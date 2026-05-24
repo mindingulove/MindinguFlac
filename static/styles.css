@@ -624,6 +624,7 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
 .transport { display: flex; align-items: center; gap: 22px; }
 .transport-btn { background: transparent; border: 0; color: var(--muted); font-size: 20px; cursor: pointer; transition: 0.1s; padding: 4px; }
 .transport-btn:hover { color: var(--text); }
+.transport-btn.active { color: var(--accent); }
 .active-tool { color: var(--accent); }
 
 .play-round {
