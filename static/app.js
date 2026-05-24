@@ -732,8 +732,8 @@ async function renderAlbumPage(album) {
 // ---------------------------------------------------------------------------
 // Selection & Playback (SpotiFLAC Only)
 // ---------------------------------------------------------------------------
-
 async function selectMusicItem(item, mode = "stream", contextList = null) {
+  if (!item) return;
   if (item.type === "artist") {
     pushPage(() => renderArtistPage(item));
     return;
@@ -742,6 +742,13 @@ async function selectMusicItem(item, mode = "stream", contextList = null) {
     pushPage(() => renderAlbumPage(item));
     return;
   }
+
+  // Priority: Cancel any active prefetch immediately
+  if (state.activePrefetchJobId) {
+    api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
+    state.activePrefetchJobId = null;
+  }
+
   
   const requestId = ++state.playbackRequestId;
   state.activeJobId = null;
