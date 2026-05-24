@@ -1,0 +1,13 @@
+__pycache__/
+.venv/
+venv/
+data/
+.DS_Store
+claude.md
+CODEX.md
+.env
+*.log
+*.pyc
+build/
+dist/
+*.spec

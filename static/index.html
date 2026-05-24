@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mindinguflac</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <img class="brand-logo-mark" src="assets/mindinguflac-mark.png" alt="" onerror="this.classList.add('missing')">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Mindinguflac</span>
+    </div>
+    <div class="nav-group">
+      <button class="nav active" data-view="home"><span>Home</span></button>
+      <button class="nav" data-view="artists"><span>Artists</span></button>
+      <button class="nav" data-view="albums"><span>Albums</span></button>
+      <button class="nav" data-view="settings"><span>Settings</span></button>
+    </div>
+    <div class="sidebar-note">
+      <strong>Library</strong>
+      <span>Hi-Fi lossless streaming powered by Mindinguflac.</span>
+    </div>
+  </aside>
+
+  <main class="shell">
+    <header class="topbar">
+      <div class="history-controls">
+        <button id="backButton" class="history-btn" title="Go back"><i class="bi bi-chevron-left"></i></button>
+        <button id="forwardButton" class="history-btn" title="Go forward"><i class="bi bi-chevron-right"></i></button>
+      </div>
+      <div class="search-box">
+        <i class="bi bi-search"></i>
+        <input id="searchInput" type="search" placeholder="Artist, album, or track">
+        <div id="suggestions" class="suggestions hidden"></div>
+      </div>
+      <button class="settings-shortcut" type="button" data-view-jump="settings" aria-label="Settings"><i class="bi bi-gear"></i></button>
+    </header>
+
+    <section id="home" class="view active">
+      <div id="pageContent"></div>
+    </section>
+
+    <section id="artists" class="view">
+      <div class="section-head sticky-head"><h1>Artists</h1><span>Discovery index</span></div>
+      <div class="scroll-area"><div id="artistGrid" class="grid"></div></div>
+    </section>
+
+    <section id="albums" class="view">
+      <div class="section-head sticky-head"><h1>Albums</h1><span>Grouped by artist</span></div>
+      <div class="scroll-area"><div id="albumGrid" class="grid"></div></div>
+    </section>
+
+    <section id="settings" class="view">
+      <div class="scroll-area">
+        <div class="library-hero compact-hero">
+          <div>
+            <span class="eyebrow">Application</span>
+            <h1>Settings</h1>
+          </div>
+        </div>
+        <div class="section-head sticky-head">
+          <h2>Configuration</h2>
+          <span>SpotiFLAC and storage settings</span>
+        </div>
+        <form id="settingsForm" class="settings-panel">
+          
+          <div class="settings-section">
+            <h2 class="settings-section-title">Storage</h2>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Cache folder</strong>
+                <span>Where streamed tracks are temporarily stored.</span>
+              </div>
+              <div class="settings-control">
+                <input id="cacheDir" type="text" spellcheck="false">
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Music folder</strong>
+                <span>Destination for permanent downloads.</span>
+              </div>
+              <div class="settings-control">
+                <input id="musicDir" type="text" spellcheck="false">
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h2 class="settings-section-title">Playback</h2>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Service source</strong>
+                <span>Primary provider for SpotiFLAC streaming.</span>
+              </div>
+              <div class="settings-control">
+                <select id="downloadService">
+                  <option value="tidal">Tidal</option>
+                  <option value="deezer">Deezer</option>
+                  <option value="qobuz">Qobuz</option>
+                  <option value="amazon">Amazon Music</option>
+                  <option value="apple_music">Apple Music</option>
+                  <option value="soundcloud">SoundCloud</option>
+                  <option value="youtube">YouTube</option>
+                </select>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Default quality</strong>
+                <span>Preferred bitrate for streaming and downloads.</span>
+              </div>
+              <div class="settings-control">
+                <select id="defaultQuality">
+                  <option value="DOLBY_ATMOS">Tidal: Dolby Atmos</option>
+                  <option value="HI_RES_LOSSLESS">Tidal: Hi-Res Lossless</option>
+                  <option value="LOSSLESS">Lossless (FLAC/CD)</option>
+                  <option value="HIGH">High (320kbps)</option>
+                  <option value="LOW">Low (96-128kbps)</option>
+                  <option value="27">Qobuz: Hi-Res Max</option>
+                  <option value="7">Qobuz: Hi-Res</option>
+                  <option value="6">Qobuz: CD</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h2 class="settings-section-title">Maintenance</h2>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Cache cleanup</strong>
+                <span id="cacheUsage">Calculating cache usage...</span>
+              </div>
+              <div class="settings-control">
+                <select id="cacheCleanupFrequency">
+                  <option value="never">Only manually</option>
+                  <option value="startup">On every app start</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+                <button id="clearCache" class="danger" type="button">Empty cache now</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h2 class="settings-section-title">Search & Metadata</h2>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Demo metadata</strong>
+                <span>Enable example metadata indexers.</span>
+              </div>
+              <div class="settings-control">
+                <label class="check"><input id="demoMusicIndexer" type="checkbox"> Enabled</label>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Strict matching</strong>
+                <span>Only show results that closely match the requested title.</span>
+              </div>
+              <div class="settings-control">
+                <label class="check"><input id="strictTitleMatch" type="checkbox"> Enabled</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <div class="indexer-title">
+              <h2 class="settings-section-title">Music metadata indexers</h2>
+              <button id="addMusicIndexer" type="button" class="add-btn">Add indexer</button>
+            </div>
+            <div id="musicIndexers"></div>
+          </div>
+
+          <div class="settings-footer">
+            <button class="primary" type="submit">Save settings</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <aside class="details-panel">
+    <div class="details-head">
+      <strong id="sideTitle">No track selected</strong>
+      <span id="sideMeta">Search or choose from the library</span>
+    </div>
+    <div id="sideCover" class="details-cover"></div>
+  </aside>
+
+  <footer class="player">
+    <div class="player-track">
+      <div class="player-cover"></div>
+      <div class="player-copy">
+        <strong id="playerTitle">Nothing playing</strong>
+        <span id="playerArtist">Search or choose from library</span>
+        <span id="playerMeta"></span>
+      </div>
+      <i id="playerStatusIcon" class="bi bi-check-circle-fill player-status ready"></i>
+    </div>
+    <div class="player-controls">
+      <div class="transport">
+        <button id="btnShuffle" class="transport-btn" type="button" aria-label="Shuffle"><i class="bi bi-shuffle"></i></button>
+        <button id="btnPrev" class="transport-btn" type="button" aria-label="Previous"><i class="bi bi-skip-start-fill"></i></button>
+        <button id="playPause" class="play-round" type="button" aria-label="Play"><i class="bi bi-play-fill"></i></button>
+        <button id="btnNext" class="transport-btn" type="button" aria-label="Next"><i class="bi bi-skip-end-fill"></i></button>
+        <button id="btnRepeat" class="transport-btn" type="button" aria-label="Repeat"><i class="bi bi-repeat"></i></button>
+      </div>
+      <div class="progress-row">
+        <span id="currentTime">0:00</span>
+        <input id="seekBar" type="range" min="0" max="1000" value="0">
+        <span id="durationTime">0:00</span>
+      </div>
+    </div>
+    <div class="player-tools">
+      <button class="transport-btn" type="button" aria-label="Queue"><i class="bi bi-list-ul"></i></button>
+      <button id="muteToggle" class="transport-btn" type="button" aria-label="Mute"><i class="bi bi-volume-up"></i></button>
+      <input id="volumeBar" class="volume" type="range" min="0" max="1" step="0.01" value="1">
+    </div>
+    <audio id="audioPlayer"></audio>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

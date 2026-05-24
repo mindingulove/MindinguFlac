@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import json
+import os
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+APP_NAME = "Mindinguflac"
+
+
+def is_desktop_mode() -> bool:
+    return os.environ.get("MINDINGUFLAC_DESKTOP") == "1"
+
+
+def _windows_dir(env_name: str, fallback: Path) -> Path:
+    value = os.environ.get(env_name)
+    return Path(value) if value else fallback
+
+
+def app_data_dir() -> Path:
+    if not is_desktop_mode():
+        return ROOT / "data"
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / APP_NAME
+    if sys.platform == "win32":
+        return _windows_dir("APPDATA", home / "AppData" / "Roaming") / APP_NAME
+    return Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")) / APP_NAME
+
+
+def default_cache_dir() -> Path:
+    if not is_desktop_mode():
+        return ROOT / "data" / "cache"
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Caches" / APP_NAME / "cache"
+    if sys.platform == "win32":
+        return _windows_dir("LOCALAPPDATA", home / "AppData" / "Local") / APP_NAME / "Cache"
+    return Path(os.environ.get("XDG_CACHE_HOME", home / ".cache")) / APP_NAME / "cache"
+
+
+def default_music_dir() -> Path:
+    if not is_desktop_mode():
+        return ROOT / "data" / "music"
+    return Path.home() / "Music" / APP_NAME
+
+
+def jobs_path() -> Path:
+    return app_data_dir() / "jobs.json"
+
+
+@dataclass
+class MusicIndexerConfig:
+    name: str
+    type: str = "musicbrainz"
+    url: str = ""
+    api_key: str = ""
+    enabled: bool = True
+
+
+@dataclass
+class AppConfig:
+    cache_dir: Path = field(default_factory=default_cache_dir)
+    music_dir: Path = field(default_factory=default_music_dir)
+    default_quality: str = "LOSSLESS"
+    download_service: str = "tidal"
+    cache_cleanup_frequency: str = "never"
+    last_cache_cleanup: float = 0
+    strict_title_match: bool = False
+    demo_music_indexer: bool = True
+    music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
+
+    def public_dict(self) -> dict:
+        return {
+            "cache_dir": str(self.cache_dir.expanduser().resolve()),
+            "music_dir": str(self.music_dir.expanduser().resolve()),
+            "default_quality": self.default_quality,
+            "download_service": self.download_service,
+            "cache_cleanup_frequency": self.cache_cleanup_frequency,
+            "last_cache_cleanup": self.last_cache_cleanup,
+            "strict_title_match": self.strict_title_match,
+            "demo_music_indexer": self.demo_music_indexer,
+            "music_indexers": [vars(item) for item in self.music_indexers],
+        }
+
+    @classmethod
+    def from_public_dict(cls, value: dict) -> "AppConfig":
+        music_indexers = [MusicIndexerConfig(**item) for item in value.get("music_indexers", [])]
+        
+        cache_dir_str = (value.get("cache_dir") or "").strip()
+        music_dir_str = (value.get("music_dir") or "").strip()
+        
+        return cls(
+            cache_dir=Path(cache_dir_str).expanduser().resolve() if cache_dir_str else default_cache_dir().expanduser().resolve(),
+            music_dir=Path(music_dir_str).expanduser().resolve() if music_dir_str else default_music_dir().expanduser().resolve(),
+            default_quality=value.get("default_quality", "LOSSLESS"),
+            download_service=value.get("download_service", "tidal"),
+            cache_cleanup_frequency=value.get("cache_cleanup_frequency", "never"),
+            last_cache_cleanup=float(value.get("last_cache_cleanup", 0) or 0),
+            strict_title_match=bool(value.get("strict_title_match", False)),
+            demo_music_indexer=bool(value.get("demo_music_indexer", True)),
+            music_indexers=music_indexers,
+        )
+
+
+def load_config(path: Path) -> AppConfig:
+    if not path.exists():
+        return AppConfig()
+    try:
+        return AppConfig.from_public_dict(json.loads(path.read_text("utf-8")))
+    except Exception:
+        return AppConfig()
+
+
+def save_config(path: Path, config: AppConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config.public_dict(), indent=2), "utf-8")

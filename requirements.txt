@@ -1,0 +1,4 @@
+rapidfuzz
+free-proxy
+PySocks
+git+https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version.git
