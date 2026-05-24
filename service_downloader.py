@@ -40,7 +40,7 @@ def is_valid_audio_file(path: Path) -> bool:
     return any(byte != 0 for byte in header)
 
 
-AUDIO_SUFFIXES = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".alac"}
+AUDIO_SUFFIXES = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".alac", ".webm"}
 
 
 def is_download_audio_candidate(path: Path) -> bool:
