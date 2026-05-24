@@ -9,11 +9,25 @@ import webview
 
 
 APP_NAME = "Mindinguflac"
+DARK_BACKGROUND = "#090b10"
 
 
 def resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base / relative
+
+
+def force_dark_appearance() -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSAppearance, NSApplication
+
+        appearance = NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua")
+        if appearance:
+            NSApplication.sharedApplication().setAppearance_(appearance)
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -27,6 +41,7 @@ def main() -> None:
 
     icon_path = resource_path("static/assets/mindinguflac-mark.png")
     url = f"http://127.0.0.1:{port}/"
+    force_dark_appearance()
 
     try:
         webview.create_window(
@@ -35,7 +50,7 @@ def main() -> None:
             width=1280,
             height=820,
             min_size=(960, 640),
-            background_color="#090b10",
+            background_color=DARK_BACKGROUND,
         )
         webview.start(icon=str(icon_path) if icon_path.exists() else None)
     finally:

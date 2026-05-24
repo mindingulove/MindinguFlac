@@ -23,7 +23,9 @@ def centered_square(size: int) -> Image.Image:
 def write_iconset() -> None:
     iconset = OUT / "mindinguflac.iconset"
     iconset.mkdir(parents=True, exist_ok=True)
-    for size in (16, 32, 64, 128, 256, 512):
+    for stale in iconset.glob("*.png"):
+        stale.unlink()
+    for size in (16, 32, 128, 256, 512):
         centered_square(size).save(iconset / f"icon_{size}x{size}.png")
         centered_square(size * 2).save(iconset / f"icon_{size}x{size}@2x.png")
 
@@ -37,11 +39,21 @@ def write_ico() -> None:
     )
 
 
+def write_icns() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)
+    image = centered_square(1024)
+    image.save(
+        OUT / "mindinguflac.icns",
+        sizes=[(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)],
+    )
+
+
 def main() -> None:
     if not SOURCE.exists():
         raise SystemExit(f"Missing source icon: {SOURCE}")
     write_iconset()
     write_ico()
+    write_icns()
 
 
 if __name__ == "__main__":

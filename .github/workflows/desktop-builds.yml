@@ -31,9 +31,7 @@ jobs:
           PY
 
       - name: Prepare icons
-        run: |
-          python scripts/make_desktop_icons.py
-          iconutil -c icns build/icons/mindinguflac.iconset -o build/icons/mindinguflac.icns
+        run: python scripts/make_desktop_icons.py
 
       - name: Build app
         run: |

@@ -551,7 +551,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def create_server(host: str = "0.0.0.0", port: int = 8888) -> ThreadingHTTPServer:
-    DATA.mkdir(exist_ok=True)
+    DATA.mkdir(parents=True, exist_ok=True)
     app_config.cache_dir.mkdir(parents=True, exist_ok=True)
     app_config.music_dir.mkdir(parents=True, exist_ok=True)
     apply_scheduled_cache_cleanup()
