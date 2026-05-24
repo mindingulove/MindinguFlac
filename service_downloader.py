@@ -1231,6 +1231,11 @@ class ServiceDownloadManager:
                         raise RuntimeError("Download cancelled")
                     try:
                         SpotiFLAC(**kwargs)
+                        # Check for rate limiting in SF logs
+                        for msg in captured:
+                            if "(429)" in msg or "rate limited" in msg.lower():
+                                print(f"[Bypass] Rate limit detected in logs: {msg}")
+                                return False
                         return True
                     except TypeError as e:
                         msg = str(e)
