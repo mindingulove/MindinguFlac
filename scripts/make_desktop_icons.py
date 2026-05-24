@@ -6,15 +6,23 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "static" / "assets" / "mindinguflac_icon.png"
+SOURCE = ROOT / "static" / "assets" / "app_icon.png"
 OUT = ROOT / "build" / "icons"
 
 
 def centered_square(size: int) -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    # Scale to fill 100% of the canvas instead of 86%
-    source = source.resize((size, size), Image.Resampling.LANCZOS)
-    return source
+    # To get a shaped icon on macOS without the square background,
+    # we need to keep a small margin or it might get forced into a square by the OS.
+    # 90% size is usually safe for shaped icons.
+    target_size = int(size * 0.94)
+    source.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
+    
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    x = (size - source.width) // 2
+    y = (size - source.height) // 2
+    canvas.alpha_composite(source, (x, y))
+    return canvas
 
 
 def write_iconset() -> None:
