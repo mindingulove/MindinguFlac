@@ -1380,8 +1380,19 @@ function bindKeyboardControls() {
 }
 
 function storedVolume() {
-  const value = Number(localStorage.getItem(STORAGE_KEYS.volume));
-  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1;
+  const fromSettings = Number(state.settings?.volume);
+  if (Number.isFinite(fromSettings)) return Math.max(0, Math.min(1, fromSettings));
+  const local = Number(localStorage.getItem(STORAGE_KEYS.volume));
+  return Number.isFinite(local) ? Math.max(0, Math.min(1, local)) : 1;
+}
+
+let _volumeSaveTimer = null;
+function persistVolume(vol) {
+  state.settings.volume = vol;
+  clearTimeout(_volumeSaveTimer);
+  _volumeSaveTimer = setTimeout(() => {
+    api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) }).catch(() => {});
+  }, 600);
 }
 
 function absoluteUrl(url) {
@@ -1454,7 +1465,7 @@ function bindPlayer() {
   $("seekBar").oninput = () => { if (audio.duration) audio.currentTime = ($("seekBar").value / 1000) * audio.duration; };
   $("volumeBar").oninput = () => {
     audio.volume = Number($("volumeBar").value);
-    localStorage.setItem(STORAGE_KEYS.volume, String(audio.volume));
+    persistVolume(audio.volume);
     syncVolumeBar();
   };
   $("btnNext").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex + 1) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue); } };
@@ -1773,6 +1784,9 @@ async function boot() {
   bindKeyboardControls();
   bindPlaylistDialogs();
   state.settings = await api("/api/settings").catch(() => ({}));
+  const _audio = $("audioPlayer");
+  _audio.volume = storedVolume();
+  syncVolumeBar();
 
   // Hide suggestions when clicking outside
   document.addEventListener("click", (e) => {

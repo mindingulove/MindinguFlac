@@ -72,6 +72,7 @@ class AppConfig:
     strict_title_match: bool = False
     demo_music_indexer: bool = True
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
+    volume: float = 1.0
 
     def public_dict(self) -> dict:
         return {
@@ -84,6 +85,7 @@ class AppConfig:
             "strict_title_match": self.strict_title_match,
             "demo_music_indexer": self.demo_music_indexer,
             "music_indexers": [vars(item) for item in self.music_indexers],
+            "volume": self.volume,
         }
 
     @classmethod
@@ -103,6 +105,7 @@ class AppConfig:
             strict_title_match=bool(value.get("strict_title_match", False)),
             demo_music_indexer=bool(value.get("demo_music_indexer", True)),
             music_indexers=music_indexers,
+            volume=float(value.get("volume", 1.0)),
         )
 
 
