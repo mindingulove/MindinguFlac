@@ -1007,6 +1007,11 @@ class ServiceDownloadManager:
                 raise RuntimeError("Could not resolve a Spotify URL from the selected track metadata")
 
             output_dir = self._output_dir(job)
+            if output_dir.exists():
+                try:
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                except Exception:
+                    pass
             output_dir.mkdir(parents=True, exist_ok=True)
 
             with self._lock:
@@ -1166,10 +1171,14 @@ class ServiceDownloadManager:
                         raise RuntimeError("Download cancelled")
                     try:
                         SpotiFLAC(**kwargs)
-                        # Check for rate limiting in SF logs
+                        # Check for failures or rate limiting in SF logs
                         for msg in captured:
-                            if "(429)" in msg or "rate limited" in msg.lower():
+                            m = msg.lower()
+                            if "(429)" in m or "rate limited" in m:
                                 print(f"[Bypass] Rate limit detected in logs: {msg}")
+                                return False
+                            if "all providers fail" in m or "failures" in m or "failed : 1" in m:
+                                print(f"[Bypass] SpotiFLAC reported failure in logs: {msg}")
                                 return False
                         return True
                     except TypeError as e:
