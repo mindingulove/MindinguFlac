@@ -1068,8 +1068,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         return;
       }
       updatePlayerPie(pct);
-      const statusText = job.last_status || (job.status === "running" ? "Streaming" : "Loading");
-      setPlayerStatus(`${statusText}...`, track);
+      setPlayerStatus("Loading...", track);
     } catch (error) {}
   }
 }
