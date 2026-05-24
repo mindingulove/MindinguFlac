@@ -452,87 +452,10 @@ def _ensure_tor() -> bool:
         return _start_tor()
 
 
-def prefetch_proxy_pool() -> None:
-    """Start Tor and build HTTP proxy pool in background at download start."""
-    def _warmup():
-        _ensure_tor()
-        with _proxy_pool_lock:
-            if not _proxy_pool or (time.time() - _proxy_pool_time > _PROXY_POOL_TTL):
-                _build_fallback_pool()
-    
-    t = threading.Thread(target=_warmup, daemon=True, name="proxy-warmup")
+def prefetch_tor() -> None:
+    """Start Tor in background at download start so it's ready if needed."""
+    t = threading.Thread(target=_ensure_tor, daemon=True, name="tor-warmup")
     t.start()
-
-
-# Fallback HTTP proxy pool (used only if Tor is unavailable)
-_PROXY_SOURCES = [
-    "https://api.proxyscrape.com/v3/free-proxy-list/get?request=getproxies&protocol=http&timeout=3000&proxy_format=ipport&format=text",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-]
-
-_proxy_pool: list[str] = []
-_proxy_pool_lock = threading.Lock()
-_proxy_pool_time: float = 0
-_PROXY_POOL_TTL = 600
-
-
-def _test_proxy(proxy: str, timeout: int = 5) -> str | None:
-    import socket
-    try:
-        host, port_str = proxy.rsplit(":", 1)
-        sock = socket.create_connection((host, int(port_str)), timeout=timeout)
-        sock.settimeout(timeout)
-        sock.sendall(b"CONNECT accounts.spotify.com:443 HTTP/1.1\r\nHost: accounts.spotify.com:443\r\n\r\n")
-        response = sock.recv(64).decode("ascii", errors="ignore")
-        sock.close()
-        return f"http://{proxy}" if "200" in response else None
-    except Exception:
-        return None
-
-
-def _build_fallback_pool() -> None:
-    import random
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    global _proxy_pool_time
-    candidates: list[str] = []
-    for url in _PROXY_SOURCES:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                lines = resp.read().decode().splitlines()
-                candidates.extend(l.strip() for l in lines if l.strip() and ":" in l)
-            if len(candidates) >= 200:
-                break
-        except Exception:
-            continue
-    random.shuffle(candidates)
-    candidates = candidates[:150]
-    working: list[str] = []
-    with ThreadPoolExecutor(max_workers=30) as ex:
-        futures = {ex.submit(_test_proxy, p): p for p in candidates}
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                working.append(result)
-    with _proxy_pool_lock:
-        _proxy_pool.clear()
-        _proxy_pool.extend(working)
-        _proxy_pool_time = time.time()
-    print(f"[Proxy] Fallback pool ready: {len(working)} HTTP proxies.")
-
-
-def _pop_fallback_proxy() -> str | None:
-    with _proxy_pool_lock:
-        if _proxy_pool:
-            import random
-            p = random.choice(_proxy_pool)
-            _proxy_pool.remove(p)
-            return p
-    print("[Proxy] Building fallback HTTP proxy pool…")
-    _build_fallback_pool()
-    with _proxy_pool_lock:
-        return _proxy_pool.pop() if _proxy_pool else None
 
 
 def _install_stream_capture() -> None:
@@ -1152,8 +1075,8 @@ class ServiceDownloadManager:
         if job["id"] in self._cancel_flags:
             return
 
-        # Kick off proxy pool build in background immediately — ready if download fails
-        prefetch_proxy_pool()
+        # Kick off tor warmup in background immediately
+        prefetch_tor()
 
         try:
             from SpotiFLAC import SpotiFLAC  # type: ignore
@@ -1309,25 +1232,9 @@ class ServiceDownloadManager:
                             print(f"[Bypass] ✓ {service} (Tor) succeeded.")
                             success = True
                             break
-
-                    # 3. Try HTTP Proxies (as ultimate fallback for this service)
-                    for attempt in range(2): # Try 2 proxies per service to keep it moving
-                        proxy = _pop_fallback_proxy()
-                        if not proxy: break
-                        
-                        with self._lock:
-                            job["last_status"] = f"Trying {service} (Proxy {attempt+1})..."
-                        self._save_jobs()
-                        
-                        captured.clear()
-                        sf_success = _exec_sf(proxy)
-                        if _has_audio(delete_invalid=True) or sf_success:
-                            print(f"[Bypass] ✓ {service} (Proxy) succeeded.")
-                            success = True
-                            break
                         
                     if success: break
-                    print(f"[Bypass] ✗ {service} failed all modes, moving to next provider...")
+                    print(f"[Bypass] ✗ {service} failed, moving to next provider...")
 
             finally:
                 _STREAM_CAPTURE.manager = None
