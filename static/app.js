@@ -556,9 +556,12 @@ function renderTrackList(containerId, items, context = "general") {
       let col6 = ""; // Status column (Far Right)
       if (isTrack) {
         const label = isDownloaded ? "Remove from library" : (isBusy ? "Cancel library download" : "Add to library");
-        const icon = isBusy ? progressButtonMarkup(status) : `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
+        let iconHtml = `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
+        if (isBusy) {
+           iconHtml = progressButtonMarkup(status);
+        }
         col6 = `<button class="track-library-btn ${isDownloaded ? "downloaded" : ""} ${isBusy ? "progress" : ""}" type="button" aria-label="${label}" title="${label}" data-library-action="${idx}" data-active-job-id="${status.active_job_id || ""}">
-          ${icon}
+          ${iconHtml}
         </button>`;
       }
 
@@ -595,6 +598,7 @@ function renderTrackList(containerId, items, context = "general") {
       `;
     }).join("");
     
+    syncActiveTrackRows();
     container.querySelectorAll(".track-row").forEach(el => {
       el.onclick = (event) => {
         if (event.target.closest("[data-library-action]")) return;
@@ -959,10 +963,11 @@ async function cancelLibraryDownload(track, button, refresh) {
   if (typeof refresh === "function") refresh();
 }
 
-function updateLibraryProgressButton(button, progress) {
+function updateLibraryProgressButton(button, status) {
   if (!button) return;
   button.classList.add("progress");
-  button.innerHTML = progressButtonMarkup({ progress });
+  const s = typeof status === "object" ? status : { progress: status };
+  button.innerHTML = progressButtonMarkup(s);
 }
 
 async function waitForLibraryToggle(track, jobId = "", button = null) {
@@ -975,7 +980,9 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     }).catch(() => null);
     if (status?.active_job_id && button) button.dataset.activeJobId = status.active_job_id;
-    if (status?.progress) updateLibraryProgressButton(button, status.progress);
+    if (status && typeof status.progress !== "undefined") {
+      updateLibraryProgressButton(button, status);
+    }
     if (status?.active_job_status === "error") throw new Error("Download cancelled");
     if (status?.in_library) {
       if (button) {
@@ -989,7 +996,11 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       const data = await api("/api/service/downloads").catch(() => ({ jobs: [] }));
       const job = (data.jobs || []).find(item => item.id === jobId);
       if (job?.status === "error") throw new Error(job.error || "Download failed");
-      if (job?.progress) updateLibraryProgressButton(button, job.progress);
+      if (job?.status === "finished") {
+        updateLibraryProgressButton(button, { ...job, progress: 100 });
+      } else if (job && typeof job.progress !== "undefined") {
+        updateLibraryProgressButton(button, job);
+      }
     }
   }
   throw new Error("Library update timed out");
@@ -1046,7 +1057,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         setPlayerStatus(job.error || "Service download failed", track);
         return;
       }
-      const pct = job.progress ? Math.round(job.progress) : 0;
+      const pct = job.progress ? Math.max(0, Math.min(99, Math.round(job.progress))) : 0;
       if (job.status === "finished") {
         setPlayerStatusIcon("ready");
         setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track);
@@ -1057,7 +1068,8 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         return;
       }
       updatePlayerPie(pct);
-      setPlayerStatus(job.status === "running" ? `Streaming${pct ? " " + pct + "%" : ""}...` : "Loading...", track);
+      const statusText = job.last_status || (job.status === "running" ? "Streaming" : "Loading");
+      setPlayerStatus(`${statusText}...`, track);
     } catch (error) {}
   }
 }

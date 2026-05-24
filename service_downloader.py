@@ -68,8 +68,9 @@ def is_download_audio_candidate(path: Path) -> bool:
     suffix = path.suffix.lower()
     return (
         suffix in AUDIO_SUFFIXES
-        or suffix == ".part"          # any *.part in-progress file (0.6+)
-        or name.endswith(".m4a.tmp")  # 0.5 compat
+        or suffix in {".part", ".ytdl", ".tmp", ".temp", ".crdownload"}
+        or name.endswith(".m4a.tmp")
+        or ".temp" in name
     )
 
 # Maps our service names to SpotiFLAC's PROVIDER_REGISTRY keys.
@@ -238,7 +239,7 @@ def _parse_duration_ms(value: object) -> int:
     return seconds * 1000
 
 
-def _estimated_total_bytes(job: dict) -> int:
+def _estimated_total_bytes(job: dict, detected_ext: str = "") -> int:
     meta = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
     duration_ms = (
         _parse_duration_ms(meta.get("duration_ms"))
@@ -246,9 +247,38 @@ def _estimated_total_bytes(job: dict) -> int:
         or _parse_duration_ms(meta.get("duration"))
     )
     minutes = max(1.0, duration_ms / 60000) if duration_ms else 5.0
+    
+    ext = detected_ext.lower()
+    # Strip temporary/downloader extensions
+    for tmp in (".part", ".ytdl", ".tmp", ".temp", ".crdownload"):
+        if ext.endswith(tmp):
+            ext = ext[:-len(tmp)]
+            if "." in ext:
+                ext = ext[ext.rfind("."):]
+            break
+            
     quality = str(job.get("quality") or "").lower()
-    if any(token in quality for token in ("flac", "lossless", "27")):
-        mb_per_min = 18.0
+    url = str(job.get("resolved_url") or "").lower()
+    is_youtube = "youtube.com" in url or "googlevideo.com" in url or "youtu.be" in url
+
+    # Use the actual on-disk format when known — quality setting may not match
+    # the fallback provider (e.g. quality=LOSSLESS but YouTube delivers .webm)
+    if ext in {".webm", ".opus", ".ogg"}:
+        mb_per_min = 1.0 if is_youtube else 2.0
+    elif ext in {".mp3"}:
+        if "320" in quality: mb_per_min = 2.4
+        elif "256" in quality: mb_per_min = 1.9
+        elif "192" in quality: mb_per_min = 1.45
+        else: mb_per_min = 1.2
+    elif ext in {".m4a", ".aac"}:
+        mb_per_min = 1.8
+    elif ext in {".flac", ".alac", ".wav"}:
+        mb_per_min = 12.0
+    elif is_youtube:
+        # YouTube is never lossless
+        mb_per_min = 1.2
+    elif any(token in quality for token in ("flac", "lossless", "27")):
+        mb_per_min = 12.0
     elif "320" in quality:
         mb_per_min = 2.4
     elif "256" in quality:
@@ -258,7 +288,7 @@ def _estimated_total_bytes(job: dict) -> int:
     elif "128" in quality:
         mb_per_min = 1.0
     else:
-        mb_per_min = 5.0
+        mb_per_min = 3.0
     estimated = int(minutes * mb_per_min * 1024 * 1024)
     return max(estimated, 1)
 
@@ -423,8 +453,14 @@ def _ensure_tor() -> bool:
 
 
 def prefetch_proxy_pool() -> None:
-    """Start Tor in background at download start so it's ready if needed."""
-    t = threading.Thread(target=_ensure_tor, daemon=True, name="tor-warmup")
+    """Start Tor and build HTTP proxy pool in background at download start."""
+    def _warmup():
+        _ensure_tor()
+        with _proxy_pool_lock:
+            if not _proxy_pool or (time.time() - _proxy_pool_time > _PROXY_POOL_TTL):
+                _build_fallback_pool()
+    
+    t = threading.Thread(target=_warmup, daemon=True, name="proxy-warmup")
     t.start()
 
 
@@ -651,6 +687,7 @@ class ServiceDownloadManager:
             "active_job_status": active.get("status", "") if active else "",
             "library_requested": bool(active.get("library_requested") or active.get("mode") == "download") if active else False,
             "progress": active.get("progress", 0) if active else 0,
+            "last_status": active.get("last_status", "") if active else "",
         }
 
     def _refresh_job_file_progress(self, job_id: str) -> None:
@@ -944,14 +981,20 @@ class ServiceDownloadManager:
         output_dir = job.get("output_dir")
         if not output_dir:
             return False
+        root = Path(output_dir)
         try:
-            downloaded_bytes = _downloaded_candidate_size(Path(output_dir))
+            candidates = [p for p in root.rglob("*") if p.is_file() and is_download_audio_candidate(p)]
+            if not candidates:
+                return False
+            biggest = max(candidates, key=lambda p: p.stat().st_size)
+            downloaded_bytes = biggest.stat().st_size
+            detected_ext = biggest.suffix.lower()
         except Exception:
             return False
         if downloaded_bytes <= 0:
             return False
 
-        total_bytes = max(int(job.get("estimated_total_bytes") or 0), _estimated_total_bytes(job))
+        total_bytes = max(int(job.get("estimated_total_bytes") or 0), _estimated_total_bytes(job, detected_ext))
         if downloaded_bytes >= total_bytes:
             total_bytes = int(downloaded_bytes * 1.3)
         progress = min(95.0, (downloaded_bytes / total_bytes) * 100.0)
@@ -965,6 +1008,7 @@ class ServiceDownloadManager:
             job["progress"] = progress
             job["downloaded_bytes"] = downloaded_bytes
             job["estimated_total_bytes"] = total_bytes
+            print(f"[Progress] {job.get('title')} (file) -> {job['progress']:.1f}% ({downloaded_bytes}/{total_bytes} bytes)")
         return True
 
     def start_job(self, payload: dict) -> dict:
@@ -993,6 +1037,7 @@ class ServiceDownloadManager:
             "service": (payload.get("service") or self.config.download_service or "tidal").lower(),
             "quality": payload.get("quality") or self.config.default_quality or "flac",
             "status": "starting",
+            "last_status": "Starting...",
             "progress": 0,
             "created_at": time.time(),
             "error": "",
@@ -1230,6 +1275,10 @@ class ServiceDownloadManager:
                 _STREAM_CAPTURE.job_id = job["id"]
 
                 # First attempt
+                with self._lock:
+                    job["last_status"] = f"Downloading via {spotiflac_service}..."
+                self._save_jobs()
+                
                 sf_success = _exec_sf()
                 success = _has_audio() or sf_success
 
@@ -1239,6 +1288,10 @@ class ServiceDownloadManager:
                         # --- Primary: Tor SOCKS5 ---
                         if _tor_is_up() or _ensure_tor():
                             print(f"[Bypass] Retrying via Tor SOCKS5 ({_TOR_SOCKS})…")
+                            with self._lock:
+                                job["last_status"] = "Retrying via Tor..."
+                            self._save_jobs()
+                            
                             captured.clear()
                             sf_success = _exec_sf(_TOR_SOCKS)
                             if _has_audio(delete_invalid=True) or sf_success:
@@ -1253,7 +1306,12 @@ class ServiceDownloadManager:
                                 if not proxy:
                                     print(f"[Bypass] No fallback proxies left.")
                                     break
+                                
                                 print(f"[Bypass] HTTP proxy attempt {attempt + 1}: {proxy}")
+                                with self._lock:
+                                    job["last_status"] = f"Trying proxy {attempt + 1}/5..."
+                                self._save_jobs()
+                                
                                 captured.clear()
                                 sf_success = _exec_sf(proxy)
                                 if _has_audio(delete_invalid=True) or sf_success:

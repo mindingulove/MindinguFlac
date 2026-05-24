@@ -607,11 +607,12 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
 
 .player-pie {
   --pct: 0;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: conic-gradient(var(--accent) calc(var(--pct) * 1%), rgba(255,255,255,0.18) 0);
   flex-shrink: 0;
+  transition: background 0.3s ease;
 }
 
 .player-pie.indeterminate {
@@ -1118,7 +1119,11 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.02em;
-  display: inline-block;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
 }
 
 .track-art {
