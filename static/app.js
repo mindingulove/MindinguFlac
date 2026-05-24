@@ -743,7 +743,11 @@ async function selectMusicItem(item, mode = "stream", contextList = null) {
     return;
   }
 
-  // Priority: Cancel any active prefetch immediately
+  // Priority: Cancel any active job or prefetch immediately
+  if (state.activeJobId) {
+    api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activeJobId }) }).catch(() => {});
+    state.activeJobId = null;
+  }
   if (state.activePrefetchJobId) {
     api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
     state.activePrefetchJobId = null;

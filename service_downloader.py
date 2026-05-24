@@ -1227,6 +1227,10 @@ class ServiceDownloadManager:
 
                 for service in services_list:
                     if success: break
+                    if job["id"] in self._cancel_flags:
+                        print(f"[Bypass] Job {job['id']} cancelled, stopping loop.")
+                        break
+
                     kwargs["services"] = [service]
                     
                     # 1. Try Direct
@@ -1242,6 +1246,8 @@ class ServiceDownloadManager:
                         break
                     else:
                         _has_audio(delete_invalid=True) # Clean up partial/0-byte files
+
+                    if job["id"] in self._cancel_flags: break
 
                     # 2. Try Tor
                     if _tor_is_up() or _ensure_tor():
