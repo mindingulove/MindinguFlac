@@ -742,7 +742,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null) {
   state.activeJobId = null;
   state.currentTrack = item;
   
-  prepareSelectedTrackUi(item, "Starting SpotiFLAC…");
+  prepareSelectedTrackUi(item, "Loading...");
   syncActiveTrackRows();
   
   if (contextList && contextList.length) {
@@ -845,10 +845,16 @@ function prepareSelectedTrackUi(track, status = "Opening stream...") {
 
 function setPlayerStatus(msg, track) {
   state.playerStatus = msg;
+  const meta = $("playerMeta");
+  if (meta && meta.textContent !== msg) {
+    meta.classList.remove("fade-in");
+    void meta.offsetWidth;
+    meta.textContent = msg;
+    meta.classList.add("fade-in");
+  }
   if (track) {
     $("playerTitle").innerHTML = albumLinkHtml(track, track.title || "Unknown");
     $("playerArtist").innerHTML = artistLinkHtml(track);
-    $("playerMeta").textContent = msg;
     updateDetailsPanel(track);
     updateMediaSession(track);
     bindEntityLinks($("playerTitle").parentElement);
@@ -1051,7 +1057,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         return;
       }
       updatePlayerPie(pct);
-      setPlayerStatus(job.status === "running" ? `Streaming${pct ? " " + pct + "%" : ""}…` : "Starting…", track);
+      setPlayerStatus(job.status === "running" ? `Streaming${pct ? " " + pct + "%" : ""}...` : "Loading...", track);
     } catch (error) {}
   }
 }
