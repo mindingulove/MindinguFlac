@@ -2,7 +2,7 @@
 
 Self-hosted music discovery, streaming, and library app with a Python backend and responsive HTML frontend.
 
-Brand artwork lives at `static/assets/mindinguflac-mark.png`. Use the no-wordmark mark there so the sidebar logo remains readable at interface size.
+Brand artwork lives in `static/assets`: `mindinguflac_icon.png` is the app icon, and `mindinguflac-mark.png` is the in-interface logo.
 
 ## Credits
 

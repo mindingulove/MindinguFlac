@@ -39,7 +39,7 @@ def main() -> None:
     thread = threading.Thread(target=server.serve_forever, name="mindinguflac-http", daemon=True)
     thread.start()
 
-    icon_path = resource_path("static/assets/mindinguflac-mark.png")
+    icon_path = resource_path("static/assets/mindinguflac_icon.png")
     url = f"http://127.0.0.1:{port}/"
     force_dark_appearance()
 

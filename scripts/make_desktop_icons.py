@@ -6,7 +6,7 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "static" / "assets" / "mindinguflac-mark.png"
+SOURCE = ROOT / "static" / "assets" / "mindinguflac_icon.png"
 OUT = ROOT / "build" / "icons"
 
 
