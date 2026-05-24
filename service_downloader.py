@@ -1142,6 +1142,8 @@ class ServiceDownloadManager:
             "lrc": True,
             "album_artwork": True,
             "allow_fallback": True,
+            "use_artist_subfolders": True,
+            "use_album_subfolders": True,
         }
 
         quality = job.get("quality") or ""
