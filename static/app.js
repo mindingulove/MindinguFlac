@@ -7,6 +7,7 @@ const state = {
   playlists: [],
   currentTrack: null,
   activeJobId: null,
+  activePrefetchJobId: null,
   isShuffle: false,
   isRepeat: false,
   queue: [],
@@ -905,7 +906,8 @@ async function prefetchNextTrack() {
     if (source.path) return; // already cached, nothing to do
   } catch (e) {}
   try {
-    await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream")) });
+    const job = await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream")) });
+    if (job && job.id) state.activePrefetchJobId = job.id;
   } catch (e) {}
 }
 
@@ -1516,9 +1518,15 @@ function bindPlayer() {
   };
   $("btnNext").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex + 1) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue); } };
   $("btnPrev").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex - 1 + state.queue.length) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue); } };
-  $("btnShuffle").onclick = () => {
+  $("btnShuffle").onclick = async () => {
     state.isShuffle = !state.isShuffle;
     $("btnShuffle").classList.toggle("active", state.isShuffle);
+    
+    // Cancel active prefetch immediately so it doesn't waste bandwidth or leave half-cached files
+    if (state.activePrefetchJobId) {
+      api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
+      state.activePrefetchJobId = null;
+    }
     
     // If we have a queue, reshuffle it immediately so "Next" follows the new order
     if (state.queue.length > 0 && state.currentTrack) {

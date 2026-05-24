@@ -523,6 +523,17 @@ class ServiceDownloadManager:
             job["status"] = "error"
             job["error"] = "Cancelled by user"
             job["library_requested"] = False
+            
+            # Delete partial/cached files for this job
+            output_dir = job.get("output_dir")
+            if output_dir:
+                try:
+                    p = Path(output_dir)
+                    if p.exists():
+                        shutil.rmtree(p, ignore_errors=True)
+                except Exception:
+                    pass
+        
         self._save_jobs()
         return True
 

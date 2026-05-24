@@ -1028,6 +1028,7 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   place-items: center;
   cursor: pointer;
   border-radius: 50%;
+  font-size: 20px;
 }
 
 .track-library-btn:hover {
