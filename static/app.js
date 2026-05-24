@@ -1525,34 +1525,40 @@ function bindPlayer() {
   };
   $("btnNext").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex + 1) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue); } };
   $("btnPrev").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex - 1 + state.queue.length) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue); } };
-  $("btnShuffle").onclick = async () => {
-    state.isShuffle = !state.isShuffle;
-    $("btnShuffle").classList.toggle("active", state.isShuffle);
-    
-    // Cancel active prefetch immediately so it doesn't waste bandwidth or leave half-cached files
-    if (state.activePrefetchJobId) {
-      api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
-      state.activePrefetchJobId = null;
-    }
-    
-    // If we have a queue, reshuffle it immediately so "Next" follows the new order
-    if (state.queue.length > 0 && state.currentTrack) {
-      const current = state.currentTrack;
-      if (state.isShuffle) {
-        // Shuffle everything except the current track, then put current at index 0
-        const others = state.originalQueue.filter(t => t.title !== current.title || t.artist !== current.artist);
-        state.queue = [current, ...others.sort(() => Math.random() - 0.5)];
-        state.queueIndex = 0;
-      } else {
-        // Restore original order and find where we are
-        state.queue = [...state.originalQueue];
-        state.queueIndex = state.queue.findIndex(t => t.title === current.title && t.artist === current.artist);
+  const btnShuffle = $("btnShuffle");
+  if (btnShuffle) {
+    btnShuffle.onclick = () => {
+      state.isShuffle = !state.isShuffle;
+      btnShuffle.classList.toggle("active", state.isShuffle);
+      
+      if (state.activePrefetchJobId) {
+        api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
+        state.activePrefetchJobId = null;
       }
-      // Trigger a new prefetch for the new "next" track
-      prefetchNextTrack().catch(() => {});
-    }
-  };
-  $("btnRepeat").onclick = () => { state.isRepeat = !state.isRepeat; $("btnRepeat").classList.toggle("active", state.isRepeat); audio.loop = state.isRepeat; };
+      
+      if (state.queue.length > 0 && state.currentTrack) {
+        const current = state.currentTrack;
+        if (state.isShuffle) {
+          const others = state.originalQueue.filter(t => t.title !== current.title || t.artist !== current.artist);
+          state.queue = [current, ...others.sort(() => Math.random() - 0.5)];
+          state.queueIndex = 0;
+        } else {
+          state.queue = [...state.originalQueue];
+          state.queueIndex = state.queue.findIndex(t => t.title === current.title && t.artist === current.artist);
+        }
+        prefetchNextTrack().catch(() => {});
+      }
+    };
+  }
+
+  const btnRepeat = $("btnRepeat");
+  if (btnRepeat) {
+    btnRepeat.onclick = () => {
+      state.isRepeat = !state.isRepeat;
+      btnRepeat.classList.toggle("active", state.isRepeat);
+      audio.loop = state.isRepeat;
+    };
+  }
   bindMediaSessionActions();
 }
 
