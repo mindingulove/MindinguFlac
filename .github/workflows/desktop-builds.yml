@@ -71,12 +71,12 @@ jobs:
       - name: Build app
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --windowed --name Mindinguflac `
+          pyinstaller --noconfirm --onefile --windowed --name Mindinguflac `
             --icon build/icons/mindinguflac.ico `
             --add-data "static;static" `
             --collect-all SpotiFLAC `
             desktop.py
-          Compress-Archive -Path dist/Mindinguflac/* -DestinationPath Mindinguflac-windows.zip
+          Compress-Archive -Path dist/Mindinguflac.exe -DestinationPath Mindinguflac-windows.zip
 
       - uses: actions/upload-artifact@v4
         with:
