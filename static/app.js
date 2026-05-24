@@ -405,6 +405,7 @@ function bindCardClicks(container, items) {
 
 function renderArtistsPage() {
   setActiveView("home");
+  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
   document.querySelector('.nav[data-view="artists"]')?.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
@@ -418,6 +419,7 @@ function renderArtistsPage() {
 
 function renderAlbumsPage() {
   setActiveView("home");
+  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
   document.querySelector('.nav[data-view="albums"]')?.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
