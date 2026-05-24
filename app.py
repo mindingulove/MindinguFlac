@@ -524,6 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                     "followers": imported.get("followers", 0),
                     "spotify_url": spotify_url,
                     "tracks": imported["tracks"],
+                    "metadata_fetched": bool(spotify_url and imported["tracks"]),
                     "created_at": time.time(),
                 }
                 with playlists_lock:
@@ -559,6 +560,7 @@ class Handler(BaseHTTPRequestHandler):
                         pl["owner"] = imported.get("owner", "")
                         pl["followers"] = imported.get("followers", 0)
                         pl["tracks"] = imported["tracks"]
+                        pl["metadata_fetched"] = True
                         save_playlists(data)
                 self.send_json(pl)
                 return

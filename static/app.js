@@ -1505,8 +1505,8 @@ function renderPlaylistPage(playlist) {
   const pl = state.playlists.find(p => p.id === playlist.id) || playlist;
   _renderPlaylistContent(pl);
 
-  // Auto-refresh if imported from Spotify but missing metadata
-  if (pl.spotify_url && !pl.artwork_url) {
+  // Auto-refresh once if imported from Spotify but metadata not yet fetched
+  if (pl.spotify_url && !pl.metadata_fetched) {
     api("/api/playlists/refresh", { method: "POST", body: JSON.stringify({ id: pl.id }) })
       .then(updated => {
         const idx = state.playlists.findIndex(p => p.id === pl.id);
