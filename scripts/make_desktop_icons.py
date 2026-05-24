@@ -12,12 +12,9 @@ OUT = ROOT / "build" / "icons"
 
 def centered_square(size: int) -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    source.thumbnail((int(size * 0.86), int(size * 0.86)), Image.Resampling.LANCZOS)
-    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    x = (size - source.width) // 2
-    y = (size - source.height) // 2
-    canvas.alpha_composite(source, (x, y))
-    return canvas
+    # Scale to fill 100% of the canvas instead of 86%
+    source = source.resize((size, size), Image.Resampling.LANCZOS)
+    return source
 
 
 def write_iconset() -> None:
