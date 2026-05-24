@@ -653,7 +653,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             size = path.stat().st_size
             mime = _sniff_audio_mime(path) if is_active_job else (mimetypes.guess_type(path.name)[0] or "audio/mpeg")
-            
+
             if is_active_job and _candidate_is_streamable(path):
                 self.send_response(200)
                 self.send_cors_headers()
@@ -670,17 +670,23 @@ class Handler(BaseHTTPRequestHandler):
                         chunk = f.read(64 * 1024)
                         if chunk:
                             last_pos += len(chunk)
-                            self.wfile.write(hex(len(chunk))[2:].encode() + b"\r\n")
-                            self.wfile.write(chunk + b"\r\n")
-                            self.wfile.flush()
+                            try:
+                                self.wfile.write(hex(len(chunk))[2:].encode() + b"\r\n")
+                                self.wfile.write(chunk + b"\r\n")
+                                self.wfile.flush()
+                            except (BrokenPipeError, ConnectionResetError):
+                                return
                             consecutive_no_data = 0
                         else:
                             time.sleep(0.5)
                             consecutive_no_data += 1
                             if consecutive_no_data > 240:
                                 break
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
+                    try:
+                        self.wfile.write(b"0\r\n\r\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                 return
 
             self.send_response(200)
@@ -694,11 +700,15 @@ class Handler(BaseHTTPRequestHandler):
                     chunk = f.read(256 * 1024)
                     if not chunk:
                         break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
+                    try:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except Exception as exc:
             print(f"Streaming error: {exc}")
-
     def stream_music_suggestions(self, term: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
