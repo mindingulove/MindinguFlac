@@ -556,7 +556,7 @@ function renderTrackList(containerId, items, context = "general") {
       let col6 = ""; // Status column (Far Right)
       if (isTrack) {
         const label = isDownloaded ? "Remove from library" : (isBusy ? "Cancel library download" : "Add to library");
-        let iconHtml = `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
+        let iconHtml = `<i class="bi ${isDownloaded ? "bi-check-circle-fill downloaded" : "bi-check-circle"}"></i>`;
         if (isBusy) {
            iconHtml = progressButtonMarkup(status);
         }
@@ -959,7 +959,7 @@ async function cancelLibraryDownload(track, button, refresh) {
   button.classList.remove("progress");
   button.classList.remove("downloaded");
   button.dataset.activeJobId = "";
-  button.innerHTML = '<i class="bi bi-arrow-down-circle"></i>';
+  button.innerHTML = '<i class="bi bi-check-circle"></i>';
   if (typeof refresh === "function") refresh();
 }
 
@@ -988,7 +988,7 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       if (button) {
         button.classList.remove("progress");
         button.classList.add("downloaded");
-        button.innerHTML = '<i class="bi bi-arrow-down-circle-fill downloaded"></i>';
+        button.innerHTML = '<i class="bi bi-check-circle-fill downloaded"></i>';
       }
       return status;
     }
