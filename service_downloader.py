@@ -13,6 +13,11 @@ from pathlib import Path
 
 from config import jobs_path
 
+# SpotiFLAC's DownloadManager is a process-wide singleton that calls reset()
+# at the start of every run(), wiping progress for any concurrent download.
+# Serialize all SpotiFLAC() calls so they never overlap.
+_spotiflac_lock = threading.Lock()
+
 def clean_part(value: str) -> str:
     cleaned = "".join(char for char in value if char not in '/\\:*?"<>|').strip()
     return cleaned or "Unknown"
@@ -1219,49 +1224,50 @@ class ServiceDownloadManager:
         def _has_audio(delete_invalid: bool = False) -> bool:
             return bool(_find_audio_files(output_dir, delete_invalid=delete_invalid))
 
-        try:
-            _STREAM_CAPTURE.manager = self
-            _STREAM_CAPTURE.job_id = job["id"]
-            
-            # First attempt
-            sf_success = _exec_sf()
-            success = _has_audio() or sf_success
-            
-            if not success:
-                print(f"[Bypass] Triggered for {job.get('title')} - all providers failed.")
-                try:
-                    # --- Primary: Tor SOCKS5 ---
-                    if _tor_is_up() or _ensure_tor():
-                        print(f"[Bypass] Retrying via Tor SOCKS5 ({_TOR_SOCKS})…")
-                        captured.clear()
-                        sf_success = _exec_sf(_TOR_SOCKS)
-                        if _has_audio(delete_invalid=True) or sf_success:
-                            print(f"[Bypass] ✓ Downloaded via Tor.")
-                            success = True
+        with _spotiflac_lock:
+            try:
+                _STREAM_CAPTURE.manager = self
+                _STREAM_CAPTURE.job_id = job["id"]
 
-                    # --- Fallback: HTTP proxy pool ---
-                    if not success:
-                        print(f"[Bypass] Tor failed or unavailable — trying HTTP proxy pool…")
-                        for attempt in range(5):
-                            proxy = _pop_fallback_proxy()
-                            if not proxy:
-                                print(f"[Bypass] No fallback proxies left.")
-                                break
-                            print(f"[Bypass] HTTP proxy attempt {attempt + 1}: {proxy}")
+                # First attempt
+                sf_success = _exec_sf()
+                success = _has_audio() or sf_success
+
+                if not success:
+                    print(f"[Bypass] Triggered for {job.get('title')} - all providers failed.")
+                    try:
+                        # --- Primary: Tor SOCKS5 ---
+                        if _tor_is_up() or _ensure_tor():
+                            print(f"[Bypass] Retrying via Tor SOCKS5 ({_TOR_SOCKS})…")
                             captured.clear()
-                            sf_success = _exec_sf(proxy)
+                            sf_success = _exec_sf(_TOR_SOCKS)
                             if _has_audio(delete_invalid=True) or sf_success:
-                                print(f"[Bypass] ✓ Downloaded via proxy {proxy}")
+                                print(f"[Bypass] ✓ Downloaded via Tor.")
                                 success = True
-                                break
-                            else:
-                                print(f"[Bypass] ✗ {proxy} produced no file, trying next…")
-                except Exception as e:
-                    print(f"[Bypass] Error: {e}")
-        finally:
-            _STREAM_CAPTURE.manager = None
-            _STREAM_CAPTURE.job_id = ""
-            sf_logger.removeHandler(handler)
+
+                        # --- Fallback: HTTP proxy pool ---
+                        if not success:
+                            print(f"[Bypass] Tor failed or unavailable — trying HTTP proxy pool…")
+                            for attempt in range(5):
+                                proxy = _pop_fallback_proxy()
+                                if not proxy:
+                                    print(f"[Bypass] No fallback proxies left.")
+                                    break
+                                print(f"[Bypass] HTTP proxy attempt {attempt + 1}: {proxy}")
+                                captured.clear()
+                                sf_success = _exec_sf(proxy)
+                                if _has_audio(delete_invalid=True) or sf_success:
+                                    print(f"[Bypass] ✓ Downloaded via proxy {proxy}")
+                                    success = True
+                                    break
+                                else:
+                                    print(f"[Bypass] ✗ {proxy} produced no file, trying next…")
+                    except Exception as e:
+                        print(f"[Bypass] Error: {e}")
+            finally:
+                _STREAM_CAPTURE.manager = None
+                _STREAM_CAPTURE.job_id = ""
+                sf_logger.removeHandler(handler)
 
         if not success:
             msg = captured[0] if captured else "All providers failed and no proxy bypass succeeded"
