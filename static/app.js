@@ -26,6 +26,7 @@ const state = {
   playerStatus: "Choose a track to stream",
   playbackRequestId: 0,
   currentStreamUrl: "",
+  prefetchedForRequestId: -1,
 };
 
 const SERVICE_LABELS = {
@@ -882,6 +883,22 @@ function serviceDownloadPayload(track, mode = "stream") {
   };
 }
 
+async function prefetchNextTrack() {
+  if (state.isRepeat) return;
+  if (!state.queue.length || state.queueIndex < 0) return;
+  const nextIdx = state.queueIndex + 1;
+  if (nextIdx >= state.queue.length) return;
+  const next = state.queue[nextIdx];
+  if (!next || next.type === "artist" || next.type === "album") return;
+  try {
+    const source = await api("/api/playback/source", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream")) });
+    if (source.path) return; // already cached, nothing to do
+  } catch (e) {}
+  try {
+    await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream")) });
+  } catch (e) {}
+}
+
 async function toggleTrackLibrary(track, button, refresh) {
   if (!isTrackItem(track)) return;
   if (button.classList.contains("progress")) {
@@ -1469,6 +1486,10 @@ function bindPlayer() {
     $("currentTime").textContent = formatTime(audio.currentTime);
     $("durationTime").textContent = formatTime(audio.duration);
     $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
+    if (audio.currentTime >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
+      state.prefetchedForRequestId = state.playbackRequestId;
+      prefetchNextTrack().catch(() => {});
+    }
   };
   $("seekBar").oninput = () => { if (audio.duration) audio.currentTime = ($("seekBar").value / 1000) * audio.duration; };
   $("volumeBar").oninput = () => {
