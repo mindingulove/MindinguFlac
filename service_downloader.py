@@ -1171,7 +1171,7 @@ class ServiceDownloadManager:
                         raise RuntimeError("Download cancelled")
                     try:
                         SpotiFLAC(**kwargs)
-                        # Check for failures or rate limiting in SF logs
+                        # Check for failures, rate limiting, or quality fallback in SF logs
                         for msg in captured:
                             m = msg.lower()
                             if "(429)" in m or "rate limited" in m:
@@ -1179,6 +1179,9 @@ class ServiceDownloadManager:
                                 return False
                             if "all providers fail" in m or "failures" in m or "failed : 1" in m:
                                 print(f"[Bypass] SpotiFLAC reported failure in logs: {msg}")
+                                return False
+                            if "quality" in m and "unavailable" in m and "falling back" in m:
+                                print(f"[Bypass] Quality fallback detected, retrying via bypass: {msg}")
                                 return False
                         return True
                     except TypeError as e:
@@ -1208,8 +1211,7 @@ class ServiceDownloadManager:
         captured: list[str] = []
         class _Capture(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:
-                if record.levelno >= logging.ERROR:
-                    captured.append(record.getMessage())
+                captured.append(record.getMessage())
 
         handler = _Capture()
         sf_logger = logging.getLogger("SpotiFLAC")
