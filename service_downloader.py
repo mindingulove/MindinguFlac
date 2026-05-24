@@ -26,7 +26,8 @@ def clean_part(value: str) -> str:
 def is_valid_audio_file(path: Path) -> bool:
     try:
         size = path.stat().st_size
-        if size == 0:
+        # Ignore files smaller than 100KB (likely failed/partial)
+        if size < 100 * 1024:
             return False
         header = path.read_bytes()[:64]
     except Exception:
@@ -1215,10 +1216,12 @@ class ServiceDownloadManager:
                     
                     captured.clear()
                     sf_success = _exec_sf()
-                    if _has_audio() or sf_success:
+                    if sf_success and _has_audio():
                         print(f"[Bypass] ✓ {service} (Direct) succeeded.")
                         success = True
                         break
+                    else:
+                        _has_audio(delete_invalid=True) # Clean up partial/0-byte files
 
                     # 2. Try Tor
                     if _tor_is_up() or _ensure_tor():
@@ -1228,10 +1231,12 @@ class ServiceDownloadManager:
                         
                         captured.clear()
                         sf_success = _exec_sf(_TOR_SOCKS)
-                        if _has_audio(delete_invalid=True) or sf_success:
+                        if sf_success and _has_audio():
                             print(f"[Bypass] ✓ {service} (Tor) succeeded.")
                             success = True
                             break
+                        else:
+                            _has_audio(delete_invalid=True)
                         
                     if success: break
                     print(f"[Bypass] ✗ {service} failed, moving to next provider...")
