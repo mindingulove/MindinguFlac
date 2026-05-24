@@ -1279,16 +1279,19 @@ class ServiceDownloadManager:
                 _STREAM_CAPTURE.manager = self
                 _STREAM_CAPTURE.job_id = job["id"]
 
-                # First attempt
+                # First attempt - NO fallback to other services (forces bypass if primary is blocked)
                 with self._lock:
                     job["last_status"] = f"Downloading via {spotiflac_service}..."
                 self._save_jobs()
                 
+                kwargs["allow_fallback"] = False
                 sf_success = _exec_sf()
                 success = _has_audio() or sf_success
 
                 if not success:
-                    print(f"[Bypass] Triggered for {job.get('title')} - all providers failed.")
+                    print(f"[Bypass] Triggered for {job.get('title')} - primary service failed or rate limited.")
+                    # Re-enable fallback for bypass attempts so we actually get the file
+                    kwargs["allow_fallback"] = True
                     try:
                         # --- Primary: Tor SOCKS5 ---
                         if _tor_is_up() or _ensure_tor():
