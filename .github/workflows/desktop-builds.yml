@@ -39,6 +39,12 @@ jobs:
             --icon build/icons/mindinguflac.icns \
             --add-data "static:static" \
             --collect-all SpotiFLAC \
+            --exclude-module AppKit._AppKit \
+            --exclude-module MediaLibrary \
+            --exclude-module Photos \
+            --exclude-module Contacts \
+            --exclude-module EventKit \
+            --exclude-module CoreLocation \
             --target-arch universal2 \
             desktop.py
           ditto -c -k --sequesterRsrc --keepParent dist/Mindinguflac.app Mindinguflac-macos-universal.zip

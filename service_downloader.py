@@ -527,7 +527,23 @@ class ServiceDownloadManager:
         self.jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._cancel_flags: set[str] = set()
+        self._progress_thread_running = False
         self._load_jobs()
+
+    def _ensure_progress_thread(self) -> None:
+        if self._progress_thread_running:
+            return
+        self._progress_thread_running = True
+        def _loop():
+            while True:
+                with self._lock:
+                    has_running = any(j.get("status") == "running" for j in self.jobs.values())
+                if not has_running:
+                    self._progress_thread_running = False
+                    return
+                self._sync_progress()
+                time.sleep(1)
+        threading.Thread(target=_loop, daemon=True, name="progress-sync").start()
 
     def update_config(self, config) -> None:
         with self._lock:
@@ -1013,6 +1029,7 @@ class ServiceDownloadManager:
                 job["resolved_url"] = resolved_url
                 job["output_dir"] = str(output_dir)
 
+            self._ensure_progress_thread()
             self._run_spotiflac(resolved_url, output_dir, job)
             self._save_sidecar_files(output_dir, job)
 
