@@ -1236,22 +1236,26 @@ class ServiceDownloadManager:
                         break
 
                     kwargs["services"] = [service]
+                    # If retries is 0, we bypass to Tor immediately and use 1 retry internally
+                    immediate_tor = self.config.track_max_retries == 0
+                    kwargs["track_max_retries"] = self.config.track_max_retries if not immediate_tor else 1
                     
-                    # 1. Try Direct
-                    with self._lock:
-                        job["last_status"] = f"Trying {service}..."
-                    self._save_jobs()
-                    
-                    captured.clear()
-                    sf_success = _exec_sf()
-                    if sf_success and _has_audio():
-                        print(f"[Bypass] ✓ {service} (Direct) succeeded.")
-                        success = True
-                        break
-                    else:
-                        _has_audio(delete_invalid=True) # Clean up partial/0-byte files
+                    if not immediate_tor:
+                        # 1. Try Direct
+                        with self._lock:
+                            job["last_status"] = f"Trying {service}..."
+                        self._save_jobs()
+                        
+                        captured.clear()
+                        sf_success = _exec_sf()
+                        if sf_success and _has_audio():
+                            print(f"[Bypass] ✓ {service} (Direct) succeeded.")
+                            success = True
+                            break
+                        else:
+                            _has_audio(delete_invalid=True) # Clean up partial/0-byte files
 
-                    if job["id"] in self._cancel_flags: break
+                        if job["id"] in self._cancel_flags: break
 
                     # 2. Try Tor
                     if _tor_is_up() or _ensure_tor():
