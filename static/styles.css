@@ -615,8 +615,8 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
 }
 
 .player-pie.indeterminate {
-  background: conic-gradient(var(--accent) 0 90deg, rgba(255,255,255,0.18) 90deg 360deg);
-  animation: spin 0.9s linear infinite;
+  background: transparent;
+  border: 2px solid rgba(255,255,255,0.25);
 }
 
 .player-controls { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
