@@ -274,12 +274,12 @@ def _estimated_total_bytes(job: dict, detected_ext: str = "") -> int:
     elif ext in {".m4a", ".aac"}:
         mb_per_min = 1.8
     elif ext in {".flac", ".alac", ".wav"}:
-        mb_per_min = 12.0
+        mb_per_min = 6.5
     elif is_youtube:
         # YouTube is never lossless
         mb_per_min = 1.2
     elif any(token in quality for token in ("flac", "lossless", "27")):
-        mb_per_min = 12.0
+        mb_per_min = 6.5
     elif "320" in quality:
         mb_per_min = 2.4
     elif "256" in quality:
