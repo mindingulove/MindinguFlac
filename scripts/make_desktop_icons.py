@@ -10,10 +10,21 @@ SOURCE = ROOT / "static" / "assets" / "app_icon.png"
 OUT = ROOT / "build" / "icons"
 
 
-def centered_square(size: int) -> Image.Image:
+def process_icon(size: int) -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    # Resize to fill the entire square canvas
-    return source.resize((size, size), Image.Resampling.LANCZOS)
+    # To get a shaped icon on macOS without the square background,
+    # we MUST have a small transparent margin around the image.
+    # 82% of the canvas is the standard for "shaped" icons.
+    margin_size = int(size * 0.82)
+    source.thumbnail((margin_size, margin_size), Image.Resampling.LANCZOS)
+    
+    # Create a fully transparent canvas
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    # Center the character on the transparent canvas
+    x = (size - source.width) // 2
+    y = (size - source.height) // 2
+    canvas.alpha_composite(source, (x, y))
+    return canvas
 
 
 def write_iconset() -> None:
@@ -22,13 +33,13 @@ def write_iconset() -> None:
     for stale in iconset.glob("*.png"):
         stale.unlink()
     for size in (16, 32, 128, 256, 512):
-        centered_square(size).save(iconset / f"icon_{size}x{size}.png")
-        centered_square(size * 2).save(iconset / f"icon_{size}x{size}@2x.png")
+        process_icon(size).save(iconset / f"icon_{size}x{size}.png")
+        process_icon(size * 2).save(iconset / f"icon_{size}x{size}@2x.png")
 
 
 def write_ico() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    image = centered_square(1024)
+    image = process_icon(1024)
     image.save(
         OUT / "mindinguflac.ico",
         sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
@@ -37,7 +48,7 @@ def write_ico() -> None:
 
 def write_icns() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    image = centered_square(1024)
+    image = process_icon(1024)
     image.save(
         OUT / "mindinguflac.icns",
         sizes=[(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)],
