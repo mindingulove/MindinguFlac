@@ -2,7 +2,7 @@
 
 Self-hosted music discovery, streaming, and library app with a Python backend and responsive HTML frontend. Runs as a web server you open in any browser, and also ships as a native desktop app for macOS and Windows built on pywebview.
 
-![Mindinguflac](screenshot.png)
+![Mindinguflac](screenshot.jpeg)
 
 Brand artwork lives in `static/assets`: `mindinguflac_icon.png` is the app icon, and `mindinguflac-mark.png` is the in-interface logo.
 
