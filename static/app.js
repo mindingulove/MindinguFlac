@@ -38,6 +38,57 @@ const SERVICE_LABELS = {
   youtube: "YouTube",
 };
 
+const SERVICE_QUALITIES = {
+  tidal: [
+    { value: "DOLBY_ATMOS",    label: "Dolby Atmos" },
+    { value: "HI_RES_LOSSLESS",label: "Hi-Res Lossless" },
+    { value: "LOSSLESS",       label: "Lossless (FLAC/CD)" },
+    { value: "HIGH",           label: "High (320kbps)" },
+    { value: "LOW",            label: "Low (96-128kbps)" },
+  ],
+  deezer: [
+    { value: "LOSSLESS", label: "Lossless (FLAC)" },
+    { value: "HIGH",     label: "High (320kbps)" },
+    { value: "256",      label: "256kbps" },
+    { value: "192",      label: "192kbps" },
+    { value: "128",      label: "128kbps" },
+  ],
+  qobuz: [
+    { value: "27", label: "Hi-Res Max" },
+    { value: "7",  label: "Hi-Res" },
+    { value: "6",  label: "CD (FLAC)" },
+  ],
+  amazon: [
+    { value: "LOSSLESS", label: "FLAC / ALAC" },
+  ],
+  apple_music: [
+    { value: "256", label: "256kbps AAC" },
+    { value: "192", label: "192kbps AAC" },
+    { value: "128", label: "128kbps AAC" },
+  ],
+  soundcloud: [
+    { value: "HIGH", label: "High (256kbps)" },
+    { value: "LOW",  label: "Low (128kbps)" },
+  ],
+  youtube: [
+    { value: "HIGH", label: "High (256kbps)" },
+    { value: "LOW",  label: "Low (128kbps)" },
+  ],
+};
+
+function updateQualityOptions(service, currentQuality) {
+  const sel = $("defaultQuality");
+  if (!sel) return;
+  const opts = SERVICE_QUALITIES[service] || SERVICE_QUALITIES.tidal;
+  sel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
+  // Keep current quality if valid for this service, else default to first
+  if (currentQuality && opts.some(o => o.value === currentQuality)) {
+    sel.value = currentQuality;
+  } else {
+    sel.value = opts[0].value;
+  }
+}
+
 const STORAGE_KEYS = {
   volume: "streambox.volume",
 };
@@ -1168,7 +1219,8 @@ async function renderSettings() {
   $("cacheDir").value = state.settings.cache_dir || "";
   $("musicDir").value = state.settings.music_dir || "";
   $("downloadService").value = state.settings.download_service || "tidal";
-  $("defaultQuality").value = state.settings.default_quality || "LOSSLESS";
+  updateQualityOptions($("downloadService").value, state.settings.default_quality || "LOSSLESS");
+  $("downloadService").onchange = () => updateQualityOptions($("downloadService").value, $("defaultQuality").value);
   $("cacheCleanupFrequency").value = state.settings.cache_cleanup_frequency || "never";
   $("demoMusicIndexer").checked = !!state.settings.demo_music_indexer;
   $("strictTitleMatch").checked = !!state.settings.strict_title_match;

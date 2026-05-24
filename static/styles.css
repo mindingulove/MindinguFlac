@@ -1084,7 +1084,7 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
 }
 
 #playerArtist {
