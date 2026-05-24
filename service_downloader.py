@@ -1135,7 +1135,7 @@ class ServiceDownloadManager:
             "url": url,
             "output_dir": str(output_dir),
             "services": services_list,
-            "track_max_retries": 3,
+            "track_max_retries": 1,
             "verbose": True,
             "metadata": sp_meta if sp_meta else True,
             "cover": True,
