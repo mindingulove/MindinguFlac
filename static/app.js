@@ -800,15 +800,32 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
   state.currentPlayableReady = true;
   state.autoplayWanted = true;
   
-  const icon = $("playerStatusIcon");
-  icon.classList.remove("downloading");
-  icon.classList.add("ready");
-  icon.className = "bi bi-check-circle-fill player-status ready";
-
+  setPlayerStatusIcon("ready");
   setPlayerStatus(statusText, track);
   audio.load();
   syncPlayPauseButton();
   tryStartAudio(audio, track, requestId, jobId);
+}
+
+function setPlayerStatusIcon(mode, pct) {
+  const icon = $("playerStatusIcon");
+  icon.className = "player-status " + (mode === "ready" ? "ready" : mode === "error" ? "error" : "downloading");
+  if (mode === "ready") {
+    icon.innerHTML = '<i class="bi bi-check-circle-fill"></i>';
+  } else if (mode === "error") {
+    icon.innerHTML = '<i class="bi bi-exclamation-circle"></i>';
+  } else {
+    const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
+    icon.innerHTML = `<span class="player-pie${p > 0 ? "" : " indeterminate"}" style="--pct:${p}"></span>`;
+  }
+}
+
+function updatePlayerPie(pct) {
+  const pie = $("playerStatusIcon")?.querySelector(".player-pie");
+  if (!pie) return;
+  const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
+  pie.style.setProperty("--pct", p);
+  if (p > 0) pie.classList.remove("indeterminate");
 }
 
 function prepareSelectedTrackUi(track, status = "Opening stream...") {
@@ -820,12 +837,7 @@ function prepareSelectedTrackUi(track, status = "Opening stream...") {
   resetSeekUi();
   state.currentPlayableReady = false;
   state.autoplayWanted = false;
-  
-  const icon = $("playerStatusIcon");
-  icon.classList.remove("ready");
-  icon.classList.add("downloading");
-  icon.className = "bi bi-cloud-download player-status downloading";
-  
+  setPlayerStatusIcon("downloading", 0);
   setPlayerStatus(status, track);
   syncActiveTrackRows();
 }
@@ -1007,18 +1019,13 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       const job = (data.jobs || []).find((item) => item.id === jobId);
       if (!job) return;
       if (job.status === "error") {
+        setPlayerStatusIcon("error");
         setPlayerStatus(job.error || "Service download failed", track);
-        const icon = $("playerStatusIcon");
-        icon.classList.remove("downloading");
-        icon.className = "bi bi-exclamation-circle player-status";
         return;
       }
-      const pct = job.progress ? ` ${Math.round(job.progress)}%` : "";
+      const pct = job.progress ? Math.round(job.progress) : 0;
       if (job.status === "finished") {
-        const icon = $("playerStatusIcon");
-        icon.classList.remove("downloading");
-        icon.classList.add("ready");
-        icon.className = "bi bi-check-circle-fill player-status ready";
+        setPlayerStatusIcon("ready");
         setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track);
         if (!switchedToFinal && mode === "stream" && job.library_path) {
           switchedToFinal = true;
@@ -1026,7 +1033,8 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         }
         return;
       }
-      setPlayerStatus(job.status === "running" ? `Streaming${pct}…` : "Starting…", track);
+      updatePlayerPie(pct);
+      setPlayerStatus(job.status === "running" ? `Streaming${pct ? " " + pct + "%" : ""}…` : "Starting…", track);
     } catch (error) {}
   }
 }
