@@ -1561,6 +1561,12 @@ function bindPlayer() {
       state.isRepeat = !state.isRepeat;
       btnRepeat.classList.toggle("active", state.isRepeat);
       audio.loop = state.isRepeat;
+      
+      // If repeat is enabled, we don't need the next track prefetch anymore
+      if (state.isRepeat && state.activePrefetchJobId) {
+        api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
+        state.activePrefetchJobId = null;
+      }
     };
   }
   bindMediaSessionActions();
