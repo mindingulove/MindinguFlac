@@ -1,6 +1,8 @@
 # Mindinguflac
 
-Self-hosted music discovery, streaming, and library app with a Python backend and responsive HTML frontend.
+Self-hosted music discovery, streaming, and library app with a Python backend and responsive HTML frontend. Runs as a web server you open in any browser, and also ships as a native desktop app for macOS and Windows built on pywebview.
+
+![Mindinguflac](screenshot.png)
 
 Brand artwork lives in `static/assets`: `mindinguflac_icon.png` is the app icon, and `mindinguflac-mark.png` is the in-interface logo.
 
@@ -29,6 +31,7 @@ The app uses SpotiFLAC-backed direct service downloads for listening, caching, a
 - Album downloads also save `metadata.json`, `cover.jpg`, and lyrics text when available
 - Settings screen for cache path, music library path, quality, and preferred service
 - Music metadata provider layer with demo and MusicBrainz/Cover Art Archive support
+- Playlist management: create playlists, add tracks via the player status icon, import from Spotify playlist URLs
 - Web server mode plus pywebview desktop entry point for packaged macOS and Windows apps
 
 ## Run
