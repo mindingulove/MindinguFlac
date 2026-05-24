@@ -1276,7 +1276,9 @@ async function renderSettings() {
   $("downloadService").value = state.settings.download_service || "tidal";
   updateQualityOptions($("downloadService").value, state.settings.default_quality || "LOSSLESS");
   $("downloadService").onchange = () => updateQualityOptions($("downloadService").value, $("defaultQuality").value);
+  $("trackMaxRetries").value = state.settings.track_max_retries || 1;
   $("cacheCleanupFrequency").value = state.settings.cache_cleanup_frequency || "never";
+
   $("demoMusicIndexer").checked = !!state.settings.demo_music_indexer;
   $("strictTitleMatch").checked = !!state.settings.strict_title_match;
   
@@ -1308,7 +1310,9 @@ async function saveSettings(e) {
     music_dir: $("musicDir").value,
     download_service: $("downloadService").value,
     default_quality: $("defaultQuality").value,
+    track_max_retries: parseInt($("trackMaxRetries").value) || 1,
     cache_cleanup_frequency: $("cacheCleanupFrequency").value,
+
     demo_music_indexer: $("demoMusicIndexer").checked,
     strict_title_match: $("strictTitleMatch").checked,
     music_indexers: Array.from(document.querySelectorAll("#musicIndexers .indexer-row")).map(row => ({

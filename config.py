@@ -73,6 +73,7 @@ class AppConfig:
     demo_music_indexer: bool = True
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
     volume: float = 1.0
+    track_max_retries: int = 1
 
     def public_dict(self) -> dict:
         return {
@@ -86,6 +87,7 @@ class AppConfig:
             "demo_music_indexer": self.demo_music_indexer,
             "music_indexers": [vars(item) for item in self.music_indexers],
             "volume": self.volume,
+            "track_max_retries": self.track_max_retries,
         }
 
     @classmethod
@@ -106,6 +108,7 @@ class AppConfig:
             demo_music_indexer=bool(value.get("demo_music_indexer", True)),
             music_indexers=music_indexers,
             volume=float(value.get("volume", 1.0)),
+            track_max_retries=int(value.get("track_max_retries", 1)),
         )
 
 
