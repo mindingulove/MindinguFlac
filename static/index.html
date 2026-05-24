@@ -16,16 +16,20 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <span>Mindinguflac</span>
     </div>
+    <div class="sidebar-library-head">
+      <span class="sidebar-playlists-label">Your Library</span>
+      <button id="createPlaylistBtn" class="create-playlist-btn" type="button" title="New playlist"><i class="bi bi-plus-lg"></i><span>Create</span></button>
+    </div>
+
     <div class="nav-group">
       <button class="nav active" data-view="home"><span>Home</span></button>
       <button class="nav" data-view="artists"><span>Artists</span></button>
       <button class="nav" data-view="albums"><span>Albums</span></button>
-      <button class="nav" data-view="settings"><span>Settings</span></button>
     </div>
-    <div class="sidebar-note">
-      <strong>Library</strong>
-      <span>Hi-Fi lossless streaming powered by Mindinguflac.</span>
-    </div>
+
+    <div id="sidebarPlaylistList" class="sidebar-playlist-list"></div>
+
+    <button class="nav sidebar-settings-btn" data-view="settings"><span>Settings</span></button>
   </aside>
 
   <main class="shell">
@@ -228,6 +232,50 @@
     </div>
     <audio id="audioPlayer"></audio>
   </footer>
+
+  <!-- Add to playlist dialog -->
+  <dialog id="playlistPickerDialog">
+    <div class="playlist-picker">
+      <div class="playlist-picker-head">
+        <h2>Add to playlist</h2>
+        <button id="playlistPickerClose" class="modal-close" type="button" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+      </div>
+      <div class="playlist-picker-search">
+        <i class="bi bi-search"></i>
+        <input id="playlistPickerSearch" type="search" placeholder="Find a playlist">
+      </div>
+      <div class="playlist-picker-body" id="playlistPickerBody">
+        <!-- list rendered by JS -->
+      </div>
+      <div class="playlist-picker-footer">
+        <button id="playlistPickerCancel" class="playlist-picker-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Create playlist dialog -->
+  <dialog id="createPlaylistDialog">
+    <div class="create-playlist-modal">
+      <div class="playlist-picker-head">
+        <h2>New playlist</h2>
+        <button id="createPlaylistClose" class="modal-close" type="button" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+      </div>
+      <div class="create-playlist-form">
+        <label>
+          <span>Name</span>
+          <input id="newPlaylistName" type="text" placeholder="My playlist">
+        </label>
+        <label>
+          <span>Spotify playlist link <em>(optional)</em></span>
+          <input id="newPlaylistSpotifyUrl" type="url" placeholder="https://open.spotify.com/playlist/…">
+        </label>
+        <div class="create-playlist-actions">
+          <button id="createPlaylistCancel" class="playlist-picker-cancel" type="button">Cancel</button>
+          <button id="createPlaylistSubmit" class="create-playlist-submit" type="button">Create</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
 
   <script src="app.js"></script>
 </body>

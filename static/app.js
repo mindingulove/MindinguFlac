@@ -4,6 +4,7 @@ const state = {
   viewStack: [],
   catalog: { artists: [], albums: [], top_tracks: [], personal_tracks: [], recent_tracks: [] },
   settings: {},
+  playlists: [],
   currentTrack: null,
   activeJobId: null,
   isShuffle: false,
@@ -171,6 +172,7 @@ function setActiveView(id) {
   }
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
   document.querySelectorAll(".nav").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".sidebar-playlist-item").forEach(el => el.classList.remove("active"));
   const view = $(id);
   if (view) view.classList.add("active");
   const nav = document.querySelector(`.nav[data-view="${id}"]`);
@@ -403,6 +405,7 @@ function bindCardClicks(container, items) {
 
 function renderArtistsPage() {
   setActiveView("home");
+  document.querySelector('.nav[data-view="artists"]')?.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Artists</h1>
@@ -415,6 +418,7 @@ function renderArtistsPage() {
 
 function renderAlbumsPage() {
   setActiveView("home");
+  document.querySelector('.nav[data-view="albums"]')?.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Albums</h1>
@@ -1408,12 +1412,314 @@ function bindPlayer() {
 
 function formatTime(s) { const m = Math.floor(s / 60); return `${m}:${Math.floor(s % 60).toString().padStart(2, "0")}`; }
 
+// ---------------------------------------------------------------------------
+// Playlists
+// ---------------------------------------------------------------------------
+
+async function loadPlaylists() {
+  try {
+    state.playlists = await api("/api/playlists");
+    renderSidebarPlaylists();
+  } catch (e) {
+    console.error("loadPlaylists failed", e);
+  }
+}
+
+function trackInPlaylist(playlist, track) {
+  if (!track) return false;
+  return playlist.tracks.some(t => {
+    if (track.spotify_id && t.spotify_id) return t.spotify_id === track.spotify_id;
+    return t.title?.toLowerCase() === track.title?.toLowerCase() &&
+           t.artist?.toLowerCase() === track.artist?.toLowerCase();
+  });
+}
+
+function renderSidebarPlaylists() {
+  const list = $("sidebarPlaylistList");
+  if (!list) return;
+  if (!state.playlists.length) {
+    list.innerHTML = `<div style="padding: 8px 10px; font-size: 12px; color: var(--muted);">No playlists yet</div>`;
+    return;
+  }
+  list.innerHTML = state.playlists.map(pl => {
+    const art = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
+    const artStyle = art ? `style="background-image: url('${art}')"` : "";
+    const artIcon = art ? "" : `<i class="bi bi-music-note-list"></i>`;
+    return `
+      <div class="sidebar-playlist-item" data-playlist-id="${pl.id}">
+        <div class="sidebar-playlist-art" ${artStyle}>${artIcon}</div>
+        <div class="sidebar-playlist-info">
+          <div class="sidebar-playlist-name">${esc(pl.name)}</div>
+          <div class="sidebar-playlist-count">${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}</div>
+        </div>
+        <button class="sidebar-playlist-delete" type="button" data-delete-playlist="${pl.id}" aria-label="Delete playlist" title="Delete playlist"><i class="bi bi-trash3"></i></button>
+      </div>
+    `;
+  }).join("");
+
+  list.querySelectorAll(".sidebar-playlist-item").forEach(el => {
+    el.onclick = (event) => {
+      if (event.target.closest("[data-delete-playlist]")) return;
+      const pl = state.playlists.find(p => p.id === el.dataset.playlistId);
+      if (pl) pushPage(() => renderPlaylistPage(pl));
+    };
+  });
+  list.querySelectorAll("[data-delete-playlist]").forEach(btn => {
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      deletePlaylist(btn.dataset.deletePlaylist);
+    };
+  });
+}
+
+async function deletePlaylist(id) {
+  if (!confirm("Delete this playlist?")) return;
+  try {
+    await api("/api/playlists", { method: "DELETE", body: JSON.stringify({ id }) });
+    state.playlists = state.playlists.filter(p => p.id !== id);
+    renderSidebarPlaylists();
+    // If we're viewing this playlist, go back
+    if (state.viewStack.length > 1) popPage();
+  } catch (e) {
+    alert("Failed to delete playlist: " + e.message);
+  }
+}
+
+function formatDuration(tracks) {
+  const ms = tracks.reduce((sum, t) => sum + (t.duration_ms || 0), 0);
+  if (!ms) return "";
+  const totalMin = Math.floor(ms / 60000);
+  const hr = Math.floor(totalMin / 60);
+  const min = totalMin % 60;
+  return hr ? `${hr} hr ${min} min` : `${min} min`;
+}
+
+function renderPlaylistPage(playlist) {
+  setActiveView("home");
+  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
+    el.classList.toggle("active", el.dataset.playlistId === playlist.id);
+  });
+  const pl = state.playlists.find(p => p.id === playlist.id) || playlist;
+  _renderPlaylistContent(pl);
+
+  // Auto-refresh if imported from Spotify but missing metadata
+  if (pl.spotify_url && !pl.artwork_url) {
+    api("/api/playlists/refresh", { method: "POST", body: JSON.stringify({ id: pl.id }) })
+      .then(updated => {
+        const idx = state.playlists.findIndex(p => p.id === pl.id);
+        if (idx !== -1) state.playlists[idx] = updated;
+        renderSidebarPlaylists();
+        _renderPlaylistContent(updated);
+        document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
+          el.classList.toggle("active", el.dataset.playlistId === pl.id);
+        });
+      }).catch(() => {});
+  }
+}
+
+function _renderPlaylistContent(pl) {
+  const heroArt = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
+  const artStyle = heroArt ? `background-image: url('${heroArt}')` : "";
+  const artIcon = artStyle ? "" : `<i class="bi bi-music-note-list"></i>`;
+  const duration = formatDuration(pl.tracks);
+  const metaParts = [];
+  if (pl.owner) metaParts.push(esc(pl.owner));
+  if (pl.followers) metaParts.push(`${pl.followers.toLocaleString()} saves`);
+  metaParts.push(`${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}${duration ? ", " + duration : ""}`);
+
+  $("pageContent").innerHTML = `
+    <div class="scroll-area">
+      <div class="playlist-hero">
+        <div class="playlist-hero-art" style="${artStyle}">${artIcon}</div>
+        <div class="playlist-hero-info">
+          <span class="eyebrow">Playlist</span>
+          <h1>${esc(pl.name)}</h1>
+          ${pl.description ? `<div class="playlist-hero-desc">${esc(pl.description)}</div>` : ""}
+          <div class="playlist-hero-meta">${metaParts.join(" · ")}</div>
+        </div>
+      </div>
+      <div id="playlistTrackList" class="track-list" style="margin-top: 24px"></div>
+    </div>
+  `;
+
+  if (pl.tracks.length) {
+    renderTrackList("playlistTrackList", pl.tracks, "general");
+  } else {
+    $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">No songs yet — click the status icon while a track is playing to add it.</div>`;
+  }
+}
+
+// Open the "Add to playlist" picker for the current track
+function openPlaylistPicker(track) {
+  if (!track) return;
+  const dialog = $("playlistPickerDialog");
+  if (!dialog) return;
+
+  let searchVal = "";
+
+  function renderPickerList() {
+    const body = $("playlistPickerBody");
+    const filtered = state.playlists.filter(pl =>
+      !searchVal || pl.name.toLowerCase().includes(searchVal.toLowerCase())
+    );
+
+    const sections = [];
+
+    // Saved in (already contains track)
+    const saved = filtered.filter(pl => trackInPlaylist(pl, track));
+    if (saved.length) {
+      sections.push(`<div class="playlist-picker-divider">Saved in</div>`);
+      saved.forEach(pl => sections.push(pickerRowHtml(pl, true)));
+    }
+
+    // Recently updated (not containing track)
+    const recent = filtered.filter(pl => !trackInPlaylist(pl, track));
+    if (recent.length) {
+      sections.push(`<div class="playlist-picker-divider">Recently updated</div>`);
+      recent.forEach(pl => sections.push(pickerRowHtml(pl, false)));
+    }
+
+    const newBtn = `
+      <button class="playlist-picker-new" id="pickerNewBtn" type="button">
+        <div class="playlist-picker-new-icon"><i class="bi bi-plus-lg"></i></div>
+        New playlist
+      </button>
+    `;
+
+    body.innerHTML = newBtn + sections.join("");
+
+    body.querySelectorAll("[data-picker-playlist]").forEach(btn => {
+      btn.onclick = async () => {
+        const plId = btn.dataset.pickerPlaylist;
+        const wasIn = btn.dataset.inPlaylist === "1";
+        const pl = state.playlists.find(p => p.id === plId);
+        if (!pl) return;
+        try {
+          const result = await api("/api/playlists/tracks", {
+            method: "POST",
+            body: JSON.stringify({ playlist_id: plId, track, action: wasIn ? "remove" : "add" }),
+          });
+          const idx = state.playlists.findIndex(p => p.id === plId);
+          if (idx !== -1) {
+            if (result.in_playlist) {
+              state.playlists[idx].tracks.push(track);
+            } else {
+              state.playlists[idx].tracks = state.playlists[idx].tracks.filter(t => {
+                if (track.spotify_id && t.spotify_id) return t.spotify_id !== track.spotify_id;
+                return !(t.title?.toLowerCase() === track.title?.toLowerCase() && t.artist?.toLowerCase() === track.artist?.toLowerCase());
+              });
+            }
+          }
+          renderSidebarPlaylists();
+          renderPickerList();
+        } catch (e) {
+          alert("Failed: " + e.message);
+        }
+      };
+    });
+
+    $("pickerNewBtn").onclick = () => {
+      dialog.close();
+      openCreatePlaylistDialog(track);
+    };
+  }
+
+  renderPickerList();
+
+  $("playlistPickerSearch").value = "";
+  $("playlistPickerSearch").oninput = (e) => {
+    searchVal = e.target.value;
+    renderPickerList();
+  };
+
+  dialog.showModal();
+}
+
+function pickerRowHtml(pl, isIn) {
+  const art = (pl.tracks[0] || {}).artwork_url || "";
+  const artStyle = art ? `style="background-image: url('${art}')"` : "";
+  const artIcon = art ? "" : `<i class="bi bi-music-note-list"></i>`;
+  return `
+    <button class="playlist-picker-row" type="button" data-picker-playlist="${pl.id}" data-in-playlist="${isIn ? "1" : "0"}">
+      <div class="playlist-picker-art" ${artStyle}>${artIcon}</div>
+      <div class="playlist-picker-info">
+        <strong>${esc(pl.name)}</strong>
+        <span>${pl.tracks.length} songs</span>
+      </div>
+      <div class="playlist-picker-check ${isIn ? "checked" : ""}">
+        ${isIn ? '<i class="bi bi-check-lg"></i>' : ""}
+      </div>
+    </button>
+  `;
+}
+
+function openCreatePlaylistDialog(trackToAdd = null) {
+  const dialog = $("createPlaylistDialog");
+  if (!dialog) return;
+  $("newPlaylistName").value = "";
+  $("newPlaylistSpotifyUrl").value = "";
+  dialog.showModal();
+
+  $("createPlaylistSubmit").onclick = async () => {
+    const name = $("newPlaylistName").value.trim() || "New Playlist";
+    const spotifyUrl = $("newPlaylistSpotifyUrl").value.trim();
+    $("createPlaylistSubmit").disabled = true;
+    $("createPlaylistSubmit").textContent = "Creating…";
+    try {
+      const result = await api("/api/playlists", {
+        method: "POST",
+        body: JSON.stringify({ name, spotify_url: spotifyUrl }),
+      });
+      state.playlists.unshift(result);
+      // If a track was queued to be added, add it now
+      if (trackToAdd) {
+        try {
+          await api("/api/playlists/tracks", {
+            method: "POST",
+            body: JSON.stringify({ playlist_id: result.id, track: trackToAdd, action: "add" }),
+          });
+          state.playlists[0].tracks.push(trackToAdd);
+        } catch (e) {}
+      }
+      renderSidebarPlaylists();
+      dialog.close();
+    } catch (e) {
+      alert("Failed to create playlist: " + e.message);
+    } finally {
+      $("createPlaylistSubmit").disabled = false;
+      $("createPlaylistSubmit").textContent = "Create";
+    }
+  };
+}
+
+function bindPlaylistDialogs() {
+  const picker = $("playlistPickerDialog");
+  const creator = $("createPlaylistDialog");
+
+  $("playlistPickerClose").onclick = () => picker.close();
+  $("playlistPickerCancel").onclick = () => picker.close();
+  $("createPlaylistClose").onclick = () => creator.close();
+  $("createPlaylistCancel").onclick = () => creator.close();
+
+  picker.addEventListener("click", (e) => { if (e.target === picker) picker.close(); });
+  creator.addEventListener("click", (e) => { if (e.target === creator) creator.close(); });
+
+  $("createPlaylistBtn").onclick = () => openCreatePlaylistDialog();
+
+  $("playerStatusIcon").addEventListener("click", () => {
+    if (!state.currentTrack) return;
+    loadPlaylists().then(() => openPlaylistPicker(state.currentTrack));
+  });
+}
+
 async function boot() {
   bindSearch();
   bindPlayer();
   bindKeyboardControls();
+  bindPlaylistDialogs();
   state.settings = await api("/api/settings").catch(() => ({}));
-  
+
   // Hide suggestions when clicking outside
   document.addEventListener("click", (e) => {
     const searchBox = document.querySelector(".search-box");
@@ -1434,8 +1740,8 @@ async function boot() {
   $("backButton").onclick = popPage;
   $("forwardButton").onclick = forwardPage;
   $("clearCache").onclick = async () => { await api("/api/cache", { method: "DELETE" }); renderSettings(); };
-  
-  await loadCatalog();
+
+  await Promise.all([loadCatalog(), loadPlaylists()]);
   replacePage(renderHomePage);
 }
 

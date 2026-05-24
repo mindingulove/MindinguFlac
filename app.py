@@ -14,6 +14,7 @@ import shutil
 import threading
 import time
 import urllib.request
+import uuid
 import rapidfuzz
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,10 +31,78 @@ ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 DATA = app_data_dir()
 CONFIG_PATH = DATA / "config.json"
+PLAYLISTS_PATH = DATA / "playlists.json"
 
 config_lock = threading.Lock()
 app_config = load_config(CONFIG_PATH)
 service_downloader = ServiceDownloadManager(app_config)
+
+
+playlists_lock = threading.Lock()
+
+
+def load_playlists() -> list[dict]:
+    try:
+        return json.loads(PLAYLISTS_PATH.read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def save_playlists(data: list[dict]) -> None:
+    PLAYLISTS_PATH.write_text(json.dumps(data, indent=2), "utf-8")
+
+
+def _spotify_import_playlist(playlist_url: str) -> dict:
+    """Returns {name, artwork_url, description, owner, followers, tracks} from Spotify."""
+    m = re.search(r"playlist/([A-Za-z0-9]+)", playlist_url)
+    if not m:
+        return {"name": "", "artwork_url": "", "description": "", "owner": "", "followers": 0, "tracks": []}
+    playlist_id = m.group(1)
+    try:
+        from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        client = SpotifyMetadataClient()
+
+        info = client._get(f"playlists/{playlist_id}", params={
+            "fields": "name,description,images,owner(display_name),followers(total)"
+        })
+        pl_name = info.get("name", "")
+        images = info.get("images") or []
+        pl_artwork = images[0].get("url", "") if images else ""
+        pl_description = info.get("description", "") or ""
+        pl_owner = (info.get("owner") or {}).get("display_name", "")
+        pl_followers = (info.get("followers") or {}).get("total", 0)
+
+        tracks = []
+        offset = 0
+        while True:
+            data = client._get(f"playlists/{playlist_id}/tracks", params={"limit": 100, "offset": offset})
+            items = data.get("items", [])
+            for item in items:
+                t = item.get("track")
+                if not t or not t.get("id"):
+                    continue
+                spotify_id = t["id"]
+                tracks.append({
+                    "type": "track",
+                    "title": t.get("name", ""),
+                    "artist": ", ".join(a["name"] for a in (t.get("artists") or [])),
+                    "album": (t.get("album") or {}).get("name", ""),
+                    "artwork_url": ((t.get("album") or {}).get("images") or [{}])[0].get("url", ""),
+                    "spotify_id": spotify_id,
+                    "spotify_url": f"https://open.spotify.com/track/{spotify_id}",
+                    "duration_ms": t.get("duration_ms", 0),
+                })
+            if not data.get("next") or len(items) < 100:
+                break
+            offset += 100
+
+        return {
+            "name": pl_name, "artwork_url": pl_artwork, "description": pl_description,
+            "owner": pl_owner, "followers": pl_followers, "tracks": tracks,
+        }
+    except Exception as e:
+        print(f"[Spotify import] {e}")
+        return {"name": "", "artwork_url": "", "description": "", "owner": "", "followers": 0, "tracks": []}
 
 
 def directory_stats(path: Path) -> dict:
@@ -369,6 +438,10 @@ class Handler(BaseHTTPRequestHandler):
                     print(f"[ImageProxy] Error fetching {url}: {e}")
                     self.send_error_json("Failed to fetch image", HTTPStatus.BAD_GATEWAY)
                 return
+            if path == "/api/playlists":
+                with playlists_lock:
+                    self.send_json(load_playlists())
+                return
             if path == "/api/cache":
                 self.send_json(cache_stats())
                 return
@@ -435,6 +508,87 @@ class Handler(BaseHTTPRequestHandler):
                     service_downloader.update_config(app_config)
                 self.send_json({"ok": True})
                 return
+            if path == "/api/playlists":
+                body = read_body(self)
+                user_name = body.get("name", "").strip()
+                spotify_url = body.get("spotify_url", "").strip()
+                imported = {"name": "", "artwork_url": "", "tracks": []}
+                if spotify_url:
+                    imported = _spotify_import_playlist(spotify_url)
+                playlist = {
+                    "id": str(uuid.uuid4()),
+                    "name": user_name or imported["name"] or "New Playlist",
+                    "artwork_url": imported.get("artwork_url", ""),
+                    "description": imported.get("description", ""),
+                    "owner": imported.get("owner", ""),
+                    "followers": imported.get("followers", 0),
+                    "spotify_url": spotify_url,
+                    "tracks": imported["tracks"],
+                    "created_at": time.time(),
+                }
+                with playlists_lock:
+                    data = load_playlists()
+                    data.append(playlist)
+                    save_playlists(data)
+                self.send_json({**playlist, "imported": bool(imported["tracks"])}, 201)
+                return
+            if path == "/api/playlists/refresh":
+                body = read_body(self)
+                playlist_id = body.get("id", "")
+                with playlists_lock:
+                    data = load_playlists()
+                    pl = next((p for p in data if p["id"] == playlist_id), None)
+                    if not pl:
+                        self.send_error_json("Playlist not found", HTTPStatus.NOT_FOUND)
+                        return
+                    spotify_url = pl.get("spotify_url", "")
+                if not spotify_url:
+                    self.send_error_json("No Spotify URL", HTTPStatus.BAD_REQUEST)
+                    return
+                imported = _spotify_import_playlist(spotify_url)
+                if not imported["name"] and not imported["tracks"]:
+                    self.send_error_json("Spotify import failed", HTTPStatus.BAD_GATEWAY)
+                    return
+                with playlists_lock:
+                    data = load_playlists()
+                    pl = next((p for p in data if p["id"] == playlist_id), None)
+                    if pl:
+                        if imported["name"]: pl["name"] = imported["name"]
+                        if imported["artwork_url"]: pl["artwork_url"] = imported["artwork_url"]
+                        pl["description"] = imported.get("description", "")
+                        pl["owner"] = imported.get("owner", "")
+                        pl["followers"] = imported.get("followers", 0)
+                        pl["tracks"] = imported["tracks"]
+                        save_playlists(data)
+                self.send_json(pl)
+                return
+            if path == "/api/playlists/tracks":
+                body = read_body(self)
+                playlist_id = body.get("playlist_id", "")
+                track = body.get("track") or {}
+                action = body.get("action", "toggle")
+                with playlists_lock:
+                    data = load_playlists()
+                    pl = next((p for p in data if p["id"] == playlist_id), None)
+                    if not pl:
+                        self.send_error_json("Playlist not found", HTTPStatus.NOT_FOUND)
+                        return
+                    def same_track(t):
+                        if track.get("spotify_id") and t.get("spotify_id"):
+                            return t["spotify_id"] == track["spotify_id"]
+                        return (t.get("title", "").lower() == track.get("title", "").lower() and
+                                t.get("artist", "").lower() == track.get("artist", "").lower())
+                    existing = next((t for t in pl["tracks"] if same_track(t)), None)
+                    if action == "remove" or (action == "toggle" and existing):
+                        pl["tracks"] = [t for t in pl["tracks"] if not same_track(t)]
+                        in_playlist = False
+                    else:
+                        if not existing:
+                            pl["tracks"].append(track)
+                        in_playlist = True
+                    save_playlists(data)
+                self.send_json({"ok": True, "in_playlist": in_playlist})
+                return
             if path == "/api/service/download":
                 body = read_body(self)
                 job = service_downloader.start_job(body)
@@ -463,6 +617,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
         try:
+            if path == "/api/playlists":
+                body = read_body(self)
+                playlist_id = body.get("id", "")
+                with playlists_lock:
+                    data = load_playlists()
+                    data = [p for p in data if p["id"] != playlist_id]
+                    save_playlists(data)
+                self.send_json({"ok": True})
+                return
             if path == "/api/service/cancel":
                 body = read_body(self)
                 service_downloader.cancel_job(body.get("job_id"))
