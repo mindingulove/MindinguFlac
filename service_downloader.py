@@ -1278,58 +1278,57 @@ class ServiceDownloadManager:
             try:
                 _STREAM_CAPTURE.manager = self
                 _STREAM_CAPTURE.job_id = job["id"]
+                success = False
+                kwargs["allow_fallback"] = False # We handle the provider loop ourselves now
 
-                # First attempt - NO fallback to other services (forces bypass if primary is blocked)
-                with self._lock:
-                    job["last_status"] = f"Downloading via {spotiflac_service}..."
-                self._save_jobs()
-                
-                kwargs["allow_fallback"] = False
-                sf_success = _exec_sf()
-                success = _has_audio() or sf_success
+                for service in services_list:
+                    if success: break
+                    kwargs["services"] = [service]
+                    
+                    # 1. Try Direct
+                    with self._lock:
+                        job["last_status"] = f"Trying {service}..."
+                    self._save_jobs()
+                    
+                    captured.clear()
+                    sf_success = _exec_sf()
+                    if _has_audio() or sf_success:
+                        print(f"[Bypass] ✓ {service} (Direct) succeeded.")
+                        success = True
+                        break
 
-                if not success:
-                    print(f"[Bypass] Triggered for {job.get('title')} - primary service failed or rate limited.")
-                    # Re-enable fallback for bypass attempts so we actually get the file
-                    kwargs["allow_fallback"] = True
-                    try:
-                        # --- Primary: Tor SOCKS5 ---
-                        if _tor_is_up() or _ensure_tor():
-                            print(f"[Bypass] Retrying via Tor SOCKS5 ({_TOR_SOCKS})…")
-                            with self._lock:
-                                job["last_status"] = "Retrying via Tor..."
-                            self._save_jobs()
-                            
-                            captured.clear()
-                            sf_success = _exec_sf(_TOR_SOCKS)
-                            if _has_audio(delete_invalid=True) or sf_success:
-                                print(f"[Bypass] ✓ Downloaded via Tor.")
-                                success = True
+                    # 2. Try Tor
+                    if _tor_is_up() or _ensure_tor():
+                        with self._lock:
+                            job["last_status"] = f"Trying {service} (Tor)..."
+                        self._save_jobs()
+                        
+                        captured.clear()
+                        sf_success = _exec_sf(_TOR_SOCKS)
+                        if _has_audio(delete_invalid=True) or sf_success:
+                            print(f"[Bypass] ✓ {service} (Tor) succeeded.")
+                            success = True
+                            break
 
-                        # --- Fallback: HTTP proxy pool ---
-                        if not success:
-                            print(f"[Bypass] Tor failed or unavailable — trying HTTP proxy pool…")
-                            for attempt in range(5):
-                                proxy = _pop_fallback_proxy()
-                                if not proxy:
-                                    print(f"[Bypass] No fallback proxies left.")
-                                    break
-                                
-                                print(f"[Bypass] HTTP proxy attempt {attempt + 1}: {proxy}")
-                                with self._lock:
-                                    job["last_status"] = f"Trying proxy {attempt + 1}/5..."
-                                self._save_jobs()
-                                
-                                captured.clear()
-                                sf_success = _exec_sf(proxy)
-                                if _has_audio(delete_invalid=True) or sf_success:
-                                    print(f"[Bypass] ✓ Downloaded via proxy {proxy}")
-                                    success = True
-                                    break
-                                else:
-                                    print(f"[Bypass] ✗ {proxy} produced no file, trying next…")
-                    except Exception as e:
-                        print(f"[Bypass] Error: {e}")
+                    # 3. Try HTTP Proxies (as ultimate fallback for this service)
+                    for attempt in range(2): # Try 2 proxies per service to keep it moving
+                        proxy = _pop_fallback_proxy()
+                        if not proxy: break
+                        
+                        with self._lock:
+                            job["last_status"] = f"Trying {service} (Proxy {attempt+1})..."
+                        self._save_jobs()
+                        
+                        captured.clear()
+                        sf_success = _exec_sf(proxy)
+                        if _has_audio(delete_invalid=True) or sf_success:
+                            print(f"[Bypass] ✓ {service} (Proxy) succeeded.")
+                            success = True
+                            break
+                        
+                    if success: break
+                    print(f"[Bypass] ✗ {service} failed all modes, moving to next provider...")
+
             finally:
                 _STREAM_CAPTURE.manager = None
                 _STREAM_CAPTURE.job_id = ""
