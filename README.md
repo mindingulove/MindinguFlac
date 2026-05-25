@@ -2,6 +2,33 @@
 
 Self-hosted music discovery, streaming, and library app with a Python backend and responsive HTML frontend. Runs as a web server you open in any browser, and also ships as a native desktop app for macOS and Windows built on pywebview.
 
+## Disclaimer
+
+This project is for educational and private use only. The developer does not condone or encourage copyright infringement.
+
+SpotiFLAC is a third-party tool and is not affiliated with, endorsed by, or connected to Spotify, Tidal, Qobuz, Amazon Music or any other streaming service.
+
+You are solely responsible for:
+- Ensuring your use of this software complies with your local laws.
+- Reading and adhering to the Terms of Service of the respective platforms.
+- Any legal consequences resulting from the misuse of this tool.
+
+The software is provided "as is", without warranty of any kind. The author assumes no liability for any bans, damages, or legal issues arising from its use.
+
+## FAQ
+
+**Is this software free?**
+Yes. This software is completely free. You do not need an account, login, or subscription. All you need is an internet connection.
+
+**Can using this software get my Spotify account suspended or banned?**
+No. This software has no connection to your Spotify account. Spotify data is obtained through reverse engineering of the Spotify Web Player, not through user authentication.
+
+**Where does the audio come from?**
+The audio is fetched using third-party APIs.
+
+**Want to support the project?**
+If this software is useful and brings you value, consider supporting the project by buying me a coffee. Your support helps keep development going.
+
 <img width="1392" height="932" alt="Image" src="https://github.com/user-attachments/assets/ad8693c2-726d-4065-bc07-84c33df4cf4b" />
 <img width="1707" height="1035" alt="Image" src="https://github.com/user-attachments/assets/c7295c26-a39e-42c3-ade8-b0be7d8d95ed" />
 <img width="1707" height="1035" alt="Image" src="https://github.com/user-attachments/assets/c446baf3-387d-4f28-abdb-8b39379d3a8f" />
@@ -46,36 +73,6 @@ The app uses SpotiFLAC-backed direct service downloads for listening, caching, a
 - Music metadata provider layer with demo and MusicBrainz/Cover Art Archive support
 - Playlist management: create playlists, add tracks via the player status icon, import from Spotify playlist URLs
 - Web server mode plus pywebview desktop entry point for packaged macOS and Windows apps
-
-## FAQ
-
-**Is this software free?**
-Yes. This software is completely free. You do not need an account, login, or subscription. All you need is an internet connection.
-
-**Can using this software get my Spotify account suspended or banned?**
-No. This software has no connection to your Spotify account. Spotify data is obtained through reverse engineering of the Spotify Web Player, not through user authentication.
-
-**Where does the audio come from?**
-The audio is fetched using third-party APIs.
-
-**Why does metadata fetching sometimes fail?**
-This usually happens because your IP address has been rate-limited. You can wait and try again later, or use a VPN to bypass the rate limit.
-
-**Want to support the project?**
-If this software is useful and brings you value, consider supporting the project by buying me a coffee. Your support helps keep development going.
-
-## Disclaimer
-
-This project is for educational and private use only. The developer does not condone or encourage copyright infringement.
-
-SpotiFLAC is a third-party tool and is not affiliated with, endorsed by, or connected to Spotify, Tidal, Qobuz, Amazon Music or any other streaming service.
-
-You are solely responsible for:
-- Ensuring your use of this software complies with your local laws.
-- Reading and adhering to the Terms of Service of the respective platforms.
-- Any legal consequences resulting from the misuse of this tool.
-
-The software is provided "as is", without warranty of any kind. The author assumes no liability for any bans, damages, or legal issues arising from its use.
 
 ## Run
 
