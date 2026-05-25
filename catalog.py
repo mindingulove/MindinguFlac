@@ -131,7 +131,8 @@ def discover_catalog(config) -> dict:
     all_artists = {}
     all_albums = {}
     
-    for t in library + recent + base_global:
+    # Base artists/albums from the Top Tracks ONLY (not library/recent)
+    for t in base_global:
         art_name = t.get("artist") or "Unknown Artist"
         if art_name not in all_artists:
             all_artists[art_name] = {
@@ -147,7 +148,7 @@ def discover_catalog(config) -> dict:
         all_artists[art_name]["tracks"] += 1
         all_artists[art_name]["plays"] += t.get("plays", 0)
 
-    for t in library + recent + base_global:
+    for t in base_global:
         alb_title = t.get("album") or "Unknown Album"
         art_name = t.get("artist") or "Unknown Artist"
         key = (art_name, alb_title)
@@ -181,6 +182,6 @@ def discover_catalog(config) -> dict:
         "personal_tracks": library,
         "recent_tracks": recent,
         "top_tracks": base_global,
-        "artists": sorted(all_artists.values(), key=lambda x: (-x["plays"], x.get("name", "").lower())),
-        "albums": sorted(all_albums.values(), key=lambda x: (-x["plays"], x.get("artist", "").lower(), x.get("title", "").lower())),
+        "artists": sorted(all_artists.values(), key=lambda x: (-(x.get("plays") or 0), x.get("name", "").lower())),
+        "albums": sorted(all_albums.values(), key=lambda x: (-(x.get("plays") or 0), x.get("artist", "").lower(), x.get("title", "").lower())),
     }

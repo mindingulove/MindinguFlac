@@ -429,19 +429,27 @@ def album_metadata(config: AppConfig, artist: str, album: str, track: str = "") 
 
 
 def enrich_artwork_batch(results: list[dict]) -> list[dict]:
-    from concurrent.futures import ThreadPoolExecutor
-    def enrich_item(item):
-        if item.get("artwork_url"): return item
+    # We use a simple sequential loop here because ThreadPoolExecutor
+    # can cause freezes/timeouts in some desktop webview environments (WebKit)
+    # when making concurrent network requests.
+    enriched = []
+    for item in results:
+        if item.get("artwork_url"): 
+            enriched.append(item)
+            continue
         try:
-            if item.get("type") == "artist": item["artwork_url"] = spotify_artist_artwork(item.get("artist", ""))
-            elif item.get("type") == "album": item["artwork_url"] = spotify_album_artwork(item.get("artist", ""), item.get("title", ""))
+            if item.get("type") == "artist": 
+                item["artwork_url"] = spotify_artist_artwork(item.get("artist", ""))
+            elif item.get("type") == "album": 
+                item["artwork_url"] = spotify_album_artwork(item.get("artist", ""), item.get("title", ""))
             else:
                 sp = spotify_search_track(item.get("artist", ""), item.get("title", ""))
-                if sp.get("artwork_url"): item["artwork_url"] = sp["artwork_url"]
-        except Exception: pass
-        return item
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        return list(ex.map(enrich_item, results))
+                if sp.get("artwork_url"): 
+                    item["artwork_url"] = sp["artwork_url"]
+        except Exception: 
+            pass
+        enriched.append(item)
+    return enriched
 
 def enrich_albums_batch(results: list[dict]) -> list[dict]:
     return results
