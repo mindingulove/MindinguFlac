@@ -61,9 +61,6 @@ The audio is fetched using third-party APIs.
 **Why does metadata fetching sometimes fail?**
 This usually happens because your IP address has been rate-limited. You can wait and try again later, or use a VPN to bypass the rate limit.
 
-**Why does Windows Defender or antivirus flag or delete the file?**
-This is a false positive. It likely happens because the executable is compressed using UPX. If you are concerned, you can fork the repository and build the software yourself from source.
-
 **Want to support the project?**
 If this software is useful and brings you value, consider supporting the project by buying me a coffee. Your support helps keep development going.
 
