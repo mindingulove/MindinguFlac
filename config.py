@@ -97,6 +97,13 @@ class AppConfig:
         cache_dir_str = (value.get("cache_dir") or "").strip()
         music_dir_str = (value.get("music_dir") or "").strip()
         
+        rt = value.get("track_max_retries")
+        if rt is None:
+            rt = 1
+        else:
+            try: rt = int(rt)
+            except: rt = 1
+
         return cls(
             cache_dir=Path(cache_dir_str).expanduser().resolve() if cache_dir_str else default_cache_dir().expanduser().resolve(),
             music_dir=Path(music_dir_str).expanduser().resolve() if music_dir_str else default_music_dir().expanduser().resolve(),
@@ -108,7 +115,7 @@ class AppConfig:
             demo_music_indexer=bool(value.get("demo_music_indexer", True)),
             music_indexers=music_indexers,
             volume=float(value.get("volume", 1.0)),
-            track_max_retries=int(value.get("track_max_retries", 1)),
+            track_max_retries=rt,
         )
 
 

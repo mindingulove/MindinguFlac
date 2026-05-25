@@ -12,8 +12,8 @@ OUT = ROOT / "build" / "icons"
 
 def process_icon(size: int) -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    # 80% scale provides enough padding to avoid the forced OS square background.
-    target_size = int(size * 0.80)
+    # 75% scale is safe to avoid the macOS square "plating"
+    target_size = int(size * 0.75)
     source.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
     
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -28,10 +28,23 @@ def write_iconset() -> None:
     iconset.mkdir(parents=True, exist_ok=True)
     for stale in iconset.glob("*.png"):
         stale.unlink()
-    # Required sizes for macOS icns
-    for size in (16, 32, 128, 256, 512):
-        process_icon(size).save(iconset / f"icon_{size}x{size}.png")
-        process_icon(size * 2).save(iconset / f"icon_{size}x{size}@2x.png")
+    
+    # macOS iconset naming requirements
+    # 16, 32, 128, 256, 512 + @2x versions
+    configs = [
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ]
+    for size, name in configs:
+        process_icon(size).save(iconset / name)
 
 
 def write_ico() -> None:
