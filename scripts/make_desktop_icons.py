@@ -12,8 +12,9 @@ OUT = ROOT / "build" / "icons"
 
 def process_icon(size: int) -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    # 72% scale is very safe to ensure macOS treats it as a shaped icon.
-    target_size = int(size * 0.72)
+    # 90% scale is usually the sweet spot for shaped icons on macOS.
+    # It's large enough to look good but has enough margin to avoid the square plate.
+    target_size = int(size * 0.90)
     source.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
 
     # Explicitly transparent canvas
@@ -22,7 +23,6 @@ def process_icon(size: int) -> Image.Image:
     y = (size - source.height) // 2
     canvas.alpha_composite(source, (x, y))
     return canvas
-
 
 
 def write_iconset() -> None:
