@@ -156,13 +156,13 @@ function albumTarget(item = {}) {
 }
 
 function artistLinkHtml(item, text = null, className = "") {
-  const label = text || item?.artist || item?.name || "";
+  const label = text || item && item.artist || item && item.name || "";
   if (!label) return "";
   return `<button class="inline-entity-link artist-link ${className}" type="button" title="${esc(label)}" data-open-artist='${attrJson(artistTarget({ ...item, artist: label }))}'>${esc(label)}</button>`;
 }
 
 function albumLinkHtml(item, text = null, className = "") {
-  const label = text || item?.title || item?.name || "";
+  const label = text || item && item.title || item && item.name || "";
   if (!label) return "";
   return `<button class="inline-entity-link track-title-link ${className}" type="button" title="${esc(label)}" data-open-album='${attrJson(albumTarget(item))}'>${esc(label)}</button>`;
 }
@@ -234,7 +234,7 @@ function setActiveView(id) {
 
 function pushPage(renderFn) {
   if (state.viewStack.length > 0) {
-    state.viewStack[state.viewStack.length - 1].scroll = document.querySelector(".active .scroll-area")?.scrollTop || 0;
+    state.viewStack[state.viewStack.length - 1].scroll = document.querySelector(".active .scroll-area") ? document.querySelector(".active .scroll-area").scrollTop : 0 || 0;
   }
   state.viewStack.push({ render: renderFn, scroll: 0 });
   state.forwardHistory = [];
@@ -467,7 +467,7 @@ function bindCardClicks(container, items) {
 function renderArtistsPage() {
   setActiveView("home");
   document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
-  document.querySelector('.nav[data-view="artists"]')?.classList.add("active");
+  let el1 = document.querySelector('.nav[data-view="artists"]'); if (el1) el1.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Artists</h1>
@@ -481,7 +481,7 @@ function renderArtistsPage() {
 function renderAlbumsPage() {
   setActiveView("home");
   document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
-  document.querySelector('.nav[data-view="albums"]')?.classList.add("active");
+  let el2 = document.querySelector('.nav[data-view="albums"]'); if (el2) el2.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Albums</h1>
@@ -669,7 +669,7 @@ async function renderArtistPage(artist) {
   const timeout = setTimeout(() => {
     if ($("artistLoading")) {
       $("artistLoading").innerHTML = '<span>No discovery data available for this artist.</span>';
-      setTimeout(() => $("artistLoading")?.remove(), 3000);
+      setTimeout(() => { if ($("artistLoading")) $("artistLoading").remove(); }, 3000);
     }
     es.close();
   }, 12000);
@@ -697,8 +697,8 @@ async function renderArtistPage(artist) {
     } catch (err) {}
   };
 
-  es.addEventListener("done", () => { $("artistLoading")?.remove(); es.close(); });
-  es.onerror = (err) => { $("artistLoading")?.remove(); es.close(); };
+  es.addEventListener("done", () => { if ($("artistLoading")) $("artistLoading").remove(); es.close(); });
+  es.onerror = (err) => { if ($("artistLoading")) $("artistLoading").remove(); es.close(); };
 }
 
 async function renderAlbumPage(album) {
@@ -855,7 +855,7 @@ function setPlayerStatusIcon(mode, pct) {
 }
 
 function updatePlayerPie(pct) {
-  const pie = $("playerStatusIcon")?.querySelector(".player-pie");
+  const pie = $("playerStatusIcon") ? $("playerStatusIcon").querySelector : null(".player-pie");
   if (!pie) return;
   const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
   pie.style.setProperty("--pct", p);
@@ -954,7 +954,7 @@ async function toggleTrackLibrary(track, button, refresh) {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     });
-    const activeJobId = result.job?.id || result.active_job_id || "";
+    const activeJobId = (result.job ? result.job.id : null) || result.active_job_id || "";
     if (activeJobId) button.dataset.activeJobId = activeJobId;
     if (result.action === "started" || result.action === "queued") {
       await waitForLibraryToggle(track, activeJobId, button);
@@ -978,7 +978,7 @@ async function cancelLibraryDownload(track, button, refresh) {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     }).catch(() => null);
-    jobId = status?.active_job_id || "";
+    jobId = (status ? status.active_job_id : null) || "";
   }
   if (jobId) {
     await api("/api/service/cancel", {
@@ -1002,19 +1002,19 @@ function updateLibraryProgressButton(button, status) {
 
 async function waitForLibraryToggle(track, jobId = "", button = null) {
   for (let attempt = 0; attempt < 900; attempt++) {
-    if (button?.dataset.cancelled === "1") return null;
+    if ((button ? button.dataset : null).cancelled === "1") return null;
     await new Promise(resolve => setTimeout(resolve, 1000));
-    if (button?.dataset.cancelled === "1") return null;
+    if ((button ? button.dataset : null).cancelled === "1") return null;
     const status = await api("/api/library/status", {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     }).catch(() => null);
-    if (status?.active_job_id && button) button.dataset.activeJobId = status.active_job_id;
+    if ((status ? status.active_job_id : null) && button) button.dataset.activeJobId = status.active_job_id;
     if (status && typeof status.progress !== "undefined") {
       updateLibraryProgressButton(button, status);
     }
-    if (status?.active_job_status === "error") throw new Error("Download cancelled");
-    if (status?.in_library) {
+    if ((status ? status.active_job_status : null) === "error") throw new Error("Download cancelled");
+    if ((status ? status.in_library : null)) {
       if (button) {
         button.classList.remove("progress");
         button.classList.add("downloaded");
@@ -1025,8 +1025,8 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
     if (jobId) {
       const data = await api("/api/service/downloads").catch(() => ({ jobs: [] }));
       const job = (data.jobs || []).find(item => item.id === jobId);
-      if (job?.status === "error") throw new Error(job.error || "Download failed");
-      if (job?.status === "finished") {
+      if ((job ? job.status : null) === "error") throw new Error(job.error || "Download failed");
+      if ((job ? job.status : null) === "finished") {
         updateLibraryProgressButton(button, { ...job, progress: 100 });
       } else if (job && typeof job.progress !== "undefined") {
         updateLibraryProgressButton(button, job);
@@ -1458,7 +1458,7 @@ function bindKeyboardControls() {
 }
 
 function storedVolume() {
-  const fromSettings = Number(state.settings?.volume);
+  const fromSettings = Number((state.settings ? state.settings.volume : null));
   if (Number.isFinite(fromSettings)) return Math.max(0, Math.min(1, fromSettings));
   const local = Number(localStorage.getItem(STORAGE_KEYS.volume));
   return Number.isFinite(local) ? Math.max(0, Math.min(1, local)) : 1;
@@ -1614,8 +1614,8 @@ function trackInPlaylist(playlist, track) {
   if (!track) return false;
   return playlist.tracks.some(t => {
     if (track.spotify_id && t.spotify_id) return t.spotify_id === track.spotify_id;
-    return t.title?.toLowerCase() === track.title?.toLowerCase() &&
-           t.artist?.toLowerCase() === track.artist?.toLowerCase();
+    return (t.title ? t.title.toLowerCase : null)() === (track.title ? track.title.toLowerCase : null)() &&
+           (t.artist ? t.artist.toLowerCase : null)() === (track.artist ? track.artist.toLowerCase : null)();
   });
 }
 
@@ -1792,7 +1792,7 @@ function openPlaylistPicker(track) {
             } else {
               state.playlists[idx].tracks = state.playlists[idx].tracks.filter(t => {
                 if (track.spotify_id && t.spotify_id) return t.spotify_id !== track.spotify_id;
-                return !(t.title?.toLowerCase() === track.title?.toLowerCase() && t.artist?.toLowerCase() === track.artist?.toLowerCase());
+                return !((t.title ? t.title.toLowerCase : null)() === (track.title ? track.title.toLowerCase : null)() && (t.artist ? t.artist.toLowerCase : null)() === (track.artist ? track.artist.toLowerCase : null)());
               });
             }
           }
