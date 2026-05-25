@@ -12,15 +12,11 @@ OUT = ROOT / "build" / "icons"
 
 def process_icon(size: int) -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    # To get a shaped icon on macOS without the square background,
-    # we MUST have a small transparent margin around the image.
-    # 82% of the canvas is the standard for "shaped" icons.
-    margin_size = int(size * 0.82)
-    source.thumbnail((margin_size, margin_size), Image.Resampling.LANCZOS)
+    # 80% scale provides enough padding to avoid the forced OS square background.
+    target_size = int(size * 0.80)
+    source.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
     
-    # Create a fully transparent canvas
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    # Center the character on the transparent canvas
     x = (size - source.width) // 2
     y = (size - source.height) // 2
     canvas.alpha_composite(source, (x, y))
@@ -32,6 +28,7 @@ def write_iconset() -> None:
     iconset.mkdir(parents=True, exist_ok=True)
     for stale in iconset.glob("*.png"):
         stale.unlink()
+    # Required sizes for macOS icns
     for size in (16, 32, 128, 256, 512):
         process_icon(size).save(iconset / f"icon_{size}x{size}.png")
         process_icon(size * 2).save(iconset / f"icon_{size}x{size}@2x.png")
@@ -48,11 +45,18 @@ def write_ico() -> None:
 
 def write_icns() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    image = process_icon(1024)
-    image.save(
-        OUT / "mindinguflac.icns",
-        sizes=[(16, 16), (32, 32), (64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)],
-    )
+    iconset = OUT / "mindinguflac.iconset"
+    if not iconset.exists():
+        write_iconset()
+    
+    # Use native macOS iconutil for the most compatible ICNS file
+    import subprocess
+    try:
+        subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(OUT / "mindinguflac.icns")], check=True)
+    except Exception as e:
+        print(f"iconutil failed, falling back to Pillow: {e}")
+        image = process_icon(1024)
+        image.save(OUT / "mindinguflac.icns")
 
 
 def main() -> None:
