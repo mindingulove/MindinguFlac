@@ -339,10 +339,14 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/discover":
-                catalog = discover_catalog(app_config)
+                refresh_global = query.get("refresh", ["1"])[0] != "0"
+                catalog = discover_catalog(app_config, refresh_global=refresh_global)
 
-                # Only enrich a small batch of each section to keep response time low
-                # Webview/Safari can be strict about long-running requests
+                if not refresh_global:
+                    self.send_json(catalog)
+                    return
+
+                # Only enrich a small batch of each section to keep response time low.
                 catalog["personal_tracks"] = enrich_artwork_batch(catalog["personal_tracks"][:6]) + catalog["personal_tracks"][6:]
 
                 recent_raw = catalog["recent_tracks"][:6]

@@ -4,9 +4,7 @@ import catalog
 import music_metadata
 
 c = AppConfig()
-try:
-    cat = catalog.discover_catalog(c)
-    print("Catalog fetch successful.")
-except Exception as e:
-    import traceback
-    traceback.print_exc()
+cat = catalog.discover_catalog(c)
+print("Artists:", len(cat["artists"]))
+print("Albums:", len(cat["albums"]))
+print("Top Tracks:", len(cat["top_tracks"]))

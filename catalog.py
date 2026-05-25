@@ -4,10 +4,10 @@ import json
 import urllib.parse
 from pathlib import Path
 
-from config import jobs_path, ROOT
+from config import app_data_dir, jobs_path
 
 JOBS_PATH = jobs_path()
-DISCOVERY_CACHE_PATH = ROOT / "data" / "discovery_cache.json"
+DISCOVERY_CACHE_PATH = app_data_dir() / "discovery_cache.json"
 
 # "Most listened in the world" / Discovery defaults
 DEFAULT_GLOBAL_TRACKS = [
@@ -53,8 +53,16 @@ def save_discovery_cache(data: dict) -> None:
     except Exception: pass
 
 
-def discover_catalog(config) -> dict:
+def cached_global_tracks(cache: dict) -> list[dict]:
+    return [
+        {**track, "type": "track", "source": "Global Discovery"}
+        for track in cache.get("top_tracks", DEFAULT_GLOBAL_TRACKS)
+    ]
+
+
+def discover_catalog(config, refresh_global: bool = True) -> dict:
     cache = load_discovery_cache()
+    print(f"[Debug] Loaded discovery cache: top_tracks={len(cache.get('top_tracks', []))}, top_artists={len(cache.get('top_artists', []))}, top_albums={len(cache.get('top_albums', []))}")
     library = []
     music_dir = config.music_dir
     if music_dir.exists():
@@ -108,25 +116,37 @@ def discover_catalog(config) -> dict:
     top_artists = []
     top_albums = []
     
-    try:
-        from music_metadata import SpotifyIndexer
-        sp = SpotifyIndexer()
-        base_global = sp.top_tracks(24)
-        top_artists = sp.top_artists(24)
-        top_albums = sp.new_releases(24)
-        
-        # Update cache on successful fetch
-        if base_global:
-            save_discovery_cache({
-                "top_tracks": base_global,
-                "top_artists": top_artists,
-                "top_albums": top_albums
-            })
-    except Exception:
-        # Use cached data as fallback
-        base_global = [{**t, "type": "track", "source": "Global Discovery"} for t in cache.get("top_tracks", DEFAULT_GLOBAL_TRACKS)]
+    if not refresh_global:
+        base_global = cached_global_tracks(cache)
         top_artists = cache.get("top_artists", [])
         top_albums = cache.get("top_albums", [])
+    else:
+        try:
+            from music_metadata import SpotifyIndexer
+            sp = SpotifyIndexer()
+            live_global = sp.top_tracks(24)
+            live_artists = sp.top_artists(24)
+            live_albums = sp.new_releases(24)
+
+            # SpotiFLAC's Spotify client turns network/API failures into empty
+            # results. Treat an empty section as unavailable rather than clearing
+            # previously usable desktop discovery data.
+            base_global = live_global or cached_global_tracks(cache)
+            top_artists = live_artists or cache.get("top_artists", [])
+            top_albums = live_albums or cache.get("top_albums", [])
+
+            # Preserve the last usable data for any section that failed silently.
+            if live_global or live_artists or live_albums:
+                save_discovery_cache({
+                    "top_tracks": base_global,
+                    "top_artists": top_artists,
+                    "top_albums": top_albums
+                })
+        except Exception:
+            # Use cached data as fallback
+            base_global = cached_global_tracks(cache)
+            top_artists = cache.get("top_artists", [])
+            top_albums = cache.get("top_albums", [])
 
     # Deduplicate library artists/albums for full lists
     all_artists = {}

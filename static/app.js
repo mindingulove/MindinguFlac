@@ -1,4 +1,5 @@
 const API_BASE = "";
+const CATALOG_REFRESH_MS = 15 * 60 * 1000;
 
 const state = {
   viewStack: [],
@@ -28,6 +29,7 @@ const state = {
   playbackRequestId: 0,
   currentStreamUrl: "",
   prefetchedForRequestId: -1,
+  catalogRefreshTimer: null,
 };
 
 const SERVICE_LABELS = {
@@ -138,7 +140,7 @@ function artistTarget(item = {}) {
     name,
     artist: name,
     artwork_url: item.artist_artwork_url || (item.type === "artist" ? item.artwork_url : ""),
-    artist_id: item.artist_id || item.spotify_artist_id || item.musicbrainz_artist_id || "",
+    artist_id: item.artist_id || item.spotify_artist_id || (item.type === "artist" ? item.spotify_id : "") || item.musicbrainz_artist_id || "",
   };
 }
 
@@ -156,13 +158,13 @@ function albumTarget(item = {}) {
 }
 
 function artistLinkHtml(item, text = null, className = "") {
-  const label = text || item && item.artist || item && item.name || "";
+  const label = text || (item && item.artist) || (item && item.name) || "";
   if (!label) return "";
   return `<button class="inline-entity-link artist-link ${className}" type="button" title="${esc(label)}" data-open-artist='${attrJson(artistTarget({ ...item, artist: label }))}'>${esc(label)}</button>`;
 }
 
 function albumLinkHtml(item, text = null, className = "") {
-  const label = text || item && item.title || item && item.name || "";
+  const label = text || (item && item.title) || (item && item.name) || "";
   if (!label) return "";
   return `<button class="inline-entity-link track-title-link ${className}" type="button" title="${esc(label)}" data-open-album='${attrJson(albumTarget(item))}'>${esc(label)}</button>`;
 }
@@ -234,7 +236,8 @@ function setActiveView(id) {
 
 function pushPage(renderFn) {
   if (state.viewStack.length > 0) {
-    state.viewStack[state.viewStack.length - 1].scroll = document.querySelector(".active .scroll-area") ? document.querySelector(".active .scroll-area").scrollTop : 0 || 0;
+    const activeScrollArea = document.querySelector(".active .scroll-area");
+    state.viewStack[state.viewStack.length - 1].scroll = activeScrollArea ? activeScrollArea.scrollTop : 0;
   }
   state.viewStack.push({ render: renderFn, scroll: 0 });
   state.forwardHistory = [];
@@ -316,15 +319,57 @@ function syncActiveTrackRows() {
 // Home & Cards Restoration
 // ---------------------------------------------------------------------------
 
+function catalogSignature(catalog) {
+  return JSON.stringify(["personal_tracks", "recent_tracks", "top_tracks", "artists", "albums"].map((section) => (
+    (catalog[section] || []).map((item) => ({
+      id: item.spotify_id || item.id || "",
+      title: item.title || item.name || "",
+      artist: item.artist || "",
+      artwork: item.artwork_url || "",
+    }))
+  )));
+}
+
+function redrawCatalogPage() {
+  const current = state.viewStack[state.viewStack.length - 1];
+  if (!current) {
+    replacePage(renderHomePage);
+    return;
+  }
+  if ([renderHomePage, renderArtistsPage, renderAlbumsPage, renderPersonalTracksPage, renderRecentTracksPage, renderGlobalTracksPage].includes(current.render)) {
+    const activeScrollArea = document.querySelector(".active .scroll-area");
+    const scrollTop = activeScrollArea ? activeScrollArea.scrollTop : 0;
+    current.render();
+    const refreshedScrollArea = document.querySelector(".active .scroll-area");
+    if (refreshedScrollArea) refreshedScrollArea.scrollTop = scrollTop;
+  }
+}
+
+function applyCatalog(catalog) {
+  const changed = catalogSignature(state.catalog) !== catalogSignature(catalog);
+  state.catalog = catalog;
+  if (changed || state.viewStack.length === 0) {
+    redrawCatalogPage();
+  }
+}
+
+async function refreshCatalog() {
+  try {
+    applyCatalog(await api("/api/discover?refresh=1"));
+  } catch (e) {
+    console.error("Refresh catalog failed", e);
+  }
+}
+
 async function loadCatalog() {
   try {
-    state.catalog = await api("/api/discover");
-    if (state.viewStack.length === 0 || state.viewStack[0].render === renderHomePage) {
-      replacePage(renderHomePage);
-    }
+    applyCatalog(await api("/api/discover?refresh=0"));
   } catch (e) {
-    console.error("Load catalog failed", e);
+    console.error("Load cached catalog failed", e);
   }
+  refreshCatalog();
+  if (state.catalogRefreshTimer) clearInterval(state.catalogRefreshTimer);
+  state.catalogRefreshTimer = setInterval(refreshCatalog, CATALOG_REFRESH_MS);
 }
 
 function renderHomePage() {
@@ -467,7 +512,8 @@ function bindCardClicks(container, items) {
 function renderArtistsPage() {
   setActiveView("home");
   document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
-  let el1 = document.querySelector('.nav[data-view="artists"]'); if (el1) el1.classList.add("active");
+  const navItem = document.querySelector('.nav[data-view="artists"]');
+  if (navItem) navItem.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Artists</h1>
@@ -481,7 +527,8 @@ function renderArtistsPage() {
 function renderAlbumsPage() {
   setActiveView("home");
   document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
-  let el2 = document.querySelector('.nav[data-view="albums"]'); if (el2) el2.classList.add("active");
+  const navItem = document.querySelector('.nav[data-view="albums"]');
+  if (navItem) navItem.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Albums</h1>
@@ -662,7 +709,7 @@ async function renderArtistPage(artist) {
   }
 
   const artistName = artist.name || artist.artist;
-  const artistId = artist.artist_id || "";
+  const artistId = artist.artist_id || artist.spotify_id || "";
   const es = new EventSource(`/api/music/artist?artist=${encodeURIComponent(artistName)}&artist_id=${artistId}`);
   window.artistEvtSource = es;
 
@@ -855,7 +902,8 @@ function setPlayerStatusIcon(mode, pct) {
 }
 
 function updatePlayerPie(pct) {
-  const pie = $("playerStatusIcon") ? $("playerStatusIcon").querySelector : null(".player-pie");
+  const playerStatusIcon = $("playerStatusIcon");
+  const pie = playerStatusIcon ? playerStatusIcon.querySelector(".player-pie") : null;
   if (!pie) return;
   const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
   pie.style.setProperty("--pct", p);
@@ -954,7 +1002,7 @@ async function toggleTrackLibrary(track, button, refresh) {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     });
-    const activeJobId = (result.job ? result.job.id : null) || result.active_job_id || "";
+    const activeJobId = (result.job && result.job.id) || result.active_job_id || "";
     if (activeJobId) button.dataset.activeJobId = activeJobId;
     if (result.action === "started" || result.action === "queued") {
       await waitForLibraryToggle(track, activeJobId, button);
@@ -978,7 +1026,7 @@ async function cancelLibraryDownload(track, button, refresh) {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     }).catch(() => null);
-    jobId = (status ? status.active_job_id : null) || "";
+    jobId = (status && status.active_job_id) ? status.active_job_id : "";
   }
   if (jobId) {
     await api("/api/service/cancel", {
@@ -1002,19 +1050,19 @@ function updateLibraryProgressButton(button, status) {
 
 async function waitForLibraryToggle(track, jobId = "", button = null) {
   for (let attempt = 0; attempt < 900; attempt++) {
-    if ((button ? button.dataset : null).cancelled === "1") return null;
+    if (button && button.dataset.cancelled === "1") return null;
     await new Promise(resolve => setTimeout(resolve, 1000));
-    if ((button ? button.dataset : null).cancelled === "1") return null;
+    if (button && button.dataset.cancelled === "1") return null;
     const status = await api("/api/library/status", {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     }).catch(() => null);
-    if ((status ? status.active_job_id : null) && button) button.dataset.activeJobId = status.active_job_id;
+    if (status && status.active_job_id && button) button.dataset.activeJobId = status.active_job_id;
     if (status && typeof status.progress !== "undefined") {
       updateLibraryProgressButton(button, status);
     }
-    if ((status ? status.active_job_status : null) === "error") throw new Error("Download cancelled");
-    if ((status ? status.in_library : null)) {
+    if (status && status.active_job_status === "error") throw new Error("Download cancelled");
+    if (status && status.in_library) {
       if (button) {
         button.classList.remove("progress");
         button.classList.add("downloaded");
@@ -1025,8 +1073,8 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
     if (jobId) {
       const data = await api("/api/service/downloads").catch(() => ({ jobs: [] }));
       const job = (data.jobs || []).find(item => item.id === jobId);
-      if ((job ? job.status : null) === "error") throw new Error(job.error || "Download failed");
-      if ((job ? job.status : null) === "finished") {
+      if (job && job.status === "error") throw new Error(job.error || "Download failed");
+      if (job && job.status === "finished") {
         updateLibraryProgressButton(button, { ...job, progress: 100 });
       } else if (job && typeof job.progress !== "undefined") {
         updateLibraryProgressButton(button, job);
@@ -1458,7 +1506,7 @@ function bindKeyboardControls() {
 }
 
 function storedVolume() {
-  const fromSettings = Number((state.settings ? state.settings.volume : null));
+  const fromSettings = state.settings && state.settings.volume !== undefined ? Number(state.settings.volume) : NaN;
   if (Number.isFinite(fromSettings)) return Math.max(0, Math.min(1, fromSettings));
   const local = Number(localStorage.getItem(STORAGE_KEYS.volume));
   return Number.isFinite(local) ? Math.max(0, Math.min(1, local)) : 1;
@@ -1611,11 +1659,13 @@ async function loadPlaylists() {
 }
 
 function trackInPlaylist(playlist, track) {
+  if (!playlist || !playlist.tracks) return false;
   if (!track) return false;
   return playlist.tracks.some(t => {
     if (track.spotify_id && t.spotify_id) return t.spotify_id === track.spotify_id;
-    return (t.title ? t.title.toLowerCase : null)() === (track.title ? track.title.toLowerCase : null)() &&
-           (t.artist ? t.artist.toLowerCase : null)() === (track.artist ? track.artist.toLowerCase : null)();
+    return t.title && track.title && t.artist && track.artist &&
+           t.title.toLowerCase() === track.title.toLowerCase() &&
+           t.artist.toLowerCase() === track.artist.toLowerCase();
   });
 }
 
@@ -1792,7 +1842,9 @@ function openPlaylistPicker(track) {
             } else {
               state.playlists[idx].tracks = state.playlists[idx].tracks.filter(t => {
                 if (track.spotify_id && t.spotify_id) return t.spotify_id !== track.spotify_id;
-                return !((t.title ? t.title.toLowerCase : null)() === (track.title ? track.title.toLowerCase : null)() && (t.artist ? t.artist.toLowerCase : null)() === (track.artist ? track.artist.toLowerCase : null)());
+                return !(t.title && track.title && t.artist && track.artist &&
+                         t.title.toLowerCase() === track.title.toLowerCase() && 
+                         t.artist.toLowerCase() === track.artist.toLowerCase());
               });
             }
           }

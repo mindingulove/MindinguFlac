@@ -88,12 +88,147 @@ def _get_spotify_client():
             return None
 
 
+def _numeric_plays(value: object) -> int:
+    try:
+        return int(str(value or "0").replace(",", ""))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _legacy_track_item(item: object) -> dict:
+    if isinstance(item, dict) and "name" in item:
+        return item
+    artist_names = [name.strip() for name in str(getattr(item, "artists", "") or "").split(",") if name.strip()]
+    cover_url = getattr(item, "cover_url", "") or ""
+    return {
+        "id": getattr(item, "id", "") or "",
+        "name": getattr(item, "title", "") or "",
+        "artists": [{"name": name} for name in artist_names],
+        "album": {
+            "name": getattr(item, "album", "") or "",
+            "images": [{"url": cover_url}] if cover_url else [],
+        },
+        "duration_ms": getattr(item, "duration_ms", 0) or 0,
+        "external_urls": {"spotify": getattr(item, "external_url", "") or ""},
+        "external_ids": {"isrc": getattr(item, "isrc", "") or ""},
+        "popularity": _numeric_plays(getattr(item, "plays", 0)) // 10000,
+    }
+
+
+def _legacy_simple_item(item: dict, kind: str) -> dict:
+    cover_url = item.get("cover_url", "")
+    artists = item.get("artists", "")
+    if isinstance(artists, str):
+        artists = [{"name": name.strip()} for name in artists.split(",") if name.strip()]
+    return {
+        "id": item.get("id", ""),
+        "name": item.get("name", ""),
+        "artists": artists or [],
+        "images": [{"url": cover_url}] if cover_url else [],
+        "release_date": item.get("release_date", ""),
+        "external_urls": {"spotify": item.get("external_url", "")},
+        "popularity": _numeric_plays(item.get("plays", 0)) // 10000,
+        "type": kind,
+    }
+
+
+def _raw_search_simple_items(client: object, query: str, limit: int, kind: str) -> list[dict]:
+    web_client = getattr(client, "web_client", None)
+    payload_builder = getattr(client, "_search_payload", None)
+    if not web_client or not payload_builder:
+        return []
+    try:
+        search = web_client.query(payload_builder(query, limit)).get("data", {}).get("searchV2", {})
+    except Exception:
+        return []
+    section = search.get("albumsV2" if kind == "album" else "artists", {})
+    results = []
+    for wrapper in section.get("items", []):
+        node = wrapper.get("data") or wrapper.get("item", {}).get("data", {})
+        uri = node.get("uri", "")
+        spotify_id = node.get("id", "") or (uri.rsplit(":", 1)[-1] if uri else "")
+        if not spotify_id:
+            continue
+        if kind == "album":
+            results.append({
+                "id": spotify_id,
+                "name": node.get("name", ""),
+                "artists": ", ".join(
+                    item.get("profile", {}).get("name", "")
+                    for item in node.get("artists", {}).get("items", [])
+                    if item.get("profile", {}).get("name")
+                ),
+                "cover_url": _best_raw_image(node.get("coverArt", {})),
+                "release_date": node.get("date", {}).get("isoString", ""),
+                "external_url": f"https://open.spotify.com/album/{spotify_id}",
+            })
+        else:
+            results.append({
+                "id": spotify_id,
+                "name": node.get("profile", {}).get("name", node.get("name", "")),
+                "cover_url": _best_raw_image((node.get("visualIdentity") or {}).get("squareCoverImage", {})),
+                "external_url": f"https://open.spotify.com/artist/{spotify_id}",
+            })
+    return results
+
+
+def _best_raw_image(image: dict | None) -> str:
+    sources = (image or {}).get("sources", [])
+    if not sources:
+        sources = (image or {}).get("image", {}).get("data", {}).get("sources", [])
+    return max(sources, key=lambda item: item.get("width", 0), default={}).get("url", "")
+
+
+def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
+    """Expose SpotiFLAC 0.6.1 public methods in the legacy response shape."""
+    if endpoint == "search":
+        query = params.get("q", "")
+        limit = int(params.get("limit", 20))
+        results = client.search(query, limit=limit)
+        albums = results.get("albums", []) or _raw_search_simple_items(client, query, limit, "album")
+        artists = results.get("artists", []) or _raw_search_simple_items(client, query, limit, "artist")
+        return {
+            "tracks": {"items": [_legacy_track_item(item) for item in results.get("tracks", [])]},
+            "albums": {"items": [_legacy_simple_item(item, "album") for item in albums]},
+            "artists": {"items": [_legacy_simple_item(item, "artist") for item in artists]},
+        }
+
+    playlist_match = re.fullmatch(r"playlists/([^/]+)/tracks", endpoint)
+    if playlist_match:
+        playlist_result = client.get_playlist_tracks(playlist_match.group(1))
+        tracks = playlist_result[1] if len(playlist_result) > 1 else []
+        limit = int(params.get("limit", len(tracks)))
+        return {"items": [{"track": _legacy_track_item(item)} for item in tracks[:limit]]}
+
+    album_match = re.fullmatch(r"albums/([^/]+)", endpoint)
+    if album_match:
+        info, tracks = client.get_album_tracks(album_match.group(1))
+        cover_url = info.get("cover_url", "")
+        return {
+            "id": album_match.group(1),
+            "name": info.get("name", ""),
+            "images": [{"url": cover_url}] if cover_url else [],
+            "tracks": {"items": [_legacy_track_item(item) for item in tracks]},
+        }
+
+    artist_top_match = re.fullmatch(r"artists/([^/]+)/top-tracks", endpoint)
+    if artist_top_match and hasattr(client, "get_artist_profile"):
+        profile = client.get_artist_profile(artist_top_match.group(1))
+        artist = profile.get("profile", {}).get("name", "")
+        tracks = client.search_tracks(artist, limit=20) if artist else []
+        return {"tracks": [_legacy_track_item(item) for item in tracks]}
+
+    return {}
+
+
 def _sp(endpoint: str, **params) -> dict:
     client = _get_spotify_client()
     if not client:
         return {}
     try:
-        return client._get(endpoint, params=params) or {}
+        if hasattr(client, "_get"):
+            return client._get(endpoint, params=params) or {}
+        return _public_client_get(client, endpoint, params)
     except Exception:
         return {}
 
@@ -167,19 +302,21 @@ def spotify_artist_artwork(artist: str) -> str:
 
 
 @functools.lru_cache(maxsize=128)
-def spotify_artist_top_tracks(artist_name: str, limit: int = 25) -> list[dict]:
-    data = _sp("search", q=f"artist:{artist_name}", type="artist", limit=3)
-    sp_artists = (data.get("artists") or {}).get("items") or []
-    artist_item = None
-    for a in sp_artists:
-        if norm_name(a.get("name", "")) == norm_name(artist_name):
-            artist_item = a
-            break
-    if not artist_item and sp_artists:
-        artist_item = sp_artists[0]
-    if not artist_item:
-        return []
-    sp_artist_id = artist_item["id"]
+def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str = "") -> list[dict]:
+    sp_artist_id = artist_id
+    if not sp_artist_id:
+        data = _sp("search", q=f"artist:{artist_name}", type="artist", limit=3)
+        sp_artists = (data.get("artists") or {}).get("items") or []
+        artist_item = None
+        for a in sp_artists:
+            if norm_name(a.get("name", "")) == norm_name(artist_name):
+                artist_item = a
+                break
+        if not artist_item and sp_artists:
+            artist_item = sp_artists[0]
+        if not artist_item:
+            return []
+        sp_artist_id = artist_item["id"]
     data = _sp(f"artists/{sp_artist_id}/top-tracks", market="US")
     sp_tracks = (data.get("tracks") or [])[:limit]
     results = []
@@ -296,6 +433,21 @@ class SpotifyIndexer(BaseMusicIndexer):
                 "album": item.get("name", ""), "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
                 "spotify_id": item.get("id", ""), "source": "Spotify", "plays": 0,
             })
+        if not results and not hasattr(_get_spotify_client(), "_get"):
+            seen = set()
+            for track in self.top_tracks(limit * 2):
+                key = (track.get("artist", ""), track.get("album", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append({
+                    "type": "album", "title": track.get("album", ""),
+                    "album": track.get("album", ""), "artist": track.get("artist", ""),
+                    "artwork_url": track.get("artwork_url", ""),
+                    "spotify_id": "", "source": "Spotify", "plays": track.get("plays", 0),
+                })
+                if len(results) >= limit:
+                    break
         return results
 
     def top_artists(self, limit: int = 20) -> list[dict]:
@@ -354,7 +506,7 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
     art = spotify_artist_artwork(artist)
     yield {"type": "artist_info", "artist": artist, "artist_id": artist_id, "artwork_url": art}
     
-    top_tracks = spotify_artist_top_tracks(artist)
+    top_tracks = spotify_artist_top_tracks(artist, artist_id=artist_id)
     yield {"type": "top_tracks", "tracks": top_tracks}
 
     data = _sp("search", q=f"artist:{artist}", type="album", limit=15)

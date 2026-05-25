@@ -6,16 +6,19 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "static" / "assets" / "app_icon.png"
+SOURCE = ROOT / "static" / "assets" / "mindinguflac-mark.png"
 OUT = ROOT / "build" / "icons"
 
 
 def process_icon(size: int) -> Image.Image:
     source = Image.open(SOURCE).convert("RGBA")
-    # 90% scale is usually the sweet spot for shaped icons on macOS.
-    # It's large enough to look good but has enough margin to avoid the square plate.
-    target_size = int(size * 0.90)
-    source.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
+    bounds = source.getchannel("A").getbbox()
+    if bounds:
+        source = source.crop(bounds)
+    target_size = int(size * 0.98)
+    scale = min(target_size / source.width, target_size / source.height)
+    dimensions = (round(source.width * scale), round(source.height * scale))
+    source = source.resize(dimensions, Image.Resampling.LANCZOS)
 
     # Explicitly transparent canvas
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
