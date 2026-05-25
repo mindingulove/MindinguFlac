@@ -2033,6 +2033,12 @@ async function boot() {
        else if (el.dataset.view === "albums") pushPage(renderAlbumsPage);
     };
   });
+
+  document.querySelectorAll("[data-view-jump]").forEach(el => {
+    el.onclick = () => {
+       if (el.dataset.viewJump === "settings") pushPage(renderSettings);
+    };
+  });
   $("settingsForm").onsubmit = saveSettings;
   $("backButton").onclick = popPage;
   $("forwardButton").onclick = forwardPage;
