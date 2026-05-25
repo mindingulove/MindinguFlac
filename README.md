@@ -47,6 +47,39 @@ The app uses SpotiFLAC-backed direct service downloads for listening, caching, a
 - Playlist management: create playlists, add tracks via the player status icon, import from Spotify playlist URLs
 - Web server mode plus pywebview desktop entry point for packaged macOS and Windows apps
 
+## FAQ
+
+**Is this software free?**
+Yes. This software is completely free. You do not need an account, login, or subscription. All you need is an internet connection.
+
+**Can using this software get my Spotify account suspended or banned?**
+No. This software has no connection to your Spotify account. Spotify data is obtained through reverse engineering of the Spotify Web Player, not through user authentication.
+
+**Where does the audio come from?**
+The audio is fetched using third-party APIs.
+
+**Why does metadata fetching sometimes fail?**
+This usually happens because your IP address has been rate-limited. You can wait and try again later, or use a VPN to bypass the rate limit.
+
+**Why does Windows Defender or antivirus flag or delete the file?**
+This is a false positive. It likely happens because the executable is compressed using UPX. If you are concerned, you can fork the repository and build the software yourself from source.
+
+**Want to support the project?**
+If this software is useful and brings you value, consider supporting the project by buying me a coffee. Your support helps keep development going.
+
+## Disclaimer
+
+This project is for educational and private use only. The developer does not condone or encourage copyright infringement.
+
+SpotiFLAC is a third-party tool and is not affiliated with, endorsed by, or connected to Spotify, Tidal, Qobuz, Amazon Music or any other streaming service.
+
+You are solely responsible for:
+- Ensuring your use of this software complies with your local laws.
+- Reading and adhering to the Terms of Service of the respective platforms.
+- Any legal consequences resulting from the misuse of this tool.
+
+The software is provided "as is", without warranty of any kind. The author assumes no liability for any bans, damages, or legal issues arising from its use.
+
 ## Run
 
 ```bash
