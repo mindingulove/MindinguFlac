@@ -2,8 +2,6 @@
 
 Self-hosted music discovery, streaming, and library app with a Python backend and responsive HTML frontend. Runs as a web server you open in any browser, and also ships as a native desktop app for macOS and Windows built on pywebview.
 
-![Mindinguflac](screenshot.jpg)
-
 <img width="1392" height="932" alt="Image" src="https://github.com/user-attachments/assets/ad8693c2-726d-4065-bc07-84c33df4cf4b" />
 <img width="1707" height="1035" alt="Image" src="https://github.com/user-attachments/assets/c7295c26-a39e-42c3-ade8-b0be7d8d95ed" />
 <img width="1707" height="1035" alt="Image" src="https://github.com/user-attachments/assets/c446baf3-387d-4f28-abdb-8b39379d3a8f" />
