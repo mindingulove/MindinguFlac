@@ -38,6 +38,7 @@ def apply_macos_patches() -> None:
         import objc
         from AppKit import NSApplication, NSMenu, NSMenuItem
         from Foundation import NSObject
+        import webview.platforms.cocoa as cocoa
 
         # 1. Media permissions (WKUIDelegate)
         WKUIDelegate = objc.protocolNamed("WKUIDelegate")
@@ -61,22 +62,42 @@ def apply_macos_patches() -> None:
                     self.window = window
                 return self
 
+            @objc.selector(b"playPauseAction:")
             def playPauseAction_(self, sender):
                 self.window.evaluate_js('document.getElementById("playPause")?.click()')
 
+            @objc.selector(b"nextAction:")
             def nextAction_(self, sender):
                 self.window.evaluate_js('document.getElementById("btnNext")?.click()')
 
+            @objc.selector(b"prevAction:")
             def prevAction_(self, sender):
                 self.window.evaluate_js('document.getElementById("btnPrev")?.click()')
 
+            @objc.selector(b"shuffleAction:")
             def shuffleAction_(self, sender):
                 self.window.evaluate_js('document.getElementById("btnShuffle")?.click()')
 
+            @objc.selector(b"repeatAction:")
             def repeatAction_(self, sender):
                 self.window.evaluate_js('document.getElementById("btnRepeat")?.click()')
 
-        # 3. Patching logic
+        # Shared state for the dock menu
+        _macos_state = {
+            "handler": None,
+            "menu": None
+        }
+
+        # 3. Patch AppDelegate.applicationDockMenu:
+        def applicationDockMenu_(self, sender):
+            return _macos_state["menu"]
+
+        # Add the method to cocoa.AppDelegate class BEFORE it's instantiated
+        if not hasattr(cocoa.AppDelegate, "applicationDockMenu_"):
+            objc_method = objc.selector(applicationDockMenu_, selector=b"applicationDockMenu:", signature=b"@@:@")
+            objc.classAddMethod(cocoa.AppDelegate, b"applicationDockMenu:", objc_method)
+
+        # 4. Patching logic for window-specific setup
         def _install(wv_window):
             try:
                 # Install media delegate
@@ -84,44 +105,37 @@ def apply_macos_patches() -> None:
                 wv.setUIDelegate_(_deny_delegate)
                 _deny_delegate.retain()
 
-                # Install dock menu
-                app = NSApplication.sharedApplication()
-                delegate = app.delegate()
-                if not delegate:
-                    return
+                # Initialize dock menu once window is available
+                if _macos_state["menu"] is None:
+                    handler = _DockMenuHandler.alloc().initWithWindow_(wv_window)
+                    handler.retain()
+                    _macos_state["handler"] = handler
 
-                handler = _DockMenuHandler.alloc().initWithWindow_(wv_window)
-                handler.retain() # Keep alive
-
-                dock_menu = NSMenu.alloc().initWithTitle_("Dock Menu")
-                
-                item_play = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Play / Pause", "playPauseAction:", "")
-                item_play.setTarget_(handler)
-                dock_menu.addItem_(item_play)
-                
-                item_next = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Next Track", "nextAction:", "")
-                item_next.setTarget_(handler)
-                dock_menu.addItem_(item_next)
-                
-                item_prev = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Previous Track", "prevAction:", "")
-                item_prev.setTarget_(handler)
-                dock_menu.addItem_(item_prev)
-                
-                dock_menu.addItem_(NSMenuItem.separatorItem())
-                
-                item_shuffle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Shuffle", "shuffleAction:", "")
-                item_shuffle.setTarget_(handler)
-                dock_menu.addItem_(item_shuffle)
-                
-                item_repeat = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Repeat", "repeatAction:", "")
-                item_repeat.setTarget_(handler)
-                dock_menu.addItem_(item_repeat)
-
-                def applicationDockMenu_(self, sender):
-                    return dock_menu
-
-                objc_method = objc.selector(applicationDockMenu_, selector=b"applicationDockMenu:", signature=b"@@:@")
-                objc.classAddMethod(type(delegate), b"applicationDockMenu:", objc_method)
+                    dock_menu = NSMenu.alloc().initWithTitle_("Dock Menu")
+                    
+                    item_play = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Play / Pause", "playPauseAction:", "")
+                    item_play.setTarget_(handler)
+                    dock_menu.addItem_(item_play)
+                    
+                    item_next = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Next Track", "nextAction:", "")
+                    item_next.setTarget_(handler)
+                    dock_menu.addItem_(item_next)
+                    
+                    item_prev = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Previous Track", "prevAction:", "")
+                    item_prev.setTarget_(handler)
+                    dock_menu.addItem_(item_prev)
+                    
+                    dock_menu.addItem_(NSMenuItem.separatorItem())
+                    
+                    item_shuffle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Shuffle", "shuffleAction:", "")
+                    item_shuffle.setTarget_(handler)
+                    dock_menu.addItem_(item_shuffle)
+                    
+                    item_repeat = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Repeat", "repeatAction:", "")
+                    item_repeat.setTarget_(handler)
+                    dock_menu.addItem_(item_repeat)
+                    
+                    _macos_state["menu"] = dock_menu
             except Exception:
                 pass
 
