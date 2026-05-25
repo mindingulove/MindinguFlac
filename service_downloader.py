@@ -177,12 +177,23 @@ def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "t
     try:
         from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
         client = SpotifyMetadataClient()
+        q = f"artist:{artist} album:{album}" if kind == "album" and album else (
+            f"artist:{artist}" if kind == "album" else (
+                f"artist:{artist} track:{title}" if title else f"artist:{artist} {album}"
+            )
+        )
+        if not hasattr(client, "_get"):
+            data = client.search(q, limit=3)
+            items = data.get("albums" if kind == "album" else "tracks", [])
+            for item in items:
+                url = item.get("external_url", "") if isinstance(item, dict) else getattr(item, "external_url", "")
+                if url:
+                    return url
+            return ""
         if kind == "album":
-            q = f"artist:{artist} album:{album}" if album else f"artist:{artist}"
             data = client._get("search", params={"q": q, "type": "album", "limit": 3})
             items = data.get("albums", {}).get("items", [])
         else:
-            q = f"artist:{artist} track:{title}" if title else f"artist:{artist} {album}"
             data = client._get("search", params={"q": q, "type": "track", "limit": 3})
             items = data.get("tracks", {}).get("items", [])
         for item in items:
@@ -199,6 +210,11 @@ def resolve_download_url(track: dict, service: str = "tidal", kind: str = "track
     spotify_url = _first_value(track.get("spotify_url"), (track.get("metadata") or {}).get("spotify_url"))
     if spotify_url and "spotify.com" in spotify_url:
         print(f"[Resolve] Using provided Spotify URL: {spotify_url}")
+        return spotify_url
+    spotify_id = _first_value(track.get("spotify_id"), (track.get("metadata") or {}).get("spotify_id"))
+    if spotify_id:
+        spotify_url = f"https://open.spotify.com/{'album' if kind == 'album' else 'track'}/{spotify_id}"
+        print(f"[Resolve] Using provided Spotify ID: {spotify_url}")
         return spotify_url
 
     # 2. Try Odesli resolution for other candidates
@@ -722,16 +738,16 @@ class ServiceDownloadManager:
         exact_matches = []
         fallback_matches = []
         explicit_path = Path(identity.get("library_path") or "")
-        if explicit_path.exists() and explicit_path.is_file():
+        if explicit_path.exists() and explicit_path.is_file() and is_valid_audio_file(explicit_path):
             exact_matches.append({"path": explicit_path, "job": None, "quality": _quality_rank(explicit_path)})
 
         for job in jobs:
             path_text = job.get("library_path") or ""
             if job.get("status") == "finished" and job.get("mode") == "download" and path_text:
                 path = Path(path_text)
-                if path.exists() and _job_matches_identity(job, identity):
+                if path.exists() and is_valid_audio_file(path) and _job_matches_identity(job, identity):
                     exact_matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
-                elif path.exists() and _norm(job.get("artist")) == identity["artist"] and _norm(job.get("title")) == identity["title"]:
+                elif path.exists() and is_valid_audio_file(path) and _norm(job.get("artist")) == identity["artist"] and _norm(job.get("title")) == identity["title"]:
                     fallback_matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
 
         album_dir = self.config.music_dir / identity["artist_part"] / identity["album_part"]
@@ -762,7 +778,7 @@ class ServiceDownloadManager:
             path_text = job.get("library_path") or ""
             if job.get("status") == "finished" and job.get("mode", "stream") == "stream" and path_text:
                 path = Path(path_text)
-                if path.exists() and _job_matches_identity(job, identity):
+                if path.exists() and is_valid_audio_file(path) and _job_matches_identity(job, identity):
                     matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
         if not matches:
             return None

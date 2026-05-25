@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import catalog
@@ -50,6 +51,22 @@ class DiscoveryRefreshTests(unittest.TestCase):
 
         self.assertEqual(result["top_tracks"][0]["title"], "New Number One")
         self.assertEqual(saved["top_tracks"][0]["title"], "New Number One")
+
+    def test_saved_artist_identity_is_applied_to_cached_top_track_artist(self):
+        cache = {
+            "top_tracks": [{"type": "track", "title": "Billie Jean", "artist": "Michael Jackson", "album": "Thriller"}],
+            "top_artists": [],
+            "top_albums": [],
+            "artist_identities": {"michael jackson": {"spotify_id": "artist-id", "artwork_url": "/cover"}},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "discovery_cache.json"
+            cache_path.write_text(json.dumps(cache), "utf-8")
+            with patch.object(catalog, "DISCOVERY_CACHE_PATH", cache_path):
+                result = catalog.discover_catalog(SimpleNamespace(music_dir=Path(tmpdir) / "music"), refresh_global=False)
+
+        self.assertEqual(result["artists"][0]["spotify_id"], "artist-id")
+        self.assertEqual(result["artists"][0]["artwork_url"], "/cover")
 
 
 if __name__ == "__main__":

@@ -58,6 +58,13 @@ def cover_art_url(release_id: str) -> str:
 def proxy_artwork_url(url: str) -> str:
     if not url:
         return ""
+    parsed = urllib.parse.urlparse(url)
+    spotify_prefix = "ab67616d000082c1"
+    image_id = parsed.path.rsplit("/", 1)[-1]
+    if parsed.netloc == "i.scdn.co" and image_id.startswith(spotify_prefix):
+        repaired_id = image_id[len(spotify_prefix):]
+        if re.fullmatch(r"[0-9a-fA-F]{40}", repaired_id):
+            url = urllib.parse.urlunparse(parsed._replace(path=parsed.path.rsplit("/", 1)[0] + "/" + repaired_id))
     # Always route through our backend proxy to fix CORS/Broken images
     return "/api/image?" + urllib.parse.urlencode({"url": url})
 
@@ -169,6 +176,44 @@ def _raw_search_simple_items(client: object, query: str, limit: int, kind: str) 
                 "cover_url": _best_raw_image((node.get("visualIdentity") or {}).get("squareCoverImage", {})),
                 "external_url": f"https://open.spotify.com/artist/{spotify_id}",
             })
+    return results
+
+
+def _raw_artist_discography_items(client: object, artist_id: str) -> list[dict]:
+    web_client = getattr(client, "web_client", None)
+    fetch_discography = getattr(web_client, "get_artist_discography", None)
+    if not fetch_discography or not artist_id:
+        return []
+    try:
+        items = fetch_discography(artist_id)
+    except Exception:
+        return []
+
+    results = []
+    seen = set()
+    for item in items:
+        release = {}
+        releases = item.get("releases") if isinstance(item, dict) else None
+        release_items = releases.get("items") if isinstance(releases, dict) else None
+        if release_items:
+            release = release_items[0] or {}
+        elif isinstance(item, dict):
+            release = item.get("album") or item
+        release_type = str(release.get("type", "")).upper()
+        if release_type == "APPEARS_ON":
+            continue
+        uri = release.get("uri", "")
+        spotify_id = release.get("id", "") or (uri.rsplit(":", 1)[-1] if uri else "")
+        if not spotify_id or spotify_id in seen:
+            continue
+        seen.add(spotify_id)
+        results.append({
+            "id": spotify_id,
+            "name": release.get("name", ""),
+            "cover_url": _best_raw_image(release.get("coverArt", {})),
+            "release_date": release.get("date", {}).get("isoString", ""),
+            "external_url": f"https://open.spotify.com/album/{spotify_id}",
+        })
     return results
 
 
@@ -285,8 +330,27 @@ def spotify_album_artwork(artist: str, album: str) -> str:
     return ""
 
 
+def _raw_artist_profile_artwork(client: object, artist_id: str) -> str:
+    web_client = getattr(client, "web_client", None)
+    if not web_client or not artist_id:
+        return ""
+    payload = {
+        "operationName": "queryArtistOverview",
+        "variables": {"uri": f"spotify:artist:{artist_id}", "locale": ""},
+        "extensions": {"persistedQuery": {
+            "version": 1,
+            "sha256Hash": "446130b4a0aa6522a686aafccddb0ae849165b5e0436fd802f96e0243617b5d8",
+        }},
+    }
+    try:
+        artist_data = web_client.query(payload).get("data", {}).get("artistUnion", {})
+    except Exception:
+        return ""
+    return _best_raw_image(artist_data.get("visuals", {}).get("avatarImage", {}))
+
+
 @functools.lru_cache(maxsize=128)
-def spotify_artist_artwork(artist: str) -> str:
+def spotify_artist_artwork(artist: str, artist_id: str = "") -> str:
     data = _sp("search", q=f"artist:{artist}", type="artist", limit=3)
     items = (data.get("artists") or {}).get("items") or []
     for a in items:
@@ -298,35 +362,41 @@ def spotify_artist_artwork(artist: str) -> str:
         images = items[0].get("images") or []
         if images:
             return proxy_artwork_url(images[0]["url"])
+    client = _get_spotify_client()
+    raw_artwork = _raw_artist_profile_artwork(client, artist_id or spotify_artist_id(artist)) if client else ""
+    if raw_artwork:
+        return proxy_artwork_url(raw_artwork)
     return ""
 
 
 @functools.lru_cache(maxsize=128)
+def spotify_artist_id(artist_name: str) -> str:
+    data = _sp("search", q=f"artist:{artist_name}", type="artist", limit=3)
+    sp_artists = (data.get("artists") or {}).get("items") or []
+    for item in sp_artists:
+        if norm_name(item.get("name", "")) == norm_name(artist_name):
+            return item.get("id", "")
+    return sp_artists[0].get("id", "") if sp_artists else ""
+
+
+@functools.lru_cache(maxsize=128)
 def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str = "") -> list[dict]:
-    sp_artist_id = artist_id
+    sp_artist_id = spotify_artist_id(artist_name) or artist_id
     if not sp_artist_id:
-        data = _sp("search", q=f"artist:{artist_name}", type="artist", limit=3)
-        sp_artists = (data.get("artists") or {}).get("items") or []
-        artist_item = None
-        for a in sp_artists:
-            if norm_name(a.get("name", "")) == norm_name(artist_name):
-                artist_item = a
-                break
-        if not artist_item and sp_artists:
-            artist_item = sp_artists[0]
-        if not artist_item:
-            return []
-        sp_artist_id = artist_item["id"]
+        return []
     data = _sp(f"artists/{sp_artist_id}/top-tracks", market="US")
     sp_tracks = (data.get("tracks") or [])[:limit]
     results = []
     for t in sp_tracks:
         images = (t.get("album") or {}).get("images") or []
         art = proxy_artwork_url(images[0]["url"]) if images else ""
+        album_name = (t.get("album") or {}).get("name", "")
+        if not art and album_name:
+            art = spotify_album_artwork(artist_name, album_name)
         results.append({
             "title": t.get("name", ""),
             "artist": artist_name,
-            "album": (t.get("album") or {}).get("name", ""),
+            "album": album_name,
             "artwork_url": art,
             "duration": format_duration_ms(t.get("duration_ms", 0)),
             "length": t.get("duration_ms", 0),
@@ -503,19 +573,30 @@ def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:
 
 
 def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
-    art = spotify_artist_artwork(artist)
-    yield {"type": "artist_info", "artist": artist, "artist_id": artist_id, "artwork_url": art}
+    resolved_artist_id = spotify_artist_id(artist) or artist_id
+    art = spotify_artist_artwork(artist, resolved_artist_id)
+    if resolved_artist_id:
+        from catalog import save_artist_identity
+        save_artist_identity(artist, resolved_artist_id, art)
+    yield {"type": "artist_info", "artist": artist, "artist_id": resolved_artist_id, "artwork_url": art}
     
-    top_tracks = spotify_artist_top_tracks(artist, artist_id=artist_id)
+    top_tracks = spotify_artist_top_tracks(artist, artist_id=resolved_artist_id)
     yield {"type": "top_tracks", "tracks": top_tracks}
 
-    data = _sp("search", q=f"artist:{artist}", type="album", limit=15)
+    client = _get_spotify_client()
+    album_items = _raw_artist_discography_items(client, resolved_artist_id) if client and resolved_artist_id else []
+    if album_items:
+        source_items = [_legacy_simple_item(item, "album") for item in album_items]
+    else:
+        data = _sp("search", q=f"artist:{artist}", type="album", limit=50)
+        source_items = (data.get("albums") or {}).get("items") or []
     albums = []
-    for item in (data.get("albums") or {}).get("items") or []:
+    for item in source_items:
+        images = item.get("images") or []
         albums.append({
             "type": "album", "title": item["name"], "artist": artist, "album": item["name"],
             "year": release_year(item.get("release_date", "")),
-            "artwork_url": proxy_artwork_url(item.get("images", [{}])[0].get("url", "")),
+            "artwork_url": proxy_artwork_url(images[0].get("url", "")) if images else "",
             "spotify_id": item["id"], "source": "Spotify"
         })
     yield {"type": "albums", "albums": albums}

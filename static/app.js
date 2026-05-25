@@ -1,5 +1,7 @@
 const API_BASE = "";
 const CATALOG_REFRESH_MS = 15 * 60 * 1000;
+const ARTIST_TRACK_PREVIEW_COUNT = 5;
+const ARTIST_ALBUM_PREVIEW_COUNT = 6;
 
 const state = {
   viewStack: [],
@@ -152,6 +154,9 @@ function albumTarget(item = {}) {
     album,
     artist: item.artist || "",
     artwork_url: item.album_artwork_url || item.artwork_url || "",
+    artist_artwork_url: item.artist_artwork_url || "",
+    spotify_artist_id: item.spotify_artist_id || item.artist_id || "",
+    year: item.year || "",
     musicbrainz_release_id: item.musicbrainz_release_id || "",
     spotify_id: item.album_spotify_id || item.spotify_album_id || "",
   };
@@ -612,7 +617,7 @@ function renderTrackList(containerId, items, context = "general") {
       let col6 = ""; // Status column (Far Right)
       if (isTrack) {
         const label = isDownloaded ? "Remove from library" : (isBusy ? "Cancel library download" : "Add to library");
-        let iconHtml = `<i class="bi ${isDownloaded ? "bi-check-circle-fill downloaded" : "bi-check-circle"}"></i>`;
+        let iconHtml = `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
         if (isBusy) {
            iconHtml = progressButtonMarkup(status);
         }
@@ -691,12 +696,18 @@ async function renderArtistPage(artist) {
       </div>
       
       <div id="artistTopTracksSection" class="hidden">
-        <div class="section-head sticky-head"><h2>Popular Tracks</h2></div>
+        <div class="section-head sticky-head">
+          <h2>Popular Tracks</h2>
+          <button class="see-more hidden" id="artistTracksToggle" type="button"></button>
+        </div>
         <div id="artistTopTracks" class="track-list"></div>
       </div>
 
       <div id="artistAlbumsSection" class="hidden">
-        <div class="section-head sticky-head"><h2>Albums</h2></div>
+        <div class="section-head sticky-head">
+          <h2>Albums</h2>
+          <button class="see-more hidden" id="artistAlbumsToggle" type="button"></button>
+        </div>
         <div id="artistAlbumsGrid" class="grid"></div>
       </div>
       
@@ -710,6 +721,44 @@ async function renderArtistPage(artist) {
 
   const artistName = artist.name || artist.artist;
   const artistId = artist.artist_id || artist.spotify_id || "";
+  let artistTracks = [];
+  let artistAlbums = [];
+  let artistArtwork = artist.artwork_url || "";
+  let resolvedArtistId = artistId;
+  let tracksExpanded = false;
+  let albumsExpanded = false;
+
+  function updateSectionToggle(buttonId, expanded, hasMore, onClick) {
+    const button = $(buttonId);
+    if (!button) return;
+    button.classList.toggle("hidden", !hasMore);
+    if (!hasMore) return;
+    button.innerHTML = expanded ? 'See less <i class="bi bi-chevron-up"></i>' : 'See all <i class="bi bi-chevron-right"></i>';
+    button.onclick = onClick;
+  }
+
+  function redrawArtistTracks() {
+    renderTrackList("artistTopTracks", tracksExpanded ? artistTracks : artistTracks.slice(0, ARTIST_TRACK_PREVIEW_COUNT), "artist");
+    updateSectionToggle("artistTracksToggle", tracksExpanded, artistTracks.length > ARTIST_TRACK_PREVIEW_COUNT, () => {
+      tracksExpanded = !tracksExpanded;
+      redrawArtistTracks();
+    });
+  }
+
+  function redrawArtistAlbums() {
+    const shownAlbums = albumsExpanded ? artistAlbums : artistAlbums.slice(0, ARTIST_ALBUM_PREVIEW_COUNT);
+    renderCards("artistAlbumsGrid", shownAlbums.map(al => ({
+      ...al,
+      type: "album",
+      artist_artwork_url: artistArtwork,
+      spotify_artist_id: resolvedArtistId,
+    })), "album");
+    updateSectionToggle("artistAlbumsToggle", albumsExpanded, artistAlbums.length > ARTIST_ALBUM_PREVIEW_COUNT, () => {
+      albumsExpanded = !albumsExpanded;
+      redrawArtistAlbums();
+    });
+  }
+
   const es = new EventSource(`/api/music/artist?artist=${encodeURIComponent(artistName)}&artist_id=${artistId}`);
   window.artistEvtSource = es;
 
@@ -726,19 +775,23 @@ async function renderArtistPage(artist) {
     try {
       const part = JSON.parse(e.data);
       if (part.type === "artist_info") {
+        resolvedArtistId = part.artist_id || resolvedArtistId;
+        artistArtwork = part.artwork_url || artistArtwork;
         $("artistHeroName").textContent = part.artist;
         if (part.artwork_url) {
           $("artistHeroArt").style.backgroundImage = `url('${part.artwork_url}')`;
         }
       }
       if (part.type === "top_tracks") {
+        artistTracks = part.tracks || [];
         $("artistTopTracksSection").classList.remove("hidden");
-        renderTrackList("artistTopTracks", part.tracks || [], "artist");
+        redrawArtistTracks();
       }
       if (part.type === "albums") {
         if (part.albums && part.albums.length) {
+            artistAlbums = part.albums;
             $("artistAlbumsSection").classList.remove("hidden");
-            renderCards("artistAlbumsGrid", part.albums.map(al => ({...al, type:"album"})), "album");
+            redrawArtistAlbums();
         }
       }
     } catch (err) {}
@@ -760,6 +813,14 @@ async function renderAlbumPage(album) {
     const spotifyId = album.spotify_id || "";
     
     const data = await api(`/api/music/album_tracks?artist=${encodeURIComponent(artistName)}&album=${encodeURIComponent(albumTitle)}&release_id=${releaseId}&spotify_id=${spotifyId}`);
+    const artistArtwork = data.artist_artwork_url || album.artist_artwork_url || "";
+    const year = data.year || album.year || "";
+    const albumMeta = [
+      year,
+      `${data.track_count} tracks`,
+      data.total_duration,
+    ].filter(Boolean);
+    const metadataHtml = albumMeta.map((value) => `<span class="dot">•</span><span>${esc(value)}</span>`).join("");
     
     content.innerHTML = `
       <div class="scroll-area">
@@ -770,15 +831,10 @@ async function renderAlbumPage(album) {
             <h1>${esc(data.album)}</h1>
             <div class="hero-meta-row">
               <button class="hero-artist-link" id="heroArtistLink" title="${esc(data.artist)}">
-                <div class="mini-art" style="background-image: url('${data.artist_artwork_url || ""}')"></div>
+                ${artistArtwork ? `<div class="mini-art" style="background-image: url('${artistArtwork}')"></div>` : ""}
                 ${esc(data.artist)}
               </button>
-              <span class="dot">•</span>
-              <span>${data.year}</span>
-              <span class="dot">•</span>
-              <span>${data.track_count} tracks</span>
-              <span class="dot">•</span>
-              <span>${data.total_duration}</span>
+              ${metadataHtml}
             </div>
           </div>
         </div>
@@ -786,7 +842,11 @@ async function renderAlbumPage(album) {
       </div>
     `;
     
-    $("heroArtistLink").onclick = () => openArtistLink({ name: data.artist, artwork_url: data.artist_artwork_url });
+    $("heroArtistLink").onclick = () => openArtistLink({
+      name: data.artist,
+      artwork_url: artistArtwork,
+      artist_id: album.spotify_artist_id || "",
+    });
     renderTrackList("albumTrackList", data.tracks || [], "album");
   } catch (e) {
     content.innerHTML = `<div class="error-state">Failed to load album: ${e.message}</div>`;
@@ -858,11 +918,8 @@ async function selectMusicItem(item, mode = "stream", contextList = null) {
     );
     
     if (existing) {
-      state.activeJobId = existing.id;
-      if (existing.status === "finished" && existing.library_path) {
-        await playFromLibraryPath(existing.library_path, item, requestId, existing.id);
-        return;
-      } else if (existing.status === "running" || existing.status === "starting") {
+      if (existing.status === "running" || existing.status === "starting") {
+        state.activeJobId = existing.id;
         await startServiceDownload(item, mode, requestId, existing.id);
         return;
       }
@@ -1037,7 +1094,7 @@ async function cancelLibraryDownload(track, button, refresh) {
   button.classList.remove("progress");
   button.classList.remove("downloaded");
   button.dataset.activeJobId = "";
-  button.innerHTML = '<i class="bi bi-check-circle"></i>';
+  button.innerHTML = '<i class="bi bi-arrow-down-circle"></i>';
   if (typeof refresh === "function") refresh();
 }
 
@@ -1066,7 +1123,7 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       if (button) {
         button.classList.remove("progress");
         button.classList.add("downloaded");
-        button.innerHTML = '<i class="bi bi-check-circle-fill downloaded"></i>';
+        button.innerHTML = '<i class="bi bi-arrow-down-circle-fill downloaded"></i>';
       }
       return status;
     }

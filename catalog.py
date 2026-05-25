@@ -43,7 +43,7 @@ def load_discovery_cache() -> dict:
         try:
             return json.loads(DISCOVERY_CACHE_PATH.read_text("utf-8"))
         except Exception: pass
-    return {"top_tracks": DEFAULT_GLOBAL_TRACKS, "top_artists": [], "top_albums": []}
+    return {"top_tracks": DEFAULT_GLOBAL_TRACKS, "top_artists": [], "top_albums": [], "artist_identities": {}}
 
 
 def save_discovery_cache(data: dict) -> None:
@@ -51,6 +51,19 @@ def save_discovery_cache(data: dict) -> None:
         DISCOVERY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         DISCOVERY_CACHE_PATH.write_text(json.dumps(data, indent=2), "utf-8")
     except Exception: pass
+
+
+def save_artist_identity(artist: str, spotify_id: str, artwork_url: str = "") -> None:
+    if not artist or not spotify_id:
+        return
+    cache = load_discovery_cache()
+    identities = cache.setdefault("artist_identities", {})
+    current = identities.get(artist.casefold(), {})
+    identities[artist.casefold()] = {
+        "spotify_id": spotify_id,
+        "artwork_url": artwork_url or current.get("artwork_url", ""),
+    }
+    save_discovery_cache(cache)
 
 
 def cached_global_tracks(cache: dict) -> list[dict]:
@@ -140,7 +153,8 @@ def discover_catalog(config, refresh_global: bool = True) -> dict:
                 save_discovery_cache({
                     "top_tracks": base_global,
                     "top_artists": top_artists,
-                    "top_albums": top_albums
+                    "top_albums": top_albums,
+                    "artist_identities": cache.get("artist_identities", {}),
                 })
         except Exception:
             # Use cached data as fallback
@@ -155,6 +169,7 @@ def discover_catalog(config, refresh_global: bool = True) -> dict:
     # Base artists/albums from the Top Tracks ONLY (not library/recent)
     for t in base_global:
         art_name = t.get("artist") or "Unknown Artist"
+        cached_identity = cache.get("artist_identities", {}).get(art_name.casefold(), {})
         if art_name not in all_artists:
             all_artists[art_name] = {
                 "type": "artist", 
@@ -162,8 +177,8 @@ def discover_catalog(config, refresh_global: bool = True) -> dict:
                 "artist": art_name, 
                 "tracks": 0, 
                 "plays": 0, 
-                "artwork_url": t.get("artwork_url", ""),
-                "spotify_id": t.get("spotify_id"),
+                "artwork_url": cached_identity.get("artwork_url") or t.get("artwork_url", ""),
+                "spotify_id": cached_identity.get("spotify_id", ""),
                 "musicbrainz_artist_id": t.get("musicbrainz_artist_id") or (t.get("metadata") or {}).get("musicbrainz_artist_id")
             }
         all_artists[art_name]["tracks"] += 1
@@ -191,6 +206,8 @@ def discover_catalog(config, refresh_global: bool = True) -> dict:
         if a["artist"] not in all_artists:
             all_artists[a["artist"]] = a
         else:
+            if a.get("spotify_id"):
+                all_artists[a["artist"]]["spotify_id"] = a["spotify_id"]
             if not all_artists[a["artist"]].get("artwork_url"):
                 all_artists[a["artist"]]["artwork_url"] = a.get("artwork_url")
 
