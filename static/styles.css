@@ -451,10 +451,10 @@ button, input, select { font: inherit; }
   font-size: 12px;
   color: var(--muted);
   display: block;
-  margin-bottom: 8px;
+  margin: 0 0 8px 5.5em;
 }
 
-h1 { font-size: clamp(32px, 5vw, 68px); margin: 0; font-weight: 900; letter-spacing: -1px; }
+h1 { font-size: clamp(32px, 5vw, 68px); margin: 0 0 0 1em; font-weight: 900; letter-spacing: -1px; }
 h2 { font-size: 22px; margin: 0; font-weight: 800; }
 
 .section-head {
