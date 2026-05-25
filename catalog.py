@@ -4,13 +4,12 @@ import json
 import urllib.parse
 from pathlib import Path
 
-from config import jobs_path
+from config import jobs_path, ROOT
 
-ROOT = Path(__file__).resolve().parent
-JOBS_PATH = jobs_path()
+DISCOVERY_CACHE_PATH = ROOT / "data" / "discovery_cache.json"
 
 # "Most listened in the world" / Discovery defaults
-GLOBAL_TRACKS = [
+DEFAULT_GLOBAL_TRACKS = [
     {"title": "Blinding Lights", "artist": "The Weeknd", "album": "After Hours", "plays": 482000},
     {"title": "Starboy", "artist": "The Weeknd", "album": "Starboy", "plays": 475000},
     {"title": "Sweater Weather", "artist": "The Neighbourhood", "album": "I Love You.", "plays": 468000},
@@ -38,7 +37,23 @@ GLOBAL_TRACKS = [
 ]
 
 
+def load_discovery_cache() -> dict:
+    if DISCOVERY_CACHE_PATH.exists():
+        try:
+            return json.loads(DISCOVERY_CACHE_PATH.read_text("utf-8"))
+        except Exception: pass
+    return {"top_tracks": DEFAULT_GLOBAL_TRACKS, "top_artists": [], "top_albums": []}
+
+
+def save_discovery_cache(data: dict) -> None:
+    try:
+        DISCOVERY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DISCOVERY_CACHE_PATH.write_text(json.dumps(data, indent=2), "utf-8")
+    except Exception: pass
+
+
 def discover_catalog(config) -> dict:
+    cache = load_discovery_cache()
     library = []
     music_dir = config.music_dir
     if music_dir.exists():
@@ -98,8 +113,19 @@ def discover_catalog(config) -> dict:
         base_global = sp.top_tracks(24)
         top_artists = sp.top_artists(24)
         top_albums = sp.new_releases(24)
+        
+        # Update cache on successful fetch
+        if base_global:
+            save_discovery_cache({
+                "top_tracks": base_global,
+                "top_artists": top_artists,
+                "top_albums": top_albums
+            })
     except Exception:
-        base_global = [{**t, "type": "track", "source": "Global Discovery"} for t in GLOBAL_TRACKS]
+        # Use cached data as fallback
+        base_global = [{**t, "type": "track", "source": "Global Discovery"} for t in cache.get("top_tracks", DEFAULT_GLOBAL_TRACKS)]
+        top_artists = cache.get("top_artists", [])
+        top_albums = cache.get("top_albums", [])
 
     # Deduplicate library artists/albums for full lists
     all_artists = {}
