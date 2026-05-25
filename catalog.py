@@ -6,6 +6,7 @@ from pathlib import Path
 
 from config import jobs_path, ROOT
 
+JOBS_PATH = jobs_path()
 DISCOVERY_CACHE_PATH = ROOT / "data" / "discovery_cache.json"
 
 # "Most listened in the world" / Discovery defaults

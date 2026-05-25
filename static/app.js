@@ -340,7 +340,7 @@ function renderHomePage() {
   const topArtists = (state.catalog.artists || []).slice(0, 6);
   const topAlbums = (state.catalog.albums || []).slice(0, 6);
 
-  $("pageContent").innerHTML = `
+  let html = `
     <div class="library-hero compact-hero">
       <div>
         <span class="eyebrow">Personal Music Discovery</span>
@@ -348,23 +348,29 @@ function renderHomePage() {
       </div>
     </div>
 
-    <div class="scroll-area">
-      ${recentTracks.length ? `
+    <div class="scroll-area">`;
+
+  if (recentTracks.length) {
+    html += `
         <div class="section-head sticky-head">
           <h2>Recently Played</h2>
           <button class="see-more" id="seeMoreRecent">See all <i class="bi bi-chevron-right"></i></button>
         </div>
         <div id="recentTracksGrid" class="grid"></div>
-      ` : ""}
+    `;
+  }
 
-      ${personalTracks.length ? `
+  if (personalTracks.length) {
+    html += `
         <div class="section-head sticky-head">
           <h2>Your Most Listened</h2>
           <button class="see-more" id="seeMorePersonal">See all <i class="bi bi-chevron-right"></i></button>
         </div>
         <div id="personalTracksGrid" class="grid"></div>
-      ` : ""}
+    `;
+  }
 
+  html += `
       <div class="section-head sticky-head">
         <h2>Top Songs (Global)</h2>
         <button class="see-more" id="seeMoreGlobalTracks">See all <i class="bi bi-chevron-right"></i></button>
@@ -384,6 +390,8 @@ function renderHomePage() {
       <div id="topAlbumsGrid" class="grid"></div>
     </div>
   `;
+
+  $("pageContent").innerHTML = html;
 
   if (recentTracks.length) {
     renderCards("recentTracksGrid", recentTracks, "track");
