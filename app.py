@@ -340,23 +340,26 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/discover":
                 catalog = discover_catalog(app_config)
-                catalog["personal_tracks"] = enrich_artwork_batch(catalog["personal_tracks"][:12]) + catalog["personal_tracks"][12:]
-                
-                recent_enriched = enrich_artwork_batch(catalog["recent_tracks"][:12])
+
+                # Only enrich a small batch of each section to keep response time low
+                # Webview/Safari can be strict about long-running requests
+                catalog["personal_tracks"] = enrich_artwork_batch(catalog["personal_tracks"][:6]) + catalog["personal_tracks"][6:]
+
+                recent_raw = catalog["recent_tracks"][:6]
+                recent_enriched = enrich_artwork_batch(recent_raw)
                 for track in recent_enriched:
                     job_id = track.get("id")
                     if job_id:
                         service_downloader.update_job_metadata(job_id, track.get("metadata") or {}, track.get("artwork_url") or "")
-                
-                catalog["recent_tracks"] = recent_enriched + catalog["recent_tracks"][12:]
-                
-                # Enrich Global Top Tracks
-                catalog["top_tracks"] = enrich_artwork_batch(catalog["top_tracks"][:12]) + catalog["top_tracks"][12:]
-                
-                catalog["artists"] = enrich_artwork_batch(catalog["artists"][:12]) + catalog["artists"][12:]
-                catalog["albums"] = enrich_artwork_batch(catalog["albums"][:12]) + catalog["albums"][12:]
+                catalog["recent_tracks"] = recent_enriched + catalog["recent_tracks"][6:]
+
+                catalog["top_tracks"] = enrich_artwork_batch(catalog["top_tracks"][:6]) + catalog["top_tracks"][6:]
+                catalog["artists"] = enrich_artwork_batch(catalog["artists"][:6]) + catalog["artists"][6:]
+                catalog["albums"] = enrich_artwork_batch(catalog["albums"][:6]) + catalog["albums"][6:]
+
                 self.send_json(catalog)
                 return
+
             if path == "/api/music/index":
                 self.send_json({"results": indexed_music()})
                 return

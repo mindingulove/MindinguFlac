@@ -440,7 +440,8 @@ def enrich_artwork_batch(results: list[dict]) -> list[dict]:
                 if sp.get("artwork_url"): item["artwork_url"] = sp["artwork_url"]
         except Exception: pass
         return item
-    with ThreadPoolExecutor(max_workers=8) as ex: return list(pool.map(enrich_item, results)) if 'pool' in locals() else list(ex.map(enrich_item, results))
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        return list(ex.map(enrich_item, results))
 
 def enrich_albums_batch(results: list[dict]) -> list[dict]:
     return results

@@ -658,7 +658,16 @@ async function renderArtistPage(artist) {
   const es = new EventSource(`/api/music/artist?artist=${encodeURIComponent(artistName)}&artist_id=${artistId}`);
   window.artistEvtSource = es;
 
+  const timeout = setTimeout(() => {
+    if ($("artistLoading")) {
+      $("artistLoading").innerHTML = '<span>No discovery data available for this artist.</span>';
+      setTimeout(() => $("artistLoading")?.remove(), 3000);
+    }
+    es.close();
+  }, 12000);
+
   es.onmessage = (e) => {
+    clearTimeout(timeout);
     try {
       const part = JSON.parse(e.data);
       if (part.type === "artist_info") {
