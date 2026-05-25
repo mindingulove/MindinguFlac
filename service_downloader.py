@@ -156,7 +156,13 @@ def _resolve_platform_url(candidate_url: str, service: str) -> str:
         links = data.get("linksByPlatform") or {}
         platform_info = links.get(platform) or {}
         resolved = platform_info.get("url") or platform_info.get("nativeAppUri") or ""
+        
+        # Guard: Odesli sometimes returns the root domain if it can't find a match
         if resolved:
+            r_low = resolved.lower()
+            if r_low.endswith("amazon.com") or r_low.endswith("amazon.com/") or \
+               r_low.endswith("deezer.com") or r_low.endswith("tidal.com"):
+                return ""
             return resolved
     except Exception:
         pass
@@ -189,18 +195,29 @@ def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "t
 
 
 def resolve_download_url(track: dict, service: str = "tidal", kind: str = "track") -> str:
+    # 1. Try Spotify directly if we have it - it's our most reliable source for SpotiFLAC
+    spotify_url = _first_value(track.get("spotify_url"), (track.get("metadata") or {}).get("spotify_url"))
+    if spotify_url and "spotify.com" in spotify_url:
+        print(f"[Resolve] Using provided Spotify URL: {spotify_url}")
+        return spotify_url
+
+    # 2. Try Odesli resolution for other candidates
     for candidate in _candidate_urls(track, kind):
         resolved = _resolve_platform_url(candidate, service)
         if resolved:
+            print(f"[Resolve] Odesli resolved {candidate} -> {resolved}")
             return resolved
 
     artist = _first_value(track.get("artist"), (track.get("metadata") or {}).get("artist"))
     album = _first_value(track.get("album"), (track.get("metadata") or {}).get("album"))
     title = _first_value(track.get("title"), (track.get("metadata") or {}).get("title"))
 
-    # Last resort: search Spotify directly using SpotiFLAC's own client credentials.
+    # 3. Last resort: search Spotify directly using SpotiFLAC's own client credentials.
     if artist and (title or album):
-        return _search_spotify_url(artist, title, album, kind)
+        res = _search_spotify_url(artist, title, album, kind)
+        if res:
+            print(f"[Resolve] Search resolved '{artist} - {title}' -> {res}")
+            return res
 
     return ""
 
