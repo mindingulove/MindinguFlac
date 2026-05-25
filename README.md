@@ -34,17 +34,6 @@ If this software is useful and brings you value, consider supporting the project
 <img width="1707" height="1035" alt="Image" src="https://github.com/user-attachments/assets/c446baf3-387d-4f28-abdb-8b39379d3a8f" />
 <img width="1707" height="1035" alt="Image" src="https://github.com/user-attachments/assets/678ce573-243c-46f1-8b0c-0433dd3c8a91" />
 
-<img width="1760" height="1019" alt="Image" src="https://github.com/user-attachments/assets/055d3f93-c4a3-4930-aefa-aa68990fbbb7" />
-
-<img width="1707" height="1035" alt="Image" src="https://github.com/user-attachments/assets/fdf1ca08-a9db-4cf4-9ea6-9645798835b1" />
-
-<img width="1392" height="932" alt="Image" src="https://github.com/user-attachments/assets/4e0bbd2f-111e-405f-87fb-a1e36e58ef81" />
-
-<img width="1760" height="1019" alt="Image" src="https://github.com/user-attachments/assets/8f591b71-c3ea-4c45-b0b9-a040153c5ee4" />
-
-<img width="1760" height="1019" alt="Image" src="https://github.com/user-attachments/assets/7d0d652d-4f6d-436d-ab21-b1e92caae33f" />
-
-Brand artwork lives in `static/assets`: `mindinguflac_icon.png` is the app icon.
 
 ## Credits
 
