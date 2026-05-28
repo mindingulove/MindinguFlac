@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import AppConfig, MusicIndexerConfig
+from discogs_metadata import discogs_album_images
+from spotify_web_metadata import spotify_album_playcounts, spotify_artist_about, fetch_wikipedia_bio
 
 
 USER_AGENT = "Streambox/1.0 (self-hosted; https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)"
@@ -53,6 +55,31 @@ def get_json(url: str, timeout: int = 10) -> dict:
 
 def cover_art_url(release_id: str) -> str:
     return f"/api/artwork/{urllib.parse.quote(release_id)}" if release_id else ""
+
+
+def caa_artwork(release_id: str) -> list[dict]:
+    if not release_id:
+        return []
+    try:
+        data = get_json(f"https://coverartarchive.org/release/{release_id}")
+        images = []
+        for img in data.get("images") or []:
+            # The 'image' key in CAA is the original uncompressed upload
+            url = img.get("image")
+            if not url:
+                continue
+            images.append({
+                "url": proxy_artwork_url(url),
+                "full_url": proxy_artwork_url(url),
+                "source": "MusicBrainz CAA",
+                "label": "Original Scan" if img.get("front") else "Artwork",
+                "width": 1200,  # Placeholder, will be sorted by 'front' priority
+                "height": 1200,
+                "is_front": bool(img.get("front")),
+            })
+        return images
+    except Exception:
+        return []
 
 
 def proxy_artwork_url(url: str) -> str:
@@ -286,16 +313,156 @@ def odesli_lookup(spotify_url: str) -> dict:
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         links = data.get("linksByPlatform") or {}
+        entities = data.get("entitiesByUniqueId") or {}
         results = {}
         for platform, info in links.items():
             results[f"{platform}_url"] = info.get("url")
             u = info.get("url", "")
-            if "deezer.com" in u: results["deezer_id"] = u.split("/")[-1].split("?")[0]
-            if "tidal.com" in u: results["tidal_id"] = u.split("/")[-1].split("?")[0]
-            if "amazon.com" in u: results["amazon_id"] = u.split("/")[-1].split("?")[0]
-            if "apple.com" in u: results["apple_music_id"] = u.split("/")[-1].split("?")[0]
+            entity = entities.get(info.get("entityUniqueId", "")) or {}
+            provider_id = entity.get("id", "")
+            if platform == "deezer" or "deezer.com" in u:
+                results["deezer_id"] = provider_id or u.split("/")[-1].split("?")[0]
+            if platform == "tidal" or "tidal.com" in u:
+                results["tidal_id"] = provider_id or u.split("/")[-1].split("?")[0]
+            if platform in {"amazonMusic", "amazonStore"} or "amazon.com" in u:
+                results["amazon_id"] = provider_id or u.split("/")[-1].split("?")[0]
+            if platform == "appleMusic" or "apple.com" in u:
+                results["apple_music_id"] = provider_id or u.split("/")[-1].split("?")[0]
         return results
     except Exception: return {}
+
+
+@functools.lru_cache(maxsize=2048)
+def deezer_track_identifiers(deezer_id: str, artist: str, title: str, duration_ms: int = 0) -> dict:
+    if not deezer_id:
+        return {}
+    try:
+        data = get_json(f"https://api.deezer.com/track/{urllib.parse.quote(str(deezer_id))}")
+    except Exception:
+        return {}
+    deezer_artist = (data.get("artist") or {}).get("name", "")
+    if norm_name(data.get("title", "")) != norm_name(title):
+        return {}
+    if artist and deezer_artist and norm_name(deezer_artist) != norm_name(artist):
+        return {}
+    deezer_duration_ms = int(data.get("duration") or 0) * 1000
+    tolerance = max(5000, int(duration_ms * 0.03)) if duration_ms else 0
+    if duration_ms and deezer_duration_ms and abs(deezer_duration_ms - duration_ms) > tolerance:
+        return {}
+    identifiers = {
+        "isrc": data.get("isrc", ""),
+        "deezer_artist_id": (data.get("artist") or {}).get("id", ""),
+        "deezer_album_id": (data.get("album") or {}).get("id", ""),
+    }
+    return {key: value for key, value in identifiers.items() if value}
+
+
+@functools.lru_cache(maxsize=2048)
+def musicbrainz_recording_identifiers(artist: str, title: str, album: str = "", duration_ms: int = 0) -> dict:
+    if not artist or not title:
+        return {}
+    album_candidates = []
+    for candidate in (album, re.sub(r"\s*\([^)]*\)", "", album).strip()):
+        if candidate and candidate not in album_candidates:
+            album_candidates.append(candidate)
+    if not album_candidates:
+        album_candidates.append("")
+
+    candidates = []
+    for album_candidate in album_candidates:
+        terms = [f'recording:"{title}"', f'artist:"{artist}"']
+        if album_candidate:
+            terms.append(f'release:"{album_candidate}"')
+        try:
+            url = "https://musicbrainz.org/ws/2/recording/?" + urllib.parse.urlencode({
+                "query": " AND ".join(terms),
+                "limit": "20",
+                "fmt": "json",
+                "inc": "isrcs+artist-credits",
+            })
+            candidates = get_json(url).get("recordings", [])
+        except Exception:
+            continue
+        if candidates:
+            break
+
+    exact = [
+        recording for recording in candidates
+        if norm_name(recording.get("title", "")) == norm_name(title)
+        and any(norm_name(credit.get("name", "")) == norm_name(artist) for credit in recording.get("artist-credit", []))
+    ]
+    if not exact:
+        return {}
+    if duration_ms:
+        exact.sort(key=lambda item: abs(int(item.get("length") or 0) - duration_ms) if item.get("length") else 10**12)
+        selected = exact[0]
+        selected_length = int(selected.get("length") or 0)
+        tolerance = max(5000, int(duration_ms * 0.03))
+        if selected_length and abs(selected_length - duration_ms) > tolerance:
+            return {}
+    else:
+        selected = exact[0]
+
+    identifiers = {"musicbrainz_recording_id": selected.get("id", "")}
+    isrcs = selected.get("isrcs") or []
+    if isrcs:
+        identifiers["isrc"] = isrcs[0]
+    artist_fields = _ac_fields(selected.get("artist-credit") or [])
+    identifiers.update({key: value for key, value in artist_fields.items() if value})
+    return {key: value for key, value in identifiers.items() if value}
+
+
+def enrich_track_identifiers(track: dict) -> dict:
+    if not isinstance(track, dict) or track.get("type", "track") != "track":
+        return dict(track or {})
+    enriched = dict(track)
+    if not enriched.get("spotify_id") and enriched.get("title"):
+        for key, value in spotify_search_track(
+            enriched.get("artist", ""),
+            enriched.get("title", ""),
+        ).items():
+            if value and not enriched.get(key):
+                enriched[key] = value
+    spotify_id = enriched.get("spotify_id", "")
+    spotify_url = enriched.get("spotify_url", "") or (
+        f"https://open.spotify.com/track/{spotify_id}" if spotify_id else ""
+    )
+    if spotify_url:
+        enriched["spotify_url"] = spotify_url
+        for key, value in odesli_lookup(spotify_url).items():
+            if value and not enriched.get(key):
+                enriched[key] = value
+
+    duration_ms = int(enriched.get("duration_ms") or enriched.get("length") or 0)
+    for key, value in deezer_track_identifiers(
+        str(enriched.get("deezer_id", "")),
+        enriched.get("artist", ""),
+        enriched.get("title", ""),
+        duration_ms,
+    ).items():
+        if value and not enriched.get(key):
+            enriched[key] = value
+    mb_ids = musicbrainz_recording_identifiers(
+        enriched.get("artist", ""),
+        enriched.get("title", ""),
+        enriched.get("album", ""),
+        duration_ms,
+    )
+    for key, value in mb_ids.items():
+        if value and not enriched.get(key):
+            enriched[key] = value
+
+    if not enriched.get("isrc"):
+        from isrc_resolver import resolve_isrc
+        isrc = resolve_isrc(
+            enriched.get("title", ""),
+            enriched.get("artist", ""),
+            spotify_id=enriched.get("spotify_id", ""),
+        )
+        if isrc:
+            enriched["isrc"] = isrc
+
+    return enriched
 
 
 @functools.lru_cache(maxsize=1024)
@@ -306,9 +473,14 @@ def spotify_search_track(artist: str, title: str) -> dict:
     for item in items:
         images = (item.get("album") or {}).get("images") or []
         ext_ids = item.get("external_ids") or {}
+        artist_id = ""
+        artists = item.get("artists") or []
+        if artists:
+            artist_id = artists[0].get("id") or ""
         return {
             "spotify_url": (item.get("external_urls") or {}).get("spotify", ""),
             "spotify_id": item.get("id", ""),
+            "artist_id": artist_id,
             "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
             "isrc": ext_ids.get("isrc", ""),
             "ean": ext_ids.get("ean", ""),
@@ -446,91 +618,141 @@ class BaseMusicIndexer:
 
 class SpotifyIndexer(BaseMusicIndexer):
     def search(self, query: str) -> list[dict]:
-        data = _sp("search", q=query, type="track,album,artist", limit=20)
+        client = _get_spotify_client()
+        web_client = getattr(client, "web_client", None)
+        payload_builder = getattr(client, "_search_payload", None)
+        if not web_client or not payload_builder:
+            return []
+        try:
+            data = web_client.query(payload_builder(query, 20))
+            search_v2 = data.get("data", {}).get("searchV2", {})
+        except Exception:
+            return []
+
+        def _join_artists(node):
+            if not node: return "", ""
+            items = node.get("items") or []
+            names = ", ".join(a.get("profile", {}).get("name") or a.get("name") or ""
+                              for a in items if isinstance(a, dict))
+            first_id = ""
+            if items:
+                # Some API versions use 'uri', others use 'data' -> 'uri'
+                first = items[0]
+                uri = (first.get("uri") or (first.get("data") or {}).get("uri")) if isinstance(first, dict) else ""
+                if uri: first_id = uri.split(":")[-1]
+            return names, first_id
+
         results = []
-        for item in (data.get("tracks") or {}).get("items") or []:
-            images = (item.get("album") or {}).get("images") or []
+
+        # Tracks
+        for item in search_v2.get("tracksV2", {}).get("items", []):
+            t = item.get("item", {}).get("data", {})
+            if not t.get("id"): continue
+            cover = _best_raw_image(t.get("albumOfTrack", {}).get("coverArt"))
+            names, aid = _join_artists(t.get("artists"))
             results.append({
-                "type": "track", "title": item.get("name", ""),
-                "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
-                "album": (item.get("album") or {}).get("name", ""),
-                "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
-                "spotify_url": (item.get("external_urls") or {}).get("spotify", ""),
-                "spotify_id": item.get("id", ""), "isrc": (item.get("external_ids") or {}).get("isrc", ""),
-                "source": "Spotify", "plays": item.get("popularity", 0) * 1000,
+                "type": "track", "title": t.get("name", "Unknown"),
+                "artist": names, "artist_id": aid,
+                "album": t.get("albumOfTrack", {}).get("name", "Unknown"),
+                "artwork_url": proxy_artwork_url(cover),
+                "spotify_url": f"https://open.spotify.com/track/{t['id']}",
+                "spotify_id": t["id"], "isrc": "",
+                "source": "Spotify", "plays": _numeric_plays(t.get("playcount")),
             })
-        for item in (data.get("albums") or {}).get("items") or []:
-            images = item.get("images") or []
+
+        # Albums
+        for item in search_v2.get("albumsV2", {}).get("items", []):
+            node = item.get("data", {})
+            uri = node.get("uri", "")
+            if not uri: continue
+            album_id = uri.split(":")[-1]
+            cover = _best_raw_image(node.get("coverArt"))
+            names, aid = _join_artists(node.get("artists"))
             results.append({
-                "type": "album", "title": item.get("name", ""),
-                "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
-                "album": item.get("name", ""), "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
-                "spotify_id": item["id"], "source": "Spotify", "plays": 0,
+                "type": "album", "title": node.get("name", "Unknown"),
+                "artist": names, "artist_id": aid,
+                "album": node.get("name", ""),
+                "artwork_url": proxy_artwork_url(cover),
+                "spotify_id": album_id, "source": "Spotify", "plays": 0,
             })
-        for item in (data.get("artists") or {}).get("items") or []:
-            images = item.get("images") or []
+
+        # Artists
+        for item in search_v2.get("artists", {}).get("items", []):
+            node = item.get("data", {})
+            uri = node.get("uri", "")
+            if not uri: continue
+            artist_id = uri.split(":")[-1]
+            # Try visuals -> avatarImage, then visualIdentity -> squareCoverImage
+            cover = _best_raw_image(node.get("visuals", {}).get("avatarImage") if node.get("visuals") else None) or \
+                    _best_raw_image(node.get("visualIdentity", {}).get("squareCoverImage") if node.get("visualIdentity") else None)
+            name = node.get("profile", {}).get("name", "Unknown")
             results.append({
-                "type": "artist", "title": item.get("name", ""), "artist": item.get("name", ""),
-                "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
-                "spotify_id": item.get("id", ""), "source": "Spotify", "plays": item.get("popularity", 0) * 1000,
+                "type": "artist", "title": name, "artist": name, "artist_id": artist_id,
+                "artwork_url": proxy_artwork_url(cover),
+                "spotify_id": artist_id, "source": "Spotify", "plays": 0,
             })
+
         return results
 
     def top_tracks(self, limit: int = 20) -> list[dict]:
-        data = _sp("playlists/37i9dQZEVXbMDoHDwVN2tF/tracks", market="US", limit=limit)
         results = []
-        for entry in data.get("items") or []:
-            item = entry.get("track")
-            if not item: continue
-            images = (item.get("album") or {}).get("images") or []
-            results.append({
-                "type": "track", "title": item.get("name", ""),
-                "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
-                "album": (item.get("album") or {}).get("name", ""),
-                "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
-                "spotify_id": item.get("id", ""), "source": "Spotify", "plays": item.get("popularity", 0) * 10000,
-            })
-        return results
+        offset = 0
+        while len(results) < limit:
+            batch_limit = min(50, limit - len(results))
+            data = _sp("playlists/37i9dQZEVXbMDoHDwVN2tF/tracks", market="US", limit=batch_limit, offset=offset)
+            items = data.get("items") or []
+            if not items: break
+            for entry in items:
+                item = entry.get("track")
+                if not item: continue
+                images = (item.get("album") or {}).get("images") or []
+                results.append({
+                    "type": "track", "title": item.get("name", ""), "name": item.get("name", ""),
+                    "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
+                    "album": (item.get("album") or {}).get("name", ""),
+                    "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
+                    "spotify_id": item.get("id", ""), "source": "Spotify", "plays": item.get("popularity", 0) * 10000,
+                })
+            offset += len(items)
+        return results[:limit]
 
     def new_releases(self, limit: int = 20) -> list[dict]:
-        data = _sp("browse/new-releases", market="US", limit=limit)
         results = []
-        for item in (data.get("albums") or {}).get("items") or []:
-            images = item.get("images") or []
-            results.append({
-                "type": "album", "title": item.get("name", ""),
-                "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
-                "album": item.get("name", ""), "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
-                "spotify_id": item.get("id", ""), "source": "Spotify", "plays": 0,
-            })
-        if not results and not hasattr(_get_spotify_client(), "_get"):
-            seen = set()
-            for track in self.top_tracks(limit * 2):
-                key = (track.get("artist", ""), track.get("album", ""))
-                if key in seen:
-                    continue
-                seen.add(key)
+        offset = 0
+        while len(results) < limit:
+            batch_limit = min(50, limit - len(results))
+            data = _sp("browse/new-releases", market="US", limit=batch_limit, offset=offset)
+            items = (data.get("albums") or {}).get("items") or []
+            if not items: break
+            for item in items:
+                images = item.get("images") or []
                 results.append({
-                    "type": "album", "title": track.get("album", ""),
-                    "album": track.get("album", ""), "artist": track.get("artist", ""),
-                    "artwork_url": track.get("artwork_url", ""),
-                    "spotify_id": "", "source": "Spotify", "plays": track.get("plays", 0),
+                    "type": "album", "title": item.get("name", ""), "name": item.get("name", ""),
+                    "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
+                    "album": item.get("name", ""), "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
+                    "spotify_id": item.get("id", ""), "source": "Spotify", "plays": 0,
                 })
-                if len(results) >= limit:
-                    break
-        return results
+            offset += len(items)
+        return results[:limit]
 
     def top_artists(self, limit: int = 20) -> list[dict]:
-        data = _sp("search", q="year:2024", type="artist", limit=limit)
         results = []
-        for item in (data.get("artists") or {}).get("items") or []:
-            images = item.get("images") or []
-            results.append({
-                "type": "artist", "title": item.get("name", ""), "artist": item.get("name", ""),
-                "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
-                "spotify_id": item.get("id", ""), "source": "Spotify", "plays": item.get("popularity", 0) * 10000,
-            })
-        return results
+        offset = 0
+        while len(results) < limit:
+            batch_limit = min(50, limit - len(results))
+            data = _sp("search", q="year:2024", type="artist", limit=batch_limit, offset=offset)
+            items = (data.get("artists") or {}).get("items") or []
+            if not items: break
+            for item in items:
+                images = item.get("images") or []
+                results.append({
+                    "type": "artist", "title": item.get("name", ""), "name": item.get("name", ""),
+                    "artist": item.get("name", ""),
+                    "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
+                    "spotify_id": item.get("id", ""), "source": "Spotify", "plays": item.get("popularity", 0) * 10000,
+                })
+            offset += len(items)
+        return results[:limit]
 
 
 def build_music_indexers(config: AppConfig) -> list[BaseMusicIndexer]:
@@ -608,6 +830,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         try:
             sp_album = _sp(f"albums/{spotify_id}", market="US")
             if sp_album:
+                playcounts = spotify_album_playcounts(spotify_id)
                 art = proxy_artwork_url(sp_album.get("images", [{}])[0].get("url", ""))
                 yr = release_year(sp_album.get("release_date", ""))
                 album_name = sp_album["name"]
@@ -617,7 +840,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                         "album": album_name, "year": yr, "track_number": t.get("track_number"),
                         "duration": format_duration_ms(t.get("duration_ms", 0)),
                         "artwork_url": art, "spotify_id": t["id"], "source": "Spotify",
-                        "length": t.get("duration_ms", 0)
+                        "length": t.get("duration_ms", 0), "plays": playcounts.get(t["id"], 0),
                     })
                 total_ms = sum(int(t.get("duration_ms", 0)) for t in sp_album.get("tracks", {}).get("items") or [])
         except Exception: pass
@@ -636,7 +859,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                         "type": "track", "title": rec.get("title", it.get("title")),
                         "artist": albumartist, "album": album_name, "year": yr,
                         "track_number": it.get("number", ""), "duration": format_duration_ms(ln),
-                        "artwork_url": art or proxy_artwork_url(spotify_album_artwork(artist, album_name)),
+                        "artwork_url": art or spotify_album_artwork(artist, album_name),
                         "musicbrainz_recording_id": rec.get("id", ""), "musicbrainz_release_id": release_id,
                         "source": "MusicBrainz", "length": ln
                     })
@@ -649,16 +872,87 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
             if items: return album_tracks(config, artist, album, "", items[0]["id"])
         except Exception: pass
 
-    if not art: art = proxy_artwork_url(spotify_album_artwork(artist, album))
+    if not art: art = spotify_album_artwork(artist, album)
+    gallery_images = []
+    
+    # 1. Add Spotify (Primary Base)
+    if art:
+        gallery_images.append({
+            "url": art, "full_url": art, "source": "Spotify", "label": "Spotify Cover",
+            "width": 640, "height": 640, "is_spotify": True
+        })
+
+    # 2. Add MusicBrainz CAA (Ultra-HD Scans)
+    if release_id:
+        gallery_images.extend(caa_artwork(release_id))
+
+    # 3. Add Discogs (Collector Scans)
+    discogs_release = discogs_album_images(artist, album, yr, config.discogs_token)
+    for image in discogs_release.get("images", []):
+        if not image.get("url"):
+            continue
+        gallery_images.append({
+            "url": proxy_artwork_url(image.get("url", "")),
+            "full_url": proxy_artwork_url(image.get("full_url") or image.get("url", "")),
+            "source": "Discogs",
+            "label": "Vinyl image",
+            "width": image.get("width", 0),
+            "height": image.get("height", 0),
+            "is_primary": image.get("type") == "primary"
+        })
+
+    # 4. Global Ranking: Spotify ALWAYS first, then Primary/Front, then by Area
+    def quality_score(img: dict) -> int:
+        if img.get("is_spotify"):
+            return 100_000_000 # Absolute priority
+        
+        score = img.get("width", 0) * img.get("height", 0)
+        if img.get("source") == "MusicBrainz CAA" and img.get("is_front"):
+            score += 10_000_000 # Massive boost for official HD front scans
+        if img.get("is_primary"):
+            score += 5_000_000
+        return score
+
+    gallery_images.sort(key=quality_score, reverse=True)
+
+    # Use the best quality image as the main artwork_url if available
+    top_art = gallery_images[0]["url"] if gallery_images else art
+
     return {
         "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
-        "total_duration": format_duration_ms(total_ms), "artwork_url": art,
+        "total_duration": format_duration_ms(total_ms), "artwork_url": top_art,
         "artist_artwork_url": spotify_artist_artwork(artist), "tracks": tracks,
+        "gallery_images": gallery_images,
+        "discogs_release_url": discogs_release.get("release_url", ""),
     }
 
 
 def album_metadata(config: AppConfig, artist: str, album: str, track: str = "") -> dict:
     return {"artist": artist, "album": album, "title": track}
+
+
+def artist_about(artist_id: str, artist_name: str) -> dict:
+    about = spotify_artist_about(artist_id)
+    
+    # If we have monthly listeners or followers, we've found the real artist on Spotify.
+    # In this case, we trust Spotify data and do NOT fallback to Wikipedia name-searching.
+    has_spotify_stats = bool(about.get("monthly_listeners") or about.get("followers"))
+    spotify_bio = (about.get("biography") or "").strip()
+    
+    if has_spotify_stats or len(spotify_bio) > 5:
+        about["biography"] = spotify_bio or "Official biography currently unavailable."
+        about["bio_source"] = "Spotify"
+    else:
+        # ABSOLUTE FALLBACK: Only if Spotify has zero stats AND zero bio.
+        wiki_bio = fetch_wikipedia_bio(f"{artist_name} (musician)") or fetch_wikipedia_bio(artist_name)
+        if wiki_bio and "may refer to:" not in wiki_bio:
+            about["biography"] = wiki_bio
+            about["bio_source"] = "Wikipedia"
+        else:
+            about["biography"] = "Official artist information is currently unavailable."
+            about["bio_source"] = "Spotify"
+        
+    return about
 
 
 def enrich_artwork_batch(results: list[dict]) -> list[dict]:

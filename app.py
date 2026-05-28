@@ -16,6 +16,7 @@ import time
 import urllib.request
 import uuid
 import rapidfuzz
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,7 +24,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, load_config, save_config
-from music_metadata import album_metadata, album_tracks, artist_page, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, search_music, search_relevance
+from music_metadata import album_metadata, album_tracks, artist_page, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, search_music, search_relevance
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
 
 
@@ -32,6 +33,7 @@ STATIC = ROOT / "static"
 DATA = app_data_dir()
 CONFIG_PATH = DATA / "config.json"
 PLAYLISTS_PATH = DATA / "playlists.json"
+DOCK_RECENTS_PATH = DATA / "dock_recents.json"
 
 config_lock = threading.Lock()
 app_config = load_config(CONFIG_PATH)
@@ -39,6 +41,8 @@ service_downloader = ServiceDownloadManager(app_config)
 
 
 playlists_lock = threading.Lock()
+dock_recent_items_lock = threading.Lock()
+_dock_recent_items: list[dict] = []
 
 
 def load_playlists() -> list[dict]:
@@ -52,49 +56,252 @@ def save_playlists(data: list[dict]) -> None:
     PLAYLISTS_PATH.write_text(json.dumps(data, indent=2), "utf-8")
 
 
+def merge_nonempty_track_metadata(saved: dict, enriched: dict) -> dict:
+    merged = dict(saved)
+    for key, value in enriched.items():
+        if value not in ("", None, [], {}):
+            merged[key] = value
+        elif key not in merged:
+            merged[key] = value
+    return merged
+
+
+def enrich_and_persist_track(track: dict) -> dict:
+    enriched = enrich_track_identifiers(track)
+    spotify_id = enriched.get("spotify_id", "")
+    changed = False
+    with playlists_lock:
+        data = load_playlists()
+        for playlist in data:
+            for index, saved in enumerate(playlist.get("tracks") or []):
+                same_spotify_id = spotify_id and saved.get("spotify_id") == spotify_id
+                same_title_artist = (
+                    not saved.get("spotify_id")
+                    and saved.get("title", "").casefold() == enriched.get("title", "").casefold()
+                    and saved.get("artist", "").casefold() == enriched.get("artist", "").casefold()
+                )
+                if same_spotify_id or same_title_artist:
+                    merged = merge_nonempty_track_metadata(saved, enriched)
+                    if merged == saved:
+                        continue
+                    playlist["tracks"][index] = merged
+                    changed = True
+        if changed:
+            save_playlists(data)
+    return enriched
+
+
+def backfill_playlist_isrcs(playlist_id: str = "", max_workers: int = 8) -> dict:
+    from isrc_resolver import resolve_isrc
+
+    with playlists_lock:
+        playlists = load_playlists()
+        targets = [
+            (playlist.get("id", ""), index, dict(track))
+            for playlist in playlists
+            if not playlist_id or playlist.get("id") == playlist_id
+            for index, track in enumerate(playlist.get("tracks") or [])
+            if not track.get("isrc")
+        ]
+
+    def resolve_target(target):
+        pid, index, track = target
+        isrc = resolve_isrc(
+            track.get("title", ""),
+            track.get("artist", ""),
+            spotify_id=track.get("spotify_id", ""),
+        )
+        return pid, index, track, isrc
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        resolved = list(executor.map(resolve_target, targets))
+
+    filled = 0
+    with playlists_lock:
+        playlists = load_playlists()
+        by_id = {playlist.get("id"): playlist for playlist in playlists}
+        for pid, index, original, isrc in resolved:
+            tracks = (by_id.get(pid) or {}).get("tracks") or []
+            if not isrc or index >= len(tracks) or tracks[index].get("isrc"):
+                continue
+            current = tracks[index]
+            if original.get("spotify_id") and current.get("spotify_id") != original.get("spotify_id"):
+                continue
+            if not original.get("spotify_id") and (
+                current.get("title") != original.get("title")
+                or current.get("artist") != original.get("artist")
+            ):
+                continue
+            current["isrc"] = isrc
+            filled += 1
+        if filled:
+            save_playlists(playlists)
+    return {"missing": len(targets), "filled": filled, "remaining": len(targets) - filled}
+
+
+def backfill_library_sidecars(music_root: Path | None = None) -> dict:
+    root = Path(music_root or app_config.music_dir)
+    result = {
+        "root": str(root),
+        "sidecars_scanned": 0,
+        "tracks_scanned": 0,
+        "tracks_updated": 0,
+        "sidecars_updated": 0,
+        "errors": [],
+    }
+    for info_path in sorted(root.rglob("metadata.json")):
+        result["sidecars_scanned"] += 1
+        try:
+            data = json.loads(info_path.read_text("utf-8"))
+            tracks = data.get("tracks") if isinstance(data, dict) else None
+            if not isinstance(tracks, dict):
+                continue
+            changed = False
+            for title, saved in list(tracks.items()):
+                if not isinstance(saved, dict):
+                    continue
+                result["tracks_scanned"] += 1
+                source = dict(saved)
+                source.setdefault("title", title)
+                try:
+                    enriched = enrich_track_identifiers(source)
+                except Exception as exc:
+                    result["errors"].append(f"{info_path}: {title}: {exc}")
+                    continue
+                merged = merge_nonempty_track_metadata(saved, enriched)
+                if merged == saved:
+                    continue
+                tracks[title] = merged
+                changed = True
+                result["tracks_updated"] += 1
+            if changed:
+                info_path.write_text(json.dumps(data, indent=2), "utf-8")
+                result["sidecars_updated"] += 1
+        except Exception as exc:
+            result["errors"].append(f"{info_path}: {exc}")
+    return result
+
+
+def enrich_saved_playlist_tracks(playlist_id: str) -> None:
+    with playlists_lock:
+        playlist = next((entry for entry in load_playlists() if entry.get("id") == playlist_id), None)
+        tracks = list((playlist or {}).get("tracks") or [])
+    for track in tracks:
+        enrich_and_persist_track(track)
+
+
+def start_playlist_identifier_enrichment(playlist_id: str) -> None:
+    threading.Thread(
+        target=enrich_saved_playlist_tracks,
+        args=(playlist_id,),
+        name=f"playlist-identifiers-{playlist_id}",
+        daemon=True,
+    ).start()
+
+
+def enrich_download_payload(body: dict) -> dict:
+    track = body.get("track") if isinstance(body.get("track"), dict) else {}
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else track
+    source = {**metadata, **track}
+    enriched = enrich_and_persist_track(source)
+    if not enriched:
+        return body
+    return {
+        **body,
+        "track": enriched,
+        "metadata": enriched,
+        "spotify_id": enriched.get("spotify_id", body.get("spotify_id", "")),
+        "isrc": enriched.get("isrc", body.get("isrc", "")),
+    }
+
+
+def dock_recent_item_key(entry: dict) -> str:
+    data = entry["data"]
+    if entry["kind"] == "playlist":
+        return f"playlist:{data.get('id') or entry['title']}"
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    identity = data.get("spotify_id") or metadata.get("spotify_id")
+    fallback = f"{entry['title']}:{data.get('artist', '')}"
+    return f"track:{identity or fallback}"
+
+
+def valid_dock_recent_items(entries: list[dict]) -> list[dict]:
+    items = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title", "")).strip()
+        kind = entry.get("kind")
+        data = entry.get("data")
+        if title and kind in {"track", "playlist"} and isinstance(data, dict):
+            item = {"title": title, "kind": kind, "data": data}
+            key = dock_recent_item_key(item)
+            if key not in seen:
+                seen.add(key)
+                items.append(item)
+            if len(items) == 3:
+                break
+    return items
+
+
+def set_dock_recent_items(entries: list[dict]) -> None:
+    items = valid_dock_recent_items(entries)
+    with dock_recent_items_lock:
+        _dock_recent_items[:] = items
+        DOCK_RECENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DOCK_RECENTS_PATH.write_text(json.dumps(items, indent=2), "utf-8")
+
+
+def initialize_dock_recent_items() -> None:
+    try:
+        saved = valid_dock_recent_items(json.loads(DOCK_RECENTS_PATH.read_text("utf-8")))
+    except Exception:
+        saved = []
+    if saved:
+        set_dock_recent_items(saved)
+        return
+
+    catalog = discover_catalog(app_config, refresh_global=False)
+    set_dock_recent_items([
+        {"kind": "track", "title": track.get("title", "Unknown Track"), "data": track}
+        for track in catalog.get("recent_tracks", [])[:3]
+    ])
+
+
+def get_dock_recent_items() -> list[dict]:
+    with dock_recent_items_lock:
+        return list(_dock_recent_items)
+
+
 def _spotify_import_playlist(playlist_url: str) -> dict:
     """Returns {name, artwork_url, description, owner, followers, tracks} from Spotify."""
-    m = re.search(r"playlist/([A-Za-z0-9]+)", playlist_url)
+    m = re.search(r"(?:playlist/|spotify:playlist:)([A-Za-z0-9]+)", playlist_url)
     if not m:
         return {"name": "", "artwork_url": "", "description": "", "owner": "", "followers": 0, "tracks": []}
     playlist_id = m.group(1)
     try:
         from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
         client = SpotifyMetadataClient()
-
-        info = client._get(f"playlists/{playlist_id}", params={
-            "fields": "name,description,images,owner(display_name),followers(total)"
-        })
+        info, imported_tracks, playlist_cover = client.get_playlist_tracks(playlist_id)
         pl_name = info.get("name", "")
-        images = info.get("images") or []
-        pl_artwork = images[0].get("url", "") if images else ""
+        pl_artwork = info.get("cover_url", "") or playlist_cover
         pl_description = info.get("description", "") or ""
-        pl_owner = (info.get("owner") or {}).get("display_name", "")
-        pl_followers = (info.get("followers") or {}).get("total", 0)
+        pl_owner = info.get("owner", "") or ""
+        pl_followers = info.get("followers", 0) or 0
 
-        tracks = []
-        offset = 0
-        while True:
-            data = client._get(f"playlists/{playlist_id}/tracks", params={"limit": 100, "offset": offset})
-            items = data.get("items", [])
-            for item in items:
-                t = item.get("track")
-                if not t or not t.get("id"):
-                    continue
-                spotify_id = t["id"]
-                tracks.append({
-                    "type": "track",
-                    "title": t.get("name", ""),
-                    "artist": ", ".join(a["name"] for a in (t.get("artists") or [])),
-                    "album": (t.get("album") or {}).get("name", ""),
-                    "artwork_url": ((t.get("album") or {}).get("images") or [{}])[0].get("url", ""),
-                    "spotify_id": spotify_id,
-                    "spotify_url": f"https://open.spotify.com/track/{spotify_id}",
-                    "duration_ms": t.get("duration_ms", 0),
-                })
-            if not data.get("next") or len(items) < 100:
-                break
-            offset += 100
+        tracks = [{
+            "type": "track",
+            "title": track.title,
+            "artist": track.artists,
+            "artist_id": track.artist_id if hasattr(track, 'artist_id') else "",
+            "album": track.album,
+            "artwork_url": track.cover_url,
+            "spotify_id": track.id,
+            "spotify_url": track.external_url or f"https://open.spotify.com/track/{track.id}",
+            "duration_ms": track.duration_ms,
+            "isrc": track.isrc,
+        } for track in imported_tracks if track.id]
 
         return {
             "name": pl_name, "artwork_url": pl_artwork, "description": pl_description,
@@ -305,6 +512,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -428,10 +636,17 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 try:
                     # Stricter timeout and standard headers
-                    req = urllib.request.Request(url, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    image_headers = {
+                        "User-Agent": "Mindinguflac/1.0 +https://www.discogs.com/developers/",
                         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-                    })
+                    }
+                    image_host = (urlparse(url).hostname or "").lower()
+                    if app_config.discogs_token and (
+                        image_host == "discogs.com"
+                        or image_host.endswith(".discogs.com")
+                    ):
+                        image_headers["Authorization"] = f"Discogs token={app_config.discogs_token}"
+                    req = urllib.request.Request(url, headers=image_headers)
                     with urllib.request.urlopen(req, timeout=15) as resp:
                         content_type = resp.headers.get("Content-Type", "image/jpeg")
                         data = resp.read()
@@ -451,6 +666,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/cache":
                 self.send_json(cache_stats())
+                return
+            if path == "/api/cache/logs":
+                self.send_json(service_downloader.cache_log_snapshot())
                 return
             if path == "/api/service/downloads":
                 self.send_json({"jobs": service_downloader.list_jobs()})
@@ -505,6 +723,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         try:
+            if path == "/api/dock/recent":
+                body = read_body(self)
+                set_dock_recent_items(body.get("entries") or [])
+                self.send_json({"ok": True})
+                return
+            if path == "/api/dock/playing-state":
+                body = read_body(self)
+                import desktop as _desktop
+                _desktop._macos_dock_state["playing"] = bool(body.get("playing"))
+                self.send_json({"ok": True})
+                return
+            if path == "/api/artist/about":
+                body = read_body(self)
+                from music_metadata import artist_about
+                self.send_json(artist_about(body.get("artist_id"), body.get("name")))
+                return
+            if path == "/api/music/enrich":
+                body = read_body(self)
+                tracks = body.get("tracks") or []
+                self.send_json({"tracks": enrich_artwork_batch(tracks)})
+                return
             if path == "/api/settings":
                 body = read_body(self)
                 updated = AppConfig.from_public_dict(body)
@@ -522,6 +761,9 @@ class Handler(BaseHTTPRequestHandler):
                 imported = {"name": "", "artwork_url": "", "tracks": []}
                 if spotify_url:
                     imported = _spotify_import_playlist(spotify_url)
+                    if not imported["name"] and not imported["tracks"]:
+                        self.send_error_json("Spotify import failed", HTTPStatus.BAD_GATEWAY)
+                        return
                 playlist = {
                     "id": str(uuid.uuid4()),
                     "name": user_name or imported["name"] or "New Playlist",
@@ -538,6 +780,8 @@ class Handler(BaseHTTPRequestHandler):
                     data = load_playlists()
                     data.append(playlist)
                     save_playlists(data)
+                if imported["tracks"]:
+                    start_playlist_identifier_enrichment(playlist["id"])
                 self.send_json({**playlist, "imported": bool(imported["tracks"])}, 201)
                 return
             if path == "/api/playlists/refresh":
@@ -569,6 +813,8 @@ class Handler(BaseHTTPRequestHandler):
                         pl["tracks"] = imported["tracks"]
                         pl["metadata_fetched"] = True
                         save_playlists(data)
+                if pl and pl.get("tracks"):
+                    start_playlist_identifier_enrichment(playlist_id)
                 self.send_json(pl)
                 return
             if path == "/api/playlists/tracks":
@@ -596,21 +842,32 @@ class Handler(BaseHTTPRequestHandler):
                             pl["tracks"].append(track)
                         in_playlist = True
                     save_playlists(data)
+                if in_playlist and not existing:
+                    threading.Thread(
+                        target=enrich_and_persist_track,
+                        args=(track,),
+                        daemon=True,
+                        name="playlist-track-enrich",
+                    ).start()
                 self.send_json({"ok": True, "in_playlist": in_playlist})
                 return
             if path == "/api/service/download":
-                body = read_body(self)
+                body = enrich_download_payload(read_body(self))
                 job = service_downloader.start_job(body)
                 self.send_json(job, 201)
                 return
             if path == "/api/library/status":
                 self.send_json(service_downloader.library_status(read_body(self)))
                 return
+            if path == "/api/library/status/batch":
+                body = read_body(self)
+                self.send_json(service_downloader.library_status_batch(body.get("tracks", [])))
+                return
             if path == "/api/library/toggle":
-                self.send_json(service_downloader.toggle_library(read_body(self)))
+                self.send_json(service_downloader.toggle_library(enrich_download_payload(read_body(self))))
                 return
             if path == "/api/playback/source":
-                self.send_json(service_downloader.playback_source(read_body(self)))
+                self.send_json(service_downloader.playback_source(enrich_download_payload(read_body(self))))
                 return
             if path == "/api/service/promote":
                 body = read_body(self)
@@ -639,6 +896,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = read_body(self)
                 service_downloader.cancel_job(body.get("job_id"))
                 self.send_json({"ok": True})
+                return
+            if path == "/api/cache":
+                result = service_downloader.clear_cache()
+                app_config.last_cache_cleanup = time.time()
+                save_config(CONFIG_PATH, app_config)
+                self.send_json({**result, **cache_stats()})
                 return
             self.send_error_json("Not found", HTTPStatus.NOT_FOUND)
         except Exception as exc:

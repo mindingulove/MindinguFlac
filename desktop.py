@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -10,11 +12,40 @@ import webview
 
 APP_NAME = "Mindinguflac"
 DARK_BACKGROUND = "#090b10"
+_macos_dock_state: dict[str, object] = {
+    "handler": None,
+    "shuffle": False,
+    "repeat": False,
+    "playing": False,
+}
 
 
 def resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base / relative
+
+
+def configure_tls_certificates() -> None:
+    """Keep TLS verification usable while a new desktop bundle is installed."""
+    bundled_cert = resource_path("certifi/cacert.pem")
+    if not bundled_cert.is_file():
+        try:
+            import certifi
+
+            bundled_cert = Path(certifi.where())
+        except Exception:
+            return
+    if sys.platform == "darwin":
+        runtime_dir = Path.home() / "Library" / "Application Support" / APP_NAME / "runtime"
+    elif sys.platform == "win32":
+        runtime_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME / "runtime"
+    else:
+        runtime_dir = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_NAME / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    stable_cert = runtime_dir / "cacert.pem"
+    shutil.copy2(bundled_cert, stable_cert)
+    for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        os.environ[name] = str(stable_cert)
 
 
 def force_dark_appearance() -> None:
@@ -30,136 +61,115 @@ def force_dark_appearance() -> None:
         pass
 
 
-def apply_macos_patches() -> None:
-    """Apply various macOS-specific patches (media permissions, dock menu, etc)."""
+def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> None:
+    """Install native playback controls in the macOS Dock context menu."""
     if sys.platform != "darwin":
         return
     try:
         import objc
-        from AppKit import NSApplication, NSMenu, NSMenuItem
+        from AppKit import NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem
         from Foundation import NSObject
         import webview.platforms.cocoa as cocoa
 
-        # 1. Media permissions (WKUIDelegate)
-        WKUIDelegate = objc.protocolNamed("WKUIDelegate")
-
-        class _NoMediaDelegate(NSObject, protocols=[WKUIDelegate]):
-            @objc.python_method
-            def webView_requestMediaCapturePermissionForOrigin_initiatedByFrame_type_decisionHandler_(
-                self, webView, origin, frame, type_, handler
-            ):
-                # 1 = WKPermissionDecisionDeny
-                handler(1)
-
-        _deny_delegate = _NoMediaDelegate.alloc().init()
-
-        # 2. Dock Menu Handler
         class _DockMenuHandler(NSObject):
-            @objc.python_method
             def initWithWindow_(self, window):
                 self = objc.super(_DockMenuHandler, self).init()
                 if self:
                     self.window = window
                 return self
 
-            @objc.selector(b"playPauseAction:")
+            @objc.python_method
+            def run_js_script(self, script):
+                threading.Thread(
+                    target=self.window.evaluate_js,
+                    args=(script,),
+                    daemon=True,
+                ).start()
+
+            @objc.python_method
+            def run_button_action(self, element_id):
+                self.run_js_script(f'document.getElementById("{element_id}")?.click()')
+
             def playPauseAction_(self, sender):
-                self.window.evaluate_js('document.getElementById("playPause")?.click()')
+                self.run_button_action("playPause")
 
-            @objc.selector(b"nextAction:")
             def nextAction_(self, sender):
-                self.window.evaluate_js('document.getElementById("btnNext")?.click()')
+                self.run_button_action("btnNext")
 
-            @objc.selector(b"prevAction:")
             def prevAction_(self, sender):
-                self.window.evaluate_js('document.getElementById("btnPrev")?.click()')
+                self.run_button_action("btnPrev")
 
-            @objc.selector(b"shuffleAction:")
             def shuffleAction_(self, sender):
-                self.window.evaluate_js('document.getElementById("btnShuffle")?.click()')
+                _macos_dock_state["shuffle"] = not _macos_dock_state["shuffle"]
+                self.run_button_action("btnShuffle")
 
-            @objc.selector(b"repeatAction:")
             def repeatAction_(self, sender):
-                self.window.evaluate_js('document.getElementById("btnRepeat")?.click()')
+                _macos_dock_state["repeat"] = not _macos_dock_state["repeat"]
+                self.run_button_action("btnRepeat")
 
-        # Shared state for the dock menu
-        _macos_state = {
-            "handler": None,
-            "menu": None
-        }
+            def recentAction_(self, sender):
+                entries = recent_items_provider()
+                index = sender.tag()
+                if 0 <= index < len(entries):
+                    entry_json = json.dumps(entries[index], ensure_ascii=True)
+                    self.run_js_script(f"window.openDockRecentItem({entry_json})")
 
-        # 3. Patch AppDelegate.applicationDockMenu:
-        def applicationDockMenu_(self, sender):
-            return _macos_state["menu"]
+        handler = _DockMenuHandler.alloc().initWithWindow_(window)
+        _macos_dock_state["handler"] = handler
 
-        # Add the method to cocoa.AppDelegate class BEFORE it's instantiated
-        if not hasattr(cocoa.AppDelegate, "applicationDockMenu_"):
-            objc_method = objc.selector(applicationDockMenu_, selector=b"applicationDockMenu:", signature=b"@@:@")
-            objc.classAddMethod(cocoa.AppDelegate, b"applicationDockMenu:", objc_method)
+        def build_dock_menu():
+            dock_menu = NSMenu.alloc().initWithTitle_("Dock Menu")
+            for title, action in (
+                ("Pause" if _macos_dock_state["playing"] else "Play", "playPauseAction:"),
+                ("Next", "nextAction:"),
+                ("Previous", "prevAction:"),
+            ):
+                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, "")
+                item.setTarget_(handler)
+                dock_menu.addItem_(item)
 
-        # 4. Patching logic for window-specific setup
-        def _install(wv_window):
-            try:
-                # Install media delegate
-                wv = wv_window._browser.webview  # pywebview cocoa backend
-                wv.setUIDelegate_(_deny_delegate)
-                _deny_delegate.retain()
+            dock_menu.addItem_(NSMenuItem.separatorItem())
 
-                # Initialize dock menu once window is available
-                if _macos_state["menu"] is None:
-                    handler = _DockMenuHandler.alloc().initWithWindow_(wv_window)
-                    handler.retain()
-                    _macos_state["handler"] = handler
+            for title, action, state_key in (
+                ("Shuffle", "shuffleAction:", "shuffle"),
+                ("Repeat", "repeatAction:", "repeat"),
+            ):
+                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, "")
+                item.setTarget_(handler)
+                item.setState_(NSControlStateValueOn if _macos_dock_state[state_key] else NSControlStateValueOff)
+                dock_menu.addItem_(item)
 
-                    dock_menu = NSMenu.alloc().initWithTitle_("Dock Menu")
-                    
-                    item_play = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Play / Pause", "playPauseAction:", "")
-                    item_play.setTarget_(handler)
-                    dock_menu.addItem_(item_play)
-                    
-                    item_next = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Next Track", "nextAction:", "")
-                    item_next.setTarget_(handler)
-                    dock_menu.addItem_(item_next)
-                    
-                    item_prev = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Previous Track", "prevAction:", "")
-                    item_prev.setTarget_(handler)
-                    dock_menu.addItem_(item_prev)
-                    
-                    dock_menu.addItem_(NSMenuItem.separatorItem())
-                    
-                    item_shuffle = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Shuffle", "shuffleAction:", "")
-                    item_shuffle.setTarget_(handler)
-                    dock_menu.addItem_(item_shuffle)
-                    
-                    item_repeat = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Repeat", "repeatAction:", "")
-                    item_repeat.setTarget_(handler)
-                    dock_menu.addItem_(item_repeat)
-                    
-                    _macos_state["menu"] = dock_menu
-            except Exception:
-                pass
+            recent_items = recent_items_provider()
+            if recent_items:
+                dock_menu.addItem_(NSMenuItem.separatorItem())
+                heading = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Recently Played", None, "")
+                heading.setEnabled_(False)
+                dock_menu.addItem_(heading)
+                for index, entry in enumerate(recent_items):
+                    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                        entry["title"], "recentAction:", ""
+                    )
+                    item.setTarget_(handler)
+                    item.setTag_(index)
+                    dock_menu.addItem_(item)
+            return dock_menu
 
-        import webview as _wv
-        _orig_create = _wv.create_window
+        class _DockAppDelegate(cocoa.BrowserView.AppDelegate):
+            def applicationDockMenu_(self, sender):
+                return build_dock_menu()
 
-        def _patched_create(*a, **kw):
-            win = _orig_create(*a, **kw)
-            # defer until webview.start() has initialised the window
-            def _later():
-                import time; time.sleep(0.5)
-                _install(win)
-            threading.Thread(target=_later, daemon=True).start()
-            return win
-
-        _wv.create_window = _patched_create
-    except Exception:
-        pass
+        # pywebview creates this delegate inside webview.start(), after this setup runs.
+        cocoa.BrowserView.AppDelegate = _DockAppDelegate
+    except Exception as exc:
+        print(f"Unable to install macOS Dock menu: {exc}", file=sys.stderr)
 
 
 def main() -> None:
     os.environ.setdefault("MINDINGUFLAC_DESKTOP", "1")
+    configure_tls_certificates()
     import app
 
+    app.initialize_dock_recent_items()
     server = app.create_server("127.0.0.1", 0)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, name="mindinguflac-http", daemon=True)
@@ -168,10 +178,9 @@ def main() -> None:
     icon_path = resource_path("static/assets/app_icon.png")
     url = f"http://127.0.0.1:{port}/"
     force_dark_appearance()
-    apply_macos_patches()
 
     try:
-        webview.create_window(
+        window = webview.create_window(
             APP_NAME,
             url,
             width=1280,
@@ -179,6 +188,7 @@ def main() -> None:
             min_size=(960, 640),
             background_color=DARK_BACKGROUND,
         )
+        install_macos_dock_menu(window, app.get_dock_recent_items)
         webview.start(icon=str(icon_path) if icon_path.exists() else None)
     finally:
         server.shutdown()

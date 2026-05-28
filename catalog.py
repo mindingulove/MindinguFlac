@@ -108,7 +108,7 @@ def discover_catalog(config, refresh_global: bool = True) -> dict:
             with JOBS_PATH.open("r", encoding="utf-8") as f:
                 jobs = json.load(f)
                 jobs.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-                for job in jobs[:20]:
+                for job in jobs[:100]:
                     if job.get("status") == "finished":
                         recent.append({
                             "type": "track",
@@ -137,9 +137,9 @@ def discover_catalog(config, refresh_global: bool = True) -> dict:
         try:
             from music_metadata import SpotifyIndexer
             sp = SpotifyIndexer()
-            live_global = sp.top_tracks(24)
-            live_artists = sp.top_artists(24)
-            live_albums = sp.new_releases(24)
+            live_global = sp.top_tracks(100)
+            live_artists = sp.top_artists(100)
+            live_albums = sp.new_releases(100)
 
             # SpotiFLAC's Spotify client turns network/API failures into empty
             # results. Treat an empty section as unavailable rather than clearing

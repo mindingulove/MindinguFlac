@@ -13,10 +13,6 @@ from pathlib import Path
 
 from config import jobs_path
 
-# SpotiFLAC's DownloadManager is a process-wide singleton that calls reset()
-# at the start of every run(), wiping progress for any concurrent download.
-# Serialize all SpotiFLAC() calls so they never overlap.
-_spotiflac_lock = threading.Lock()
 
 def clean_part(value: str) -> str:
     cleaned = "".join(char for char in value if char not in '/\\:*?"<>|').strip()
@@ -26,10 +22,10 @@ def clean_part(value: str) -> str:
 def is_valid_audio_file(path: Path) -> bool:
     try:
         size = path.stat().st_size
-        # Ignore files smaller than 100KB (likely failed/partial)
         if size < 100 * 1024:
             return False
-        header = path.read_bytes()[:64]
+        with path.open("rb") as audio_file:
+            header = audio_file.read(64)
     except Exception:
         return False
     suffix = path.suffix.lower()
@@ -74,10 +70,18 @@ def is_download_audio_candidate(path: Path) -> bool:
         or ".temp" in name
     )
 
-# Maps our service names to SpotiFLAC's PROVIDER_REGISTRY keys.
-_SPOTIFLAC_SERVICE_MAP: dict[str, str] = {
-    "apple_music": "apple",
-}
+
+IDENTIFIER_FIELDS = (
+    "spotify_id",
+    "isrc",
+    "deezer_id",
+    "tidal_id",
+    "amazon_id",
+    "apple_music_id",
+    "musicbrainz_recording_id",
+    "musicbrainz_release_id",
+    "musicbrainz_artist_id",
+)
 
 SERVICE_PLATFORM_KEYS = {
     "spotify": "spotify",
@@ -156,8 +160,7 @@ def _resolve_platform_url(candidate_url: str, service: str) -> str:
         links = data.get("linksByPlatform") or {}
         platform_info = links.get(platform) or {}
         resolved = platform_info.get("url") or platform_info.get("nativeAppUri") or ""
-        
-        # Guard: Odesli sometimes returns the root domain if it can't find a match
+
         if resolved:
             r_low = resolved.lower()
             if r_low.endswith("amazon.com") or r_low.endswith("amazon.com/") or \
@@ -166,47 +169,54 @@ def _resolve_platform_url(candidate_url: str, service: str) -> str:
             return resolved
     except Exception:
         pass
-    # Only fall back to the raw candidate if it already belongs to the target service.
     domain = _SERVICE_DOMAINS.get(service, "")
     if domain and domain in candidate_url:
         return candidate_url
     return ""
 
 
-def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "track") -> str:
+def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "track", isrc: str = "") -> str:
     try:
         from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
         client = SpotifyMetadataClient()
-        q = f"artist:{artist} album:{album}" if kind == "album" and album else (
+        
+        queries = []
+        if isrc and kind == "track":
+            queries.append(f"isrc:{isrc}")
+        
+        queries.append(f"artist:{artist} album:{album}" if kind == "album" and album else (
             f"artist:{artist}" if kind == "album" else (
                 f"artist:{artist} track:{title}" if title else f"artist:{artist} {album}"
             )
-        )
-        if not hasattr(client, "_get"):
-            data = client.search(q, limit=3)
-            items = data.get("albums" if kind == "album" else "tracks", [])
+        ))
+
+        for q in queries:
+            if not hasattr(client, "_get"):
+                data = client.search(q, limit=3)
+                items = data.get("albums" if kind == "album" else "tracks", [])
+                for item in items:
+                    url = item.get("external_url", "") if isinstance(item, dict) else getattr(item, "external_url", "")
+                    if url:
+                        return url
+                continue
+
+            if kind == "album":
+                data = client._get("search", params={"q": q, "type": "album", "limit": 3})
+                items = data.get("albums", {}).get("items", [])
+            else:
+                data = client._get("search", params={"q": q, "type": "track", "limit": 3})
+                items = data.get("tracks", {}).get("items", [])
+            
             for item in items:
-                url = item.get("external_url", "") if isinstance(item, dict) else getattr(item, "external_url", "")
+                url = (item.get("external_urls") or {}).get("spotify", "")
                 if url:
                     return url
-            return ""
-        if kind == "album":
-            data = client._get("search", params={"q": q, "type": "album", "limit": 3})
-            items = data.get("albums", {}).get("items", [])
-        else:
-            data = client._get("search", params={"q": q, "type": "track", "limit": 3})
-            items = data.get("tracks", {}).get("items", [])
-        for item in items:
-            url = (item.get("external_urls") or {}).get("spotify", "")
-            if url:
-                return url
     except Exception:
         pass
     return ""
 
 
 def resolve_download_url(track: dict, service: str = "tidal", kind: str = "track") -> str:
-    # 1. Try Spotify directly if we have it - it's our most reliable source for SpotiFLAC
     spotify_url = _first_value(track.get("spotify_url"), (track.get("metadata") or {}).get("spotify_url"))
     if spotify_url and "spotify.com" in spotify_url:
         print(f"[Resolve] Using provided Spotify URL: {spotify_url}")
@@ -217,7 +227,6 @@ def resolve_download_url(track: dict, service: str = "tidal", kind: str = "track
         print(f"[Resolve] Using provided Spotify ID: {spotify_url}")
         return spotify_url
 
-    # 2. Try Odesli resolution for other candidates
     for candidate in _candidate_urls(track, kind):
         resolved = _resolve_platform_url(candidate, service)
         if resolved:
@@ -227,12 +236,12 @@ def resolve_download_url(track: dict, service: str = "tidal", kind: str = "track
     artist = _first_value(track.get("artist"), (track.get("metadata") or {}).get("artist"))
     album = _first_value(track.get("album"), (track.get("metadata") or {}).get("album"))
     title = _first_value(track.get("title"), (track.get("metadata") or {}).get("title"))
+    isrc = _first_value(track.get("isrc"), (track.get("metadata") or {}).get("isrc"))
 
-    # 3. Last resort: search Spotify directly using SpotiFLAC's own client credentials.
-    if artist and (title or album):
-        res = _search_spotify_url(artist, title, album, kind)
+    if artist and (title or album or isrc):
+        res = _search_spotify_url(artist, title, album, kind, isrc)
         if res:
-            print(f"[Resolve] Search resolved '{artist} - {title}' -> {res}")
+            print(f"[Resolve] Search resolved '{artist} - {title}' (ISRC: {isrc}) -> {res}")
             return res
 
     return ""
@@ -273,6 +282,20 @@ def _parse_duration_ms(value: object) -> int:
     return seconds * 1000
 
 
+def _audio_duration_ms(path: Path) -> int:
+    try:
+        from mutagen import File as MutagenFile  # type: ignore
+        audio = MutagenFile(path)
+        length = getattr(getattr(audio, "info", None), "length", 0)
+        return int(float(length) * 1000) if length else 0
+    except Exception:
+        return 0
+
+
+def downloaded_track_matches_request(path: Path, job: dict) -> tuple[bool, str]:
+    return True, ""
+
+
 def _estimated_total_bytes(job: dict, detected_ext: str = "") -> int:
     meta = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
     duration_ms = (
@@ -281,22 +304,19 @@ def _estimated_total_bytes(job: dict, detected_ext: str = "") -> int:
         or _parse_duration_ms(meta.get("duration"))
     )
     minutes = max(1.0, duration_ms / 60000) if duration_ms else 5.0
-    
+
     ext = detected_ext.lower()
-    # Strip temporary/downloader extensions
     for tmp in (".part", ".ytdl", ".tmp", ".temp", ".crdownload"):
         if ext.endswith(tmp):
             ext = ext[:-len(tmp)]
             if "." in ext:
                 ext = ext[ext.rfind("."):]
             break
-            
+
     quality = str(job.get("quality") or "").lower()
     url = str(job.get("resolved_url") or "").lower()
     is_youtube = "youtube.com" in url or "googlevideo.com" in url or "youtu.be" in url
 
-    # Use the actual on-disk format when known — quality setting may not match
-    # the fallback provider (e.g. quality=LOSSLESS but YouTube delivers .webm)
     if ext in {".webm", ".opus", ".ogg"}:
         mb_per_min = 1.0 if is_youtube else 2.0
     elif ext in {".mp3"}:
@@ -309,7 +329,6 @@ def _estimated_total_bytes(job: dict, detected_ext: str = "") -> int:
     elif ext in {".flac", ".alac", ".wav"}:
         mb_per_min = 6.5
     elif is_youtube:
-        # YouTube is never lossless
         mb_per_min = 1.2
     elif any(token in quality for token in ("flac", "lossless", "27")):
         mb_per_min = 6.5
@@ -334,7 +353,6 @@ def _downloaded_candidate_size(root: Path) -> int:
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        suffix = path.suffix.lower()
         if is_download_audio_candidate(path):
             candidates.append(path)
     if not candidates:
@@ -352,6 +370,23 @@ def _payload_metadata(payload: dict) -> dict:
     return {**metadata, **track, **payload}
 
 
+def _merge_nonempty_metadata(saved: dict, incoming: dict) -> dict:
+    merged = dict(saved)
+    for key, value in incoming.items():
+        if value not in ("", None, [], {}):
+            merged[key] = value
+        elif key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _audio_path_matches_track(path: Path, title: str, artist: str = "") -> bool:
+    expected_stems = {_norm(title)}
+    if artist:
+        expected_stems.add(_norm(f"{clean_part(title)} - {clean_part(artist)}"))
+    return _norm(path.stem) in expected_stems
+
+
 def _track_identity_from_payload(payload: dict) -> dict:
     meta = _payload_metadata(payload)
     artist = meta.get("artist")
@@ -361,6 +396,7 @@ def _track_identity_from_payload(payload: dict) -> dict:
         "artist": _norm(artist),
         "album": _norm(album),
         "title": _norm(title),
+        "title_part": clean_part(title or "Unknown Track"),
         "artist_part": clean_part(artist or "Unknown Artist"),
         "album_part": clean_part(album or "Unknown Album"),
         "library_path": str(meta.get("library_path") or ""),
@@ -417,106 +453,6 @@ def _quality_rank(path: Path, quality: object = "") -> int:
 
 ROOT = Path(__file__).resolve().parent
 JOBS_PATH = jobs_path()
-_STREAM_CAPTURE = threading.local()
-_STREAM_CAPTURE_INSTALLED = False
-
-# ---------------------------------------------------------------------------
-# Tor SOCKS5 bypass
-# ---------------------------------------------------------------------------
-_TOR_SOCKS = "socks5h://127.0.0.1:9050"
-_TOR_BINARY = "/opt/homebrew/bin/tor"
-_TOR_DATA_DIR = Path("/tmp/streambox-tor")
-_tor_process: object = None   # subprocess.Popen or None
-_tor_lock = threading.Lock()
-
-
-def _tor_is_up() -> bool:
-    import socket
-    try:
-        with socket.create_connection(("127.0.0.1", 9050), timeout=2):
-            return True
-    except Exception:
-        return False
-
-
-def _start_tor() -> bool:
-    """Start Tor if not already running. Returns True when SOCKS port is ready."""
-    global _tor_process
-    import subprocess
-
-    if _tor_is_up():
-        return True
-
-    tor_bin = _TOR_BINARY
-    if not Path(tor_bin).exists():
-        # Try PATH fallback
-        import shutil
-        tor_bin = shutil.which("tor") or ""
-    if not tor_bin:
-        print("[Tor] tor binary not found — install with: brew install tor")
-        return False
-
-    _TOR_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print("[Tor] Starting local Tor daemon…")
-    try:
-        proc = subprocess.Popen(
-            [tor_bin, "--SocksPort", "9050", "--DataDirectory", str(_TOR_DATA_DIR),
-             "--Log", "notice stdout"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        )
-        _tor_process = proc
-    except Exception as e:
-        print(f"[Tor] Failed to start: {e}")
-        return False
-
-    # Wait up to 30 s for bootstrap
-    for _ in range(30):
-        time.sleep(1)
-        if _tor_is_up():
-            print("[Tor] SOCKS5 ready on 127.0.0.1:9050")
-            return True
-
-    print("[Tor] Timed out waiting for Tor to bootstrap.")
-    return False
-
-
-def _ensure_tor() -> bool:
-    """Thread-safe: ensure Tor is running. Returns True if SOCKS port is available."""
-    with _tor_lock:
-        return _start_tor()
-
-
-def prefetch_tor() -> None:
-    """Start Tor in background at download start so it's ready if needed."""
-    t = threading.Thread(target=_ensure_tor, daemon=True, name="tor-warmup")
-    t.start()
-
-
-def _install_stream_capture() -> None:
-    global _STREAM_CAPTURE_INSTALLED
-    if _STREAM_CAPTURE_INSTALLED:
-        return
-    try:
-        from SpotiFLAC.core.http import HttpClient  # type: ignore
-    except Exception:
-        return
-
-    original = HttpClient.stream_to_file
-
-    def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None):
-        manager = getattr(_STREAM_CAPTURE, "manager", None)
-        job_id = getattr(_STREAM_CAPTURE, "job_id", "")
-        if manager and job_id:
-            with manager._lock:
-                job = manager.jobs.get(job_id)
-                if job:
-                    job["active_stream_url"] = url
-                    job["active_stream_dest_path"] = str(dest_path)
-                    job["active_stream_headers"] = extra_headers or {}
-        return original(self, url, dest_path, progress_cb, chunk_size, extra_headers)
-
-    HttpClient.stream_to_file = wrapped_stream_to_file
-    _STREAM_CAPTURE_INSTALLED = True
 
 
 class ServiceDownloadManager:
@@ -524,8 +460,11 @@ class ServiceDownloadManager:
         self.config = config
         self.jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
         self._cancel_flags: set[str] = set()
         self._progress_thread_running = False
+        self._cache_events: list[dict] = []
+        self._cache_file_sizes: dict[tuple[str, str], int] = {}
         self._load_jobs()
 
     def _ensure_progress_thread(self) -> None:
@@ -547,6 +486,105 @@ class ServiceDownloadManager:
         with self._lock:
             self.config = config
 
+    def cache_log_snapshot(self, limit: int = 80) -> dict:
+        with self._lock:
+            events = list(self._cache_events[-max(1, min(limit, 200)):])
+            cache_dir = str(self.config.cache_dir)
+        return {"cache_dir": cache_dir, "events": events}
+
+    def clear_cache(self) -> dict:
+        cache_dir = Path(self.config.cache_dir)
+        with self._lock:
+            stream_job_ids = {
+                job_id
+                for job_id, job in self.jobs.items()
+                if job.get("mode", "stream") == "stream"
+            }
+            active_ids = {
+                job_id
+                for job_id in stream_job_ids
+                if self.jobs[job_id].get("status") in ("starting", "running")
+            }
+            self._cancel_flags.update(active_ids)
+            for job_id in stream_job_ids:
+                self.jobs.pop(job_id, None)
+            self._cache_events.clear()
+            self._cache_file_sizes.clear()
+
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self._save_jobs()
+        return {
+            "ok": True,
+            "cache_dir": str(cache_dir),
+            "removed_jobs": len(stream_job_ids),
+            "cancelled_jobs": len(active_ids),
+        }
+
+    def _append_cache_event(self, job: dict, kind: str, message: str) -> None:
+        if job.get("prefetch"):
+            message = f"Prefetch: {message}"
+        event = {
+            "timestamp": time.time(),
+            "job_id": job.get("id", ""),
+            "title": job.get("title", ""),
+            "kind": kind,
+            "message": message,
+        }
+        with self._lock:
+            self._cache_events.append(event)
+            if len(self._cache_events) > 200:
+                del self._cache_events[:-200]
+
+    @staticmethod
+    def _cache_size_text(size: int) -> str:
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size / (1024 * 1024):.1f} MB"
+
+    def _capture_cache_activity(self, job: dict) -> None:
+        if job.get("mode", "stream") != "stream" or not job.get("output_dir"):
+            return
+        root = Path(job["output_dir"])
+        try:
+            files = sorted(path for path in root.rglob("*") if path.is_file())
+        except Exception:
+            return
+
+        seen: set[str] = set()
+        changes: list[tuple[str, str]] = []
+        with self._lock:
+            for path in files:
+                path_text = str(path)
+                seen.add(path_text)
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                key = (job["id"], path_text)
+                previous = self._cache_file_sizes.get(key)
+                self._cache_file_sizes[key] = size
+                relative = str(path.relative_to(root))
+                if previous is None:
+                    changes.append(("created", f"Created {relative} ({self._cache_size_text(size)})"))
+                elif previous != size:
+                    changes.append(("updated", f"Updated {relative} ({self._cache_size_text(size)})"))
+
+            tracked = [
+                key for key in self._cache_file_sizes
+                if key[0] == job["id"] and key[1] not in seen
+            ]
+            for key in tracked:
+                relative = str(Path(key[1]).relative_to(root))
+                del self._cache_file_sizes[key]
+                changes.append(("removed", f"Removed {relative}"))
+
+        for kind, message in changes:
+            self._append_cache_event(job, kind, message)
+
     def cancel_job(self, job_id: str) -> bool:
         with self._lock:
             job = self.jobs.get(job_id)
@@ -556,8 +594,7 @@ class ServiceDownloadManager:
             job["status"] = "error"
             job["error"] = "Cancelled by user"
             job["library_requested"] = False
-            
-            # Delete partial/cached files for this job
+
             output_dir = job.get("output_dir")
             if output_dir:
                 try:
@@ -566,7 +603,8 @@ class ServiceDownloadManager:
                         shutil.rmtree(p, ignore_errors=True)
                 except Exception:
                     pass
-        
+
+        self._append_cache_event(job, "cancelled", "Cache download cancelled and partial files removed")
         self._save_jobs()
         return True
 
@@ -600,7 +638,7 @@ class ServiceDownloadManager:
             job = self.jobs.get(job_id)
         if not job or job.get("status") != "finished":
             return None
-        
+
         if job.get("mode") == "download":
             return self._public_job(job)
 
@@ -615,20 +653,20 @@ class ServiceDownloadManager:
             "mode": "download",
             "created_at": time.time(),
         }
-        
+
         new_dir = self._output_dir(new_job)
         new_dir.mkdir(parents=True, exist_ok=True)
         new_file_path = new_dir / old_path.name
-        
+
         try:
             old_dir = old_path.parent
             for item in old_dir.iterdir():
                 if item.is_file():
                     shutil.copy2(item, new_dir / item.name)
-            
+
             new_job["library_path"] = str(new_file_path)
             new_job["output_dir"] = str(new_dir)
-            
+
             with self._lock:
                 self.jobs[new_job_id] = new_job
             self._save_jobs()
@@ -636,9 +674,24 @@ class ServiceDownloadManager:
         except Exception:
             return None
 
-    def library_status(self, payload: dict) -> dict:
+    def _library_file_index(self) -> dict[str, list[Path]]:
+        indexed: dict[str, list[Path]] = {}
+        for path in _find_audio_files(self.config.music_dir):
+            try:
+                relative = path.relative_to(self.config.music_dir)
+            except ValueError:
+                continue
+            artist = relative.parts[0] if len(relative.parts) > 1 else "Unknown Artist"
+            indexed.setdefault(_norm(artist), []).append(path)
+        return indexed
+
+    def library_status_batch(self, payloads: list) -> list:
+        library_files = self._library_file_index()
+        return [self.library_status(payload, library_files) for payload in payloads]
+
+    def library_status(self, payload: dict, library_files: dict[str, list[Path]] | None = None) -> dict:
         identity = _track_identity_from_payload(payload)
-        library = self._find_library_entry(identity)
+        library = self._find_library_entry(identity, library_files)
         cache = self._find_cache_entry(identity)
         active = self._find_active_library_job(identity)
         if active:
@@ -692,6 +745,10 @@ class ServiceDownloadManager:
         cache = self._find_cache_entry(identity)
         if cache:
             job = cache.get("job") or self._job_from_payload(payload, mode="download")
+            if cache.get("job"):
+                with self._lock:
+                    self._merge_payload_into_job(job, payload)
+                self._save_jobs()
             result = self._copy_job_audio_to_library(job, cache["path"])
             return {"ok": True, "action": "copied", **result, **self.library_status(payload)}
 
@@ -700,6 +757,7 @@ class ServiceDownloadManager:
             with self._lock:
                 job = self.jobs.get(active["id"])
                 if job:
+                    self._merge_payload_into_job(job, payload)
                     job["library_requested"] = True
                     job["library_request_payload"] = payload
             self._save_jobs()
@@ -708,6 +766,16 @@ class ServiceDownloadManager:
         new_payload = {**payload, "mode": "download"}
         job = self.start_job(new_payload)
         return {"ok": True, "action": "started", "job": job, **self.library_status(payload)}
+
+    def _merge_payload_into_job(self, job: dict, payload: dict) -> None:
+        incoming = _payload_metadata(payload)
+        job["metadata"] = _merge_nonempty_metadata(job.get("metadata") or {}, incoming)
+        for key in IDENTIFIER_FIELDS:
+            if incoming.get(key):
+                job[key] = incoming[key]
+        for key in ("artwork_url",):
+            if incoming.get(key):
+                job[key] = incoming[key]
 
     def _job_from_payload(self, payload: dict, mode: str = "download") -> dict:
         meta = _payload_metadata(payload)
@@ -722,6 +790,7 @@ class ServiceDownloadManager:
             "isrc": meta.get("isrc") or "",
             "metadata": meta,
             "service": (payload.get("service") or self.config.download_service or "tidal").lower(),
+            "engine": (payload.get("engine") or self.config.download_engine or "spotiflac").lower(),
             "quality": payload.get("quality") or self.config.default_quality or "flac",
             "status": "finished",
             "progress": 100,
@@ -732,7 +801,7 @@ class ServiceDownloadManager:
             "library_path": "",
         }
 
-    def _find_library_entry(self, identity: dict) -> dict | None:
+    def _find_library_entry(self, identity: dict, library_files: dict[str, list[Path]] | None = None) -> dict | None:
         with self._lock:
             jobs = list(self.jobs.values())
         exact_matches = []
@@ -751,18 +820,19 @@ class ServiceDownloadManager:
                     fallback_matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
 
         album_dir = self.config.music_dir / identity["artist_part"] / identity["album_part"]
-        if album_dir.exists():
-            for path in _find_audio_files(album_dir):
-                title = _norm(path.stem.split(" - ")[0])
-                if title == identity["title"]:
-                    exact_matches.append({"path": path, "job": None, "quality": _quality_rank(path)})
-
-        artist_dir = self.config.music_dir / identity["artist_part"]
-        if artist_dir.exists():
-            for path in _find_audio_files(artist_dir):
-                title = _norm(path.stem.split(" - ")[0])
-                if title == identity["title"]:
-                    fallback_matches.append({"path": path, "job": None, "quality": _quality_rank(path)})
+        if library_files is None:
+            album_paths = _find_audio_files(album_dir) if album_dir.exists() else []
+            artist_dir = self.config.music_dir / identity["artist_part"]
+            artist_paths = _find_audio_files(artist_dir) if artist_dir.exists() else []
+        else:
+            artist_paths = library_files.get(identity["artist"], [])
+            album_paths = [path for path in artist_paths if path.parent == album_dir]
+        for path in album_paths:
+            if _audio_path_matches_track(path, identity["title_part"], identity["artist_part"]):
+                exact_matches.append({"path": path, "job": None, "quality": _quality_rank(path)})
+        for path in artist_paths:
+            if _audio_path_matches_track(path, identity["title_part"], identity["artist_part"]):
+                fallback_matches.append({"path": path, "job": None, "quality": _quality_rank(path)})
 
         matches = exact_matches or fallback_matches
         if not matches:
@@ -771,19 +841,47 @@ class ServiceDownloadManager:
         return matches[0]
 
     def _find_cache_entry(self, identity: dict) -> dict | None:
+        changed = False
         with self._lock:
             jobs = list(self.jobs.values())
         matches = []
         for job in jobs:
+            if self._repair_finished_audio_path(job):
+                changed = True
             path_text = job.get("library_path") or ""
             if job.get("status") == "finished" and job.get("mode", "stream") == "stream" and path_text:
                 path = Path(path_text)
-                if path.exists() and is_valid_audio_file(path) and _job_matches_identity(job, identity):
+                matches_audio, _ = downloaded_track_matches_request(path, job) if path.exists() else (False, "")
+                if path.exists() and is_valid_audio_file(path) and matches_audio and _job_matches_identity(job, identity):
+                    normalized = self._normalize_downloaded_audio(path, job)
+                    if normalized != path:
+                        with self._lock:
+                            job["library_path"] = str(normalized)
+                        path = normalized
+                        changed = True
                     matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
+        if changed:
+            self._save_jobs()
         if not matches:
             return None
         matches.sort(key=lambda item: (item["quality"], item["path"].stat().st_mtime), reverse=True)
         return matches[0]
+
+    def _repair_finished_audio_path(self, job: dict) -> bool:
+        if job.get("status") != "finished" or not job.get("output_dir"):
+            return False
+        current = Path(job.get("library_path") or "")
+        if current.exists() and is_valid_audio_file(current):
+            return False
+        for candidate in _find_audio_files(Path(job["output_dir"])):
+            matches, _ = downloaded_track_matches_request(candidate, job)
+            if not matches:
+                continue
+            repaired = self._normalize_downloaded_audio(candidate, job)
+            with self._lock:
+                job["library_path"] = str(repaired)
+            return True
+        return False
 
     def _find_active_cache_job(self, identity: dict) -> dict | None:
         with self._lock:
@@ -833,6 +931,41 @@ class ServiceDownloadManager:
         self._save_jobs()
         return {"library_path": str(dest_path), "job": self._public_job(public)}
 
+    def _sync_existing_library_sidecar(self, job: dict) -> None:
+        album_dir = self.config.music_dir / clean_part(job.get("artist") or "Unknown Artist") / clean_part(job.get("album") or "Unknown Album")
+        if not album_dir.exists():
+            return
+        if not any(_audio_path_matches_track(path, job.get("title") or "", job.get("artist") or "") for path in _find_audio_files(album_dir)):
+            return
+        self._save_sidecar_files(album_dir, job)
+
+    def _normalize_downloaded_audio(self, path: Path, job: dict) -> Path:
+        title = clean_part(job.get("title") or "Unknown Track")
+        artist = clean_part(job.get("artist") or "Unknown Artist")
+        target = path.with_name(f"{title} - {artist}{path.suffix.lower()}")
+        if path != target:
+            try:
+                if target.exists():
+                    target.unlink()
+                path.rename(target)
+                path = target
+            except OSError:
+                pass
+
+        try:
+            from mutagen import File as MutagenFile  # type: ignore
+            audio = MutagenFile(path, easy=True)
+            if audio is not None:
+                audio["title"] = [job.get("title") or title]
+                audio["artist"] = [job.get("artist") or artist]
+                audio["albumartist"] = [job.get("artist") or artist]
+                if job.get("album"):
+                    audio["album"] = [job["album"]]
+                audio.save()
+        except Exception:
+            pass
+        return path
+
     def _delete_library_entry(self, path: Path) -> None:
         try:
             path.unlink()
@@ -846,9 +979,10 @@ class ServiceDownloadManager:
                 data = json.loads(info_path.read_text("utf-8"))
                 tracks = data.get("tracks") if isinstance(data, dict) else None
                 if isinstance(tracks, dict):
-                    title = path.stem.split(" - ")[0]
+                    album_artist = (data.get("album_info") or {}).get("artist", "")
                     for key in list(tracks.keys()):
-                        if _norm(key) == _norm(title):
+                        track_artist = (tracks.get(key) or {}).get("artist") or album_artist
+                        if _audio_path_matches_track(path, key, track_artist):
                             tracks.pop(key, None)
                     info_path.write_text(json.dumps(data, indent=2), "utf-8")
             except Exception:
@@ -862,21 +996,35 @@ class ServiceDownloadManager:
         self._save_jobs()
 
     def update_job_metadata(self, job_id: str, metadata: dict, artwork_url: str) -> None:
+        updated_job = None
         with self._lock:
             job = self.jobs.get(job_id)
             if job:
                 job["metadata"] = {**(job.get("metadata") or {}), **metadata}
+                for key in IDENTIFIER_FIELDS:
+                    if metadata.get(key):
+                        job[key] = metadata[key]
                 if artwork_url:
                     job["artwork_url"] = artwork_url
+                updated_job = dict(job)
         self._save_jobs()
+        if updated_job and updated_job.get("status") == "finished":
+            output_dir = Path(updated_job.get("output_dir") or "")
+            if output_dir.exists():
+                self._save_sidecar_files(output_dir, updated_job)
+            self._sync_existing_library_sidecar(updated_job)
 
     def list_jobs(self) -> list[dict]:
-        # Don't sync here, it's too slow and blocks the UI. 
-        # Progress is synced in the background or during worker execution.
         with self._lock:
             items = list(self.jobs.values())
-            items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-            return [self._public_job(job) for job in items]
+        changed = False
+        for job in items:
+            if self._repair_finished_audio_path(job):
+                changed = True
+        if changed:
+            self._save_jobs()
+        items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+        return [self._public_job(job) for job in items]
 
     def _sync_progress(self) -> None:
         updated = False
@@ -890,13 +1038,13 @@ class ServiceDownloadManager:
                     i_title = item.get("track_name")
                     i_artist = item.get("artist_name")
                     if not s_id and not i_title: continue
-                    
+
                     for job in self.jobs.values():
                         if job.get("status") != "running": continue
-                        
+
                         matched = False
                         meta = job.get("metadata") or {}
-                        
+
                         if s_id and (job.get("isrc") == s_id or job.get("id") == s_id or meta.get("id") == s_id or meta.get("spotify_id") == s_id):
                             matched = True
                         if not matched and i_title and i_artist:
@@ -906,11 +1054,11 @@ class ServiceDownloadManager:
                         if not matched and s_id and "open.spotify.com/track/" in job.get("resolved_url", ""):
                             u_id = job["resolved_url"].split("/track/")[1].split("?")[0].split("/")[0]
                             if u_id == s_id: matched = True
-                            
+
                         if matched:
                             prog_mb = float(item.get("progress") or 0)
                             total_mb = float(item.get("total_size") or 0)
-                            
+
                             if total_mb > 0.1:
                                 progress = min(95.0, (prog_mb / total_mb) * 100.0)
                             else:
@@ -929,7 +1077,7 @@ class ServiceDownloadManager:
                             if progress > float(job.get("progress") or 0):
                                 job["progress"] = progress
                                 updated = True
-                            
+
                             if job["progress"] > 0:
                                 print(f"[Progress] {job.get('title')} -> {job['progress']:.1f}%")
         except Exception:
@@ -939,6 +1087,7 @@ class ServiceDownloadManager:
             running_jobs = [job for job in self.jobs.values() if job.get("status") == "running"]
 
         for job in running_jobs:
+            self._capture_cache_activity(job)
             if self._sync_progress_from_files(job):
                 updated = True
 
@@ -969,6 +1118,22 @@ class ServiceDownloadManager:
         if progress <= 0:
             return False
 
+        if biggest.suffix.lower() != ".webm" and is_valid_audio_file(biggest):
+            matches_req, _ = downloaded_track_matches_request(biggest, job)
+            if matches_req:
+                prev_bytes = int(job.get("_stable_check_bytes") or 0)
+                if prev_bytes == downloaded_bytes:
+                    with self._lock:
+                        if job.get("status") == "running" and not job.get("library_path"):
+                            job["library_path"] = str(biggest)
+                            job["progress"] = 100
+                            job["status"] = "finished"
+                            job["error"] = ""
+                    self._append_cache_event(job, "finished", f"Ready to play {biggest.name}")
+                    return True
+                else:
+                    job["_stable_check_bytes"] = downloaded_bytes
+
         with self._lock:
             current = float(job.get("progress") or 0)
             if progress <= current and current < 95:
@@ -980,6 +1145,18 @@ class ServiceDownloadManager:
         return True
 
     def start_job(self, payload: dict) -> dict:
+        with self._start_lock:
+            if payload.get("mode", "stream") == "stream":
+                identity = _track_identity_from_payload(payload)
+                cache = self._find_cache_entry(identity)
+                if cache and cache.get("job"):
+                    return self._public_job(cache["job"])
+                active = self._find_active_cache_job(identity)
+                if active:
+                    return active
+            return self._create_job(payload)
+
+    def _create_job(self, payload: dict) -> dict:
         job_id = str(uuid.uuid4())
         isrc = (
             payload.get("isrc")
@@ -988,9 +1165,8 @@ class ServiceDownloadManager:
             or ""
         )
         metadata = payload.get("metadata") or payload.get("track") or {}
-        # Calculate a stable track key for UI matching
         track_key = f"{(payload.get('artist') or metadata.get('artist') or '').lower()}||{(payload.get('title') or metadata.get('title') or '').lower()}"
-        
+
         job = {
             "id": job_id,
             "track_key": track_key,
@@ -1000,9 +1176,11 @@ class ServiceDownloadManager:
             "artwork_url": payload.get("artwork_url") or metadata.get("artwork_url") or "",
             "kind": payload.get("kind", "track"),
             "mode": payload.get("mode", "stream"),
+            "prefetch": bool(payload.get("prefetch")),
             "isrc": isrc,
             "metadata": metadata,
             "service": (payload.get("service") or self.config.download_service or "tidal").lower(),
+            "engine": (payload.get("engine") or self.config.download_engine or "spotiflac").lower(),
             "quality": payload.get("quality") or self.config.default_quality or "flac",
             "status": "starting",
             "last_status": "Starting...",
@@ -1013,6 +1191,10 @@ class ServiceDownloadManager:
             "output_dir": "",
             "library_path": "",
         }
+        for key in IDENTIFIER_FIELDS:
+            value = payload.get(key) or metadata.get(key)
+            if value:
+                job[key] = value
         with self._lock:
             self.jobs[job_id] = job
         threading.Thread(target=self._worker, args=(job_id, payload), daemon=True).start()
@@ -1021,7 +1203,24 @@ class ServiceDownloadManager:
     def get_job(self, job_id: str) -> dict | None:
         with self._lock:
             job = self.jobs.get(job_id)
-            return self._public_job(job) if job else None
+        if job and self._repair_finished_audio_path(job):
+            self._save_jobs()
+        return self._public_job(job) if job else None
+
+    def update_job_identifiers(self, job_id: str, enriched_payload: dict) -> None:
+        enriched = enriched_payload.get("track") or enriched_payload.get("metadata") or {}
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if not job or job.get("status") in ("finished", "error"):
+                return
+            for key in IDENTIFIER_FIELDS:
+                if enriched.get(key) and not job.get(key):
+                    job[key] = enriched[key]
+            meta = job.get("metadata")
+            if isinstance(meta, dict):
+                for key in IDENTIFIER_FIELDS:
+                    if enriched.get(key) and not meta.get(key):
+                        meta[key] = enriched[key]
 
     def _worker(self, job_id: str, payload: dict) -> None:
         with self._lock:
@@ -1034,10 +1233,6 @@ class ServiceDownloadManager:
             metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
             merged = {**metadata, **track}
             kind = payload.get("kind", job.get("kind", "track"))
-            
-            resolved_url = resolve_download_url(merged, service="spotify", kind=kind)
-            if not resolved_url:
-                raise RuntimeError("Could not resolve a Spotify URL from the selected track metadata")
 
             output_dir = self._output_dir(job)
             if output_dir.exists():
@@ -1047,28 +1242,80 @@ class ServiceDownloadManager:
                     pass
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            with self._lock:
-                job["status"] = "running"
-                job["resolved_url"] = resolved_url
-                job["output_dir"] = str(output_dir)
+            engine = job.get("engine", "spotiflac")
 
-            self._ensure_progress_thread()
-            self._run_spotiflac(resolved_url, output_dir, job)
+            if engine == "monochrome":
+                with self._lock:
+                    job["status"] = "running"
+                    job["output_dir"] = str(output_dir)
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
+                self._ensure_progress_thread()
+                import backend_monochrome
+                backend_monochrome.run(output_dir, job, self)
+
+            elif engine == "musicdl":
+                with self._lock:
+                    job["status"] = "running"
+                    job["output_dir"] = str(output_dir)
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
+                self._ensure_progress_thread()
+                import backend_musicdl
+                backend_musicdl.run(output_dir, job, self)
+
+            elif engine == "qobuz-dlp":
+                with self._lock:
+                    job["status"] = "running"
+                    job["output_dir"] = str(output_dir)
+                self._ensure_progress_thread()
+                import backend_qobuz_dlp
+                backend_qobuz_dlp.run(output_dir, job, self)
+
+            else:  # spotiflac (default)
+                resolved_url = resolve_download_url(merged, service="spotify", kind=kind)
+                if not resolved_url:
+                    raise RuntimeError("Could not resolve a Spotify URL from the selected track metadata")
+                with self._lock:
+                    job["status"] = "running"
+                    job["resolved_url"] = resolved_url
+                    job["output_dir"] = str(output_dir)
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
+                self._ensure_progress_thread()
+                import backend_spotiflac
+                backend_spotiflac.run(resolved_url, output_dir, job, self)
+
             self._save_sidecar_files(output_dir, job)
-
-            audio_files = _find_audio_files(output_dir)
-            if not audio_files:
-                raise RuntimeError("SpotiFLAC finished but no playable audio file was found")
+            self._capture_cache_activity(job)
 
             with self._lock:
-                job["library_path"] = str(audio_files[0])
-                job["progress"] = 100
-                job["status"] = "finished"
+                already_finished = job.get("status") == "finished" and bool(job.get("library_path"))
                 library_requested = bool(job.get("library_requested"))
+
+            if already_finished:
+                audio_path = Path(job["library_path"])
+            else:
+                audio_files = _find_audio_files(output_dir)
+                if not audio_files:
+                    raise RuntimeError("Download finished but no playable audio file was found")
+                matches, message = downloaded_track_matches_request(audio_files[0], job)
+                if not matches:
+                    raise RuntimeError(message)
+                audio_path = self._normalize_downloaded_audio(audio_files[0], job)
+                with self._lock:
+                    job["library_path"] = str(audio_path)
+                    job["progress"] = 100
+                    job["status"] = "finished"
+                    job["error"] = ""
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "finished", f"Ready to play {audio_path.name}")
+
             self._save_jobs()
+            self._sync_existing_library_sidecar(job)
             if library_requested and job.get("mode", "stream") == "stream":
                 try:
-                    self._copy_job_audio_to_library(job, audio_files[0])
+                    self._copy_job_audio_to_library(job, audio_path)
                 except Exception as exc:
                     with self._lock:
                         job["library_promote_error"] = str(exc)
@@ -1077,14 +1324,20 @@ class ServiceDownloadManager:
             with self._lock:
                 job["status"] = "error"
                 job["error"] = str(exc)
+            if job.get("mode", "stream") == "stream":
+                self._append_cache_event(job, "error", f"Cache job failed: {exc}")
             self._save_jobs()
 
     def _save_sidecar_files(self, directory: Path, job: dict) -> None:
         try:
             info_path = directory / "metadata.json"
-            current_meta = job.get("metadata") or {}
+            current_meta = dict(job.get("metadata") or {})
+            for key in ("title", "artist", "album", "artwork_url", *IDENTIFIER_FIELDS):
+                value = job.get(key)
+                if value and not current_meta.get(key):
+                    current_meta[key] = value
             track_title = job.get("title") or "Unknown"
-            
+
             data = {"album_info": {}, "tracks": {}}
             if info_path.exists():
                 try:
@@ -1100,10 +1353,11 @@ class ServiceDownloadManager:
                 val = current_meta.get(key) or job.get(key)
                 if val and (not data["album_info"].get(key) or key == "artwork_url"):
                     data["album_info"][key] = val
-            
-            data["tracks"][track_title] = current_meta
+
+            saved_track = data["tracks"].get(track_title) if isinstance(data["tracks"].get(track_title), dict) else {}
+            data["tracks"][track_title] = _merge_nonempty_metadata(saved_track, current_meta)
             info_path.write_text(json.dumps(data, indent=2), "utf-8")
-            
+
             cover_path = directory / "cover.png"
             if not cover_path.exists():
                 art_url = job.get("artwork_url")
@@ -1121,210 +1375,13 @@ class ServiceDownloadManager:
         except Exception as e:
             logging.getLogger("service_downloader").warning(f"Failed to save sidecar files: {e}")
 
-    def _run_spotiflac(self, url: str, output_dir: Path, job: dict) -> None:
-        if job["id"] in self._cancel_flags:
-            return
-
-        # Kick off tor warmup in background immediately
-        prefetch_tor()
-
-        try:
-            from SpotiFLAC import SpotiFLAC  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("SpotiFLAC is not installed in this environment") from exc
-        _install_stream_capture()
-
-        raw_service = job["service"]
-        spotiflac_service = _SPOTIFLAC_SERVICE_MAP.get(raw_service, raw_service)
-
-        # Map our metadata to SpotiFLAC's internal keys
-        meta = job.get("metadata") or {}
-        sp_meta = {
-            "MUSICBRAINZ_TRACKID": meta.get("musicbrainz_recording_id"),
-            "MUSICBRAINZ_ALBUMID": meta.get("musicbrainz_release_id"),
-            "MUSICBRAINZ_ARTISTID": meta.get("musicbrainz_artist_id"),
-            "MUSICBRAINZ_RELEASEGROUPID": meta.get("musicbrainz_release_group_id"),
-            "MUSICBRAINZ_ALBUMARTISTID": meta.get("musicbrainz_albumartist_id"),
-            "ALBUMARTISTSORT": meta.get("albumartist_sort"),
-            "ARTISTSORT": meta.get("artist_sort"),
-            "ISRC": meta.get("isrc") or job.get("isrc") or meta.get("external_ids", {}).get("isrc"),
-            "SPOTIFY_ID": meta.get("spotify_id") or job.get("spotify_id"),
-            "DEEZER_ID": meta.get("deezer_id"),
-            "TIDAL_ID": meta.get("tidal_id"),
-            "AMAZON_ID": meta.get("amazon_id"),
-            "APPLE_MUSIC_ID": meta.get("apple_music_id"),
-            "UPC": meta.get("upc") or meta.get("external_ids", {}).get("upc"),
-            "EAN": meta.get("ean") or meta.get("external_ids", {}).get("ean"),
-        }
-        # Filter out empty values
-        sp_meta = {k: v for k, v in sp_meta.items() if v}
-
-        # Create a fallback list, keeping the requested service first. Tidal is
-        # intentionally last unless it is the selected service in settings.
-        fallback_services = ["qobuz", "amazon", "deezer", "soundcloud", "youtube", "tidal"]
-        services_list = [spotiflac_service] + [s for s in fallback_services if s != spotiflac_service]
-
-        kwargs = {
-            "url": url,
-            "output_dir": str(output_dir),
-            "services": services_list,
-            "track_max_retries": self.config.track_max_retries,
-            "verbose": True,
-            "metadata": sp_meta if sp_meta else True,
-            "cover": True,
-            "lrc": True,
-            "album_artwork": True,
-            "allow_fallback": True,
-            "use_artist_subfolders": True,
-            "use_album_subfolders": True,
-        }
-
-        quality = job.get("quality") or ""
-        if quality:
-            kwargs["quality"] = quality
-
-        def _exec_sf(proxy=None):
-            import os
-            old_http = os.environ.get("HTTP_PROXY")
-            old_https = os.environ.get("HTTPS_PROXY")
-            old_ua = os.environ.get("USER_AGENT")
-            
-            if proxy:
-                os.environ["HTTP_PROXY"] = proxy
-                os.environ["HTTPS_PROXY"] = proxy
-            
-            try:
-                from fake_useragent import UserAgent
-                os.environ["USER_AGENT"] = UserAgent().random
-            except Exception:
-                pass
-            
-            try:
-                known_problematic = ("track_max_retries", "verbose", "quality", "metadata", "cover", "lrc", "album_artwork")
-                for i in range(len(known_problematic) + 1):
-                    if job["id"] in self._cancel_flags:
-                        raise RuntimeError("Download cancelled")
-                    try:
-                        SpotiFLAC(**kwargs)
-                        # Check for failures, rate limiting, or quality fallback in SF logs
-                        for msg in captured:
-                            m = msg.lower()
-                            if "(429)" in m or "rate limited" in m:
-                                print(f"[Bypass] Rate limit detected in logs: {msg}")
-                                return False
-                            if "all providers fail" in m or "failures" in m or "failed : 1" in m:
-                                print(f"[Bypass] SpotiFLAC reported failure in logs: {msg}")
-                                return False
-                            if "quality" in m and "unavailable" in m and "falling back" in m:
-                                print(f"[Bypass] Quality fallback detected, retrying via bypass: {msg}")
-                                return False
-                        return True
-                    except TypeError as e:
-                        msg = str(e)
-                        found_any = False
-                        for key in known_problematic:
-                            if f"'{key}'" in msg:
-                                kwargs.pop(key, None)
-                                found_any = True
-                                break
-                        if not found_any:
-                            if i < len(known_problematic):
-                                kwargs.pop(known_problematic[i], None)
-                            else:
-                                raise e
-                return False
-            except Exception:
-                return False
-            finally:
-                if old_http: os.environ["HTTP_PROXY"] = old_http
-                elif "HTTP_PROXY" in os.environ: del os.environ["HTTP_PROXY"]
-                if old_https: os.environ["HTTPS_PROXY"] = old_https
-                elif "HTTPS_PROXY" in os.environ: del os.environ["HTTPS_PROXY"]
-                if old_ua: os.environ["USER_AGENT"] = old_ua
-                elif "USER_AGENT" in os.environ: del os.environ["USER_AGENT"]
-
-        captured: list[str] = []
-        class _Capture(logging.Handler):
-            def emit(self, record: logging.LogRecord) -> None:
-                captured.append(record.getMessage())
-
-        handler = _Capture()
-        sf_logger = logging.getLogger("SpotiFLAC")
-        sf_logger.addHandler(handler)
-        
-        def _has_audio(delete_invalid: bool = False) -> bool:
-            return bool(_find_audio_files(output_dir, delete_invalid=delete_invalid))
-
-        with _spotiflac_lock:
-            try:
-                _STREAM_CAPTURE.manager = self
-                _STREAM_CAPTURE.job_id = job["id"]
-                success = False
-                kwargs["allow_fallback"] = False # We handle the provider loop ourselves now
-
-                for service in services_list:
-                    if success: break
-                    if job["id"] in self._cancel_flags:
-                        print(f"[Bypass] Job {job['id']} cancelled, stopping loop.")
-                        break
-
-                    kwargs["services"] = [service]
-                    # If retries is 0, we bypass to Tor immediately and use 1 retry internally
-                    immediate_tor = self.config.track_max_retries == 0
-                    kwargs["track_max_retries"] = self.config.track_max_retries if not immediate_tor else 1
-                    
-                    if not immediate_tor:
-                        # 1. Try Direct
-                        with self._lock:
-                            job["last_status"] = f"Trying {service}..."
-                        self._save_jobs()
-                        
-                        captured.clear()
-                        sf_success = _exec_sf()
-                        if sf_success and _has_audio():
-                            print(f"[Bypass] ✓ {service} (Direct) succeeded.")
-                            success = True
-                            break
-                        else:
-                            _has_audio(delete_invalid=True) # Clean up partial/0-byte files
-
-                        if job["id"] in self._cancel_flags: break
-
-                    # 2. Try Tor
-                    if _tor_is_up() or _ensure_tor():
-                        with self._lock:
-                            job["last_status"] = f"Trying {service} (Tor)..."
-                        self._save_jobs()
-                        
-                        captured.clear()
-                        sf_success = _exec_sf(_TOR_SOCKS)
-                        if sf_success and _has_audio():
-                            print(f"[Bypass] ✓ {service} (Tor) succeeded.")
-                            success = True
-                            break
-                        else:
-                            _has_audio(delete_invalid=True)
-                        
-                    if success: break
-                    print(f"[Bypass] ✗ {service} failed, moving to next provider...")
-
-            finally:
-                _STREAM_CAPTURE.manager = None
-                _STREAM_CAPTURE.job_id = ""
-                sf_logger.removeHandler(handler)
-
-        if not success:
-            msg = captured[0] if captured else "All providers failed and no proxy bypass succeeded"
-            raise RuntimeError(f"SpotiFLAC ({spotiflac_service}): {msg}")
-
     def _output_dir(self, job: dict) -> Path:
-        identity = clean_part(job.get("isrc") or job.get("id") or job["id"])
         if job.get("mode", "stream") == "download":
             artist = clean_part(job.get("artist") or "Unknown Artist")
             album = clean_part(job.get("album") or job.get("title") or "Unknown Album")
             return self.config.music_dir / artist / album
-        
-        return self.config.cache_dir / identity
+
+        return self.config.cache_dir / clean_part(job["id"])
 
     def _public_job(self, job: dict | None) -> dict:
         if not job:

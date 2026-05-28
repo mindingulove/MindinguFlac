@@ -74,6 +74,8 @@ class AppConfig:
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
     volume: float = 1.0
     track_max_retries: int = 1
+    download_engine: str = "spotiflac"
+    discogs_token: str = ""
 
     def public_dict(self) -> dict:
         return {
@@ -81,6 +83,7 @@ class AppConfig:
             "music_dir": str(self.music_dir.expanduser().resolve()),
             "default_quality": self.default_quality,
             "download_service": self.download_service,
+            "download_engine": self.download_engine,
             "cache_cleanup_frequency": self.cache_cleanup_frequency,
             "last_cache_cleanup": self.last_cache_cleanup,
             "strict_title_match": self.strict_title_match,
@@ -88,6 +91,7 @@ class AppConfig:
             "music_indexers": [vars(item) for item in self.music_indexers],
             "volume": self.volume,
             "track_max_retries": self.track_max_retries,
+            "discogs_token": self.discogs_token,
         }
 
     @classmethod
@@ -116,6 +120,8 @@ class AppConfig:
             music_indexers=music_indexers,
             volume=float(value.get("volume", 1.0)),
             track_max_retries=rt,
+            download_engine=value.get("download_engine", "spotiflac"),
+            discogs_token=str(value.get("discogs_token", "") or "").strip(),
         )
 
 

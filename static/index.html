@@ -100,19 +100,25 @@
             <h2 class="settings-section-title">Playback</h2>
             <div class="settings-row">
               <div class="settings-info">
-                <strong>Service source</strong>
-                <span>Primary provider for SpotiFLAC streaming.</span>
+                <strong>Download engine</strong>
+                <span>Core module used to fetch audio.</span>
               </div>
               <div class="settings-control">
-                <select id="downloadService">
-                  <option value="tidal">Tidal</option>
-                  <option value="deezer">Deezer</option>
-                  <option value="qobuz">Qobuz</option>
-                  <option value="amazon">Amazon Music</option>
-                  <option value="apple_music">Apple Music</option>
-                  <option value="soundcloud">SoundCloud</option>
-                  <option value="youtube">YouTube</option>
+                <select id="downloadEngine">
+                  <option value="spotiflac">SpotiFLAC</option>
+                  <option value="monochrome">Monochrome</option>
+                  <option value="musicdl">musicdl</option>
+                  <option value="qobuz-dlp">qobuz-dlp</option>
                 </select>
+              </div>
+            </div>
+            <div class="settings-row" id="serviceRow">
+              <div class="settings-info">
+                <strong>Service source</strong>
+                <span>Primary provider for the selected engine.</span>
+              </div>
+              <div class="settings-control">
+                <select id="downloadService"></select>
               </div>
             </div>
             <div class="settings-row">
@@ -124,7 +130,7 @@
                 <select id="defaultQuality"></select>
               </div>
             </div>
-            <div class="settings-row">
+            <div class="settings-row" id="retriesRow">
               <div class="settings-info">
                 <strong>Download retries</strong>
                 <span>Attempts per provider. Set to 0 to bypass to Tor immediately.</span>
@@ -153,6 +159,18 @@
                 <button id="clearCache" class="danger" type="button">Empty cache now</button>
               </div>
             </div>
+            <div class="cache-live">
+              <div class="cache-live-header">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                  <strong>Live cache activity</strong>
+                  <label style="font-size: 11px; color: var(--muted); cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none;">
+                    <input type="checkbox" id="cacheAutoScroll" checked style="margin: 0;"> Auto-scroll
+                  </label>
+                </div>
+                <span id="cacheLiveStatus">Watching for stream downloads</span>
+              </div>
+              <pre id="cacheLiveLog" class="cache-live-log">Waiting for cache activity...</pre>
+            </div>
           </div>
 
           <div class="settings-section">
@@ -173,6 +191,15 @@
               </div>
               <div class="settings-control">
                 <label class="check"><input id="strictTitleMatch" type="checkbox"> Enabled</label>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Discogs personal token</strong>
+                <span>Loads vinyl sleeve and booklet images in album galleries.</span>
+              </div>
+              <div class="settings-control">
+                <input id="discogsToken" type="password" autocomplete="off" placeholder="Optional Discogs API token">
               </div>
             </div>
           </div>

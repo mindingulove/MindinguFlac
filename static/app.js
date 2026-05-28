@@ -15,6 +15,8 @@ const state = {
   isRepeat: false,
   queue: [],
   originalQueue: [],
+  queueContext: null,
+  dockRecentItems: [],
   queueIndex: -1,
   seekHoldTimer: null,
   seekHoldDirection: 0,
@@ -32,6 +34,7 @@ const state = {
   currentStreamUrl: "",
   prefetchedForRequestId: -1,
   catalogRefreshTimer: null,
+  cacheLogTimer: null,
 };
 
 const SERVICE_LABELS = {
@@ -42,6 +45,13 @@ const SERVICE_LABELS = {
   apple_music: "Apple Music",
   soundcloud: "SoundCloud",
   youtube: "YouTube",
+  netease: "NetEase Music",
+  kugou: "Kugou",
+  kuwo: "Kuwo",
+  baidu: "Baidu Music",
+  migu: "Migu",
+  fivesing: "5Sing",
+  qianqian: "QianQian",
 };
 
 const SERVICE_QUALITIES = {
@@ -82,12 +92,140 @@ const SERVICE_QUALITIES = {
   ],
 };
 
+const ENGINE_PROVIDERS = {
+  spotiflac: [
+    { value: "tidal",       label: "Tidal" },
+    { value: "deezer",      label: "Deezer" },
+    { value: "qobuz",       label: "Qobuz" },
+    { value: "amazon",      label: "Amazon Music" },
+    { value: "apple_music", label: "Apple Music" },
+    { value: "soundcloud",  label: "SoundCloud" },
+    { value: "youtube",     label: "YouTube" },
+  ],
+  monochrome: [
+    { value: "all",           label: "All (Auto-fallback)" },
+    { value: "scavengerfurs", label: "Scavengerfurs" },
+    { value: "kennyy",        label: "Kennyy Qobuz" },
+  ],
+  musicdl: [
+    { value: "all",          label: "All Sources" },
+    { value: "netease",      label: "NetEase Music" },
+    { value: "qq",           label: "QQ Music" },
+    { value: "kugou",        label: "Kugou Music" },
+    { value: "kuwo",         label: "Kuwo Music" },
+    { value: "migu",         label: "Migu Music" },
+    { value: "bilibili",     label: "Bilibili" },
+    { value: "bodian",       label: "Bodian" },
+    { value: "fivesing",     label: "5Sing" },
+    { value: "qianqian",     label: "Qianqian" },
+    { value: "soda",         label: "Soda Music" },
+    { value: "moov",         label: "MOOV" },
+    { value: "streetvoice",  label: "StreetVoice" },
+    { value: "apple",        label: "Apple Music" },
+    { value: "deezer",       label: "Deezer" },
+    { value: "tidal",        label: "TIDAL" },
+    { value: "qobuz",        label: "Qobuz" },
+    { value: "spotify",      label: "Spotify" },
+    { value: "youtube",      label: "YouTube" },
+    { value: "soundcloud",   label: "SoundCloud" },
+    { value: "jiosaavn",     label: "JioSaavn" },
+    { value: "joox",         label: "JOOX" },
+    { value: "jamendo",      label: "Jamendo" },
+    { value: "fma",          label: "FMA" },
+    { value: "suno",         label: "Suno AI" },
+    { value: "itunes",       label: "iTunes Podcast" },
+    { value: "lizhi",        label: "Lizhi FM" },
+    { value: "lrts",         label: "LRTS" },
+    { value: "qingting",     label: "Qingting FM" },
+    { value: "ximalaya",     label: "Ximalaya" },
+    { value: "gdstudio",     label: "GDStudio" },
+    { value: "jbsou",        label: "JBSou" },
+    { value: "mp3juice",     label: "MP3 Juice" },
+    { value: "myfreemp3",    label: "MyFreeMP3" },
+    { value: "tunehub",      label: "TuneHub" },
+    { value: "wjhe",         label: "HEMusic (WJHE)" },
+    { value: "alger",        label: "Alger Music" },
+    { value: "buguyy",       label: "Buguyy" },
+    { value: "fangpi",       label: "Fangpi" },
+    { value: "fivesong",     label: "5Song" },
+    { value: "flmp3",        label: "FLMP3" },
+    { value: "gequbao",      label: "Gequbao" },
+    { value: "gequhai",      label: "Gequhai" },
+    { value: "htqyy",        label: "HTQYY" },
+    { value: "jcpoo",        label: "JCPOO" },
+    { value: "kkws",         label: "KKWS" },
+    { value: "livepoo",      label: "LivePOO" },
+    { value: "mitu",         label: "Mitu" },
+    { value: "twot58",       label: "TwoT58" },
+    { value: "yinyuedao",    label: "Yinyuedao" },
+    { value: "zhuolin",      label: "Zhuolin" },
+    { value: "opengameart",  label: "OpenGameArt" },
+  ],
+  "qobuz-dlp": [],
+};
+
+const ENGINE_QUALITIES = {
+  spotiflac: null,
+  monochrome: [
+    { value: "27", label: "Hi-Res Max (FLAC)" },
+    { value: "7",  label: "Hi-Res (FLAC)" },
+    { value: "6",  label: "CD (FLAC)" },
+  ],
+  musicdl: null,
+  "qobuz-dlp": [
+    { value: "27", label: "Hi-Res Max (FLAC)" },
+    { value: "7",  label: "Hi-Res (FLAC)" },
+    { value: "6",  label: "CD (FLAC)" },
+    { value: "5",  label: "High (320kbps)" },
+  ],
+};
+
+const MUSICDL_QUALITIES = {
+  netease: [
+    { value: "best", label: "Best available" },
+    { value: "hires", label: "Hi-Res" },
+    { value: "lossless", label: "Lossless (FLAC)" },
+    { value: "320", label: "High (320kbps)" },
+    { value: "128", label: "Standard (128kbps)" },
+  ],
+  kugou: [
+    { value: "best", label: "Best available" },
+    { value: "hires", label: "Hi-Res" },
+    { value: "lossless", label: "Lossless (FLAC)" },
+    { value: "320", label: "High (320kbps)" },
+    { value: "128", label: "Standard (128kbps)" },
+  ],
+  kuwo: [
+    { value: "best", label: "Best available" },
+    { value: "lossless", label: "Lossless (FLAC)" },
+    { value: "320", label: "High (320kbps)" },
+  ],
+  migu: [
+    { value: "best", label: "Best available" },
+    { value: "hires", label: "Hi-Res FLAC" },
+    { value: "lossless", label: "Lossless (FLAC)" },
+    { value: "320", label: "High (320kbps)" },
+    { value: "128", label: "Standard (128kbps)" },
+  ],
+  fivesing: [
+    { value: "best", label: "Best available" },
+    { value: "sq", label: "SQ" },
+    { value: "hq", label: "HQ" },
+    { value: "lq", label: "LQ" },
+  ],
+  qianqian: [
+    { value: "best", label: "Best available" },
+    { value: "lossless", label: "Highest (3000kbps)" },
+    { value: "320", label: "High (320kbps)" },
+    { value: "128", label: "Standard (128kbps)" },
+  ],
+};
+
 function updateQualityOptions(service, currentQuality) {
   const sel = $("defaultQuality");
   if (!sel) return;
   const opts = SERVICE_QUALITIES[service] || SERVICE_QUALITIES.tidal;
   sel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
-  // Keep current quality if valid for this service, else default to first
   if (currentQuality && opts.some(o => o.value === currentQuality)) {
     sel.value = currentQuality;
   } else {
@@ -95,8 +233,58 @@ function updateQualityOptions(service, currentQuality) {
   }
 }
 
+function updateEngineControls(engine, currentService, currentQuality) {
+  const serviceRow = $("serviceRow");
+  const retriesRow = $("retriesRow");
+  const serviceSel = $("downloadService");
+  const qualitySel = $("defaultQuality");
+  if (!serviceRow || !serviceSel || !qualitySel) return;
+
+  const providers = ENGINE_PROVIDERS[engine] || ENGINE_PROVIDERS.spotiflac;
+  const engineQualities = ENGINE_QUALITIES[engine];
+
+  // Show/hide service row
+  serviceRow.style.display = providers.length > 0 ? "" : "none";
+
+  // Show/hide retries row (Tor is SpotiFLAC-only)
+  if (retriesRow) retriesRow.style.display = engine === "spotiflac" ? "" : "none";
+
+  // Populate service options
+  serviceSel.innerHTML = providers.map(p => `<option value="${p.value}">${p.label}</option>`).join("");
+  if (providers.length > 0) {
+    if (currentService && providers.some(p => p.value === currentService)) {
+      serviceSel.value = currentService;
+    } else {
+      serviceSel.value = providers[0].value;
+    }
+  }
+
+  // Populate quality options
+  if (engine === "musicdl") {
+    const updateMusicdlQualities = (quality) => {
+      const opts = MUSICDL_QUALITIES[serviceSel.value] || MUSICDL_QUALITIES.netease;
+      qualitySel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
+      qualitySel.value = opts.some(o => o.value === quality) ? quality : opts[0].value;
+    };
+    updateMusicdlQualities(currentQuality);
+    serviceSel.onchange = () => updateMusicdlQualities("best");
+  } else if (engineQualities) {
+    qualitySel.innerHTML = engineQualities.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
+    if (currentQuality && engineQualities.some(o => o.value === currentQuality)) {
+      qualitySel.value = currentQuality;
+    } else {
+      qualitySel.value = engineQualities[0].value;
+    }
+  } else {
+    // spotiflac: quality depends on selected service
+    updateQualityOptions(serviceSel.value, currentQuality);
+    serviceSel.onchange = () => updateQualityOptions(serviceSel.value, $("defaultQuality").value);
+  }
+}
+
 const STORAGE_KEYS = {
   volume: "streambox.volume",
+  dockRecents: "mindinguflac.dockRecents",
 };
 
 async function api(path, options = {}) {
@@ -109,6 +297,74 @@ async function api(path, options = {}) {
 }
 
 function $(id) { return document.getElementById(id); }
+
+function dockRecentKey(entry) {
+  const data = entry.data || {};
+  if (entry.kind === "playlist") return `playlist:${data.id || entry.title}`;
+  return `track:${data.spotify_id || (data.metadata || {}).spotify_id || `${data.title || ""}:${data.artist || ""}`}`;
+}
+
+function storedDockRecentItems() {
+  try {
+    const entries = JSON.parse(localStorage.getItem(STORAGE_KEYS.dockRecents) || "[]");
+    return Array.isArray(entries) ? entries.filter(entry => entry && entry.title && entry.data).slice(0, 3) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function publishDockRecentItems() {
+  localStorage.setItem(STORAGE_KEYS.dockRecents, JSON.stringify(state.dockRecentItems.slice(0, 3)));
+  api("/api/dock/recent", {
+    method: "POST",
+    body: JSON.stringify({ entries: state.dockRecentItems.slice(0, 3) }),
+  }).catch(() => {});
+}
+
+function addDockRecentItems(entries) {
+  const combined = [...entries, ...state.dockRecentItems];
+  const seen = new Set();
+  state.dockRecentItems = combined.filter(entry => {
+    const key = dockRecentKey(entry);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 3);
+  publishDockRecentItems();
+}
+
+function recordDockRecentSelection(track, playbackContext = null) {
+  const entries = [];
+  if (playbackContext && playbackContext.kind === "playlist") {
+    entries.push({
+      kind: "playlist",
+      title: playbackContext.name,
+      data: { id: playbackContext.id, name: playbackContext.name },
+    });
+  }
+  entries.push({ kind: "track", title: track.title || track.name || "Unknown Track", data: track });
+  addDockRecentItems(entries);
+}
+
+function seedDockRecentTracks() {
+  const catalogEntries = (state.catalog.recent_tracks || []).map(track => ({
+    kind: "track",
+    title: track.title || track.name || "Unknown Track",
+    data: track,
+  }));
+  addDockRecentItems([...state.dockRecentItems, ...catalogEntries]);
+}
+
+window.openDockRecentItem = function openDockRecentItem(entry) {
+  if (!entry || !entry.data) return;
+  if (entry.kind === "playlist") {
+    const playlist = state.playlists.find(item => item.id === entry.data.id);
+    if (playlist) pushPage(() => renderPlaylistPage(playlist));
+    return;
+  }
+  selectMusicItem(entry.data, "stream", [entry.data]);
+};
+
 function esc(str) {
   if (!str) return "";
   const div = document.createElement("div");
@@ -226,6 +482,7 @@ function isTypingTarget(target) {
 // ---------------------------------------------------------------------------
 
 function setActiveView(id) {
+  if (id !== "settings") stopCacheLogPolling();
   if (window.artistEvtSource) {
     window.artistEvtSource.close();
     window.artistEvtSource = null;
@@ -377,6 +634,69 @@ async function loadCatalog() {
   state.catalogRefreshTimer = setInterval(refreshCatalog, CATALOG_REFRESH_MS);
 }
 
+async function enrichBatch(items, containerId) {
+  const toEnrich = items.filter(t => !t.artwork_url || t.artwork_url === "");
+  if (toEnrich.length === 0) return;
+  
+  // High-performance individual streaming with concurrency control (max 5 at once)
+  let active = 0;
+  let index = 0;
+
+  const next = async () => {
+    if (index >= toEnrich.length) return;
+    const item = toEnrich[index++];
+    active++;
+    
+    try {
+      const res = await api("/api/music/enrich", { method: "POST", body: JSON.stringify({ tracks: [item] }) });
+      if (res && res.tracks && res.tracks[0]) {
+        const enriched = res.tracks[0];
+        
+        // Update global state catalog
+        ["recent_tracks", "personal_tracks", "top_tracks", "artists", "albums"].forEach(key => {
+          if (!state.catalog[key]) return;
+          const idx = state.catalog[key].findIndex(t => (t.id && t.id === enriched.id) || (t.name === enriched.name && t.artist === enriched.artist));
+          if (idx !== -1) {
+            state.catalog[key][idx] = { ...state.catalog[key][idx], ...enriched };
+            
+            // Progressive UI update: find and update the specific card immediately
+            const container = $(containerId);
+            if (container) {
+               // Robust selector using name/title to find the correct card
+               const nameAttr = enriched.name ? enriched.name.replace(/"/g, "\\\"") : (enriched.title || "").replace(/"/g, "\\\"");
+               const card = container.querySelector(`[data-card-data*='"name":"${nameAttr}"']`) || 
+                            container.querySelector(`[data-card-data*='"title":"${nameAttr}"']`);
+               if (card) {
+                  const artEl = card.querySelector(".card-art");
+                  if (artEl && enriched.artwork_url) {
+                    artEl.style.backgroundImage = `url('${enriched.artwork_url}')`;
+                  }
+                  card.dataset.cardData = JSON.stringify(state.catalog[key][idx]);
+               }
+            }
+          }
+        });
+        
+        // Re-sync standard track list rows if applicable
+        const listContainer = $(containerId);
+        if (listContainer && listContainer.classList.contains("track-list")) {
+          renderTrackList(containerId, items);
+        }
+      }
+    } catch (e) {
+      console.error("Single item enrichment failed:", e);
+    } finally {
+      active--;
+      next();
+    }
+  };
+
+  // Launch initial concurrent workers
+  for (let i = 0; i < Math.min(5, toEnrich.length); i++) {
+    next();
+  }
+}
+
 function renderHomePage() {
   if (!state.catalog) {
     $("pageContent").innerHTML = '<div class="loading"><div class="spinner"></div><span>Loading library...</span></div>';
@@ -446,16 +766,22 @@ function renderHomePage() {
   if (recentTracks.length) {
     renderCards("recentTracksGrid", recentTracks, "track");
     $("seeMoreRecent").onclick = () => pushPage(renderRecentTracksPage);
+    enrichBatch(recentTracks, "recentTracksGrid");
   }
 
   if (personalTracks.length) {
     renderCards("personalTracksGrid", personalTracks, "track");
     $("seeMorePersonal").onclick = () => pushPage(renderPersonalTracksPage);
+    enrichBatch(personalTracks, "personalTracksGrid");
   }
 
   renderCards("topTracksGrid", globalTracks, "track");
   renderCards("topArtistsGrid", topArtists, "artist");
   renderCards("topAlbumsGrid", topAlbums, "album");
+
+  enrichBatch(globalTracks, "topTracksGrid");
+  enrichBatch(topArtists, "topArtistsGrid");
+  enrichBatch(topAlbums, "topAlbumsGrid");
 
   $("seeMoreGlobalTracks").onclick = () => pushPage(renderGlobalTracksPage);
   $("seeMoreArtists").onclick = () => pushPage(renderArtistsPage);
@@ -526,7 +852,9 @@ function renderArtistsPage() {
     </div>
     <div class="scroll-area"><div id="fullArtistsGrid" class="grid"></div></div>
   `;
-  renderCards("fullArtistsGrid", state.catalog.artists || [], "artist");
+  const artists = state.catalog.artists || [];
+  renderCards("fullArtistsGrid", artists, "artist");
+  enrichBatch(artists, "fullArtistsGrid");
 }
 
 function renderAlbumsPage() {
@@ -541,7 +869,9 @@ function renderAlbumsPage() {
     </div>
     <div class="scroll-area"><div id="fullAlbumsGrid" class="grid"></div></div>
   `;
-  renderCards("fullAlbumsGrid", state.catalog.albums || [], "album");
+  const albums = state.catalog.albums || [];
+  renderCards("fullAlbumsGrid", albums, "album");
+  enrichBatch(albums, "fullAlbumsGrid");
 }
 
 function renderPersonalTracksPage() {
@@ -557,7 +887,9 @@ function renderPersonalTracksPage() {
       <div id="fullPersonalTracks" class="track-list"></div>
     </div>
   `;
-  renderTrackList("fullPersonalTracks", state.catalog.personal_tracks || []);
+  const tracks = state.catalog.personal_tracks || [];
+  renderTrackList("fullPersonalTracks", tracks);
+  enrichBatch(tracks, "fullPersonalTracks");
 }
 
 function renderRecentTracksPage() {
@@ -573,7 +905,9 @@ function renderRecentTracksPage() {
       <div id="fullRecentTracks" class="track-list"></div>
     </div>
   `;
-  renderTrackList("fullRecentTracks", state.catalog.recent_tracks || []);
+  const tracks = state.catalog.recent_tracks || [];
+  renderTrackList("fullRecentTracks", tracks);
+  enrichBatch(tracks, "fullRecentTracks");
 }
 
 function renderGlobalTracksPage() {
@@ -589,91 +923,112 @@ function renderGlobalTracksPage() {
       <div id="fullGlobalTracks" class="track-list"></div>
     </div>
   `;
-  renderTrackList("fullGlobalTracks", state.catalog.top_tracks || []);
+  const tracks = state.catalog.top_tracks || [];
+  renderTrackList("fullGlobalTracks", tracks);
+  enrichBatch(tracks, "fullGlobalTracks");
 }
 
-function renderTrackList(containerId, items, context = "general") {
+function renderTrackList(containerId, items, context = "general", playbackContext = null) {
   const container = $(containerId);
   if (!container) return;
   const current = state.currentTrack;
-  
-  Promise.all(items.map(item => {
-    if (!isTrackItem(item)) return Promise.resolve(null);
-    return api("/api/library/status", { method: "POST", body: JSON.stringify(serviceDownloadPayload(item, "download")) }).catch(() => null);
-  })).then((statuses) => {
-    container.innerHTML = items.map((item, idx) => {
-      const art = item.artwork_url || "";
-      const isTrack = isTrackItem(item);
-      const isActive = isTrack && current &&
-                       ((item.spotify_id && item.spotify_id === current.spotify_id) || 
-                        (item.title === current.title && item.artist === current.artist));
-      
-      const status = statuses[idx] || {};
-      const isDownloaded = isTrack && status.in_library;
-      const isBusy = isTrack && !!status.library_requested;
 
-      const typeLabel = { track: "Song", artist: "Artist", album: "Album" }[item.type] || (item.type || "Song");
-      
-      let col6 = ""; // Status column (Far Right)
-      if (isTrack) {
-        const label = isDownloaded ? "Remove from library" : (isBusy ? "Cancel library download" : "Add to library");
-        let iconHtml = `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
-        if (isBusy) {
-           iconHtml = progressButtonMarkup(status);
-        }
-        col6 = `<button class="track-library-btn ${isDownloaded ? "downloaded" : ""} ${isBusy ? "progress" : ""}" type="button" aria-label="${label}" title="${label}" data-library-action="${idx}" data-active-job-id="${status.active_job_id || ""}">
-          ${iconHtml}
-        </button>`;
-      }
+  function makeLibraryBtn(idx, status) {
+    const isDownloaded = !!(status && status.in_library);
+    const isBusy = !!(status && status.library_requested);
+    const label = isDownloaded ? "Remove from library" : (isBusy ? "Cancel library download" : "Add to library");
+    let iconHtml;
+    if (!status) {
+      iconHtml = `<i class="bi bi-arrow-down-circle"></i>`;
+    } else if (isBusy) {
+      iconHtml = progressButtonMarkup(status);
+    } else {
+      iconHtml = `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
+    }
+    return `<button class="track-library-btn${isDownloaded ? " downloaded" : ""}${isBusy ? " progress" : ""}" type="button" aria-label="${label}" title="${label}" data-library-action="${idx}" data-active-job-id="${(status && status.active_job_id) || ""}">${iconHtml}</button>`;
+  }
 
-      let col2 = `<strong>${isTrack ? albumLinkHtml(item, item.title || item.name || item.artist) : esc(item.title || item.name || item.artist)}</strong>`;
-      let col3 = ""; // Center column
-      let col4 = ""; // Extra column
-      let col5 = item.duration || "";
+  // Phase 1: render immediately with placeholder download icons (no network wait).
+  container.innerHTML = items.map((item, idx) => {
+    const art = item.artwork_url || "";
+    const isTrack = isTrackItem(item);
+    const isActive = isTrack && current &&
+                     ((item.spotify_id && item.spotify_id === current.spotify_id) ||
+                      (item.title === current.title && item.artist === current.artist));
+    const typeLabel = { track: "Song", artist: "Artist", album: "Album" }[item.type] || (item.type || "Song");
+    const col6 = isTrack ? makeLibraryBtn(idx, null) : "";
 
-      if (context === "search") {
-        col2 += `<span>${artistLinkHtml(item)}</span>`;
-        col3 = `<span class="pill">${esc(typeLabel)}</span>`;
-        col4 = isTrack ? albumLinkHtml(item, item.album || "", "album-link") : "";
-      } else if (context === "artist") {
-        col3 = item.plays ? `<span class="views-count">${item.plays.toLocaleString()}</span>` : "";
-        col4 = albumLinkHtml(item, item.album || "", "album-link");
-      } else if (context === "album") {
-        col2 += `<span>${artistLinkHtml(item)}</span>`;
-        col3 = "";
-        col4 = "";
-      } else {
-        col2 += `<span>${artistLinkHtml(item)}</span>`;
-        col4 = albumLinkHtml(item, item.album || "", "album-link");
-      }
+    let col2 = `<strong>${isTrack ? albumLinkHtml(item, item.title || item.name || item.artist) : esc(item.title || item.name || item.artist)}</strong>`;
+    let col3 = "", col4 = "";
+    const col5 = item.duration || "";
 
-      return `
-        <div class="track-row ${isActive ? "active-track" : ""}" data-item-idx="${idx}" data-item-data='${JSON.stringify(item).replace(/'/g, "&apos;")}'>
-          <div class="track-art ${item.type === "artist" ? "round" : ""}" style="background-image: url('${art}')"></div>
-          <div class="track-main">${col2}</div>
-          <div class="track-center">${col3}</div>
-          <div class="track-extra">${col4}</div>
-          <div class="track-time">${col5}</div>
-          <div class="track-status-icon">${col6}</div>
-        </div>
-      `;
-    }).join("");
-    
-    syncActiveTrackRows();
-    container.querySelectorAll(".track-row").forEach(el => {
-      el.onclick = (event) => {
-        if (event.target.closest("[data-library-action]")) return;
-        selectMusicItem(items[Number(el.dataset.itemIdx)], "stream", items);
-      };
-    });
+    if (context === "search") {
+      col2 += `<span>${artistLinkHtml(item)}</span>`;
+      col3 = `<span class="pill">${esc(typeLabel)}</span>`;
+      col4 = isTrack ? albumLinkHtml(item, item.album || "", "album-link") : "";
+    } else if (context === "artist") {
+      col3 = item.plays ? `<span class="views-count">${item.plays.toLocaleString()}</span>` : "";
+      col4 = albumLinkHtml(item, item.album || "", "album-link");
+    } else if (context === "album") {
+      col2 += `<span>${artistLinkHtml(item)}</span>`;
+      col3 = `<span class="views-count unavailable">${item.plays ? item.plays.toLocaleString() : "-"}</span>`;
+    } else {
+      col2 += `<span>${artistLinkHtml(item)}</span>`;
+      col4 = albumLinkHtml(item, item.album || "", "album-link");
+    }
+
+    return `
+      <div class="track-row ${isActive ? "active-track" : ""}" data-item-idx="${idx}" data-item-data='${JSON.stringify(item).replace(/'/g, "&apos;")}'>
+        <div class="track-art ${item.type === "artist" ? "round" : ""}" style="background-image: url('${art}')"></div>
+        <div class="track-main">${col2}</div>
+        <div class="track-center">${col3}</div>
+        <div class="track-extra">${col4}</div>
+        <div class="track-time">${col5}</div>
+        <div class="track-status-icon">${col6}</div>
+      </div>
+    `;
+  }).join("");
+
+  function bindLibraryButtons() {
     container.querySelectorAll("[data-library-action]").forEach(button => {
       button.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
-        toggleTrackLibrary(items[Number(button.dataset.libraryAction)], button, () => renderTrackList(containerId, items, context));
+        toggleTrackLibrary(items[Number(button.dataset.libraryAction)], button, () => renderTrackList(containerId, items, context, playbackContext));
       };
     });
-    bindEntityLinks(container);
+  }
+
+  syncActiveTrackRows();
+  container.querySelectorAll(".track-row").forEach(el => {
+    el.onclick = (event) => {
+      if (event.target.closest("[data-library-action]")) return;
+      selectMusicItem(items[Number(el.dataset.itemIdx)], "stream", items, playbackContext);
+    };
+  });
+  bindLibraryButtons();
+  bindEntityLinks(container);
+
+  // Phase 2: single batch request → update download icons in-place.
+  const trackIdxs = items.reduce((acc, item, idx) => {
+    if (isTrackItem(item)) acc.push(idx);
+    return acc;
+  }, []);
+  if (!trackIdxs.length) return;
+
+  api("/api/library/status/batch", {
+    method: "POST",
+    body: JSON.stringify({ tracks: trackIdxs.map(idx => serviceDownloadPayload(items[idx], "download")) }),
+  }).then(statuses => {
+    if (!container.isConnected) return;
+    trackIdxs.forEach((itemIdx, i) => {
+      const btn = container.querySelector(`[data-library-action="${itemIdx}"]`);
+      if (!btn) return;
+      const temp = document.createElement("div");
+      temp.innerHTML = makeLibraryBtn(itemIdx, statuses[i] || {});
+      btn.replaceWith(temp.firstElementChild);
+    });
+    bindLibraryButtons();
   }).catch(() => {});
 }
 
@@ -710,6 +1065,8 @@ async function renderArtistPage(artist) {
         </div>
         <div id="artistAlbumsGrid" class="grid"></div>
       </div>
+
+      <div id="artistAboutSection" class="hidden"></div>
       
       <div id="artistLoading" class="loading"><div class="spinner"></div><span>Loading discovery data…</span></div>
     </div>
@@ -759,6 +1116,123 @@ async function renderArtistPage(artist) {
     });
   }
 
+  async function loadArtistAbout() {
+    if (!resolvedArtistId) return;
+    try {
+      const about = await api("/api/artist/about", {
+        method: "POST",
+        body: JSON.stringify({ artist_id: resolvedArtistId, name: artistName })
+      });
+      if (!about || !about.monthly_listeners) return;
+
+      const aboutSection = $("artistAboutSection");
+      aboutSection.classList.remove("hidden");
+      
+      const format = (n) => new Intl.NumberFormat().format(n);
+      const firstGalleryImg = about.gallery && about.gallery[0] ? about.gallery[0].url : artistArtwork;
+
+      const formatBio = (text) => {
+        if (!text) return "";
+        // Convert <a href="spotify:artist:ID">Name</a> into clickable spans
+        return text.replace(/<a href="spotify:artist:([^"]+)">([^<]+)<\/a>/g, (match, id, name) => {
+          return `<span class="artist-link-inline" data-id="${id}" data-name="${name}">${name}</span>`;
+        });
+      };
+
+      const bioHtml = formatBio(about.biography || "No biography available.");
+
+      aboutSection.innerHTML = `
+        <h2 style="margin: 48px 0 24px">About</h2>
+        <div class="artist-about-preview" id="artistAboutTrigger">
+          <img src="${firstGalleryImg}" class="artist-about-img">
+          ${about.global_chart_position ? `
+            <div class="rank-badge">
+              <span class="rank-label">World</span>
+              <span class="rank-num">#${about.global_chart_position}</span>
+            </div>
+          ` : ""}
+          <div class="artist-about-overlay">
+          <div class="about-listeners">${format(about.monthly_listeners)} monthly listeners</div>
+          <div class="about-bio-preview">${about.biography ? about.biography.replace(/<[^>]*>/g, "") : ""}</div>
+          </div>
+          </div>
+
+          <dialog class="about-modal" id="artistAboutModal">
+          <button class="about-close" id="artistAboutClose"><i class="bi bi-x-lg"></i></button>
+          <div class="about-modal-content">
+          ${about.gallery && about.gallery.length > 0 ? `
+            <div class="about-gallery">
+              ${about.gallery.map(img => `<img src="${img.url}" loading="lazy">`).join("")}
+            </div>
+          ` : ""}
+
+          <div class="about-modal-grid">
+            <div>
+              <div class="about-stat-row">
+                <div class="about-stat-item">
+                  <b>${format(about.followers)}</b>
+                  <span>Followers</span>
+                </div>
+                <div class="about-stat-item">
+                  <b>${format(about.monthly_listeners)}</b>
+                  <span>Monthly Listeners</span>
+                </div>
+              </div>
+              <div class="about-bio-full">${bioHtml}</div>
+
+              <div class="posted-by-row">
+                 <div class="mini-art" style="background-image: url('${artistArtwork}')"></div>
+                 <span>Posted By <b class="artist-link-inline" data-id="${resolvedArtistId}" data-name="${artistName}">${artistName}</b></span>
+              </div>
+
+              <div style="margin-top: 24px; font-size: 12px; color: var(--muted)">Source: ${about.bio_source || "Spotify"}</div>
+            </div>
+              <div>
+                <h3 style="margin-bottom: 24px">Where people listen</h3>
+                <ul class="top-cities-list">
+                  ${(about.top_cities || []).map(c => `
+                    <li>
+                      <b>${esc(c.city)}, ${esc(c.country)}</b>
+                      <span>${format(c.count)} listeners</span>
+                    </li>
+                  `).join("")}
+                </ul>
+              </div>
+            </div>
+          </div>
+        </dialog>
+      `;
+
+      const modal = $("artistAboutModal");
+      $("artistAboutTrigger").onclick = () => modal.showModal();
+      $("artistAboutClose").onclick = () => modal.close();
+      modal.onclick = (e) => { if (e.target === modal) modal.close(); };
+      modal.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.stopPropagation();
+          event.preventDefault();
+          const content = modal.querySelector(".about-modal-content");
+          if (content) content.scrollBy({ top: event.key === "ArrowDown" ? 80 : -80, behavior: "smooth" });
+        }
+      });
+
+      // Handle inline artist links
+      aboutSection.querySelectorAll(".artist-link-inline").forEach(el => {
+        el.onclick = (e) => {
+          e.preventDefault();
+          modal.close();
+          pushPage(() => renderArtistPage({
+            name: el.dataset.name,
+            artist_id: el.dataset.id
+          }));
+        };
+      });
+
+    } catch (e) {
+      console.error("Failed to load artist about:", e);
+    }
+  }
+
   const es = new EventSource(`/api/music/artist?artist=${encodeURIComponent(artistName)}&artist_id=${artistId}`);
   window.artistEvtSource = es;
 
@@ -780,6 +1254,19 @@ async function renderArtistPage(artist) {
         $("artistHeroName").textContent = part.artist;
         if (part.artwork_url) {
           $("artistHeroArt").style.backgroundImage = `url('${part.artwork_url}')`;
+        }
+        // Force attempt to load about info for every artist
+        if (resolvedArtistId) {
+          loadArtistAbout();
+        } else {
+          // If no ID, attempt to fetch it via quick search
+          api("/api/music/suggest", { q: artistName }).then(res => {
+            const match = (res.results || []).find(r => r.type === "artist" && r.name.toLowerCase() === artistName.toLowerCase());
+            if (match && match.id) {
+              resolvedArtistId = match.id;
+              loadArtistAbout();
+            }
+          }).catch(() => {});
         }
       }
       if (part.type === "top_tracks") {
@@ -821,11 +1308,34 @@ async function renderAlbumPage(album) {
       data.total_duration,
     ].filter(Boolean);
     const metadataHtml = albumMeta.map((value) => `<span class="dot">•</span><span>${esc(value)}</span>`).join("");
+    const spotifyArtwork = data.artwork_url || album.artwork_url || "";
+    const galleryImages = (data.gallery_images || []).length
+      ? data.gallery_images
+      : (spotifyArtwork ? [{ url: spotifyArtwork, source: "Spotify", label: "Cover" }] : []);
+    const hasMultipleImages = galleryImages.length > 1;
+    const firstImage = galleryImages[0] || { url: "", source: "Spotify", label: "Cover" };
     
     content.innerHTML = `
       <div class="scroll-area">
         <div class="entity-hero">
-          <div class="entity-art" style="background-image: url('${data.artwork_url || album.artwork_url || ""}')"></div>
+          <div class="album-gallery-wrap">
+            <div class="entity-art album-gallery${hasMultipleImages ? " has-slides" : ""}" id="albumGallery">
+              <button class="gallery-enlarge" id="albumGalleryEnlarge" type="button" aria-label="View ${esc(data.album)} artwork larger">
+                <img id="albumGalleryImage" src="${esc(firstImage.url)}" alt="${esc(data.album)} artwork">
+              </button>
+              ${hasMultipleImages ? `
+                <button class="gallery-arrow previous" id="albumGalleryPrevious" type="button" aria-label="Previous album image"><i class="bi bi-chevron-left"></i></button>
+                <button class="gallery-arrow next" id="albumGalleryNext" type="button" aria-label="Next album image"><i class="bi bi-chevron-right"></i></button>
+                <span class="gallery-position" id="albumGalleryPosition">1 / ${galleryImages.length}</span>
+              ` : ""}
+            </div>
+            ${data.discogs_release_url ? `
+              <div class="discogs-attribution ${firstImage.source === "Discogs" ? "" : "hidden"}" id="discogsAttribution">
+                <a href="${esc(data.discogs_release_url)}" target="_blank" rel="noopener">Data provided by Discogs</a>
+                <span>This application uses Discogs' API but is not affiliated with, sponsored or endorsed by Discogs.</span>
+              </div>
+            ` : ""}
+          </div>
           <div>
             <span class="eyebrow">Album</span>
             <h1>${esc(data.album)}</h1>
@@ -838,7 +1348,26 @@ async function renderAlbumPage(album) {
             </div>
           </div>
         </div>
-        <div id="albumTrackList" class="track-list" style="margin-top: 24px"></div>
+
+        <div class="track-list-header" style="margin-top: 24px">
+          <div>#</div>
+          <div>Title</div>
+          <div class="plays-column">Plays</div>
+          <div></div>
+          <div class="time-column"><i class="bi bi-clock"></i></div>
+          <div></div>
+        </div>
+
+        <div id="albumTrackList" class="track-list"></div>
+        <dialog class="album-image-modal" id="albumImageModal" aria-label="${esc(data.album)} artwork preview">
+          <button class="album-image-modal-close" id="albumImageModalClose" type="button" aria-label="Close enlarged artwork"><i class="bi bi-x-lg"></i></button>
+          <button class="album-image-modal-zoom" id="albumImageModalZoom" type="button" aria-label="Toggle zoom view"><i class="bi bi-zoom-in"></i></button>
+          ${hasMultipleImages ? `
+            <button class="album-image-modal-arrow previous" id="albumImageModalPrevious" type="button" aria-label="Previous enlarged album image"><i class="bi bi-chevron-left"></i></button>
+            <button class="album-image-modal-arrow next" id="albumImageModalNext" type="button" aria-label="Next enlarged album image"><i class="bi bi-chevron-right"></i></button>
+          ` : ""}
+          <img id="albumImageModalImage" src="${esc(firstImage.url)}" alt="${esc(data.album)} artwork enlarged">
+        </dialog>
       </div>
     `;
     
@@ -847,6 +1376,119 @@ async function renderAlbumPage(album) {
       artwork_url: artistArtwork,
       artist_id: album.spotify_artist_id || "",
     });
+    const albumImageModal = $("albumImageModal");
+    const albumImageModalImage = $("albumImageModalImage");
+    const galleryImage = $("albumGalleryImage");
+    const galleryPosition = $("albumGalleryPosition");
+    const discogsAttribution = $("discogsAttribution");
+    let galleryIndex = 0;
+    let modalZoom = { scale: 1, x: 0, y: 0, isPanning: false, startX: 0, startY: 0 };
+    
+    const updateModalTransform = () => {
+      albumImageModalImage.style.transform = `translate(${modalZoom.x}px, ${modalZoom.y}px) scale(${modalZoom.scale})`;
+      const zoomBtn = $("albumImageModalZoom");
+      if (zoomBtn) {
+        const icon = zoomBtn.querySelector("i");
+        if (icon) {
+          icon.className = modalZoom.scale > 1.1 ? "bi bi-zoom-out" : "bi bi-zoom-in";
+        }
+      }
+    };
+
+    const resetModalZoom = () => {
+      modalZoom = { scale: 1, x: 0, y: 0, isPanning: false, startX: 0, startY: 0 };
+      updateModalTransform();
+    };
+
+    const showGalleryImage = (nextIndex) => {
+      galleryIndex = (nextIndex + galleryImages.length) % galleryImages.length;
+      const image = galleryImages[galleryIndex];
+      galleryImage.src = image.url;
+      galleryImage.alt = `${data.album} ${image.label || "artwork"}`;
+      albumImageModalImage.src = image.full_url || image.url;
+      albumImageModalImage.alt = `${galleryImage.alt} enlarged`;
+      resetModalZoom();
+      if (galleryPosition) {
+        galleryPosition.textContent = `${galleryIndex + 1} / ${galleryImages.length}`;
+      }
+      if (discogsAttribution) {
+        discogsAttribution.classList.toggle("hidden", image.source !== "Discogs");
+      }
+    };
+
+    albumImageModal.onwheel = (event) => {
+      event.preventDefault();
+      const delta = -event.deltaY;
+      const factor = delta > 0 ? 1.1 : 0.9;
+      const nextScale = Math.min(Math.max(modalZoom.scale * factor, 1), 10);
+      
+      // If we are at scale 1, reset position
+      if (nextScale === 1) {
+        modalZoom.x = 0;
+        modalZoom.y = 0;
+      }
+      
+      modalZoom.scale = nextScale;
+      updateModalTransform();
+    };
+
+    albumImageModal.onmousedown = (event) => {
+      if (modalZoom.scale > 1) {
+        modalZoom.isPanning = true;
+        modalZoom.startX = event.clientX - modalZoom.x;
+        modalZoom.startY = event.clientY - modalZoom.y;
+      }
+    };
+
+    window.addEventListener("mousemove", (event) => {
+      if (modalZoom.isPanning) {
+        modalZoom.x = event.clientX - modalZoom.startX;
+        modalZoom.y = event.clientY - modalZoom.startY;
+        updateModalTransform();
+      }
+    });
+
+    window.addEventListener("mouseup", () => {
+      modalZoom.isPanning = false;
+    });
+
+    $("albumGalleryEnlarge").onclick = () => {
+      showGalleryImage(galleryIndex);
+      albumImageModal.showModal();
+    };
+    $("albumImageModalZoom").onclick = () => {
+      if (modalZoom.scale > 1.1) {
+        resetModalZoom();
+      } else {
+        modalZoom.scale = 2.5;
+        modalZoom.x = 0;
+        modalZoom.y = 0;
+        updateModalTransform();
+      }
+    };
+    $("albumImageModalClose").onclick = () => albumImageModal.close();
+    albumImageModal.onclick = (event) => {
+      // Only close on backdrop click if we are NOT zoomed in
+      if (event.target === albumImageModal && modalZoom.scale <= 1.1) {
+        albumImageModal.close();
+      }
+    };
+    albumImageModal.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft") { event.stopPropagation(); event.preventDefault(); showGalleryImage(galleryIndex - 1); }
+      else if (event.key === "ArrowRight") { event.stopPropagation(); event.preventDefault(); showGalleryImage(galleryIndex + 1); }
+    });
+    if (hasMultipleImages) {
+      $("albumGalleryPrevious").onclick = (event) => {
+        event.stopPropagation();
+        showGalleryImage(galleryIndex - 1);
+      };
+      $("albumGalleryNext").onclick = (event) => {
+        event.stopPropagation();
+        showGalleryImage(galleryIndex + 1);
+      };
+      $("albumImageModalPrevious").onclick = () => showGalleryImage(galleryIndex - 1);
+      $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
+    }
     renderTrackList("albumTrackList", data.tracks || [], "album");
   } catch (e) {
     content.innerHTML = `<div class="error-state">Failed to load album: ${e.message}</div>`;
@@ -856,7 +1498,7 @@ async function renderAlbumPage(album) {
 // ---------------------------------------------------------------------------
 // Selection & Playback (SpotiFLAC Only)
 // ---------------------------------------------------------------------------
-async function selectMusicItem(item, mode = "stream", contextList = null) {
+async function selectMusicItem(item, mode = "stream", contextList = null, playbackContext = null) {
   if (!item) return;
   if (item.type === "artist") {
     pushPage(() => renderArtistPage(item));
@@ -867,26 +1509,31 @@ async function selectMusicItem(item, mode = "stream", contextList = null) {
     return;
   }
 
-  // Priority: Cancel any active job or prefetch immediately
+  // Cancel the active stream job immediately.
   if (state.activeJobId) {
     api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activeJobId }) }).catch(() => {});
     state.activeJobId = null;
   }
-  if (state.activePrefetchJobId) {
+  // Only cancel the prefetch if the incoming track is NOT the one being prefetched.
+  // If it IS the prefetched track (queue auto-advance), keep it running and reuse it.
+  if (state.activePrefetchJobId && trackKey(item) !== state.prefetchedTrackKey) {
     api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
     state.activePrefetchJobId = null;
+    state.prefetchedTrackKey = null;
   }
 
   
   const requestId = ++state.playbackRequestId;
   state.activeJobId = null;
   state.currentTrack = item;
+  recordDockRecentSelection(item, playbackContext);
   
   prepareSelectedTrackUi(item, "Loading...");
   syncActiveTrackRows();
   
   if (contextList && contextList.length) {
     state.originalQueue = [...contextList].filter(t => t.type !== "artist");
+    state.queueContext = playbackContext;
     if (state.isShuffle) {
         state.queue = [...state.originalQueue].sort(() => Math.random() - 0.5);
     } else {
@@ -1013,18 +1660,24 @@ function updateDetailsPanel(track) {
   bindEntityLinks(document.querySelector(".details-head"));
 }
 
-function serviceDownloadPayload(track, mode = "stream") {
+function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
   return {
     kind: "track",
     mode,
+    prefetch,
     artist: track.artist || "",
     album: track.album || "",
     title: track.title || "",
     quality: state.settings.default_quality || "LOSSLESS",
     service: state.settings.download_service || "tidal",
+    engine: state.settings.download_engine || "spotiflac",
     track,
     metadata: track.metadata || track,
   };
+}
+
+function trackKey(item) {
+  return `${(item?.title || "").toLowerCase()}||${(item?.artist || "").toLowerCase()}`;
 }
 
 async function prefetchNextTrack() {
@@ -1039,8 +1692,11 @@ async function prefetchNextTrack() {
     if (source.path) return; // already cached, nothing to do
   } catch (e) {}
   try {
-    const job = await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream")) });
-    if (job && job.id) state.activePrefetchJobId = job.id;
+    const job = await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream", true)) });
+    if (job && job.id) {
+      state.activePrefetchJobId = job.id;
+      state.prefetchedTrackKey = trackKey(next);
+    }
   } catch (e) {}
 }
 
@@ -1188,6 +1844,16 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       const job = (data.jobs || []).find((item) => item.id === jobId);
       if (!job) return;
       if (job.status === "error") {
+        if (mode === "stream") {
+          const source = await api("/api/playback/source", {
+            method: "POST",
+            body: JSON.stringify(serviceDownloadPayload(track, "stream")),
+          }).catch(() => null);
+          if (source && source.path) {
+            await playFromLibraryPath(source.path, track, requestId, source.active_job_id || null, "Playing from cache");
+            return;
+          }
+        }
         setPlayerStatusIcon("error");
         setPlayerStatus(job.error || "Service download failed", track);
         return;
@@ -1389,21 +2055,67 @@ function tabLabel(tab) {
 // Settings
 // ---------------------------------------------------------------------------
 
+function stopCacheLogPolling() {
+  if (state.cacheLogTimer) {
+    clearInterval(state.cacheLogTimer);
+    state.cacheLogTimer = null;
+  }
+}
+
+async function refreshCacheLogs() {
+  const output = $("cacheLiveLog");
+  if (!output) return;
+  try {
+    const data = await api("/api/cache/logs");
+    const events = data.events || [];
+    const status = $("cacheLiveStatus");
+    if (status) status.textContent = data.cache_dir || "Cache folder";
+    if (!events.length) {
+      output.textContent = "Waiting for cache activity...";
+      return;
+    }
+    output.textContent = events.map((event) => {
+      const clock = new Date((event.timestamp || 0) * 1000).toLocaleTimeString();
+      const track = event.title ? `[${event.title}] ` : "";
+      return `[${clock}] ${track}${event.message}`;
+    }).join("\n");
+    const autoScroll = $("cacheAutoScroll");
+    if (!autoScroll || autoScroll.checked) {
+      output.scrollTop = output.scrollHeight;
+    }
+  } catch (error) {
+    output.textContent = "Unable to read cache activity.";
+  }
+}
+
+function startCacheLogPolling() {
+  stopCacheLogPolling();
+  refreshCacheLogs();
+  state.cacheLogTimer = setInterval(refreshCacheLogs, 1000);
+}
+
 async function renderSettings() {
   setActiveView("settings");
+  startCacheLogPolling();
   state.settings = await api("/api/settings");
   
   $("cacheDir").value = state.settings.cache_dir || "";
   $("musicDir").value = state.settings.music_dir || "";
-  $("downloadService").value = state.settings.download_service || "tidal";
-  updateQualityOptions($("downloadService").value, state.settings.default_quality || "LOSSLESS");
-  $("downloadService").onchange = () => updateQualityOptions($("downloadService").value, $("defaultQuality").value);
+
+  const engine = state.settings.download_engine || "spotiflac";
+  $("downloadEngine").value = engine;
+  updateEngineControls(engine, state.settings.download_service || "tidal", state.settings.default_quality || "LOSSLESS");
+  $("downloadEngine").onchange = () => {
+    const newEngine = $("downloadEngine").value;
+    updateEngineControls(newEngine, $("downloadService").value, $("defaultQuality").value);
+  };
   $("trackMaxRetries").value = (state.settings.track_max_retries !== undefined) ? state.settings.track_max_retries : 1;
 
   $("cacheCleanupFrequency").value = state.settings.cache_cleanup_frequency || "never";
 
   $("demoMusicIndexer").checked = !!state.settings.demo_music_indexer;
   $("strictTitleMatch").checked = !!state.settings.strict_title_match;
+  $("discogsToken").value = state.settings.discogs_token || "";
   
   $("musicIndexers").innerHTML = "";
   (state.settings.music_indexers || []).forEach(indexer => {
@@ -1431,6 +2143,7 @@ async function saveSettings(e) {
     ...state.settings,
     cache_dir: $("cacheDir").value,
     music_dir: $("musicDir").value,
+    download_engine: $("downloadEngine").value,
     download_service: $("downloadService").value,
     default_quality: $("defaultQuality").value,
     track_max_retries: parseInt($("trackMaxRetries").value),
@@ -1439,6 +2152,7 @@ async function saveSettings(e) {
 
     demo_music_indexer: $("demoMusicIndexer").checked,
     strict_title_match: $("strictTitleMatch").checked,
+    discogs_token: $("discogsToken").value.trim(),
     music_indexers: Array.from(document.querySelectorAll("#musicIndexers .indexer-row")).map(row => ({
       name: row.querySelector("[data-field='name']").value,
       type: row.querySelector("[data-field='type']").value,
@@ -1631,11 +2345,12 @@ function bindPlayer() {
     if ("mediaSession" in navigator) {
       navigator.mediaSession.playbackState = audio.paused ? "paused" : "playing";
     }
+    api("/api/dock/playing-state", { method: "POST", body: JSON.stringify({ playing: !audio.paused }) }).catch(() => {});
   };
   audio.onended = () => {
     if (state.queue.length) {
       state.queueIndex = (state.queueIndex + 1) % state.queue.length;
-      selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue);
+      selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
     }
   };
   audio.ontimeupdate = () => {
@@ -1655,14 +2370,14 @@ function bindPlayer() {
     persistVolume(audio.volume);
     syncVolumeBar();
   };
-  $("btnNext").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex + 1) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue); } };
-  $("btnPrev").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex - 1 + state.queue.length) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue); } };
+  $("btnNext").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex + 1) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext); } };
+  $("btnPrev").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex - 1 + state.queue.length) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext); } };
   const btnShuffle = $("btnShuffle");
   if (btnShuffle) {
     btnShuffle.onclick = () => {
       state.isShuffle = !state.isShuffle;
       btnShuffle.classList.toggle("active", state.isShuffle);
-      
+
       if (state.activePrefetchJobId) {
         api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
         state.activePrefetchJobId = null;
@@ -1831,12 +2546,22 @@ function _renderPlaylistContent(pl) {
           <div class="playlist-hero-meta">${metaParts.join(" · ")}</div>
         </div>
       </div>
-      <div id="playlistTrackList" class="track-list" style="margin-top: 24px"></div>
+
+      <div class="track-list-header" style="margin-top: 24px">
+        <div>#</div>
+        <div>Title</div>
+        <div></div>
+        <div>Album</div>
+        <div><i class="bi bi-clock"></i></div>
+        <div></div>
+      </div>
+
+      <div id="playlistTrackList" class="track-list"></div>
     </div>
   `;
 
   if (pl.tracks.length) {
-    renderTrackList("playlistTrackList", pl.tracks, "general");
+    renderTrackList("playlistTrackList", pl.tracks, "general", { kind: "playlist", id: pl.id, name: pl.name });
   } else {
     $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">No songs yet — click the status icon while a track is playing to add it.</div>`;
   }
@@ -2008,6 +2733,7 @@ function bindPlaylistDialogs() {
 }
 
 async function boot() {
+  state.dockRecentItems = storedDockRecentItems();
   bindSearch();
   bindPlayer();
   bindKeyboardControls();
@@ -2045,7 +2771,19 @@ async function boot() {
   $("clearCache").onclick = async () => { await api("/api/cache", { method: "DELETE" }); renderSettings(); };
 
   await Promise.all([loadCatalog(), loadPlaylists()]);
+  seedDockRecentTracks();
   replacePage(renderHomePage);
 }
 
 boot().catch(console.error);
+
+// Global keyboard shortcuts
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    const openModals = document.querySelectorAll("dialog[open]");
+    if (openModals.length > 0) {
+      event.preventDefault();
+      openModals.forEach(modal => modal.close());
+    }
+  }
+});

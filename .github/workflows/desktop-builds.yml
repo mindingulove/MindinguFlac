@@ -39,7 +39,6 @@ jobs:
             --icon build/icons/mindinguflac.icns \
             --add-data "static:static" \
             --collect-all SpotiFLAC \
-            --exclude-module AppKit._AppKit \
             --exclude-module MediaLibrary \
             --exclude-module Photos \
             --exclude-module Contacts \
