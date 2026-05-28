@@ -2301,20 +2301,39 @@ function absoluteUrl(url) {
   }
 }
 
+function _callNowPlaying(fnName, arg) {
+  try {
+    const api = window.pywebview && window.pywebview.api;
+    if (api && typeof api[fnName] === "function") api[fnName](arg);
+  } catch (e) {}
+}
+
 function updateMediaSession(track) {
-  if (!("mediaSession" in navigator) || !track) return;
+  if (!track) return;
   const art = absoluteUrl(track.artwork_url || "");
-  const artwork = art ? [
-    { src: art, sizes: "96x96", type: "image/png" },
-    { src: art, sizes: "128x128", type: "image/png" },
-    { src: art, sizes: "256x256", type: "image/png" },
-    { src: art, sizes: "512x512", type: "image/png" },
-  ] : [];
-  navigator.mediaSession.metadata = new MediaMetadata({
+  if ("mediaSession" in navigator) {
+    const artwork = art ? [
+      { src: art, sizes: "96x96", type: "image/png" },
+      { src: art, sizes: "128x128", type: "image/png" },
+      { src: art, sizes: "256x256", type: "image/png" },
+      { src: art, sizes: "512x512", type: "image/png" },
+    ] : [];
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.title || "Unknown",
+      artist: track.artist || "",
+      album: track.album || "",
+      artwork,
+    });
+  }
+  // macOS Touch Bar / Now Playing
+  const audio = $("audioPlayer");
+  _callNowPlaying("set_now_playing", {
     title: track.title || "Unknown",
     artist: track.artist || "",
     album: track.album || "",
-    artwork,
+    duration: (audio && isFinite(audio.duration)) ? audio.duration : 0,
+    position: (audio && isFinite(audio.currentTime)) ? audio.currentTime : 0,
+    artwork_url: art,
   });
 }
 
@@ -2346,6 +2365,7 @@ function bindPlayer() {
       navigator.mediaSession.playbackState = audio.paused ? "paused" : "playing";
     }
     api("/api/dock/playing-state", { method: "POST", body: JSON.stringify({ playing: !audio.paused }) }).catch(() => {});
+    _callNowPlaying("set_playback_state", audio.paused ? 2 : 1);
   };
   audio.onended = () => {
     if (state.queue.length) {
@@ -2364,7 +2384,20 @@ function bindPlayer() {
       prefetchNextTrack().catch(() => {});
     }
   };
-  $("seekBar").oninput = () => { if (audio.duration) audio.currentTime = ($("seekBar").value / 1000) * audio.duration; };
+  audio.onloadedmetadata = () => {
+    if (state.currentTrack) {
+      _callNowPlaying("set_now_playing", {
+        duration: audio.duration || 0,
+        position: audio.currentTime || 0,
+      });
+    }
+  };
+  $("seekBar").oninput = () => {
+    if (audio.duration) {
+      audio.currentTime = ($("seekBar").value / 1000) * audio.duration;
+      _callNowPlaying("set_now_playing", { position: audio.currentTime });
+    }
+  };
   $("volumeBar").oninput = () => {
     audio.volume = Number($("volumeBar").value);
     persistVolume(audio.volume);
