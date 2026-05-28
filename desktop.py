@@ -69,71 +69,60 @@ def install_now_playing(window: webview.Window) -> None:
     try:
         import ctypes
         import objc
-        from Foundation import NSBundle, NSObject
-        from AppKit import NSImage
+        from Foundation import NSBundle
 
         mp_bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/MediaPlayer.framework")
         mp_bundle.load()
 
         MPNowPlayingInfoCenter = objc.lookUpClass("MPNowPlayingInfoCenter")
         MPRemoteCommandCenter = objc.lookUpClass("MPRemoteCommandCenter")
-        MPMediaItemArtwork = objc.lookUpClass("MPMediaItemArtwork")
 
         center = MPNowPlayingInfoCenter.defaultCenter()
         cmd_center = MPRemoteCommandCenter.sharedCommandCenter()
 
-        mascot_path = resource_path("static/assets/mindinguflac_icon_bcp.png")
-        _fallback_image = None
-        if mascot_path.is_file():
-            _fallback_image = NSImage.alloc().initWithContentsOfFile_(str(mascot_path))
-
-        # Pre-build fallback artwork once; store ObjC obj in _np_info["_artwork"]
-        if _fallback_image is not None:
+        # Define callbacks first so they are always registered even if
+        # the remote-command block setup below raises an exception.
+        def set_now_playing(info: dict) -> None:
             try:
-                aw = MPMediaItemArtwork.alloc().initWithImage_(_fallback_image)
-                if aw is not None:
-                    _np_info["_artwork"] = aw
-            except Exception:
-                pass
+                if "title" in info:
+                    _np_info["title"] = str(info["title"])
+                if "artist" in info:
+                    _np_info["artist"] = str(info["artist"])
+                if "album" in info:
+                    _np_info["albumTitle"] = str(info["album"])
+                # playbackDuration must be present for the Touch Bar widget to appear.
+                # Use whatever we receive; if 0, keep the previous value or default to 1.
+                d = float(info.get("duration") or 0)
+                if d > 0:
+                    _np_info["playbackDuration"] = d
+                elif "playbackDuration" not in _np_info:
+                    _np_info["playbackDuration"] = 1.0
+                _np_info["MPNowPlayingInfoPropertyElapsedPlaybackTime"] = float(info.get("position") or 0)
+                _np_info["MPNowPlayingInfoPropertyPlaybackRate"] = 1.0
+                np_data = {k: v for k, v in _np_info.items() if not k.startswith("_")}
+                if "title" in np_data:
+                    center.setNowPlayingInfo_(np_data)
+                    center.setPlaybackState_(1)
+            except Exception as exc:
+                print(f"set_now_playing error: {exc}", file=sys.stderr)
 
-        # NSObject subclass for dispatching ObjC calls onto the main thread.
-        # center is captured via _np_info["_center"] to avoid closure issues.
-        _np_info["_center"] = center
+        def set_playback_state(state_val: int) -> None:
+            try:
+                sv = int(state_val)
+                _np_info["MPNowPlayingInfoPropertyPlaybackRate"] = 1.0 if sv == 1 else 0.0
+                np_data = {k: v for k, v in _np_info.items() if not k.startswith("_")}
+                if np_data:
+                    center.setNowPlayingInfo_(np_data)
+                center.setPlaybackState_(sv)
+            except Exception as exc:
+                print(f"set_playback_state error: {exc}", file=sys.stderr)
 
-        class _NPDispatcher(NSObject):
-            def doUpdateInfo_(self, _):
-                c = _np_info.get("_center")
-                if c is None:
-                    return
-                try:
-                    np = {k: v for k, v in _np_info.items() if not k.startswith("_")}
-                    if np:
-                        c.setNowPlayingInfo_(np)
-                except Exception as e:
-                    print(f"NP setNowPlayingInfo error: {e}", file=sys.stderr)
+        import app as _app
+        _app._np_update_fn = set_now_playing
+        _app._np_state_fn = set_playback_state
 
-            def doUpdateState_(self, _):
-                c = _np_info.get("_center")
-                if c is None:
-                    return
-                try:
-                    c.setPlaybackState_(int(_np_info.get("_state", 2)))
-                except Exception as e:
-                    print(f"NP setPlaybackState error: {e}", file=sys.stderr)
-
-        _dispatcher = _NPDispatcher.alloc().init()
-
-        def _push_info():
-            _dispatcher.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "doUpdateInfo:", None, False
-            )
-
-        def _push_state():
-            _dispatcher.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "doUpdateState:", None, False
-            )
-
-        # Register remote command handlers using ObjC blocks.
+        # Register remote command handlers. Wrapped separately so a failure
+        # here doesn't prevent the callbacks above from being registered.
         _blocks: list = []
         try:
             def _make_handler(elem_id: str):
@@ -161,58 +150,17 @@ def install_now_playing(window: webview.Window) -> None:
         except Exception as cmd_exc:
             print(f"Now Playing remote commands unavailable: {cmd_exc}", file=sys.stderr)
             for cmd in (
-                cmd_center.playCommand(),
-                cmd_center.pauseCommand(),
+                cmd_center.playCommand(), cmd_center.pauseCommand(),
                 cmd_center.togglePlayPauseCommand(),
-                cmd_center.nextTrackCommand(),
-                cmd_center.previousTrackCommand(),
+                cmd_center.nextTrackCommand(), cmd_center.previousTrackCommand(),
             ):
                 try:
                     cmd.setEnabled_(True)
                 except Exception:
                     pass
 
-        # Keep strong refs so blocks / dispatcher aren't GC'd.
+        # Keep blocks alive via the module-level dict.
         _np_info["_blocks"] = _blocks
-        _np_info["_dispatcher"] = _dispatcher
-
-        def set_now_playing(info: dict) -> None:
-            try:
-                if "title" in info:
-                    _np_info["title"] = str(info["title"])
-                if "artist" in info:
-                    _np_info["artist"] = str(info["artist"])
-                if "album" in info:
-                    _np_info["albumTitle"] = str(info["album"])
-                if "duration" in info:
-                    d = float(info["duration"] or 0)
-                    if d > 0:
-                        _np_info["playbackDuration"] = d
-                if "position" in info:
-                    _np_info["MPNowPlayingInfoPropertyElapsedPlaybackTime"] = float(info["position"] or 0)
-                _np_info.setdefault("MPNowPlayingInfoPropertyPlaybackRate", 1.0)
-                # Include pre-built artwork if available
-                if "artwork" not in _np_info and "_artwork" in _np_info:
-                    _np_info["artwork"] = _np_info["_artwork"]
-                _push_info()
-            except Exception as exc:
-                print(f"set_now_playing error: {exc}", file=sys.stderr)
-
-        def set_playback_state(state_val: int) -> None:
-            try:
-                sv = int(state_val)
-                _np_info["_state"] = sv
-                _np_info["MPNowPlayingInfoPropertyPlaybackRate"] = 1.0 if sv == 1 else 0.0
-                _push_info()
-                _push_state()
-            except Exception as exc:
-                print(f"set_playback_state error: {exc}", file=sys.stderr)
-
-        # Register with the HTTP-server-based callback mechanism (more reliable
-        # than pywebview expose in PyInstaller builds).
-        import app as _app
-        _app._np_update_fn = set_now_playing
-        _app._np_state_fn = set_playback_state
 
     except Exception as exc:
         print(f"Unable to install Now Playing: {exc}", file=sys.stderr)

@@ -2328,11 +2328,14 @@ function updateMediaSession(track) {
   }
   // macOS Touch Bar / Now Playing
   const audio = $("audioPlayer");
+  const durSec = (audio && isFinite(audio.duration) && audio.duration > 0)
+    ? audio.duration
+    : (track.duration_ms ? track.duration_ms / 1000 : 300);
   _callNowPlaying("set_now_playing", {
     title: track.title || "Unknown",
     artist: track.artist || "",
     album: track.album || "",
-    duration: (audio && isFinite(audio.duration)) ? audio.duration : 0,
+    duration: durSec,
     position: (audio && isFinite(audio.currentTime)) ? audio.currentTime : 0,
     artwork_url: art,
   });
