@@ -2302,10 +2302,11 @@ function absoluteUrl(url) {
 }
 
 function _callNowPlaying(fnName, arg) {
-  try {
-    const api = window.pywebview && window.pywebview.api;
-    if (api && typeof api[fnName] === "function") api[fnName](arg);
-  } catch (e) {}
+  if (fnName === "set_now_playing") {
+    api("/api/now_playing", { method: "POST", body: JSON.stringify(arg) }).catch(() => {});
+  } else if (fnName === "set_playback_state") {
+    api("/api/now_playing/state", { method: "POST", body: JSON.stringify({ state: arg }) }).catch(() => {});
+  }
 }
 
 function updateMediaSession(track) {

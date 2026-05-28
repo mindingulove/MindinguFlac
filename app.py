@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import socket
+socket.setdefaulttimeout(30)
 mimetypes.add_type("audio/flac", ".flac")
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/ogg", ".ogg")
@@ -43,6 +45,10 @@ service_downloader = ServiceDownloadManager(app_config)
 playlists_lock = threading.Lock()
 dock_recent_items_lock = threading.Lock()
 _dock_recent_items: list[dict] = []
+
+# Callbacks set by desktop.py for macOS Now Playing / Touch Bar integration
+_np_update_fn = None   # (info: dict) -> None
+_np_state_fn = None    # (state: int) -> None
 
 
 def load_playlists() -> list[dict]:
@@ -732,6 +738,18 @@ class Handler(BaseHTTPRequestHandler):
                 body = read_body(self)
                 import desktop as _desktop
                 _desktop._macos_dock_state["playing"] = bool(body.get("playing"))
+                self.send_json({"ok": True})
+                return
+            if path == "/api/now_playing":
+                body = read_body(self)
+                if _np_update_fn:
+                    _np_update_fn(body)
+                self.send_json({"ok": True})
+                return
+            if path == "/api/now_playing/state":
+                body = read_body(self)
+                if _np_state_fn:
+                    _np_state_fn(int(body.get("state", 2)))
                 self.send_json({"ok": True})
                 return
             if path == "/api/artist/about":
