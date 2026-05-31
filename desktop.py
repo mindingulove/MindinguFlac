@@ -7,6 +7,7 @@ import sys
 import threading
 import subprocess
 import traceback
+import webbrowser
 from pathlib import Path
 
 
@@ -49,6 +50,10 @@ def setup_desktop_logging() -> Path:
     print("\n--- Mindinguflac desktop start ---", flush=True)
     print(f"platform={sys.platform} frozen={getattr(sys, 'frozen', False)} exe={sys.executable}", flush=True)
     return log_path
+
+
+def log_step(message: str) -> None:
+    print(f"[desktop] {message}", flush=True)
 
 
 def resource_path(relative: str) -> Path:
@@ -353,24 +358,37 @@ def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> No
 
 def main() -> None:
     global webview
-    setup_desktop_logging()
+    log_path = setup_desktop_logging()
     os.environ.setdefault("MINDINGUFLAC_DESKTOP", "1")
+    os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
+    if sys.platform == "win32":
+        os.environ.setdefault("PYTHONNET_RUNTIME", "coreclr")
+        os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
+    log_step(f"startup log: {log_path}")
+    log_step("importing pywebview")
     import webview as _webview
     webview = _webview
+    log_step(f"pywebview imported: {getattr(webview, '__version__', 'unknown')}")
+    log_step("configuring TLS certificates")
     configure_tls_certificates()
+    log_step("importing app")
     import app
 
+    log_step("initializing recent items")
     app.initialize_dock_recent_items()
+    log_step("creating local HTTP server")
     server = app.create_server("127.0.0.1", 0)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, name="mindinguflac-http", daemon=True)
     thread.start()
+    log_step(f"server started on port {port}")
 
     icon_path = resource_path("static/assets/app_icon.png")
     url = f"http://127.0.0.1:{port}/"
     force_dark_appearance()
 
     try:
+        log_step("creating pywebview window")
         window = webview.create_window(
             APP_NAME,
             url,
@@ -379,6 +397,7 @@ def main() -> None:
             min_size=(960, 640),
             background_color=DARK_BACKGROUND,
         )
+        log_step("pywebview window object created")
         install_now_playing(window, url)
         install_macos_dock_menu(window, app.get_dock_recent_items)
 
@@ -390,8 +409,28 @@ def main() -> None:
                 return False  # returning False makes should_cancel=True → prevents close
             window.events.closing += _hide_on_close
 
-        webview.start(icon=str(icon_path) if icon_path.exists() else None)
+        if sys.platform == "win32":
+            def _browser_fallback() -> None:
+                log_step(f"opening browser fallback: {url}")
+                try:
+                    webbrowser.open(url, new=2)
+                except Exception:
+                    traceback.print_exc()
+
+            threading.Timer(8.0, _browser_fallback).start()
+
+        log_step("starting pywebview event loop")
+        start_kwargs = {
+            "icon": str(icon_path) if icon_path.exists() else None,
+            "debug": True,
+        }
+        if sys.platform == "win32":
+            start_kwargs["gui"] = "edgechromium"
+            start_kwargs["storage_path"] = str(get_runtime_dir() / "webview")
+        webview.start(**start_kwargs)
+        log_step("pywebview event loop exited")
     finally:
+        log_step("shutting down desktop server")
         _stop_macos_now_playing_helper()
         server.shutdown()
         server.server_close()
