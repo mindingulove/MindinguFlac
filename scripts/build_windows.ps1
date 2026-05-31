@@ -15,11 +15,7 @@ $python = if (Test-Path ".venv-build\Scripts\python.exe") {
 & $python -m pip install -r requirements.txt -r requirements-desktop.txt
 & $python scripts\make_desktop_icons.py
 
-& $python -m PyInstaller --clean --noconfirm --onefile --windowed --name Mindinguflac `
-    --icon build\icons\mindinguflac.ico `
-    --add-data "static;static" `
-    --collect-all SpotiFLAC `
-    desktop.py
+& $python -m PyInstaller --clean --noconfirm Mindinguflac-windows.spec
 
 $zipPath = Join-Path $root "Mindinguflac-windows.zip"
 if (Test-Path $zipPath) {

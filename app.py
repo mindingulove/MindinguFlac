@@ -29,6 +29,105 @@ from music_metadata import album_metadata, album_tracks, artist_page, build_musi
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
 
 
+def _list_audio_output_devices() -> list[dict]:
+    """Return audio output devices as [{name, uid}]. macOS uses CoreAudio; Windows uses WMI."""
+    import sys
+    if sys.platform == "win32":
+        return _list_audio_output_devices_windows()
+    if sys.platform != "darwin":
+        return []
+    import ctypes
+    try:
+        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+
+        def _fcc(s: str) -> int:
+            return int.from_bytes(s.encode(), "big")
+
+        class _PA(ctypes.Structure):
+            _fields_ = [("mSel", ctypes.c_uint32), ("mScope", ctypes.c_uint32), ("mEl", ctypes.c_uint32)]
+
+        kSys       = ctypes.c_uint32(1)
+        kGlob      = _fcc("glob")
+        kOutp      = _fcc("outp")
+        kDevices   = _fcc("dev#")
+        kName      = _fcc("lnam")
+        kUID       = _fcc("uid ")
+        kStreamCfg = _fcc("slay")
+        kUTF8      = 0x08000100
+
+        def _cfstr(ptr: int) -> str:
+            if not ptr:
+                return ""
+            buf = ctypes.create_string_buffer(512)
+            cf.CFStringGetCString(ctypes.c_void_p(ptr), buf, 512, kUTF8)
+            try:
+                cf.CFRelease(ctypes.c_void_p(ptr))
+            except Exception:
+                pass
+            return buf.value.decode("utf-8", errors="replace")
+
+        def _get_str(dev: int, sel: int) -> str:
+            pa = _PA(sel, kGlob, 0)
+            v  = ctypes.c_void_p(0)
+            sz = ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
+            if ca.AudioObjectGetPropertyData(dev, ctypes.byref(pa), 0, None, ctypes.byref(sz), ctypes.byref(v)):
+                return ""
+            return _cfstr(v.value)
+
+        def _has_outputs(dev: int) -> bool:
+            pa = _PA(kStreamCfg, kOutp, 0)
+            sz = ctypes.c_uint32(0)
+            if ca.AudioObjectGetPropertyDataSize(dev, ctypes.byref(pa), 0, None, ctypes.byref(sz)):
+                return False
+            return sz.value > 4  # > just mNumberBuffers=0 means real channels exist
+
+        # Enumerate all device IDs
+        pa = _PA(kDevices, kGlob, 0)
+        sz = ctypes.c_uint32(0)
+        if ca.AudioObjectGetPropertyDataSize(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz)):
+            return []
+        n = sz.value // 4
+        ids = (ctypes.c_uint32 * n)()
+        if ca.AudioObjectGetPropertyData(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz), ids):
+            return []
+
+        devices = []
+        for dev_id in ids:
+            if not _has_outputs(dev_id):
+                continue
+            name = _get_str(dev_id, kName)
+            uid  = _get_str(dev_id, kUID)
+            if name:
+                devices.append({"name": name, "uid": uid})
+        return devices
+    except Exception:
+        return []
+
+
+def _list_audio_output_devices_windows() -> list[dict]:
+    import subprocess, json as _json
+    script = r"""
+try {
+    $out = Get-WmiObject -Class Win32_SoundDevice -ErrorAction SilentlyContinue |
+        Where-Object { $_.Status -eq 'OK' } |
+        ForEach-Object { @{ name=$_.Name; uid=$_.DeviceID } }
+    $out | ConvertTo-Json -Compress
+} catch { '[]' }
+"""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=8,
+        )
+        items = _json.loads(r.stdout.strip() or "[]")
+        if isinstance(items, dict):
+            items = [items]
+        return items or []
+    except Exception:
+        return []
+
+
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 DATA = app_data_dir()
@@ -680,6 +779,29 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/service/downloads":
                 self.send_json({"jobs": service_downloader.list_jobs()})
                 return
+            if path == "/api/audio/devices":
+                self.send_json({"devices": _list_audio_output_devices()})
+                return
+            if path == "/api/bluetooth/state":
+                import bluetooth_scan
+                self.send_json(bluetooth_scan.get_state())
+                return
+            if path == "/api/bluetooth/scan/start":
+                import bluetooth_scan
+                bluetooth_scan.start_scan()
+                self.send_json({"ok": True})
+                return
+            if path == "/api/bluetooth/scan/stop":
+                import bluetooth_scan
+                bluetooth_scan.stop_scan()
+                self.send_json({"ok": True})
+                return
+            if path == "/api/bluetooth/pair":
+                body = read_body(self)
+                import bluetooth_scan
+                error = bluetooth_scan.pair_device(body.get("address", ""))
+                self.send_json({"ok": not error, "error": error})
+                return
             if path == "/api/library/stream":
                 file_path = Path(query.get("path", [""])[0].strip())
                 if not file_path.exists():
@@ -796,6 +918,22 @@ class Handler(BaseHTTPRequestHandler):
                 if _macos_media_command_fn and action:
                     _macos_media_command_fn(action)
                 self.send_json({"ok": True})
+                return
+            if path == "/api/bluetooth/scan/start":
+                import bluetooth_scan
+                bluetooth_scan.start_scan()
+                self.send_json({"ok": True})
+                return
+            if path == "/api/bluetooth/scan/stop":
+                import bluetooth_scan
+                bluetooth_scan.stop_scan()
+                self.send_json({"ok": True})
+                return
+            if path == "/api/bluetooth/pair":
+                body = read_body(self)
+                import bluetooth_scan
+                error = bluetooth_scan.pair_device(body.get("address", ""))
+                self.send_json({"ok": not error, "error": error})
                 return
             if path == "/api/artist/about":
                 body = read_body(self)

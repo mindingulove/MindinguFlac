@@ -691,6 +691,162 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
 .details-head { display: grid; gap: 4px; padding: 15px; border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; background: var(--surface); }
 .details-cover { width: 100%; aspect-ratio: 1; border-radius: 0 0 8px 8px; background: var(--surface-3); background-size: cover; background-position: center; margin-bottom: 24px; box-shadow: var(--shadow); }
 
+/* Connect-to-device panel */
+.details-panel { position: relative; }
+.connect-panel {
+  position: absolute;
+  inset: 0;
+  background: #08090c;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-y: auto;
+  padding: 0 0 32px;
+}
+.connect-panel[hidden] { display: none; }
+.connect-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 18px 14px;
+  position: sticky;
+  top: 0;
+  background: #08090c;
+  border-bottom: 1px solid var(--line);
+  z-index: 1;
+}
+.connect-panel-head strong { font-size: 15px; }
+.connect-panel-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+.connect-panel-close:hover { color: var(--text); }
+.connect-device-list {
+  list-style: none;
+  margin: 0;
+  padding: 10px 0;
+  flex: 1;
+}
+.connect-device-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 18px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.12s;
+}
+.connect-device-item:hover { background: var(--surface); }
+.connect-device-item.active { background: var(--surface-2); }
+.connect-device-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 16px;
+  color: var(--muted);
+}
+.connect-device-item.active .connect-device-icon {
+  background: var(--accent);
+  color: #000;
+}
+.connect-device-info { min-width: 0; }
+.connect-device-name {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.connect-device-item.active .connect-device-name { color: var(--accent); }
+.connect-device-sub {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.connect-active-check {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.connect-hint {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 12px 18px 0;
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+#btnConnectDevice.active { color: var(--accent); }
+.connect-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+}
+.connect-scan-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 4px 12px;
+  border-radius: 99px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.15s;
+}
+.connect-scan-btn:hover { background: var(--surface-3); }
+@keyframes connect-spin { to { transform: rotate(360deg); } }
+.connect-spin { display: inline-block; animation: connect-spin 0.8s linear infinite; }
+.connect-bt-empty {
+  padding: 10px 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.connect-bt-error {
+  padding: 8px 18px;
+  font-size: 12px;
+  color: #e05;
+}
+.connect-nearby .connect-device-icon { background: var(--surface-2); }
+.connect-pair-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 4px 14px;
+  border-radius: 99px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.connect-pair-btn:hover { background: var(--surface-3); border-color: var(--accent); color: var(--accent); }
+.connect-pair-btn:disabled { opacity: 0.5; cursor: default; }
+
 .search-tabs { display: flex; gap: 8px; margin-bottom: 24px; }
 .tab {
   background: var(--surface-2);

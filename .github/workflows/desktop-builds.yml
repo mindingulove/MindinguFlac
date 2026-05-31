@@ -38,18 +38,8 @@ jobs:
 
       - name: Build app
         run: |
-          pyinstaller --noconfirm --windowed --name Mindinguflac \
-            --icon build/icons/mindinguflac.icns \
-            --add-data "static:static" \
-            --add-binary "build/macos/MindinguflacNowPlayingHelper:." \
-            --collect-all SpotiFLAC \
-            --exclude-module MediaLibrary \
-            --exclude-module Photos \
-            --exclude-module Contacts \
-            --exclude-module EventKit \
-            --exclude-module CoreLocation \
-            --target-arch universal2 \
-            desktop.py
+          brew install ffmpeg
+          pyinstaller --noconfirm Mindinguflac.spec
           ditto -c -k --sequesterRsrc --keepParent dist/Mindinguflac.app Mindinguflac-macos-universal.zip
 
       - uses: actions/upload-artifact@v4
@@ -75,14 +65,14 @@ jobs:
       - name: Prepare icons
         run: python scripts/make_desktop_icons.py
 
+      - name: Install ffmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
+
       - name: Build app
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name Mindinguflac `
-            --icon build/icons/mindinguflac.ico `
-            --add-data "static;static" `
-            --collect-all SpotiFLAC `
-            desktop.py
+          pyinstaller --noconfirm Mindinguflac-windows.spec
           Compress-Archive -Path dist/Mindinguflac.exe -DestinationPath Mindinguflac-windows.zip
 
       - uses: actions/upload-artifact@v4

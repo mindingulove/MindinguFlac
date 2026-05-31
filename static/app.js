@@ -2806,3 +2806,230 @@ window.addEventListener("keydown", (event) => {
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// Connect to device (audio output routing via AudioContext.setSinkId)
+// ---------------------------------------------------------------------------
+
+let _audioCtx = null;
+let _audioSrcNode = null;
+let _activeSinkId = "";  // "" = default (this computer)
+
+function _ensureAudioContext() {
+  if (_audioCtx) return _audioCtx;
+  _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const audio = $("audioPlayer");
+  _audioSrcNode = _audioCtx.createMediaElementSource(audio);
+  _audioSrcNode.connect(_audioCtx.destination);
+  return _audioCtx;
+}
+
+async function setAudioOutputDevice(deviceId) {
+  _activeSinkId = deviceId;
+  const audio = $("audioPlayer");
+  if (typeof audio.setSinkId === "function") {
+    try {
+      await audio.setSinkId(deviceId);
+      return;
+    } catch (e) {
+      console.warn("audio.setSinkId failed:", e);
+    }
+  }
+  const sinkSupported = typeof AudioContext !== "undefined" &&
+    typeof AudioContext.prototype.setSinkId === "function";
+  if (!sinkSupported) return;
+  try {
+    const ctx = _ensureAudioContext();
+    if (ctx.state === "suspended") await ctx.resume();
+    await ctx.setSinkId(deviceId);
+  } catch (e) {
+    console.warn("setSinkId failed:", e);
+  }
+}
+
+async function _getOutputDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  let outputs = devices.filter(d => d.kind === "audiooutput");
+  // Labels may be empty without mic permission - request once to unlock.
+  if (outputs.length && !outputs[0].label) {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s.getTracks().forEach(t => t.stop());
+      devices = await navigator.mediaDevices.enumerateDevices();
+      outputs = devices.filter(d => d.kind === "audiooutput");
+    } catch (_) {}
+  }
+  return outputs;
+}
+
+function _deviceIcon(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("airpod") || n.includes("headphone") || n.includes("earphone") || n.includes("headset"))
+    return "bi-headphones";
+  if (n.includes("bluetooth") || n.includes("bt "))
+    return "bi-bluetooth";
+  if (n.includes("tv") || n.includes("hdmi"))
+    return "bi-tv";
+  if (n.includes("speaker"))
+    return "bi-speaker";
+  return "bi-laptop";
+}
+
+let _btScanInterval = null;
+
+async function _renderConnectDevices(backendDevices, btState) {
+  const list = $("connectDeviceList");
+  list.innerHTML = "";
+
+  const browserOutputs = await _getOutputDevices();
+
+  // Section: connected output devices.
+  const items = [];
+  items.push({ name: "This computer", deviceId: "", icon: "bi-laptop", sub: "Default output" });
+
+  for (const bd of backendDevices) {
+    const match = browserOutputs.find(b => b.deviceId === bd.uid && b.deviceId !== "default");
+    if (match) items.push({ name: bd.name, deviceId: match.deviceId, icon: _deviceIcon(bd.name), sub: "" });
+  }
+  const matchedIds = new Set(items.map(i => i.deviceId));
+  for (const b of browserOutputs) {
+    if (b.deviceId === "default" || matchedIds.has(b.deviceId)) continue;
+    const label = b.label || "Audio Device";
+    items.push({ name: label, deviceId: b.deviceId, icon: _deviceIcon(label), sub: "" });
+  }
+
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.className = "connect-device-item" + (item.deviceId === _activeSinkId ? " active" : "");
+    li.innerHTML = `
+      <div class="connect-device-icon"><i class="bi ${item.icon}"></i></div>
+      <div class="connect-device-info">
+        <span class="connect-device-name">${item.name}</span>
+        ${item.sub ? `<span class="connect-device-sub">${item.sub}</span>` : ""}
+      </div>
+      ${item.deviceId === _activeSinkId ? `<i class="bi bi-check-circle-fill connect-active-check"></i>` : ""}
+    `;
+    li.onclick = async () => {
+      await setAudioOutputDevice(item.deviceId);
+      list.querySelectorAll(".connect-device-item").forEach(el => el.classList.remove("active"));
+      list.querySelectorAll(".connect-active-check").forEach(el => el.remove());
+      li.classList.add("active");
+      const check = document.createElement("i");
+      check.className = "bi bi-check-circle-fill connect-active-check";
+      li.appendChild(check);
+      $("btnConnectDevice").classList.toggle("active", item.deviceId !== "");
+    };
+    list.appendChild(li);
+  }
+
+  // Section: nearby / unpaired Bluetooth devices.
+  // Paired-but-disconnected + brand-new unpaired devices all go in the list
+  const nearby = (btState?.devices || []).filter(d => !d.connected);
+
+  const scanHeader = document.createElement("li");
+  scanHeader.className = "connect-section-header";
+  const scanning = btState?.scanning;
+  scanHeader.innerHTML = `
+    <span>Nearby devices</span>
+    <button class="connect-scan-btn" id="btScanBtn" type="button">
+      ${scanning
+        ? `<i class="bi bi-arrow-clockwise connect-spin"></i> Scanning...`
+        : `<i class="bi bi-search"></i> Scan`}
+    </button>
+  `;
+  scanHeader.querySelector("#btScanBtn").onclick = async (e) => {
+    e.stopPropagation();
+    if (scanning) {
+      await api("/api/bluetooth/scan/stop", { method: "POST", body: "{}" });
+    } else {
+      await api("/api/bluetooth/scan/start", { method: "POST", body: "{}" });
+      _startBtPoll();
+    }
+    await _refreshConnectPanel();
+  };
+  list.appendChild(scanHeader);
+
+  if (btState?.error) {
+    const err = document.createElement("li");
+    err.className = "connect-bt-error";
+    err.textContent = btState.error;
+    list.appendChild(err);
+  }
+
+  if (nearby.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "connect-bt-empty";
+    empty.textContent = scanning ? "Looking for devices..." : "No paired devices - press Scan to find new ones";
+    list.appendChild(empty);
+  }
+
+  for (const dev of nearby) {
+    const li = document.createElement("li");
+    li.className = "connect-device-item connect-nearby";
+    li.dataset.address = dev.address;
+    li.innerHTML = `
+      <div class="connect-device-icon"><i class="bi ${_deviceIcon(dev.name)}"></i></div>
+      <div class="connect-device-info">
+        <span class="connect-device-name">${dev.name}</span>
+        <span class="connect-device-sub">${dev.address}</span>
+      </div>
+      <button class="connect-pair-btn" type="button">${dev.paired ? "Connect" : "Pair"}</button>
+    `;
+    li.querySelector(".connect-pair-btn").onclick = async (e) => {
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      btn.textContent = dev.paired ? "Connecting..." : "Pairing...";
+      btn.disabled = true;
+      try {
+        const res = await api("/api/bluetooth/pair", { method: "POST", body: JSON.stringify({ address: dev.address }) });
+        if (res.error) { btn.textContent = "Failed"; btn.disabled = false; }
+      else { btn.textContent = "Done"; setTimeout(() => _refreshConnectPanel(), 2000); }
+      } catch { btn.textContent = "Error"; btn.disabled = false; }
+    };
+    list.appendChild(li);
+  }
+}
+
+function _startBtPoll() {
+  if (_btScanInterval) return;
+  _btScanInterval = setInterval(async () => {
+    try {
+      const st = await api("/api/bluetooth/state");
+      await _refreshConnectPanel(st);
+      if (!st.scanning) { clearInterval(_btScanInterval); _btScanInterval = null; }
+    } catch { clearInterval(_btScanInterval); _btScanInterval = null; }
+  }, 1500);
+}
+
+async function _refreshConnectPanel(btState) {
+  if ($("connectPanel").hidden) return;
+  if (!btState) {
+    try { btState = await api("/api/bluetooth/state"); } catch { btState = { scanning: false, devices: [], error: "" }; }
+  }
+  try {
+    const data = await api("/api/audio/devices");
+    await _renderConnectDevices(data.devices || [], btState);
+  } catch { await _renderConnectDevices([], btState); }
+}
+
+async function openConnectPanel() {
+  $("connectPanel").hidden = false;
+  $("btnConnectDevice").classList.add("active");
+  const list = $("connectDeviceList");
+  list.innerHTML = `<li style="padding:18px;color:var(--muted);font-size:13px">Loading...</li>`;
+  await _refreshConnectPanel();
+}
+
+function closeConnectPanel() {
+  $("connectPanel").hidden = true;
+  if (_btScanInterval) { clearInterval(_btScanInterval); _btScanInterval = null; }
+  api("/api/bluetooth/scan/stop", { method: "POST", body: "{}" }).catch(() => {});
+  $("btnConnectDevice").classList.toggle("active", _activeSinkId !== "");
+}
+
+$("btnConnectDevice").onclick = () => {
+  if ($("connectPanel").hidden) openConnectPanel();
+  else closeConnectPanel();
+};
+$("connectPanelClose").onclick = closeConnectPanel;

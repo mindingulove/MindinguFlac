@@ -328,11 +328,11 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
 
         import sys as _sys
         import threading as _threading
-        _ffmpeg = (
-            os.path.join(_sys._MEIPASS, "ffmpeg")
-            if getattr(_sys, "frozen", False)
-            else "ffmpeg"
-        )
+        if getattr(_sys, "frozen", False):
+            _ffmpeg_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+            _ffmpeg = os.path.join(_sys._MEIPASS, _ffmpeg_name)
+        else:
+            _ffmpeg = "ffmpeg"
         proc = subprocess.Popen(
             [
                 _ffmpeg, "-y",
