@@ -22,24 +22,16 @@ _CLIENT_SECRET = "dQjy0MinCEvxi1O4UmxvxWnDjt4cgHBPw8ll6nYBk98="
 
 _FALLBACK_API = [
     "https://monochrome-api.samidy.com",
-    "https://hifi-api.kennyy.com.br",
     "https://api.monochrome.tf",
-    "https://tidal.kinoplus.online",
     "https://hifi.geeked.wtf",
-    "https://hifi.binimum.org",
     "https://wolf.qqdl.site",
     "https://maus.qqdl.site",
     "https://vogel.qqdl.site",
     "https://katze.qqdl.site",
     "https://hund.qqdl.site",
-]
-_FALLBACK_STREAMING = [
-    "https://monochrome-api.samidy.com",
-    "https://hifi-api.kennyy.com.br",
-    "https://api.monochrome.tf",
     "https://tidal.kinoplus.online",
-    "https://hifi.geeked.wtf",
 ]
+_FALLBACK_STREAMING = _FALLBACK_API.copy()
 
 import base64
 import random
