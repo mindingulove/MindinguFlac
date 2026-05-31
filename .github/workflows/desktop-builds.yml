@@ -1,6 +1,9 @@
 name: Desktop Builds
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       target:
@@ -64,7 +67,7 @@ jobs:
 
   windows:
     name: Windows
-    if: ${{ github.event.inputs.target == 'windows' || github.event.inputs.target == 'all' }}
+    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'windows' || github.event.inputs.target == 'all' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
