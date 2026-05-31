@@ -142,8 +142,12 @@ try {
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 
-print(f"[Debug] ROOT: {ROOT}")
-print(f"[Debug] STATIC: {STATIC} (exists: {STATIC.exists()})")
+try:
+    if sys.stdout is not None:
+        print(f"[Debug] ROOT: {ROOT}")
+        print(f"[Debug] STATIC: {STATIC} (exists: {STATIC.exists()})")
+except Exception:
+    pass
 DATA = app_data_dir()
 CONFIG_PATH = DATA / "config.json"
 PLAYLISTS_PATH = DATA / "playlists.json"

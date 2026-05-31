@@ -57,7 +57,12 @@ def setup_desktop_logging() -> Path:
     return _log_path
 
 def log_step(message: str) -> None:
-    print(f"[desktop] {message}", flush=True)
+    try:
+        if sys.stdout is not None:
+            print(f"[desktop] {message}", flush=True)
+    except Exception:
+        pass
+
     if _log_path:
         try:
             with _log_path.open("a", encoding="utf-8") as lf:

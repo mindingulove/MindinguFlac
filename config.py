@@ -116,7 +116,6 @@ class AppConfig:
 
     @classmethod
     def from_public_dict(cls, value: dict) -> "AppConfig":
-        print(f"[Config] Loading from dict: {value.get('cache_dir')}, {value.get('music_dir')}")
         music_indexers = [MusicIndexerConfig(**item) for item in value.get("music_indexers", [])]
         
         cache_dir_str = (value.get("cache_dir") or "").strip()
@@ -156,7 +155,6 @@ class AppConfig:
 
 
 def load_config(path: Path) -> AppConfig:
-    print(f"[Config] Attempting to load: {path}")
     if not path.exists():
         return AppConfig()
     try:
