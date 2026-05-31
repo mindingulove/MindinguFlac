@@ -183,7 +183,7 @@ else:
             return None
 
     def _scan_loop() -> None:
-        global _inquiry
+        global _inquiry, _delegate_ref
         try:
             delegate = _delegate_ref
             _inquiry = IOBluetoothDeviceInquiry.inquiryWithDelegate_(delegate)
@@ -205,12 +205,22 @@ else:
                 with _lock:
                     if not _state["scanning"]:
                         break
+            
+            # Explicitly stop inquiry and clear delegate before thread exit
+            if _inquiry:
+                _inquiry.stop()
+                _inquiry.setDelegate_(None)
+                # Brief pump to handle any pending stop events
+                loop.runMode_beforeDate_(NSDefaultRunLoopMode, NSDate.dateWithTimeIntervalSinceNow_(0.1))
+                
         except Exception as exc:
             with _lock:
                 _state["error"] = f"Bluetooth scan failed: {exc}"
         finally:
             with _lock:
                 _state["scanning"] = False
+            _inquiry = None
+            _delegate_ref = None
 
     def start_scan() -> None:
         global _scan_thread, _delegate_ref
@@ -218,29 +228,46 @@ else:
             if _state["scanning"]:
                 return
             _state["devices"] = {}
-            _state["scanning"] = True   # set before thread starts so loop doesn't exit early
+            _state["scanning"] = True
             _state["error"] = ""
+        
+        # Create delegate here to ensure it's alive for the thread
         _delegate_ref = _ScanDelegate.alloc().init()
         _scan_thread = threading.Thread(target=_scan_loop, daemon=True, name="bt-scan")
         _scan_thread.start()
 
     def stop_scan() -> None:
-        global _inquiry
+        # Just set the flag; the loop in _scan_loop will see it and clean up
         with _lock:
             _state["scanning"] = False
-        if _inquiry:
-            try:
-                _inquiry.stop()
-            except Exception:
-                pass
 
     def pair_device(address: str) -> str:
         """Open Bluetooth Settings; macOS owns pairing and audio connection UI."""
         try:
+            # Try to get the device object
             device = IOBluetoothDevice.deviceWithAddressString_(address)
-            if device is None:
-                return "Device not found"
-            _sp.Popen(["open", "x-apple.systempreferences:com.apple.Bluetooth"])
+            
+            # If already paired but not connected, try to trigger a connection
+            if device and device.isBRPaired() and not device.isConnected():
+                try:
+                    device.openConnection()
+                except Exception:
+                    pass
+            
+            # Open the Bluetooth settings pane.
+            # On macOS 13+, the URL scheme is preferred.
+            # We try multiple common ways to ensure the Bluetooth-specific pane opens.
+            try:
+                # This is the most modern URL for the Bluetooth pane
+                _sp.Popen(["open", "x-apple.systempreferences:com.apple.BluetoothSettings"])
+            except Exception:
+                try:
+                    # Fallback for older versions or slightly different IDs
+                    _sp.Popen(["open", "x-apple.systempreferences:com.apple.Bluetooth"])
+                except Exception:
+                    # Absolute path fallback
+                    _sp.Popen(["open", "/System/Library/PreferencePanes/Bluetooth.prefPane"])
+            
             return ""
         except Exception as exc:
             return str(exc)
