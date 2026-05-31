@@ -178,22 +178,16 @@ def _select(items: list[dict], title: str, artist: str, isrc: str) -> dict | Non
 def _get_hls_url(requests_module, base_url: str, track_id: int, quality: str = "LOSSLESS", headers: dict | None = None) -> str | None:
     """Return the nested (media-level) m3u8 URL for a track, or None."""
     try:
-        # Map quality to Tidal internal strings
-        t_quality = "LOSSLESS"
-        if "HI_RES" in quality: t_quality = "HI_RES"
-        elif "HIGH" in quality: t_quality = "HIGH"
+        formats = "FLAC_HIRES" if "HI_RES" in quality else "FLAC"
 
         hdrs = headers or _HEADERS
         resp = requests_module.get(
             f"{base_url}/trackManifests/",
             params={
                 "id": str(track_id),
-                "formats": "FLAC",
+                "quality": quality,
+                "formats": formats,
                 "adaptive": "false",
-                "manifestType": "HLS",
-                "uriScheme": "HTTPS",
-                "usage": "DOWNLOAD",
-                "soundQuality": t_quality,
             },
             headers=hdrs,
             timeout=20,
@@ -206,6 +200,10 @@ def _get_hls_url(requests_module, base_url: str, track_id: int, quality: str = "
         if not master_url:
             master_url = manifest_data.get("attributes", {}).get("uri", "")
         if not master_url:
+            # Maybe it's not nested under "data"
+            master_url = resp.json().get("uri", "")
+        if not master_url:
+            return None
             return None
 
         r2 = requests_module.get(master_url, headers=hdrs, timeout=15)
@@ -415,14 +413,70 @@ def _download_direct(requests_module, cdn_url: str, out: Path, job: dict, manage
 # BTS manifest (direct single URL)
 # ---------------------------------------------------------------------------
 
-def _parse_bts(manifest_b64: str) -> str:
-    import json as _json
-    decoded = _json.loads(base64.b64decode(manifest_b64))
-    urls = decoded.get("urls", [])
-    if not urls:
-        raise RuntimeError("BTS manifest has no URLs")
-    return urls[0]
+def _fetch_manifest(requests_module, base_url: str, track_id: int, quality: str = "LOSSLESS", headers: dict | None = None) -> tuple[str, str, str] | None:
+    """Return (manifest_text, mime_type, cdn_url) or None. Handle HLS, DASH, and BTS."""
+    try:
+        formats = "FLAC_HIRES" if "HI_RES" in quality else "FLAC"
+        hdrs = headers or _HEADERS
+        resp = requests_module.get(
+            f"{base_url}/trackManifests/",
+            params={"id": str(track_id), "quality": quality, "formats": formats, "adaptive": "false"},
+            headers=hdrs,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return None
 
+        manifest_data = resp.json().get("data", {})
+        master_url = manifest_data.get("data", {}).get("attributes", {}).get("uri", "")
+        if not master_url:
+            master_url = manifest_data.get("attributes", {}).get("uri", "")
+        if not master_url:
+            master_url = resp.json().get("uri", "")
+        if not master_url:
+            return None
+
+        r2 = requests_module.get(master_url, headers=hdrs, timeout=15)
+        if r2.status_code != 200:
+            return None
+
+        content = r2.text
+        mime = r2.headers.get("Content-Type", "")
+        if not mime:
+            mime = "application/dash+xml" if "<MPD" in content else "application/vnd.tidal.bts"
+
+        return content, mime, master_url
+    except Exception:
+        return None
+
+def _parse_bts(manifest_text: str) -> str:
+    import json as _json
+    import base64
+    try:
+        if manifest_text.strip().startswith("{"):
+            decoded = _json.loads(manifest_text)
+        else:
+            decoded = _json.loads(base64.b64decode(manifest_text))
+        
+        urls = decoded.get("urls", [])
+        if not urls:
+            raise RuntimeError("BTS manifest has no URLs")
+        return urls[0]
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse BTS manifest: {exc}")
+
+
+def _find_best_hls_chunklist(requests_module, content: str, master_url: str, hdrs: dict) -> str | None:
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-STREAM-INF"):
+            url_line = lines[i + 1].strip()
+            if url_line.startswith("http"):
+                return url_line
+            else:
+                from urllib.parse import urljoin
+                return urljoin(master_url, url_line)
+    return None
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -445,7 +499,6 @@ def run(output_dir: Path, job: dict, manager) -> None:
     _log("Fetching Tidal proxy list...")
     api_instances, stream_instances = _fetch_instances(requests)
 
-    # tidal-proxy.monochrome.tf with Bearer auth is the most reliable source — try first
     authed_headers = _auth_headers(requests)
     selected = None
     items = _search(requests, _MONOCHROME_PROXY, title, artist, isrc, headers=authed_headers)
@@ -465,70 +518,52 @@ def run(output_dir: Path, job: dict, manager) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     out_base = output_dir / f"{title} - {artist}"
 
-    # All instances to try: authenticated monochrome proxy first, then hifi proxies
     all_instances = list(stream_instances) + [u for u in api_instances if u not in stream_instances]
 
-    # --- Try HLS: authenticated proxy first, then hifi instances ---
-    hls_url = _get_hls_url(requests, _MONOCHROME_PROXY, track_id, quality, headers=authed_headers)
-    if not hls_url:
+    _log(f"Fetching stream manifest for track {track_id}...")
+    manifest_info = _fetch_manifest(requests, _MONOCHROME_PROXY, track_id, quality, headers=authed_headers)
+    
+    if not manifest_info:
         for s_url in all_instances:
-            hls_url = _get_hls_url(requests, s_url, track_id, quality)
-            if hls_url:
+            manifest_info = _fetch_manifest(requests, s_url, track_id, quality)
+            if manifest_info:
                 break
 
-    if hls_url:
-        _log(f"Downloading track {track_id} to FLAC...")
-        flac_out = out_base.parent / (out_base.name + ".flac")
-        _download_hls_ffmpeg(requests, hls_url, flac_out, job, manager)
-        out = flac_out
-    else:
-        # --- Fallback: /track/ BTS manifest — authenticated proxy first ---
-
-        _log(f"HLS unavailable, fetching stream manifest for track {track_id}...")
-        manifest_data = _get_manifest_raw(requests, _MONOCHROME_PROXY, track_id, quality, headers=authed_headers)
-        if not manifest_data:
+    if not manifest_info and quality == "HI_RES_LOSSLESS":
+        _log("Hi-Res unavailable, trying LOSSLESS...")
+        manifest_info = _fetch_manifest(requests, _MONOCHROME_PROXY, track_id, "LOSSLESS", headers=authed_headers)
+        if not manifest_info:
             for s_url in all_instances:
-                manifest_data = _get_manifest_raw(requests, s_url, track_id, quality)
-                if manifest_data:
+                manifest_info = _fetch_manifest(requests, s_url, track_id, "LOSSLESS")
+                if manifest_info:
                     break
-        if not manifest_data and quality == "HI_RES_LOSSLESS":
-            _log("Hi-Res unavailable, trying LOSSLESS...")
-            manifest_data = _get_manifest_raw(requests, _MONOCHROME_PROXY, track_id, "LOSSLESS", headers=authed_headers)
-            if not manifest_data:
-                for s_url in all_instances:
-                    manifest_data = _get_manifest_raw(requests, s_url, track_id, "LOSSLESS")
-                    if manifest_data:
-                        break
-        if not manifest_data:
-            raise RuntimeError(f"Tidal HiFi: no stream manifest for track {track_id}")
 
-        manifest_b64  = manifest_data.get("manifest", "")
-        manifest_mime = manifest_data.get("manifestMimeType", "")
+    if not manifest_info:
+        raise RuntimeError(f"Tidal HiFi: no stream manifest for track {track_id}")
 
-        if "bts" in manifest_mime.lower():
-            cdn_url = _parse_bts(manifest_b64)
-            ext = ".flac" if ".flac" in cdn_url.lower() else ".m4a"
-            out = out_base.parent / (out_base.name + ext)
-            _log("Downloading Tidal stream via audio proxy...")
-            _download_direct(requests, cdn_url, out, job, manager)
-        else:
-            raise RuntimeError("DASH-only manifest and HLS unavailable — cannot stream")
+    content, mime, master_url = manifest_info
+
+    if "#EXTM3U" in content:
+        chunklist = _find_best_hls_chunklist(requests, content, master_url, authed_headers)
+        if not chunklist:
+            raise RuntimeError("HLS manifest found, but no usable chunklist")
+        
+        _log(f"Downloading track {track_id} to FLAC via HLS...")
+        flac_out = out_base.parent / (out_base.name + ".flac")
+        _download_hls_ffmpeg(requests, chunklist, flac_out, job, manager)
+        out = flac_out
+
+    elif "bts" in mime.lower() or content.strip().startswith("{") or "urls" in content:
+        cdn_url = _parse_bts(content)
+        ext = ".flac" if ".flac" in cdn_url.lower() else ".m4a"
+        out = out_base.parent / (out_base.name + ext)
+        _log("Downloading Tidal stream via audio proxy...")
+        _download_direct(requests, cdn_url, out, job, manager)
+        
+    else:
+        raise RuntimeError("DASH-only manifest and HLS unavailable — cannot stream")
 
     if not is_valid_audio_file(out):
         out.unlink(missing_ok=True)
         raise RuntimeError("Tidal HiFi: downloaded file failed audio validation")
 
-
-def _get_manifest_raw(requests_module, base_url: str, track_id: int, quality: str, headers: dict | None = None) -> dict | None:
-    try:
-        resp = requests_module.get(
-            f"{base_url}/track/",
-            params={"id": track_id, "quality": quality},
-            headers=headers or _HEADERS,
-            timeout=20,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("data")
-    except Exception:
-        pass
-    return None
