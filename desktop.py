@@ -363,8 +363,6 @@ def main() -> None:
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
     
     if sys.platform == "win32":
-        import random
-        import string
         # Use netfx for better WinForms compatibility on native Windows
         os.environ["PYTHONNET_RUNTIME"] = "netfx"
         # Force edgechromium for WebView2
@@ -375,11 +373,9 @@ def main() -> None:
             "--disable-dev-shm-usage --disable-features=ZstdContentEncoding"
         )
         
-        # Use a unique subfolder for each launch to prevent freezes caused by 
-        # WebView2 locking its own user data folder (common in PyInstaller bundles).
-        launch_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        # Use a consistent folder for WebView2 data
         runtime_dir = get_runtime_dir()
-        wv2_data = runtime_dir / f"wv2_{launch_id}"
+        wv2_data = runtime_dir / "WebView2Data"
         try:
             wv2_data.mkdir(parents=True, exist_ok=True)
             # Setting this variable ensures WebView2 loader picks it up immediately
