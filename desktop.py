@@ -459,14 +459,15 @@ def main() -> None:
 
         log_step("starting pywebview event loop")
         start_kwargs = {
-            "icon": str(icon_path) if icon_path.exists() else None,
             "debug": True,
             "private_mode": False,  # Required for WebView2 in many bundled environments
         }
         if sys.platform == "win32":
             start_kwargs["gui"] = "edgechromium"
             start_kwargs["storage_path"] = os.environ.get("WEBVIEW2_USER_DATA_FOLDER")
-            log_step(f"WebView2 User Data Folder: {start_kwargs['storage_path']}")
+            log_step(f"WebView2 User Data Folder: {start_kwargs.get('storage_path')}")
+        elif sys.platform == "darwin":
+            start_kwargs["icon"] = str(icon_path) if icon_path.exists() else None
         
         def on_shown():
             # macOS-specific helper and Darwin Now Playing

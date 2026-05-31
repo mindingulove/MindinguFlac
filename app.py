@@ -870,7 +870,8 @@ class Handler(BaseHTTPRequestHandler):
                     import urllib.request as _ureq
                     req = _ureq.Request(target_url, headers={
                         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                        "Origin": "https://monochrome.tf",
+                        "Origin": "https://monochrome.samidy.com",
+                        "Referer": "https://monochrome.samidy.com/",
                         "Accept": "*/*",
                     })
                     with _ureq.urlopen(req, timeout=30) as resp:
