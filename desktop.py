@@ -37,38 +37,46 @@ def get_runtime_dir() -> Path:
 
 _log_path = None
 
+class SafeLogWriter:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def write(self, message: str) -> None:
+        if not message:
+            return
+        try:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(message)
+        except Exception:
+            pass
+
+    def flush(self) -> None:
+        pass
+
+
 def setup_desktop_logging() -> Path:
     global _log_path
     log_dir = get_runtime_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     _log_path = log_dir / "desktop.log"
-    with _log_path.open("a", encoding="utf-8") as log_file:
-        log_file.write("\n--- Mindinguflac desktop start ---\n")
-        log_file.write(f"platform={sys.platform} frozen={getattr(sys, 'frozen', False)} exe={sys.executable}\n")
+    
+    writer = SafeLogWriter(_log_path)
+    sys.stdout = writer
+    sys.stderr = writer
+
+    writer.write(f"\n--- Mindinguflac desktop start ---\nplatform={sys.platform} frozen={getattr(sys, 'frozen', False)} exe={sys.executable}\n")
 
     def _log_exception(exc_type, exc, tb):
         import traceback
         lines = traceback.format_exception(exc_type, exc, tb)
-        with _log_path.open("a", encoding="utf-8") as lf:
-            lf.write("".join(lines) + "\n")
-        sys.__excepthook__(exc_type, exc, tb)
+        writer.write("".join(lines) + "\n")
 
     sys.excepthook = _log_exception
     return _log_path
 
-def log_step(message: str) -> None:
-    try:
-        if sys.stdout is not None:
-            print(f"[desktop] {message}", flush=True)
-    except Exception:
-        pass
 
-    if _log_path:
-        try:
-            with _log_path.open("a", encoding="utf-8") as lf:
-                lf.write(f"[desktop] {message}\n")
-        except Exception:
-            pass
+def log_step(message: str) -> None:
+    print(f"[desktop] {message}", flush=True)
 
 
 def resource_path(relative: str) -> Path:
@@ -457,8 +465,8 @@ def main() -> None:
         }
         if sys.platform == "win32":
             start_kwargs["gui"] = "edgechromium"
-            # Prefer the environment variable we just set
             start_kwargs["storage_path"] = os.environ.get("WEBVIEW2_USER_DATA_FOLDER")
+            log_step(f"WebView2 User Data Folder: {start_kwargs['storage_path']}")
         
         def on_shown():
             # macOS-specific helper and Darwin Now Playing
