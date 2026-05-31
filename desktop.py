@@ -361,9 +361,32 @@ def main() -> None:
     log_path = setup_desktop_logging()
     os.environ.setdefault("MINDINGUFLAC_DESKTOP", "1")
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
+    
     if sys.platform == "win32":
+        import random
+        import string
+        # Use netfx for better WinForms compatibility on native Windows
         os.environ["PYTHONNET_RUNTIME"] = "netfx"
+        # Force edgechromium for WebView2
         os.environ["PYWEBVIEW_GUI"] = "edgechromium"
+        
+        # Stability flags: disable features known to cause hangs in shared/restricted environments
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+            "--disable-dev-shm-usage --disable-features=ZstdContentEncoding"
+        )
+        
+        # Use a unique subfolder for each launch to prevent freezes caused by 
+        # WebView2 locking its own user data folder (common in PyInstaller bundles).
+        launch_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        runtime_dir = get_runtime_dir()
+        wv2_data = runtime_dir / f"wv2_{launch_id}"
+        try:
+            wv2_data.mkdir(parents=True, exist_ok=True)
+            # Setting this variable ensures WebView2 loader picks it up immediately
+            os.environ["WEBVIEW2_USER_DATA_FOLDER"] = str(wv2_data)
+        except Exception:
+            pass
+
     log_step(f"startup log: {log_path}")
     log_step("importing pywebview")
     import webview as _webview
@@ -426,10 +449,12 @@ def main() -> None:
         start_kwargs = {
             "icon": str(icon_path) if icon_path.exists() else None,
             "debug": True,
+            "private_mode": False,  # Required for WebView2 in many bundled environments
         }
         if sys.platform == "win32":
             start_kwargs["gui"] = "edgechromium"
-            start_kwargs["storage_path"] = str(get_runtime_dir() / "webview")
+            # Prefer the environment variable we just set
+            start_kwargs["storage_path"] = os.environ.get("WEBVIEW2_USER_DATA_FOLDER")
         
         def on_shown():
             if fallback_timer:
