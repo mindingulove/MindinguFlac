@@ -242,35 +242,55 @@ else:
             _state["scanning"] = False
 
     def pair_device(address: str) -> str:
-        """Open Bluetooth Settings; macOS owns pairing and audio connection UI."""
+        """Connect or Pair a device. If paired, attempt direct connection. If not, open Settings."""
         try:
-            # Try to get the device object
             device = IOBluetoothDevice.deviceWithAddressString_(address)
-            
-            # If already paired but not connected, try to trigger a connection
-            if device and device.isBRPaired() and not device.isConnected():
-                try:
-                    device.openConnection()
-                except Exception:
-                    pass
-            
-            # Open the Bluetooth settings pane.
-            # On macOS 13+, the URL scheme is preferred.
-            # We try multiple common ways to ensure the Bluetooth-specific pane opens.
-            try:
-                # This is the most modern URL for the Bluetooth pane
-                _sp.Popen(["open", "x-apple.systempreferences:com.apple.BluetoothSettings"])
-            except Exception:
-                try:
-                    # Fallback for older versions or slightly different IDs
-                    _sp.Popen(["open", "x-apple.systempreferences:com.apple.Bluetooth"])
-                except Exception:
-                    # Absolute path fallback
-                    _sp.Popen(["open", "/System/Library/PreferencePanes/Bluetooth.prefPane"])
+            if not device:
+                # If we can't find it by address, it might be a new discovery.
+                # Must open settings to pair.
+                _open_bluetooth_settings()
+                return ""
+
+            is_paired = bool(device.isBRPaired())
+            is_connected = bool(device.isConnected())
+
+            if is_paired:
+                if is_connected:
+                    # Already connected, nothing to do but maybe ensure it's "Active"
+                    # for audio, but that's complex.
+                    return ""
+                
+                # Attempt direct connection for paired device
+                result = device.openConnection()
+                if result == 0: # kIOReturnSuccess
+                    # Successfully connected! No need to open settings.
+                    return ""
+                
+                # If connection failed, fallback to opening settings so user can manually fix
+                _open_bluetooth_settings()
+            else:
+                # Not paired, must use System Settings to pair
+                _open_bluetooth_settings()
             
             return ""
         except Exception as exc:
             return str(exc)
+
+    def _open_bluetooth_settings() -> None:
+        """Helper to open the Bluetooth settings pane using multiple fallbacks."""
+        try:
+            # macOS 13+ modern URL
+            _sp.Popen(["open", "x-apple.systempreferences:com.apple.BluetoothSettings"])
+        except Exception:
+            try:
+                # Older URL
+                _sp.Popen(["open", "x-apple.systempreferences:com.apple.Bluetooth"])
+            except Exception:
+                try:
+                    # Absolute path
+                    _sp.Popen(["open", "/System/Library/PreferencePanes/Bluetooth.prefPane"])
+                except Exception:
+                    pass
 
     def _is_audio(device) -> bool:
         """Return True if device's Bluetooth class-of-device is Audio/Video (major class 4)."""
