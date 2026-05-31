@@ -362,8 +362,8 @@ def main() -> None:
     os.environ.setdefault("MINDINGUFLAC_DESKTOP", "1")
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
     if sys.platform == "win32":
-        os.environ.setdefault("PYTHONNET_RUNTIME", "coreclr")
-        os.environ.setdefault("PYWEBVIEW_GUI", "edgechromium")
+        os.environ["PYTHONNET_RUNTIME"] = "netfx"
+        os.environ["PYWEBVIEW_GUI"] = "edgechromium"
     log_step(f"startup log: {log_path}")
     log_step("importing pywebview")
     import webview as _webview

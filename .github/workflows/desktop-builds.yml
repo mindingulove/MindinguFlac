@@ -1,6 +1,17 @@
 name: Desktop Builds
 
 on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build target
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - macos
+          - all
   workflow_call:
     inputs:
       target:

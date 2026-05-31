@@ -122,7 +122,7 @@ try {
 else:
     from Foundation import NSObject, NSRunLoop, NSDate, NSDefaultRunLoopMode
     from IOBluetooth import IOBluetoothDevice, IOBluetoothDeviceInquiry
-    import objc
+    import subprocess as _sp
 
     _lock = threading.Lock()
     _state: dict = {"scanning": False, "devices": {}, "error": ""}
@@ -130,44 +130,87 @@ else:
     _scan_thread: threading.Thread | None = None
     _delegate_ref = None  # prevent GC
 
+    def _set_error(message: str) -> None:
+        with _lock:
+            _state["error"] = message
+
+    def _bluetooth_error_code(error) -> int:
+        try:
+            code = error.code() if hasattr(error, "code") else error
+            return int(code or 0)
+        except Exception:
+            return 0
+
+    def _bluetooth_error_message(error) -> str:
+        try:
+            if hasattr(error, "localizedDescription"):
+                return str(error.localizedDescription() or "Scan error")
+            return f"Scan error {int(error)}"
+        except Exception:
+            return "Scan error"
+
     class _ScanDelegate(NSObject):
         def deviceInquiryDeviceFound_device_(self, sender, device):
-            addr = device.getAddressString() or ""
-            name = device.getName() or device.getNameOrAddress() or addr
-            paired = bool(device.isBRPaired())
-            with _lock:
-                _state["devices"][addr] = {"name": name, "address": addr, "paired": paired}
+            try:
+                addr = str(device.getAddressString() or "")
+                name = str(device.getName() or device.getNameOrAddress() or addr)
+                paired = bool(device.isBRPaired())
+                if addr:
+                    with _lock:
+                        _state["devices"][addr] = {"name": name, "address": addr, "paired": paired}
+            except Exception as exc:
+                _set_error(f"Bluetooth scan callback failed: {exc}")
+            return None
 
         def deviceInquiryComplete_error_aborted_(self, sender, error, aborted):
-            with _lock:
-                _state["scanning"] = False
-                if error and error.code() != 0:
-                    _state["error"] = str(error.localizedDescription() or "Scan error")
+            try:
+                code = _bluetooth_error_code(error)
+                with _lock:
+                    _state["scanning"] = False
+                    if code:
+                        _state["error"] = _bluetooth_error_message(error)
+            except Exception as exc:
+                _set_error(f"Bluetooth completion callback failed: {exc}")
+            return None
 
         def deviceInquiryStarted_(self, sender):
-            with _lock:
-                _state["scanning"] = True
-                _state["error"] = ""
+            try:
+                with _lock:
+                    _state["scanning"] = True
+                    _state["error"] = ""
+            except Exception as exc:
+                _set_error(f"Bluetooth start callback failed: {exc}")
+            return None
 
     def _scan_loop() -> None:
         global _inquiry
-        delegate = _delegate_ref
-        _inquiry = IOBluetoothDeviceInquiry.inquiryWithDelegate_(delegate)
-        _inquiry.setInquiryLength_(15)
-        _inquiry.setUpdateNewDeviceNames_(True)
-        _inquiry.start()
-        loop = NSRunLoop.currentRunLoop()
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            loop.runMode_beforeDate_(
-                NSDefaultRunLoopMode,
-                NSDate.dateWithTimeIntervalSinceNow_(0.5),
-            )
+        try:
+            delegate = _delegate_ref
+            _inquiry = IOBluetoothDeviceInquiry.inquiryWithDelegate_(delegate)
+            _inquiry.setInquiryLength_(15)
+            _inquiry.setUpdateNewDeviceNames_(True)
+            result = _inquiry.start()
+            if result and result != 0:
+                with _lock:
+                    _state["error"] = f"Could not start Bluetooth scan (error {result})"
+                    _state["scanning"] = False
+                return
+            loop = NSRunLoop.currentRunLoop()
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                loop.runMode_beforeDate_(
+                    NSDefaultRunLoopMode,
+                    NSDate.dateWithTimeIntervalSinceNow_(0.5),
+                )
+                with _lock:
+                    if not _state["scanning"]:
+                        break
+        except Exception as exc:
             with _lock:
-                if not _state["scanning"]:
-                    break
-        with _lock:
-            _state["scanning"] = False
+                _state["error"] = f"Bluetooth scan failed: {exc}"
+        finally:
+            with _lock:
+                _state["scanning"] = False
 
     def start_scan() -> None:
         global _scan_thread, _delegate_ref
@@ -192,15 +235,12 @@ else:
                 pass
 
     def pair_device(address: str) -> str:
-        """Initiate connection/pairing for a device. Returns error string or ''."""
+        """Open Bluetooth Settings; macOS owns pairing and audio connection UI."""
         try:
             device = IOBluetoothDevice.deviceWithAddressString_(address)
             if device is None:
                 return "Device not found"
-            # openConnection_ triggers macOS native pairing dialog when not paired
-            result = device.openConnection_(None)
-            if result and result != 0:
-                return f"Could not connect (error {result})"
+            _sp.Popen(["open", "x-apple.systempreferences:com.apple.Bluetooth"])
             return ""
         except Exception as exc:
             return str(exc)
