@@ -3,7 +3,13 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas = [('static', 'static')]
 binaries = []
-hiddenimports = ['bluetooth_scan']
+hiddenimports = [
+    'bluetooth_scan',
+    'webview.platforms.winforms',
+    'webview.platforms.edgechromium',
+    'webview.platforms.mshtml',
+    'clr',
+]
 
 tmp_ret = collect_all('SpotiFLAC')
 datas += tmp_ret[0]
@@ -19,7 +25,7 @@ try:
 except Exception:
     pass
 
-for package_name in ('PIL', 'git'):
+for package_name in ('PIL', 'git', 'pythonnet', 'clr_loader'):
     try:
         tmp_ret = collect_all(package_name)
         datas += tmp_ret[0]

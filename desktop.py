@@ -6,9 +6,8 @@ import shutil
 import sys
 import threading
 import subprocess
+import traceback
 from pathlib import Path
-
-import webview
 
 
 APP_NAME = "Mindinguflac"
@@ -24,6 +23,32 @@ _macos_dock_state: dict[str, object] = {
     "repeat": False,
     "playing": False,
 }
+webview = None
+
+
+def get_runtime_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME / "runtime"
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME / "runtime"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_NAME / "runtime"
+
+
+def setup_desktop_logging() -> Path:
+    log_dir = get_runtime_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "desktop.log"
+    log_file = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = log_file
+    sys.stderr = log_file
+
+    def _log_exception(exc_type, exc, tb):
+        traceback.print_exception(exc_type, exc, tb)
+
+    sys.excepthook = _log_exception
+    print("\n--- Mindinguflac desktop start ---", flush=True)
+    print(f"platform={sys.platform} frozen={getattr(sys, 'frozen', False)} exe={sys.executable}", flush=True)
+    return log_path
 
 
 def resource_path(relative: str) -> Path:
@@ -41,14 +66,9 @@ def configure_tls_certificates() -> None:
             bundled_cert = Path(certifi.where())
         except Exception:
             return
-    if sys.platform == "darwin":
-        runtime_dir = Path.home() / "Library" / "Application Support" / APP_NAME / "runtime"
-    elif sys.platform == "win32":
-        runtime_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME / "runtime"
-    else:
-        runtime_dir = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_NAME / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    stable_cert = runtime_dir / "cacert.pem"
+    cert_runtime_dir = get_runtime_dir()
+    cert_runtime_dir.mkdir(parents=True, exist_ok=True)
+    stable_cert = cert_runtime_dir / "cacert.pem"
     shutil.copy2(bundled_cert, stable_cert)
     for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         os.environ[name] = str(stable_cert)
@@ -332,7 +352,11 @@ def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> No
 
 
 def main() -> None:
+    global webview
+    setup_desktop_logging()
     os.environ.setdefault("MINDINGUFLAC_DESKTOP", "1")
+    import webview as _webview
+    webview = _webview
     configure_tls_certificates()
     import app
 
@@ -374,4 +398,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        raise
