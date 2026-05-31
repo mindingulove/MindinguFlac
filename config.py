@@ -76,6 +76,7 @@ class AppConfig:
     track_max_retries: int = 1
     download_engine: str = "spotiflac"
     discogs_token: str = ""
+    qobuz_token: str = ""
 
     def public_dict(self) -> dict:
         return {
@@ -92,6 +93,7 @@ class AppConfig:
             "volume": self.volume,
             "track_max_retries": self.track_max_retries,
             "discogs_token": self.discogs_token,
+            "qobuz_token": self.qobuz_token,
         }
 
     @classmethod
@@ -122,6 +124,7 @@ class AppConfig:
             track_max_retries=rt,
             download_engine=value.get("download_engine", "spotiflac"),
             discogs_token=str(value.get("discogs_token", "") or "").strip(),
+            qobuz_token=str(value.get("qobuz_token", "") or "").strip(),
         )
 
 

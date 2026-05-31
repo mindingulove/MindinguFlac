@@ -1113,26 +1113,25 @@ class ServiceDownloadManager:
 
         total_bytes = max(int(job.get("estimated_total_bytes") or 0), _estimated_total_bytes(job, detected_ext))
         if downloaded_bytes >= total_bytes:
-            total_bytes = int(downloaded_bytes * 1.3)
+            total_bytes = int(downloaded_bytes * 1.1)
         progress = min(95.0, (downloaded_bytes / total_bytes) * 100.0)
         if progress <= 0:
             return False
 
-        if biggest.suffix.lower() != ".webm" and is_valid_audio_file(biggest):
-            matches_req, _ = downloaded_track_matches_request(biggest, job)
-            if matches_req:
-                prev_bytes = int(job.get("_stable_check_bytes") or 0)
-                if prev_bytes == downloaded_bytes:
-                    with self._lock:
-                        if job.get("status") == "running" and not job.get("library_path"):
-                            job["library_path"] = str(biggest)
-                            job["progress"] = 100
-                            job["status"] = "finished"
-                            job["error"] = ""
-                    self._append_cache_event(job, "finished", f"Ready to play {biggest.name}")
-                    return True
-                else:
-                    job["_stable_check_bytes"] = downloaded_bytes
+        # Watchdog: If bytes haven't changed for 5 minutes, it's probably a dead socket
+        now = time.time()
+        prev_bytes = int(job.get("_last_active_bytes") or 0)
+        last_time = float(job.get("_last_active_time") or now)
+
+        if downloaded_bytes > prev_bytes:
+            job["_last_active_bytes"] = downloaded_bytes
+            job["_last_active_time"] = now
+        elif now - last_time > 300: # 5 minutes of zero progress
+            with self._lock:
+                if job.get("status") == "running":
+                    job["status"] = "error"
+                    job["error"] = "Download timed out (no progress for 5 minutes). Check your connection."
+            return True
 
         with self._lock:
             current = float(job.get("progress") or 0)
@@ -1271,6 +1270,16 @@ class ServiceDownloadManager:
                 self._ensure_progress_thread()
                 import backend_qobuz_dlp
                 backend_qobuz_dlp.run(output_dir, job, self)
+
+            elif engine == "tidal_hifi":
+                with self._lock:
+                    job["status"] = "running"
+                    job["output_dir"] = str(output_dir)
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
+                self._ensure_progress_thread()
+                import backend_tidal_hifi
+                backend_tidal_hifi.run(output_dir, job, self)
 
             else:  # spotiflac (default)
                 resolved_url = resolve_download_url(merged, service="spotify", kind=kind)

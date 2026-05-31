@@ -33,11 +33,15 @@ jobs:
       - name: Prepare icons
         run: python scripts/make_desktop_icons.py
 
+      - name: Build macOS Now Playing helper
+        run: bash scripts/build_macos_now_playing_helper.sh
+
       - name: Build app
         run: |
           pyinstaller --noconfirm --windowed --name Mindinguflac \
             --icon build/icons/mindinguflac.icns \
             --add-data "static:static" \
+            --add-binary "build/macos/MindinguflacNowPlayingHelper:." \
             --collect-all SpotiFLAC \
             --exclude-module MediaLibrary \
             --exclude-module Photos \

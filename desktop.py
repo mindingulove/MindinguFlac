@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import threading
+import subprocess
 from pathlib import Path
 
 import webview
@@ -12,7 +13,11 @@ import webview
 
 APP_NAME = "Mindinguflac"
 DARK_BACKGROUND = "#090b10"
+_app_quitting = False
 _np_info: dict = {}
+_macos_now_playing_proc: subprocess.Popen[str] | None = None
+_macos_now_playing_stdin = None
+_macos_now_playing_lock = threading.Lock()
 _macos_dock_state: dict[str, object] = {
     "handler": None,
     "shuffle": False,
@@ -62,105 +67,148 @@ def force_dark_appearance() -> None:
         pass
 
 
-def install_now_playing(window: webview.Window) -> None:
+def _macos_now_playing_helper_path() -> Path | None:
+    bundle_root = Path(sys.executable).resolve().parent.parent if getattr(sys, "frozen", False) else None
+    candidates = [
+        resource_path("MindinguflacNowPlayingHelper"),
+        resource_path("Resources/MindinguflacNowPlayingHelper"),
+        resource_path("Frameworks/MindinguflacNowPlayingHelper"),
+        resource_path("build/macos/MindinguflacNowPlayingHelper"),
+        bundle_root / "Resources" / "MindinguflacNowPlayingHelper" if bundle_root else None,
+        bundle_root / "Frameworks" / "MindinguflacNowPlayingHelper" if bundle_root else None,
+        Path(__file__).resolve().parent / "build" / "macos" / "MindinguflacNowPlayingHelper",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _stop_macos_now_playing_helper() -> None:
+    global _macos_now_playing_proc, _macos_now_playing_stdin
+    with _macos_now_playing_lock:
+        if _macos_now_playing_stdin is not None:
+            try:
+                _macos_now_playing_stdin.close()
+            except Exception:
+                pass
+            _macos_now_playing_stdin = None
+        if _macos_now_playing_proc is not None and _macos_now_playing_proc.poll() is None:
+            try:
+                _macos_now_playing_proc.terminate()
+                _macos_now_playing_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    _macos_now_playing_proc.kill()
+                except Exception:
+                    pass
+        _macos_now_playing_proc = None
+
+
+def _send_macos_now_playing_message(message: dict) -> None:
+    with _macos_now_playing_lock:
+        if _macos_now_playing_stdin is None or _macos_now_playing_proc is None:
+            return
+        if _macos_now_playing_proc.poll() is not None:
+            return
+        try:
+            _macos_now_playing_stdin.write(json.dumps(message, ensure_ascii=True) + "\n")
+            _macos_now_playing_stdin.flush()
+        except Exception:
+            _stop_macos_now_playing_helper()
+
+
+def _start_macos_now_playing_helper(base_url: str) -> None:
+    global _macos_now_playing_proc, _macos_now_playing_stdin
+    helper_path = _macos_now_playing_helper_path()
+    if helper_path is None:
+        print("macOS Now Playing helper not found", file=sys.stderr)
+        return
+    with _macos_now_playing_lock:
+        if _macos_now_playing_proc is not None and _macos_now_playing_proc.poll() is None:
+            return
+        try:
+            proc = subprocess.Popen(
+                [str(helper_path), "--base-url", base_url],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            _macos_now_playing_proc = proc
+            _macos_now_playing_stdin = proc.stdin
+        except Exception as exc:
+            print(f"Unable to start macOS Now Playing helper: {exc}", file=sys.stderr)
+            _macos_now_playing_proc = None
+            _macos_now_playing_stdin = None
+
+
+def install_now_playing(window: webview.Window, base_url: str) -> None:
     """Register MPNowPlayingInfoCenter and MPRemoteCommandCenter for Touch Bar."""
     if sys.platform != "darwin":
         return
     try:
-        import ctypes
-        import objc
-        from Foundation import NSBundle
+        import app as _app
+        from AppKit import NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification
+        from Foundation import NSNotificationCenter, NSObject
 
-        mp_bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/MediaPlayer.framework")
-        mp_bundle.load()
+        _start_macos_now_playing_helper(base_url)
 
-        MPNowPlayingInfoCenter = objc.lookUpClass("MPNowPlayingInfoCenter")
-        MPRemoteCommandCenter = objc.lookUpClass("MPRemoteCommandCenter")
-
-        center = MPNowPlayingInfoCenter.defaultCenter()
-        cmd_center = MPRemoteCommandCenter.sharedCommandCenter()
-
-        # Define callbacks first so they are always registered even if
-        # the remote-command block setup below raises an exception.
         def set_now_playing(info: dict) -> None:
             try:
-                if "title" in info:
-                    _np_info["title"] = str(info["title"])
-                if "artist" in info:
-                    _np_info["artist"] = str(info["artist"])
-                if "album" in info:
-                    _np_info["albumTitle"] = str(info["album"])
-                # playbackDuration must be present for the Touch Bar widget to appear.
-                # Use whatever we receive; if 0, keep the previous value or default to 1.
-                d = float(info.get("duration") or 0)
-                if d > 0:
-                    _np_info["playbackDuration"] = d
-                elif "playbackDuration" not in _np_info:
-                    _np_info["playbackDuration"] = 1.0
-                _np_info["MPNowPlayingInfoPropertyElapsedPlaybackTime"] = float(info.get("position") or 0)
-                _np_info["MPNowPlayingInfoPropertyPlaybackRate"] = 1.0
-                np_data = {k: v for k, v in _np_info.items() if not k.startswith("_")}
-                if "title" in np_data:
-                    center.setNowPlayingInfo_(np_data)
-                    center.setPlaybackState_(1)
+                payload = {"type": "set_now_playing"}
+                payload.update({k: v for k, v in info.items() if k in {"title", "artist", "album", "duration", "position", "artwork_url"}})
+                _send_macos_now_playing_message(payload)
             except Exception as exc:
                 print(f"set_now_playing error: {exc}", file=sys.stderr)
 
         def set_playback_state(state_val: int) -> None:
             try:
-                sv = int(state_val)
-                _np_info["MPNowPlayingInfoPropertyPlaybackRate"] = 1.0 if sv == 1 else 0.0
-                np_data = {k: v for k, v in _np_info.items() if not k.startswith("_")}
-                if np_data:
-                    center.setNowPlayingInfo_(np_data)
-                center.setPlaybackState_(sv)
+                _send_macos_now_playing_message({"type": "set_playback_state", "state": int(state_val)})
             except Exception as exc:
                 print(f"set_playback_state error: {exc}", file=sys.stderr)
 
-        import app as _app
+        def clear_now_playing() -> None:
+            try:
+                _send_macos_now_playing_message({"type": "clear_now_playing"})
+            except Exception as exc:
+                print(f"clear_now_playing error: {exc}", file=sys.stderr)
+
+        def send_app_active(active: bool) -> None:
+            _send_macos_now_playing_message({"type": "app_active", "active": bool(active)})
+
+        def handle_media_command(action: str) -> None:
+            mapping = {
+                "playPause": "document.getElementById('playPause')?.click()",
+                "btnNext": "document.getElementById('btnNext')?.click()",
+                "btnPrev": "document.getElementById('btnPrev')?.click()",
+            }
+            script = mapping.get(action)
+            if not script:
+                return
+            threading.Thread(target=window.evaluate_js, args=(script,), daemon=True).start()
+
         _app._np_update_fn = set_now_playing
         _app._np_state_fn = set_playback_state
+        _app._np_clear_fn = clear_now_playing
+        _app._macos_media_command_fn = handle_media_command
 
-        # Register remote command handlers. Wrapped separately so a failure
-        # here doesn't prevent the callbacks above from being registered.
-        _blocks: list = []
-        try:
-            def _make_handler(elem_id: str):
-                @objc.block(restype=ctypes.c_long, argtypes=[objc.objc_id])
-                def _blk(event):
-                    threading.Thread(
-                        target=window.evaluate_js,
-                        args=(f'document.getElementById("{elem_id}")?.click()',),
-                        daemon=True,
-                    ).start()
-                    return 0
-                return _blk
-
-            for cmd, eid in (
-                (cmd_center.playCommand(), "playPause"),
-                (cmd_center.pauseCommand(), "playPause"),
-                (cmd_center.togglePlayPauseCommand(), "playPause"),
-                (cmd_center.nextTrackCommand(), "btnNext"),
-                (cmd_center.previousTrackCommand(), "btnPrev"),
-            ):
-                blk = _make_handler(eid)
-                _blocks.append(blk)
-                cmd.setEnabled_(True)
-                cmd.addTargetWithHandler_(blk)
-        except Exception as cmd_exc:
-            print(f"Now Playing remote commands unavailable: {cmd_exc}", file=sys.stderr)
-            for cmd in (
-                cmd_center.playCommand(), cmd_center.pauseCommand(),
-                cmd_center.togglePlayPauseCommand(),
-                cmd_center.nextTrackCommand(), cmd_center.previousTrackCommand(),
-            ):
+        class _AppStateObserver(NSObject):
+            def appStateChanged_(self, notification):
                 try:
-                    cmd.setEnabled_(True)
-                except Exception:
-                    pass
+                    from AppKit import NSApplication
 
-        # Keep blocks alive via the module-level dict.
-        _np_info["_blocks"] = _blocks
+                    send_app_active(NSApplication.sharedApplication().isActive())
+                except Exception as exc:
+                    print(f"appStateChanged error: {exc}", file=sys.stderr)
+
+        _observer = _AppStateObserver.alloc().init()
+        nc = NSNotificationCenter.defaultCenter()
+        nc.addObserver_selector_name_object_(_observer, "appStateChanged:", NSApplicationDidBecomeActiveNotification, None)
+        nc.addObserver_selector_name_object_(_observer, "appStateChanged:", NSApplicationDidResignActiveNotification, None)
+        from AppKit import NSApplication
+        send_app_active(NSApplication.sharedApplication().isActive())
 
     except Exception as exc:
         print(f"Unable to install Now Playing: {exc}", file=sys.stderr)
@@ -263,6 +311,20 @@ def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> No
             def applicationDockMenu_(self, sender):
                 return build_dock_menu()
 
+            def applicationShouldTerminate_(self, sender):
+                global _app_quitting
+                _app_quitting = True
+                return super().applicationShouldTerminate_(sender)
+
+            def applicationShouldHandleReopen_hasVisibleWindows_(self, app, flag):
+                if not flag:
+                    try:
+                        for bv in cocoa.BrowserView.instances.values():
+                            bv.window.makeKeyAndOrderFront_(None)
+                    except Exception:
+                        pass
+                return True
+
         # pywebview creates this delegate inside webview.start(), after this setup runs.
         cocoa.BrowserView.AppDelegate = _DockAppDelegate
     except Exception as exc:
@@ -293,10 +355,20 @@ def main() -> None:
             min_size=(960, 640),
             background_color=DARK_BACKGROUND,
         )
-        install_now_playing(window)
+        install_now_playing(window, url)
         install_macos_dock_menu(window, app.get_dock_recent_items)
+
+        if sys.platform == "darwin":
+            def _hide_on_close():
+                if _app_quitting:
+                    return True  # let it close so the app can terminate
+                window.hide()
+                return False  # returning False makes should_cancel=True → prevents close
+            window.events.closing += _hide_on_close
+
         webview.start(icon=str(icon_path) if icon_path.exists() else None)
     finally:
+        _stop_macos_now_playing_helper()
         server.shutdown()
         server.server_close()
 

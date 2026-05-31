@@ -102,81 +102,16 @@ const ENGINE_PROVIDERS = {
     { value: "soundcloud",  label: "SoundCloud" },
     { value: "youtube",     label: "YouTube" },
   ],
-  monochrome: [
-    { value: "all",           label: "All (Auto-fallback)" },
-    { value: "scavengerfurs", label: "Scavengerfurs" },
-    { value: "kennyy",        label: "Kennyy Qobuz" },
+  tidal_hifi: [
+    { value: "tidal", label: "Tidal" },
   ],
-  musicdl: [
-    { value: "all",          label: "All Sources" },
-    { value: "netease",      label: "NetEase Music" },
-    { value: "qq",           label: "QQ Music" },
-    { value: "kugou",        label: "Kugou Music" },
-    { value: "kuwo",         label: "Kuwo Music" },
-    { value: "migu",         label: "Migu Music" },
-    { value: "bilibili",     label: "Bilibili" },
-    { value: "bodian",       label: "Bodian" },
-    { value: "fivesing",     label: "5Sing" },
-    { value: "qianqian",     label: "Qianqian" },
-    { value: "soda",         label: "Soda Music" },
-    { value: "moov",         label: "MOOV" },
-    { value: "streetvoice",  label: "StreetVoice" },
-    { value: "apple",        label: "Apple Music" },
-    { value: "deezer",       label: "Deezer" },
-    { value: "tidal",        label: "TIDAL" },
-    { value: "qobuz",        label: "Qobuz" },
-    { value: "spotify",      label: "Spotify" },
-    { value: "youtube",      label: "YouTube" },
-    { value: "soundcloud",   label: "SoundCloud" },
-    { value: "jiosaavn",     label: "JioSaavn" },
-    { value: "joox",         label: "JOOX" },
-    { value: "jamendo",      label: "Jamendo" },
-    { value: "fma",          label: "FMA" },
-    { value: "suno",         label: "Suno AI" },
-    { value: "itunes",       label: "iTunes Podcast" },
-    { value: "lizhi",        label: "Lizhi FM" },
-    { value: "lrts",         label: "LRTS" },
-    { value: "qingting",     label: "Qingting FM" },
-    { value: "ximalaya",     label: "Ximalaya" },
-    { value: "gdstudio",     label: "GDStudio" },
-    { value: "jbsou",        label: "JBSou" },
-    { value: "mp3juice",     label: "MP3 Juice" },
-    { value: "myfreemp3",    label: "MyFreeMP3" },
-    { value: "tunehub",      label: "TuneHub" },
-    { value: "wjhe",         label: "HEMusic (WJHE)" },
-    { value: "alger",        label: "Alger Music" },
-    { value: "buguyy",       label: "Buguyy" },
-    { value: "fangpi",       label: "Fangpi" },
-    { value: "fivesong",     label: "5Song" },
-    { value: "flmp3",        label: "FLMP3" },
-    { value: "gequbao",      label: "Gequbao" },
-    { value: "gequhai",      label: "Gequhai" },
-    { value: "htqyy",        label: "HTQYY" },
-    { value: "jcpoo",        label: "JCPOO" },
-    { value: "kkws",         label: "KKWS" },
-    { value: "livepoo",      label: "LivePOO" },
-    { value: "mitu",         label: "Mitu" },
-    { value: "twot58",       label: "TwoT58" },
-    { value: "yinyuedao",    label: "Yinyuedao" },
-    { value: "zhuolin",      label: "Zhuolin" },
-    { value: "opengameart",  label: "OpenGameArt" },
-  ],
-  "qobuz-dlp": [],
 };
 
 const ENGINE_QUALITIES = {
   spotiflac: null,
-  monochrome: [
-    { value: "27", label: "Hi-Res Max (FLAC)" },
-    { value: "7",  label: "Hi-Res (FLAC)" },
-    { value: "6",  label: "CD (FLAC)" },
-  ],
-  musicdl: null,
-  "qobuz-dlp": [
-    { value: "27", label: "Hi-Res Max (FLAC)" },
-    { value: "7",  label: "Hi-Res (FLAC)" },
-    { value: "6",  label: "CD (FLAC)" },
-    { value: "5",  label: "High (320kbps)" },
+  tidal_hifi: [
+    { value: "HI_RES_LOSSLESS", label: "Hi-Res (FLAC)" },
+    { value: "LOSSLESS",        label: "CD (FLAC)" },
   ],
 };
 
@@ -1864,7 +1799,12 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track);
         if (!switchedToFinal && mode === "stream" && job.library_path) {
           switchedToFinal = true;
-          await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache");
+          const audio = $("audioPlayer");
+          // Don't interrupt active HLS playback — FLAC is cached for next play.
+          // Only switch if playback hasn't meaningfully started yet.
+          if (!audio || audio.paused || audio.currentTime < 2) {
+            await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache");
+          }
         }
         return;
       }
@@ -1877,10 +1817,12 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
 function tryStartAudio(audio, track, requestId, jobId) {
   audio.play().catch((error) => {
     if (requestId !== state.playbackRequestId) return;
-    state.autoplayWanted = false;
     if (error && error.name === "NotAllowedError") {
       state.autoplayWanted = true;
       setPlayerStatus("Ready — press play", track);
+    } else if (error && error.name !== "AbortError") {
+      // AbortError means src changed mid-load — keep autoplayWanted so oncanplay retries.
+      state.autoplayWanted = false;
     }
   });
 }
@@ -2115,6 +2057,7 @@ async function renderSettings() {
 
   $("demoMusicIndexer").checked = !!state.settings.demo_music_indexer;
   $("strictTitleMatch").checked = !!state.settings.strict_title_match;
+  $("qobuzToken").value = state.settings.qobuz_token || "";
   $("discogsToken").value = state.settings.discogs_token || "";
   
   $("musicIndexers").innerHTML = "";
@@ -2152,6 +2095,7 @@ async function saveSettings(e) {
 
     demo_music_indexer: $("demoMusicIndexer").checked,
     strict_title_match: $("strictTitleMatch").checked,
+    qobuz_token: $("qobuzToken").value.trim(),
     discogs_token: $("discogsToken").value.trim(),
     music_indexers: Array.from(document.querySelectorAll("#musicIndexers .indexer-row")).map(row => ({
       name: row.querySelector("[data-field='name']").value,
@@ -2273,6 +2217,7 @@ function bindKeyboardControls() {
   window.addEventListener("blur", () => {
     stopSeekHold();
     stopVolumeHold();
+    clearMediaSession();
   });
 }
 
@@ -2306,11 +2251,29 @@ function _callNowPlaying(fnName, arg) {
     api("/api/now_playing", { method: "POST", body: JSON.stringify(arg) }).catch(() => {});
   } else if (fnName === "set_playback_state") {
     api("/api/now_playing/state", { method: "POST", body: JSON.stringify({ state: arg }) }).catch(() => {});
+  } else if (fnName === "clear_now_playing") {
+    api("/api/now_playing/clear", { method: "POST" }).catch(() => {});
   }
 }
 
+function shouldExposeNowPlaying() {
+  const audio = $("audioPlayer");
+  return !!audio && !audio.paused;
+}
+
+function clearMediaSession() {
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = null;
+    navigator.mediaSession.playbackState = "none";
+  }
+  _callNowPlaying("clear_now_playing");
+}
+
 function updateMediaSession(track) {
-  if (!track) return;
+  if (!track || !shouldExposeNowPlaying()) {
+    clearMediaSession();
+    return;
+  }
   const art = absoluteUrl(track.artwork_url || "");
   if ("mediaSession" in navigator) {
     const artwork = art ? [
@@ -2342,19 +2305,9 @@ function updateMediaSession(track) {
 }
 
 function bindMediaSessionActions() {
-  if (!("mediaSession" in navigator)) return;
-  const audio = $("audioPlayer");
-  const handlers = {
-    play: () => audio.play(),
-    pause: () => audio.pause(),
-    previoustrack: () => $("btnPrev").click(),
-    nexttrack: () => $("btnNext").click(),
-  };
-  Object.entries(handlers).forEach(([action, handler]) => {
-    try {
-      navigator.mediaSession.setActionHandler(action, handler);
-    } catch (e) {}
-  });
+  // Intentionally do not register global media-session action handlers.
+  // macOS should keep using its own control-center routing so the selected app
+  // receives play/pause instead of Mindinguflac claiming the session.
 }
 
 function bindPlayer() {
@@ -2365,13 +2318,23 @@ function bindPlayer() {
   audio.onplay = audio.onpause = () => {
     syncPlayPauseButton();
     syncActiveTrackRows();
-    if ("mediaSession" in navigator) {
-      navigator.mediaSession.playbackState = audio.paused ? "paused" : "playing";
-    }
     api("/api/dock/playing-state", { method: "POST", body: JSON.stringify({ playing: !audio.paused }) }).catch(() => {});
-    _callNowPlaying("set_playback_state", audio.paused ? 2 : 1);
+    if (audio.paused) {
+      if (state.currentTrack) {
+        _callNowPlaying("set_now_playing", { position: audio.currentTime });
+        _callNowPlaying("set_playback_state", 2);
+      } else {
+        _callNowPlaying("clear_now_playing");
+      }
+    } else if (shouldExposeNowPlaying()) {
+      _callNowPlaying("set_playback_state", 1);
+      if (state.currentTrack) {
+        updateMediaSession(state.currentTrack);
+      }
+    }
   };
   audio.onended = () => {
+    clearMediaSession();
     if (state.queue.length) {
       state.queueIndex = (state.queueIndex + 1) % state.queue.length;
       selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
@@ -2389,17 +2352,24 @@ function bindPlayer() {
     }
   };
   audio.onloadedmetadata = () => {
-    if (state.currentTrack) {
+    if (state.currentTrack && shouldExposeNowPlaying()) {
       _callNowPlaying("set_now_playing", {
         duration: audio.duration || 0,
         position: audio.currentTime || 0,
       });
     }
   };
+  audio.oncanplay = () => {
+    if (state.autoplayWanted && audio.paused) {
+      audio.play().catch(() => {});
+    }
+  };
   $("seekBar").oninput = () => {
     if (audio.duration) {
       audio.currentTime = ($("seekBar").value / 1000) * audio.duration;
-      _callNowPlaying("set_now_playing", { position: audio.currentTime });
+      if (shouldExposeNowPlaying()) {
+        _callNowPlaying("set_now_playing", { position: audio.currentTime });
+      }
     }
   };
   $("volumeBar").oninput = () => {
@@ -2407,6 +2377,18 @@ function bindPlayer() {
     persistVolume(audio.volume);
     syncVolumeBar();
   };
+  window.addEventListener("focus", () => {
+    if (state.currentTrack && !audio.paused) {
+      _callNowPlaying("set_playback_state", 1);
+      updateMediaSession(state.currentTrack);
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !audio.paused && state.currentTrack) {
+      _callNowPlaying("set_playback_state", 1);
+      updateMediaSession(state.currentTrack);
+    }
+  });
   $("btnNext").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex + 1) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext); } };
   $("btnPrev").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex - 1 + state.queue.length) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext); } };
   const btnShuffle = $("btnShuffle");

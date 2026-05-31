@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import mimetypes
 import socket
-socket.setdefaulttimeout(30)
 mimetypes.add_type("audio/flac", ".flac")
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/ogg", ".ogg")
@@ -49,6 +48,8 @@ _dock_recent_items: list[dict] = []
 # Callbacks set by desktop.py for macOS Now Playing / Touch Bar integration
 _np_update_fn = None   # (info: dict) -> None
 _np_state_fn = None    # (state: int) -> None
+_np_clear_fn = None    # () -> None
+_macos_media_command_fn = None   # (action: str) -> None
 
 
 def load_playlists() -> list[dict]:
@@ -692,13 +693,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not job:
                     self.send_error_json("Job not found", HTTPStatus.NOT_FOUND)
                     return
-                
-                output_dir = Path(job["output_dir"])
+
+                output_dir = Path(job.get("output_dir") or "")
+                is_tidal_hifi = job.get("engine") == "tidal_hifi"
                 candidate = None
                 for _ in range(900):
-                    candidate = active_audio_candidate(output_dir)
-                    if candidate:
-                        break
                     job = service_downloader.get_job(job_id)
                     if not job or job.get("status") == "error":
                         self.send_error_json(job.get("error", "Download failed") if job else "Job not found", HTTPStatus.CONFLICT)
@@ -708,13 +707,47 @@ class Handler(BaseHTTPRequestHandler):
                         if final_path.exists():
                             candidate = final_path
                             break
+
+                    if not output_dir.parts:
+                        output_dir = Path(job.get("output_dir") or "")
+                    if output_dir.exists():
+                        candidate = active_audio_candidate(output_dir)
+                    if candidate:
+                        break
                     time.sleep(1)
-                
+
                 if not candidate:
                     self.send_error_json("No audio data available yet", HTTPStatus.ACCEPTED)
                     return
-                
-                self.stream_local_path(candidate, is_active_job=True)
+
+                is_finished = job.get("status") == "finished"
+                self.stream_local_path(candidate, is_active_job=not is_finished)
+                return
+
+            if path == "/api/tidal_proxy":
+                target_url = query.get("url", [""])[0].strip()
+                if not target_url or not target_url.startswith("https://"):
+                    self.send_error_json("Invalid URL", 400)
+                    return
+                try:
+                    import urllib.request as _ureq
+                    req = _ureq.Request(target_url, headers={
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                        "Origin": "https://monochrome.tf",
+                        "Accept": "*/*",
+                    })
+                    with _ureq.urlopen(req, timeout=30) as resp:
+                        data = resp.read()
+                        ctype = resp.headers.get("Content-Type", "audio/mp4")
+                    self.send_response(200)
+                    self.send_cors_headers()
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    self.wfile.write(data)
+                except Exception as exc:
+                    self.send_error_json(str(exc), 502)
                 return
 
             static_path = safe_static_path(path)
@@ -750,6 +783,18 @@ class Handler(BaseHTTPRequestHandler):
                 body = read_body(self)
                 if _np_state_fn:
                     _np_state_fn(int(body.get("state", 2)))
+                self.send_json({"ok": True})
+                return
+            if path == "/api/now_playing/clear":
+                if _np_clear_fn:
+                    _np_clear_fn()
+                self.send_json({"ok": True})
+                return
+            if path == "/api/macos_media_command":
+                body = read_body(self)
+                action = str(body.get("action") or "")
+                if _macos_media_command_fn and action:
+                    _macos_media_command_fn(action)
                 self.send_json({"ok": True})
                 return
             if path == "/api/artist/about":

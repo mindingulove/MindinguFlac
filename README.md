@@ -101,6 +101,7 @@ GitHub Actions builds are defined in `.github/workflows/desktop-builds.yml`:
 ## Implementation Notes
 
 - Keep the web server entry point and desktop pywebview entry point separate. `app.py` should remain usable as a normal browser-served app.
+- macOS Now Playing / Touch Bar integration is split into a small Swift helper. Keep the helper build script and the PyInstaller bundle rules in sync with `desktop.py`.
 - Direct download behavior lives in `service_downloader.py`; keep provider ordering tied to the selected service first, then fallback services.
 - Cache/library decisions should match the clicked track identity and quality. Do not reuse a different track just because a local audio file exists.
 - SpotiFLAC may expose an MP4/M4A partial before the final target file exists. Stream compatible partial files when possible, then hand off to the final local file when finished.

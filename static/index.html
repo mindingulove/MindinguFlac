@@ -106,9 +106,7 @@
               <div class="settings-control">
                 <select id="downloadEngine">
                   <option value="spotiflac">SpotiFLAC</option>
-                  <option value="monochrome">Monochrome</option>
-                  <option value="musicdl">musicdl</option>
-                  <option value="qobuz-dlp">qobuz-dlp</option>
+                  <option value="tidal_hifi">Tidal HiFi</option>
                 </select>
               </div>
             </div>
@@ -195,9 +193,19 @@
             </div>
             <div class="settings-row">
               <div class="settings-info">
-                <strong>Discogs personal token</strong>
+                <label>Qobuz token</label>
+                <span>Optional <code>user_auth_token</code> for better Qobuz stability.</span>
+              </div>
+              <div class="settings-control">
+                <input type="password" id="qobuzToken" autocomplete="off" placeholder="Optional Qobuz user token">
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <label>Discogs personal token</label>
                 <span>Loads vinyl sleeve and booklet images in album galleries.</span>
               </div>
+
               <div class="settings-control">
                 <input id="discogsToken" type="password" autocomplete="off" placeholder="Optional Discogs API token">
               </div>
