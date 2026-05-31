@@ -733,6 +733,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(album_tracks(app_config, artist, album, release_id, spotify_id))
                 return
             if path == "/api/settings":
+                print(f"[API] GET /api/settings -> {app_config.cache_dir}, {app_config.music_dir}")
                 self.send_json(app_config.public_dict())
                 return
             if path == "/api/image":

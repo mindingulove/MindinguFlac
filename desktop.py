@@ -398,7 +398,6 @@ def main() -> None:
             background_color=DARK_BACKGROUND,
         )
         log_step("pywebview window object created")
-        install_now_playing(window, url)
         install_macos_dock_menu(window, app.get_dock_recent_items)
 
         if sys.platform == "darwin":
@@ -409,6 +408,7 @@ def main() -> None:
                 return False  # returning False makes should_cancel=True → prevents close
             window.events.closing += _hide_on_close
 
+        fallback_timer = None
         if sys.platform == "win32":
             def _browser_fallback() -> None:
                 log_step(f"opening browser fallback: {url}")
@@ -417,7 +417,10 @@ def main() -> None:
                 except Exception:
                     traceback.print_exc()
 
-            threading.Timer(8.0, _browser_fallback).start()
+            # Increased timeout to 12s to account for slow Edge/WebView2 initialization.
+            # Only opens if the pywebview window doesn't appear in time.
+            fallback_timer = threading.Timer(12.0, _browser_fallback)
+            fallback_timer.start()
 
         log_step("starting pywebview event loop")
         start_kwargs = {
@@ -427,6 +430,16 @@ def main() -> None:
         if sys.platform == "win32":
             start_kwargs["gui"] = "edgechromium"
             start_kwargs["storage_path"] = str(get_runtime_dir() / "webview")
+        
+        def on_shown():
+            if fallback_timer:
+                fallback_timer.cancel()
+                log_step("cancelled browser fallback timer (window shown)")
+            
+            # macOS-specific helper and Darwin Now Playing
+            install_now_playing(window, url)
+
+        window.events.shown += on_shown
         webview.start(**start_kwargs)
         log_step("pywebview event loop exited")
     finally:

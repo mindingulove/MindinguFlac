@@ -23,7 +23,11 @@ def _windows_dir(env_name: str, fallback: Path) -> Path:
 def app_data_dir() -> Path:
     if not is_desktop_mode():
         return ROOT / "data"
-    home = Path.home()
+    try:
+        home = Path.home()
+    except Exception:
+        return ROOT / "data"
+        
     if sys.platform == "darwin":
         return home / "Library" / "Application Support" / APP_NAME
     if sys.platform == "win32":
@@ -34,7 +38,11 @@ def app_data_dir() -> Path:
 def default_cache_dir() -> Path:
     if not is_desktop_mode():
         return ROOT / "data" / "cache"
-    home = Path.home()
+    try:
+        home = Path.home()
+    except Exception:
+        return ROOT / "data" / "cache"
+
     if sys.platform == "darwin":
         return home / "Library" / "Caches" / APP_NAME / "cache"
     if sys.platform == "win32":
@@ -45,7 +53,10 @@ def default_cache_dir() -> Path:
 def default_music_dir() -> Path:
     if not is_desktop_mode():
         return ROOT / "data" / "music"
-    return Path.home() / "Music" / APP_NAME
+    try:
+        return Path.home() / "Music" / APP_NAME
+    except Exception:
+        return ROOT / "data" / "music"
 
 
 def jobs_path() -> Path:
@@ -79,9 +90,16 @@ class AppConfig:
     qobuz_token: str = ""
 
     def public_dict(self) -> dict:
+        def _safe_path(p: Path) -> str:
+            try:
+                # expanduser() handles ~ while absolute() makes it full path without symlink resolution
+                return str(p.expanduser().absolute())
+            except Exception:
+                return str(p)
+
         return {
-            "cache_dir": str(self.cache_dir.expanduser().resolve()),
-            "music_dir": str(self.music_dir.expanduser().resolve()),
+            "cache_dir": _safe_path(self.cache_dir),
+            "music_dir": _safe_path(self.music_dir),
             "default_quality": self.default_quality,
             "download_service": self.download_service,
             "download_engine": self.download_engine,
@@ -98,11 +116,20 @@ class AppConfig:
 
     @classmethod
     def from_public_dict(cls, value: dict) -> "AppConfig":
+        print(f"[Config] Loading from dict: {value.get('cache_dir')}, {value.get('music_dir')}")
         music_indexers = [MusicIndexerConfig(**item) for item in value.get("music_indexers", [])]
         
         cache_dir_str = (value.get("cache_dir") or "").strip()
         music_dir_str = (value.get("music_dir") or "").strip()
         
+        def _to_path(s: str, default_fn) -> Path:
+            if not s:
+                return default_fn().expanduser().absolute()
+            try:
+                return Path(s).expanduser().absolute()
+            except Exception:
+                return default_fn().expanduser().absolute()
+
         rt = value.get("track_max_retries")
         if rt is None:
             rt = 1
@@ -111,8 +138,8 @@ class AppConfig:
             except: rt = 1
 
         return cls(
-            cache_dir=Path(cache_dir_str).expanduser().resolve() if cache_dir_str else default_cache_dir().expanduser().resolve(),
-            music_dir=Path(music_dir_str).expanduser().resolve() if music_dir_str else default_music_dir().expanduser().resolve(),
+            cache_dir=_to_path(cache_dir_str, default_cache_dir),
+            music_dir=_to_path(music_dir_str, default_music_dir),
             default_quality=value.get("default_quality", "LOSSLESS"),
             download_service=value.get("download_service", "tidal"),
             cache_cleanup_frequency=value.get("cache_cleanup_frequency", "never"),
@@ -129,6 +156,7 @@ class AppConfig:
 
 
 def load_config(path: Path) -> AppConfig:
+    print(f"[Config] Attempting to load: {path}")
     if not path.exists():
         return AppConfig()
     try:

@@ -2040,6 +2040,7 @@ async function renderSettings() {
   setActiveView("settings");
   startCacheLogPolling();
   state.settings = await api("/api/settings");
+  console.log("Settings loaded from API:", state.settings);
   
   $("cacheDir").value = state.settings.cache_dir || "";
   $("musicDir").value = state.settings.music_dir || "";
