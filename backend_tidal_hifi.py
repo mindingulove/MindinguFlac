@@ -458,10 +458,22 @@ def _download_dash_native(requests_module, mpd_url: str, flac_out: Path, job: di
 
     streaming_ready = False
     downloaded_chunks = 0
+    
+    # Strip Origin and Referer for actual media segments to avoid 403 Forbidden from Tidal's CDN
+    cdn_headers = {"User-Agent": headers.get("User-Agent", "Mozilla/5.0")}
+    
     try:
+        # Route Init and Media segments through the audio proxy to ensure full track access
+        def _get_proxied_resp(url: str):
+            # Encode URL to ensure it passes through the proxy safely
+            from urllib.parse import quote
+            proxy_url = f"{_AUDIO_PROXY}/proxy-audio/{url}"
+            r = requests_module.get(proxy_url, headers=cdn_headers, timeout=25)
+            r.raise_for_status()
+            return r
+
         # 1. Download Init segment
-        init_resp = requests_module.get(init_url, headers=headers, timeout=20)
-        init_resp.raise_for_status()
+        init_resp = _get_proxied_resp(init_url)
         proc.stdin.write(init_resp.content)
 
         # 2. Download Media segments
@@ -470,12 +482,11 @@ def _download_dash_native(requests_module, mpd_url: str, flac_out: Path, job: di
                 raise RuntimeError("Download cancelled")
 
             current_number = start_number + i
-            # Replace $Number$ in media URL
             media_url = urljoin(mpd_url, media_url_template.replace("$Number$", str(current_number)))
             
-            chunk_resp = requests_module.get(media_url, headers=headers, timeout=20)
-            chunk_resp.raise_for_status()
+            chunk_resp = _get_proxied_resp(media_url)
             proc.stdin.write(chunk_resp.content)
+
             
             downloaded_chunks += 1
             with manager._lock:
@@ -532,41 +543,69 @@ def _download_direct(requests_module, cdn_url: str, out: Path, job: dict, manage
 # BTS manifest (direct single URL)
 # ---------------------------------------------------------------------------
 
-def _fetch_manifest(requests_module, base_url: str, track_id: int, quality: str = "LOSSLESS", headers: dict | None = None) -> tuple[str, str, str] | None:
-    """Return (manifest_text, mime_type, cdn_url) or None. Handle HLS, DASH, and BTS."""
+def _fetch_manifest(requests_module, base_url: str, track_id: int, quality: str = "LOSSLESS", headers: dict | None = None) -> tuple[str, str, str, bool] | None:
+    """Return (manifest_text, mime_type, cdn_url, is_full) or None. Handle HLS, DASH, and BTS."""
+    hdrs = headers or _get_headers()
+    
+    perms = [
+        {"manifestType": "MPEG_DASH", "usage": "PLAYBACK"},
+        {"manifestType": "MPEG_DASH", "usage": "DOWNLOAD"},
+        {"manifestType": "HLS",       "usage": "PLAYBACK"},
+        {"manifestType": "HLS",       "usage": "DOWNLOAD"},
+    ]
+    
+    best_preview = None
+    formats = "FLAC_HIRES" if "HI_RES" in quality else "FLAC"
+    for p in perms:
+        try:
+            params = {"id": str(track_id), "quality": quality, "formats": formats, "adaptive": "false"}
+            params.update(p)
+            resp = requests_module.get(f"{base_url}/trackManifests/", params=params, headers=hdrs, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                attr = data.get("data", {}).get("data", {}).get("attributes", {}) or \
+                       data.get("data", {}).get("attributes", {}) or \
+                       data.get("attributes", {})
+                
+                is_preview = (attr.get("trackPresentation") == "PREVIEW")
+                
+                master_url = attr.get("uri", "") or data.get("uri", "")
+                if master_url:
+                    r2 = requests_module.get(master_url, headers=hdrs, timeout=12)
+                    if r2.status_code == 200:
+                        content = r2.text
+                        mime = r2.headers.get("Content-Type", "") or p["manifestType"]
+                        if "MPD" in content: mime = "application/dash+xml"
+                        elif "EXTM3U" in content: mime = "application/vnd.apple.mpegurl"
+                        
+                        res = (content, mime, master_url, not is_preview)
+                        if not is_preview:
+                            return res
+                        elif best_preview is None:
+                            best_preview = res
+
+        except Exception:
+            continue
+
+    if best_preview:
+        return best_preview
+
+    # 2. Try legacy /track/ endpoint
     try:
-        formats = "FLAC_HIRES" if "HI_RES" in quality else "FLAC"
-        hdrs = headers or _get_headers()
-        resp = requests_module.get(
-            f"{base_url}/trackManifests/",
-            params={"id": str(track_id), "quality": quality, "formats": formats, "adaptive": "false"},
-            headers=hdrs,
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            return None
-
-        manifest_data = resp.json().get("data", {})
-        master_url = manifest_data.get("data", {}).get("attributes", {}).get("uri", "")
-        if not master_url:
-            master_url = manifest_data.get("attributes", {}).get("uri", "")
-        if not master_url:
-            master_url = resp.json().get("uri", "")
-        if not master_url:
-            return None
-
-        r2 = requests_module.get(master_url, headers=hdrs, timeout=15)
-        if r2.status_code != 200:
-            return None
-
-        content = r2.text
-        mime = r2.headers.get("Content-Type", "")
-        if not mime:
-            mime = "application/dash+xml" if "<MPD" in content else "application/vnd.tidal.bts"
-
-        return content, mime, master_url
+        resp = requests_module.get(f"{base_url}/track/", params={"id": track_id, "quality": quality}, headers=hdrs, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data: data = data["data"]
+            manifest_b64 = data.get("manifest")
+            mime = data.get("manifestMimeType", "")
+            if manifest_b64:
+                import base64
+                content = base64.b64decode(manifest_b64).decode("utf-8", "ignore")
+                return content, mime, "", True # Assume legacy is full if it works
     except Exception:
-        return None
+        pass
+
+    return None
 
 def _parse_bts(manifest_text: str) -> str:
     import json as _json
@@ -637,30 +676,39 @@ def run(output_dir: Path, job: dict, manager) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     out_base = output_dir / f"{title} - {artist}"
 
-    all_instances = list(stream_instances) + [u for u in api_instances if u not in stream_instances]
+    all_instances = [_MONOCHROME_PROXY] + list(stream_instances) + [u for u in api_instances if u not in stream_instances]
 
     _log(f"Fetching stream manifest for track {track_id}...")
-    manifest_info = _fetch_manifest(requests, _MONOCHROME_PROXY, track_id, quality, headers=authed_headers)
-    
-    if not manifest_info:
-        for s_url in all_instances:
-            manifest_info = _fetch_manifest(requests, s_url, track_id, quality)
-            if manifest_info:
+    manifest_info = None
+    for s_url in all_instances:
+        manifest_info = _fetch_manifest(requests, s_url, track_id, quality, headers=authed_headers)
+        if manifest_info:
+            if manifest_info[3]: # Is full
                 break
+            # If it's a preview, we keep searching other proxies for a full one
+            # but we keep this one as a fallback.
+            best_info = manifest_info
+        else:
+            best_info = None
+
+    if not manifest_info and best_info:
+        manifest_info = best_info
+
+    # If we only found previews, take it
+    if manifest_info and not manifest_info[3]:
+        _log("Full track unavailable on proxies, using PREVIEW sample.")
 
     if not manifest_info and quality == "HI_RES_LOSSLESS":
         _log("Hi-Res unavailable, trying LOSSLESS...")
-        manifest_info = _fetch_manifest(requests, _MONOCHROME_PROXY, track_id, "LOSSLESS", headers=authed_headers)
-        if not manifest_info:
-            for s_url in all_instances:
-                manifest_info = _fetch_manifest(requests, s_url, track_id, "LOSSLESS")
-                if manifest_info:
-                    break
+        for s_url in all_instances:
+            manifest_info = _fetch_manifest(requests, s_url, track_id, "LOSSLESS", headers=authed_headers)
+            if manifest_info and manifest_info[3]:
+                break
 
     if not manifest_info:
-        raise RuntimeError(f"Tidal HiFi: no stream manifest for track {track_id}")
+        raise RuntimeError(f"Tidal HiFi: no stream manifest for track {track_id} (proxies failed)")
 
-    content, mime, master_url = manifest_info
+    content, mime, master_url, is_full = manifest_info
 
     if "#EXTM3U" in content:
         chunklist = _find_best_hls_chunklist(requests, content, master_url, authed_headers)
