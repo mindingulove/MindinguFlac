@@ -19,6 +19,16 @@ try:
 except Exception:
     pass
 
+for package_name in ('PIL', 'git'):
+    try:
+        tmp_ret = collect_all(package_name)
+        datas += tmp_ret[0]
+        binaries += tmp_ret[1]
+        hiddenimports += tmp_ret[2]
+        hiddenimports += collect_submodules(package_name)
+    except Exception:
+        pass
+
 for module_name in (
     'winrt',
     'winrt.windows.devices.bluetooth',
@@ -45,7 +55,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PIL', 'AppKit', 'Foundation', 'IOBluetooth', 'objc', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
+    excludes=['AppKit', 'Foundation', 'IOBluetooth', 'objc', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
     noarchive=False,
     optimize=0,
 )
