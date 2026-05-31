@@ -81,9 +81,9 @@ def _get_bearer_token(requests_module) -> str:
 def _auth_headers(requests_module) -> dict:
     try:
         token = _get_bearer_token(requests_module)
-        return {**_HEADERS, "Authorization": f"Bearer {token}"}
+        return {**_get_headers(), "Authorization": f"Bearer {token}"}
     except Exception:
-        return _HEADERS
+        return _get_headers()
 
 _QUALITY_MAP = {
     "27": "HI_RES_LOSSLESS",
@@ -110,7 +110,7 @@ def _norm(value: object) -> str:
 
 def _fetch_instances(requests_module) -> tuple[list[str], list[str]]:
     try:
-        resp = requests_module.get(_UPTIME_URL, headers=_HEADERS, timeout=10)
+        resp = requests_module.get(_UPTIME_URL, headers=_get_headers(), timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             live_api = [x["url"] for x in data.get("api", []) if x.get("url")]
@@ -129,7 +129,7 @@ def _fetch_instances(requests_module) -> tuple[list[str], list[str]]:
 # ---------------------------------------------------------------------------
 
 def _search(requests_module, base_url: str, title: str, artist: str, isrc: str, headers: dict | None = None) -> list[dict]:
-    hdrs = headers or _HEADERS
+    hdrs = headers or _get_headers()
     if isrc:
         try:
             resp = requests_module.get(
@@ -185,7 +185,7 @@ def _get_hls_url(requests_module, base_url: str, track_id: int, quality: str = "
     try:
         formats = "FLAC_HIRES" if "HI_RES" in quality else "FLAC"
 
-        hdrs = headers or _HEADERS
+        hdrs = headers or _get_headers()
         resp = requests_module.get(
             f"{base_url}/trackManifests/",
             params={
@@ -311,7 +311,7 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
     ffmpeg writes FLAC frames as it downloads each segment, so the output
     file grows in real-time and can be streamed to the browser immediately.
     """
-    resp = requests_module.get(media_m3u8_url, headers=_HEADERS, timeout=15)
+    resp = requests_module.get(media_m3u8_url, headers=_get_headers(), timeout=15)
     resp.raise_for_status()
     m3u8_text = resp.text
     rewritten = _rewrite_m3u8_for_proxy(m3u8_text, media_m3u8_url)
@@ -390,7 +390,7 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
 def _download_direct(requests_module, cdn_url: str, out: Path, job: dict, manager) -> None:
     """Stream a single BTS URL through the audio proxy, flushing each chunk."""
     proxy_url = f"{_AUDIO_PROXY}/proxy-audio/{cdn_url}"
-    with requests_module.get(proxy_url, headers=_HEADERS, stream=True, timeout=600) as resp:
+    with requests_module.get(proxy_url, headers=_get_headers(), stream=True, timeout=600) as resp:
         resp.raise_for_status()
         total = int(resp.headers.get("Content-Length") or 0)
         done = 0
@@ -422,7 +422,7 @@ def _fetch_manifest(requests_module, base_url: str, track_id: int, quality: str 
     """Return (manifest_text, mime_type, cdn_url) or None. Handle HLS, DASH, and BTS."""
     try:
         formats = "FLAC_HIRES" if "HI_RES" in quality else "FLAC"
-        hdrs = headers or _HEADERS
+        hdrs = headers or _get_headers()
         resp = requests_module.get(
             f"{base_url}/trackManifests/",
             params={"id": str(track_id), "quality": quality, "formats": formats, "adaptive": "false"},
