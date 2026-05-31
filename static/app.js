@@ -2060,21 +2060,7 @@ async function renderSettings() {
   $("strictTitleMatch").checked = !!state.settings.strict_title_match;
   $("qobuzToken").value = state.settings.qobuz_token || "";
   $("discogsToken").value = state.settings.discogs_token || "";
-  
-  $("musicIndexers").innerHTML = "";
-  (state.settings.music_indexers || []).forEach(indexer => {
-    const row = document.createElement("div");
-    row.className = "indexer-row";
-    row.innerHTML = `
-      <input data-field="name" placeholder="Name" value="${esc(indexer.name)}">
-      <select data-field="type"><option value="musicbrainz" selected>MusicBrainz</option></select>
-      <label class="check"><input data-field="enabled" type="checkbox" ${indexer.enabled?"checked":""}> Enabled</label>
-      <button type="button" class="remove-btn" data-remove><i class="bi bi-trash"></i></button>
-    `;
-    row.querySelector("[data-remove]").onclick = () => row.remove();
-    $("musicIndexers").appendChild(row);
-  });
-  
+
   try {
     const stats = await api("/api/cache");
     $("cacheUsage").textContent = `${(stats.bytes / (1024 * 1024)).toFixed(1)} MB used by ${stats.files} files`;
@@ -2098,11 +2084,7 @@ async function saveSettings(e) {
     strict_title_match: $("strictTitleMatch").checked,
     qobuz_token: $("qobuzToken").value.trim(),
     discogs_token: $("discogsToken").value.trim(),
-    music_indexers: Array.from(document.querySelectorAll("#musicIndexers .indexer-row")).map(row => ({
-      name: row.querySelector("[data-field='name']").value,
-      type: row.querySelector("[data-field='type']").value,
-      enabled: row.querySelector("[data-field='enabled']").checked,
-    }))
+    music_indexers: []
   };
   try {
     await api("/api/settings", { method: "POST", body: JSON.stringify(body) });

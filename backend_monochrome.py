@@ -6,14 +6,24 @@ import re
 import time
 import urllib.parse
 import unicodedata
-from pathlib import Path
+import base64
+import random
 
-_DEFAULT_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-    "Origin": "https://monochrome.samidy.com",
-    "Referer": "https://monochrome.samidy.com/",
-}
+_ORIGINS = [
+    "https://monochrome.tf",
+    "https://monochrome.samidy.com",
+    "https://lossless.wtf",
+    "https://if-it-runs-ship-it.lol",
+]
+
+def _get_headers() -> dict:
+    origin = random.choice(_ORIGINS)
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "Origin": origin,
+        "Referer": f"{origin}/",
+    }
 
 def _norm(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
@@ -73,7 +83,7 @@ def _search_items(requests_module, query: str, offset: int = 0) -> list[dict]:
     
     for url in search_urls:
         try:
-            resp = requests_module.get(url, headers=_DEFAULT_HEADERS, timeout=20)
+            resp = requests_module.get(url, headers=_get_headers(), timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, dict) and data.get("success"):
@@ -127,7 +137,7 @@ def _fetch_dab(track_id: str, qid: str) -> str | None:
         try:
             url = base + params
             # chrome120 impersonation is quite strong against CF
-            resp = _requests.get(url, headers=_DEFAULT_HEADERS, impersonate="chrome120", timeout=60)
+            resp = _requests.get(url, headers=_get_headers(), impersonate="chrome120", timeout=60)
             if resp.status_code == 200:
                 u = _extract_qobuz_stream_url(resp.content)
                 if u: return u
@@ -190,7 +200,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     part_path = output_dir / f"{title} - {artist}{ext}.part"
     final_path = output_dir / f"{title} - {artist}{ext}"
 
-    with _requests.get(stream_url, headers=_DEFAULT_HEADERS, stream=True, timeout=600) as cdn_resp:
+    with _requests.get(stream_url, headers=_get_headers(), stream=True, timeout=600) as cdn_resp:
         cdn_resp.raise_for_status()
         total = int(cdn_resp.headers.get("Content-Length") or 0)
         downloaded = 0

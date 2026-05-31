@@ -41,12 +41,24 @@ _FALLBACK_STREAMING = [
     "https://hifi.geeked.wtf",
 ]
 
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Origin": "https://monochrome.samidy.com",
-    "Referer": "https://monochrome.samidy.com/",
-}
+import base64
+import random
+
+_ORIGINS = [
+    "https://monochrome.tf",
+    "https://monochrome.samidy.com",
+    "https://lossless.wtf",
+    "https://if-it-runs-ship-it.lol",
+]
+
+def _get_headers() -> dict:
+    origin = random.choice(_ORIGINS)
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Origin": origin,
+        "Referer": f"{origin}/",
+    }
 
 # ---------------------------------------------------------------------------
 # Bearer token cache
@@ -554,6 +566,12 @@ def run(output_dir: Path, job: dict, manager) -> None:
         _download_hls_ffmpeg(requests, chunklist, flac_out, job, manager)
         out = flac_out
 
+    elif "dash" in mime.lower() or "<MPD" in content:
+        _log(f"Downloading track {track_id} to FLAC via DASH...")
+        flac_out = out_base.parent / (out_base.name + ".flac")
+        _download_hls_ffmpeg(requests, master_url, flac_out, job, manager)
+        out = flac_out
+
     elif "bts" in mime.lower() or content.strip().startswith("{") or "urls" in content:
         cdn_url = _parse_bts(content)
         ext = ".flac" if ".flac" in cdn_url.lower() else ".m4a"
@@ -562,7 +580,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         _download_direct(requests, cdn_url, out, job, manager)
         
     else:
-        raise RuntimeError("DASH-only manifest and HLS unavailable — cannot stream")
+        raise RuntimeError("Unknown manifest format — cannot stream")
 
     if not is_valid_audio_file(out):
         out.unlink(missing_ok=True)
