@@ -128,16 +128,11 @@ try {
         return []
 
 
-import sys
-from pathlib import Path
-
-def get_bundle_root() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-    return Path(__file__).resolve().parent
-
-ROOT = get_bundle_root()
+ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
+
+print(f"[Debug] ROOT: {ROOT}")
+print(f"[Debug] STATIC: {STATIC} (exists: {STATIC.exists()})")
 DATA = app_data_dir()
 CONFIG_PATH = DATA / "config.json"
 PLAYLISTS_PATH = DATA / "playlists.json"

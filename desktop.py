@@ -356,6 +356,9 @@ def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> No
         print(f"Unable to install macOS Dock menu: {exc}", file=sys.stderr)
 
 
+import multiprocessing
+import ctypes
+
 def main() -> None:
     global webview
     log_path = setup_desktop_logging()
@@ -363,8 +366,6 @@ def main() -> None:
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
     
     if sys.platform == "win32":
-        # Use netfx for better WinForms compatibility on native Windows
-        os.environ["PYTHONNET_RUNTIME"] = "netfx"
         # Force edgechromium for WebView2
         os.environ["PYWEBVIEW_GUI"] = "edgechromium"
         
@@ -373,6 +374,12 @@ def main() -> None:
             "--disable-dev-shm-usage --disable-features=ZstdContentEncoding"
         )
         
+        # Set AUMID for proper taskbar grouping and notifications
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mindinguflac.desktop")
+        except Exception:
+            pass
+
         # Use a consistent folder for WebView2 data
         runtime_dir = get_runtime_dir()
         wv2_data = runtime_dir / "WebView2Data"
@@ -471,6 +478,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     try:
         main()
     except Exception:
