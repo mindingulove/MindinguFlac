@@ -128,7 +128,15 @@ try {
         return []
 
 
-ROOT = Path(__file__).resolve().parent
+import sys
+from pathlib import Path
+
+def get_bundle_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent
+
+ROOT = get_bundle_root()
 STATIC = ROOT / "static"
 DATA = app_data_dir()
 CONFIG_PATH = DATA / "config.json"
