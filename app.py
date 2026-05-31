@@ -3,6 +3,17 @@ from __future__ import annotations
 import json
 import mimetypes
 import socket
+
+# Optimize mimetypes to prevent slow Windows Registry scanning
+if not mimetypes.inited:
+    mimetypes.init(files=[])
+mimetypes.add_type("text/html", ".html")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/json", ".json")
+mimetypes.add_type("image/png", ".png")
+mimetypes.add_type("image/jpeg", ".jpg")
+mimetypes.add_type("image/svg+xml", ".svg")
 mimetypes.add_type("audio/flac", ".flac")
 mimetypes.add_type("audio/mp4", ".m4a")
 mimetypes.add_type("audio/ogg", ".ogg")

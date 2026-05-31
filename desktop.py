@@ -35,25 +35,35 @@ def get_runtime_dir() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_NAME / "runtime"
 
 
+_log_path = None
+
 def setup_desktop_logging() -> Path:
+    global _log_path
     log_dir = get_runtime_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "desktop.log"
-    log_file = log_path.open("a", encoding="utf-8", buffering=1)
-    sys.stdout = log_file
-    sys.stderr = log_file
+    _log_path = log_dir / "desktop.log"
+    with _log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write("\n--- Mindinguflac desktop start ---\n")
+        log_file.write(f"platform={sys.platform} frozen={getattr(sys, 'frozen', False)} exe={sys.executable}\n")
 
     def _log_exception(exc_type, exc, tb):
-        traceback.print_exception(exc_type, exc, tb)
+        import traceback
+        lines = traceback.format_exception(exc_type, exc, tb)
+        with _log_path.open("a", encoding="utf-8") as lf:
+            lf.write("".join(lines) + "\n")
+        sys.__excepthook__(exc_type, exc, tb)
 
     sys.excepthook = _log_exception
-    print("\n--- Mindinguflac desktop start ---", flush=True)
-    print(f"platform={sys.platform} frozen={getattr(sys, 'frozen', False)} exe={sys.executable}", flush=True)
-    return log_path
-
+    return _log_path
 
 def log_step(message: str) -> None:
     print(f"[desktop] {message}", flush=True)
+    if _log_path:
+        try:
+            with _log_path.open("a", encoding="utf-8") as lf:
+                lf.write(f"[desktop] {message}\n")
+        except Exception:
+            pass
 
 
 def resource_path(relative: str) -> Path:
@@ -366,9 +376,6 @@ def main() -> None:
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
     
     if sys.platform == "win32":
-        # Force edgechromium for WebView2
-        os.environ["PYWEBVIEW_GUI"] = "edgechromium"
-        
         # Stability flags: disable features known to cause hangs in shared/restricted environments
         os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
             "--disable-dev-shm-usage --disable-features=ZstdContentEncoding"
@@ -410,7 +417,7 @@ def main() -> None:
     log_step(f"server started on port {port}")
 
     icon_path = resource_path("static/assets/app_icon.png")
-    url = f"http://127.0.0.1:{port}/"
+    url = f"http://127.0.0.1:{port}/index.html"
     force_dark_appearance()
 
     try:
@@ -434,20 +441,6 @@ def main() -> None:
                 return False  # returning False makes should_cancel=True → prevents close
             window.events.closing += _hide_on_close
 
-        fallback_timer = None
-        if sys.platform == "win32":
-            def _browser_fallback() -> None:
-                log_step(f"opening browser fallback: {url}")
-                try:
-                    webbrowser.open(url, new=2)
-                except Exception:
-                    traceback.print_exc()
-
-            # Increased timeout to 12s to account for slow Edge/WebView2 initialization.
-            # Only opens if the pywebview window doesn't appear in time.
-            fallback_timer = threading.Timer(12.0, _browser_fallback)
-            fallback_timer.start()
-
         log_step("starting pywebview event loop")
         start_kwargs = {
             "icon": str(icon_path) if icon_path.exists() else None,
@@ -460,10 +453,6 @@ def main() -> None:
             start_kwargs["storage_path"] = os.environ.get("WEBVIEW2_USER_DATA_FOLDER")
         
         def on_shown():
-            if fallback_timer:
-                fallback_timer.cancel()
-                log_step("cancelled browser fallback timer (window shown)")
-            
             # macOS-specific helper and Darwin Now Playing
             install_now_playing(window, url)
 
