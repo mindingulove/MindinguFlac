@@ -390,88 +390,115 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
             os.unlink(tmp_m3u8)
 
 
-def _download_dash_ffmpeg(requests_module, mpd_url: str, flac_out: Path, job: dict, manager) -> None:
-    """Stream a DASH manifest by downloading it to a temporary file first, then running ffmpeg."""
+def _download_dash_native(requests_module, mpd_url: str, flac_out: Path, job: dict, manager) -> None:
+    """Parse a DASH MPD in python, download the fMP4 segments, and pipe them to ffmpeg for FLAC conversion."""
     import subprocess
     import sys as _sys
     import threading as _threading
-    import tempfile
-    import os
+    import xml.etree.ElementTree as ET
+
+    headers = _get_headers()
+    
+    # Download and parse the MPD manifest
+    resp = requests_module.get(mpd_url, headers=headers, timeout=20)
+    resp.raise_for_status()
+    mpd_text = resp.text
+
+    try:
+        root = ET.fromstring(mpd_text)
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse DASH XML: {e}")
+
+    ns = {'dash': 'urn:mpeg:dash:schema:mpd:2011'}
+    template = root.find('.//dash:SegmentTemplate', ns)
+    if template is None:
+        # Fallback to direct download if no SegmentTemplate (e.g. single file DASH)
+        base_url_node = root.find('.//dash:BaseURL', ns)
+        if base_url_node is not None and base_url_node.text:
+            return _download_direct(requests_module, base_url_node.text, flac_out, job, manager)
+        raise RuntimeError("DASH manifest has no SegmentTemplate or BaseURL")
+
+    init_url_template = template.attrib.get('initialization')
+    media_url_template = template.attrib.get('media')
+    start_number = int(template.attrib.get('startNumber', '1'))
+
+    if not init_url_template or not media_url_template:
+        raise RuntimeError("DASH SegmentTemplate missing initialization or media URLs")
+
+    # Handle relative URLs using the original mpd_url
+    from urllib.parse import urljoin
+    init_url = urljoin(mpd_url, init_url_template)
+    
+    total_segments = 0
+    for s in template.findall('.//dash:S', ns):
+        r = int(s.attrib.get('r', '0'))
+        total_segments += 1 + r
+
+    if total_segments == 0:
+        raise RuntimeError("No segments found in DASH manifest")
 
     if getattr(_sys, "frozen", False):
         _ffmpeg_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
         _ffmpeg = os.path.join(_sys._MEIPASS, _ffmpeg_name)
     else:
         _ffmpeg = "ffmpeg"
-        
-    headers = _get_headers()
-    
-    # Download the MPD manifest first because FFmpeg often chokes on remote DASH URLs with tokens
-    resp = requests_module.get(mpd_url, headers=headers, timeout=20)
-    resp.raise_for_status()
-    mpd_text = resp.text
 
-    tmp_mpd = None
-    proc = None
+    # Start ffmpeg listening on stdin
+    proc = subprocess.Popen(
+        [
+            _ffmpeg, "-y",
+            "-i", "pipe:0",
+            "-c:a", "flac",
+            str(flac_out),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    streaming_ready = False
+    downloaded_chunks = 0
     try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".mpd", delete=False, encoding="utf-8") as f:
-            f.write(mpd_text)
-            tmp_mpd = f.name
+        # 1. Download Init segment
+        init_resp = requests_module.get(init_url, headers=headers, timeout=20)
+        init_resp.raise_for_status()
+        proc.stdin.write(init_resp.content)
 
-        header_str = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
-
-        proc = subprocess.Popen(
-            [
-                _ffmpeg, "-y",
-                "-headers", header_str,
-                "-i", tmp_mpd,
-                "-c:a", "flac",
-                str(flac_out),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        _time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
-        total_dur = float(job.get("duration") or 0)
-        
-        err_lines = []
-        def _read_stderr():
-            for line in proc.stderr:
-                err_lines.append(line)
-                m = _time_re.search(line)
-                if m and total_dur > 0:
-                    h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                    current = h * 3600 + mn * 60 + s
-                    with manager._lock:
-                        job["progress"] = min(95, int(current / total_dur * 95))
-        _stderr_thread = _threading.Thread(target=_read_stderr, daemon=True)
-        _stderr_thread.start()
-
-        streaming_ready = False
-        while proc.poll() is None:
+        # 2. Download Media segments
+        for i in range(total_segments):
             if job["id"] in manager._cancel_flags:
-                proc.terminate()
-                proc.wait(timeout=5)
-                flac_out.unlink(missing_ok=True)
                 raise RuntimeError("Download cancelled")
+
+            current_number = start_number + i
+            # Replace $Number$ in media URL
+            media_url = urljoin(mpd_url, media_url_template.replace("$Number$", str(current_number)))
+            
+            chunk_resp = requests_module.get(media_url, headers=headers, timeout=20)
+            chunk_resp.raise_for_status()
+            proc.stdin.write(chunk_resp.content)
+            
+            downloaded_chunks += 1
+            with manager._lock:
+                job["progress"] = min(95, int((downloaded_chunks / total_segments) * 95))
+
             if not streaming_ready and flac_out.exists() and flac_out.stat().st_size > 0:
                 if job.get("mode") == "stream":
                     manager._append_cache_event(job, "ready", f"Ready to play {flac_out.name}")
                 streaming_ready = True
-            time.sleep(0.5)
-        _stderr_thread.join(timeout=2)
 
-        if proc.returncode != 0:
-            err_output = "".join(err_lines)
-            raise RuntimeError(f"ffmpeg DASH→FLAC failed (rc={proc.returncode}):\n{err_output}")
-        if not flac_out.exists() or flac_out.stat().st_size < 1024:
-            err_output = "".join(err_lines)
-            raise RuntimeError(f"ffmpeg produced no output.\nFFmpeg log:\n{err_output}")
+    except Exception as e:
+        proc.kill()
+        flac_out.unlink(missing_ok=True)
+        raise RuntimeError(f"DASH streaming failed: {e}")
     finally:
-        if tmp_mpd and os.path.exists(tmp_mpd):
-            os.unlink(tmp_mpd)
+        if proc.stdin:
+            proc.stdin.close()
+
+    proc.wait(timeout=10)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg DASH→FLAC failed (rc={proc.returncode})")
+    if not flac_out.exists() or flac_out.stat().st_size < 1024:
+        raise RuntimeError("ffmpeg produced no output")
 
 
 def _download_direct(requests_module, cdn_url: str, out: Path, job: dict, manager) -> None:
@@ -648,7 +675,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     elif "dash" in mime.lower() or "<MPD" in content:
         _log(f"Downloading track {track_id} to FLAC via DASH...")
         flac_out = out_base.parent / (out_base.name + ".flac")
-        _download_dash_ffmpeg(requests, master_url, flac_out, job, manager)
+        _download_dash_native(requests, master_url, flac_out, job, manager)
         out = flac_out
 
     elif "bts" in mime.lower() or content.strip().startswith("{") or "urls" in content:
