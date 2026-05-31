@@ -352,8 +352,10 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
 
         # Parse ffmpeg stderr for time= progress in a background thread
         _time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+        err_lines = []
         def _read_stderr():
             for line in proc.stderr:
+                err_lines.append(line)
                 m = _time_re.search(line)
                 if m and total_dur > 0:
                     h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
@@ -378,10 +380,11 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
         _stderr_thread.join(timeout=2)
 
         if proc.returncode != 0:
-            err_output = proc.stderr.read() if proc.stderr else ""
-            raise RuntimeError(f"ffmpeg HLS→FLAC failed (rc={proc.returncode}): {err_output}")
+            err_output = "".join(err_lines)
+            raise RuntimeError(f"ffmpeg HLS→FLAC failed (rc={proc.returncode}):\n{err_output}")
         if not flac_out.exists() or flac_out.stat().st_size < 1024:
-            raise RuntimeError("ffmpeg produced no output")
+            err_output = "".join(err_lines)
+            raise RuntimeError(f"ffmpeg produced no output.\nFFmpeg log:\n{err_output}")
     finally:
         if tmp_m3u8 and os.path.exists(tmp_m3u8):
             os.unlink(tmp_m3u8)
@@ -418,8 +421,10 @@ def _download_dash_ffmpeg(requests_module, mpd_url: str, flac_out: Path, job: di
     _time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
     total_dur = float(job.get("duration") or 0)
     
+    err_lines = []
     def _read_stderr():
         for line in proc.stderr:
+            err_lines.append(line)
             m = _time_re.search(line)
             if m and total_dur > 0:
                 h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
@@ -444,10 +449,11 @@ def _download_dash_ffmpeg(requests_module, mpd_url: str, flac_out: Path, job: di
     _stderr_thread.join(timeout=2)
 
     if proc.returncode != 0:
-        err_output = proc.stderr.read() if proc.stderr else ""
-        raise RuntimeError(f"ffmpeg DASH→FLAC failed (rc={proc.returncode}): {err_output}")
+        err_output = "".join(err_lines)
+        raise RuntimeError(f"ffmpeg DASH→FLAC failed (rc={proc.returncode}):\n{err_output}")
     if not flac_out.exists() or flac_out.stat().st_size < 1024:
-        raise RuntimeError("ffmpeg produced no output")
+        err_output = "".join(err_lines)
+        raise RuntimeError(f"ffmpeg produced no output.\nFFmpeg log:\n{err_output}")
 
 
 def _download_direct(requests_module, cdn_url: str, out: Path, job: dict, manager) -> None:
