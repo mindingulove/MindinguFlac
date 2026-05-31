@@ -387,6 +387,69 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
             os.unlink(tmp_m3u8)
 
 
+def _download_dash_ffmpeg(requests_module, mpd_url: str, flac_out: Path, job: dict, manager) -> None:
+    """Stream a DASH manifest directly via ffmpeg, passing required CORS headers."""
+    import subprocess
+    import sys as _sys
+    import threading as _threading
+
+    if getattr(_sys, "frozen", False):
+        _ffmpeg_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+        _ffmpeg = os.path.join(_sys._MEIPASS, _ffmpeg_name)
+    else:
+        _ffmpeg = "ffmpeg"
+        
+    headers = _get_headers()
+    header_str = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+
+    proc = subprocess.Popen(
+        [
+            _ffmpeg, "-y",
+            "-headers", header_str,
+            "-i", mpd_url,
+            "-c:a", "flac",
+            str(flac_out),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    _time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+    total_dur = float(job.get("duration") or 0)
+    
+    def _read_stderr():
+        for line in proc.stderr:
+            m = _time_re.search(line)
+            if m and total_dur > 0:
+                h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                current = h * 3600 + mn * 60 + s
+                with manager._lock:
+                    job["progress"] = min(95, int(current / total_dur * 95))
+    _stderr_thread = _threading.Thread(target=_read_stderr, daemon=True)
+    _stderr_thread.start()
+
+    streaming_ready = False
+    while proc.poll() is None:
+        if job["id"] in manager._cancel_flags:
+            proc.terminate()
+            proc.wait(timeout=5)
+            flac_out.unlink(missing_ok=True)
+            raise RuntimeError("Download cancelled")
+        if not streaming_ready and flac_out.exists() and flac_out.stat().st_size > 0:
+            if job.get("mode") == "stream":
+                manager._append_cache_event(job, "ready", f"Ready to play {flac_out.name}")
+            streaming_ready = True
+        time.sleep(0.5)
+    _stderr_thread.join(timeout=2)
+
+    if proc.returncode != 0:
+        err_output = proc.stderr.read() if proc.stderr else ""
+        raise RuntimeError(f"ffmpeg DASH→FLAC failed (rc={proc.returncode}): {err_output}")
+    if not flac_out.exists() or flac_out.stat().st_size < 1024:
+        raise RuntimeError("ffmpeg produced no output")
+
+
 def _download_direct(requests_module, cdn_url: str, out: Path, job: dict, manager) -> None:
     """Stream a single BTS URL through the audio proxy, flushing each chunk."""
     proxy_url = f"{_AUDIO_PROXY}/proxy-audio/{cdn_url}"
@@ -561,7 +624,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     elif "dash" in mime.lower() or "<MPD" in content:
         _log(f"Downloading track {track_id} to FLAC via DASH...")
         flac_out = out_base.parent / (out_base.name + ".flac")
-        _download_hls_ffmpeg(requests, master_url, flac_out, job, manager)
+        _download_dash_ffmpeg(requests, master_url, flac_out, job, manager)
         out = flac_out
 
     elif "bts" in mime.lower() or content.strip().startswith("{") or "urls" in content:
