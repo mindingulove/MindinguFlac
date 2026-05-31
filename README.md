@@ -84,7 +84,7 @@ The desktop entry point is `desktop.py`. It starts the same local HTTP server on
 
 GitHub Actions builds are defined in `.github/workflows/desktop-builds.yml`:
 
-- macOS universal app artifact
+- macOS arm64 app artifact
 - Windows desktop artifact
 
 ## Storage
