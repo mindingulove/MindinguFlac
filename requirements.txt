@@ -1,7 +1,7 @@
 rapidfuzz
 free-proxy
 PySocks
-git+https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version.git@843f0bf0a56d545aecf132f3babe0d6e47c381f9
+https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version/archive/843f0bf0a56d545aecf132f3babe0d6e47c381f9.zip
 pycryptodomex
 httpx[http2]>=0.27.0
 hishel

@@ -5,14 +5,6 @@ Set-Location $root
 
 Write-Host "--- Checking Environment ---"
 
-# Check for Git (Required for SpotiFLAC module)
-try {
-    git version
-} catch {
-    Write-Error "Git not found! Please install Git for Windows (https://git-scm.com/download/win) and restart your terminal."
-    exit 1
-}
-
 $python = if (Test-Path ".venv-build\Scripts\python.exe") {
     ".venv-build\Scripts\python.exe"
 } elseif (Test-Path "venv_build\Scripts\python.exe") {
