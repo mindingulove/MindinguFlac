@@ -1,6 +1,19 @@
 name: Desktop Builds
 
 on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build target (windows, macos, all)
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - macos
+          - all
   workflow_call:
     inputs:
       target:
@@ -12,7 +25,7 @@ on:
 jobs:
   macos-arm64:
     name: macOS arm64
-    if: ${{ github.event.inputs.target == 'macos' || github.event.inputs.target == 'all' }}
+    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'macos' || github.event.inputs.target == 'all' }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +66,7 @@ jobs:
 
   windows:
     name: Windows
-    if: ${{ github.event.inputs.target == 'windows' || github.event.inputs.target == 'all' }}
+    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'windows' || github.event.inputs.target == 'all' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
