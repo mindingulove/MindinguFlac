@@ -376,6 +376,9 @@ def main() -> None:
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
     
     if sys.platform == "win32":
+        # Use netfx for proper WinForms application loop blocking
+        os.environ["PYTHONNET_RUNTIME"] = "netfx"
+        
         # Stability flags: disable features known to cause hangs in shared/restricted environments
         os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
             "--disable-dev-shm-usage --disable-features=ZstdContentEncoding"
@@ -457,8 +460,18 @@ def main() -> None:
             install_now_playing(window, url)
 
         window.events.shown += on_shown
-        webview.start(**start_kwargs)
-        log_step("pywebview event loop exited")
+        
+        try:
+            webview.start(**start_kwargs)
+            log_step("pywebview event loop exited normally")
+        except Exception as exc:
+            log_step(f"CRITICAL: pywebview.start() failed: {exc}")
+            import traceback
+            log_step(traceback.format_exc())
+            # Give time to read the log if running in console
+            import time
+            time.sleep(5)
+            
     finally:
         log_step("shutting down desktop server")
         _stop_macos_now_playing_helper()
