@@ -17,7 +17,18 @@ function Invoke-Checked {
 }
 
 $requiredPython = "3.12"
-$venvDir = ".venv-build"
+# Windows uses its own venv so it never collides with the macOS venv (venv-macos)
+# when the project folder is shared (e.g. Parallels).
+#
+# IMPORTANT: the venv must live on the LOCAL Windows disk, not on the shared
+# folder. A venv created on a \\psf\ (Parallels) share is broken — its
+# python.exe reports an empty version and cannot reliably execute. We therefore
+# place it under %LOCALAPPDATA% by default (override with MINDINGUFLAC_VENV_DIR).
+if ($env:MINDINGUFLAC_VENV_DIR) {
+    $venvDir = $env:MINDINGUFLAC_VENV_DIR
+} else {
+    $venvDir = Join-Path $env:LOCALAPPDATA "mindinguflac\venv-windows"
+}
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 
 function Get-PythonMinorVersion {

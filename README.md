@@ -26,13 +26,43 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 ## Installation
 
 ### Prerequisites
-- Python 3.11+
+- Python 3.12 (the Windows torrent build requires 3.12; `libtorrent` has no 3.13/3.14 wheels)
 - FFmpeg (for audio processing)
 
-### Setup
+### Virtual environments (per-OS)
+
+This project is often developed on macOS and built for Windows from the **same
+folder** (e.g. a Parallels shared drive). Because a venv contains native,
+OS-specific binaries, macOS and Windows must use **separate** virtual
+environments so they never overwrite each other:
+
+| OS      | venv location                                   | Created/used by               |
+|---------|-------------------------------------------------|-------------------------------|
+| macOS   | `venv-macos` (in project folder)                | `run.sh`, `Mindinguflac.spec` |
+| Windows | `%LOCALAPPDATA%\mindinguflac\venv-windows`      | `scripts/build_windows.ps1`   |
+
+The macOS venv is git-ignored. The **Windows venv is created on the local disk
+(`%LOCALAPPDATA%`), not in the project folder** — a venv built on a Parallels
+`\\psf\` share is broken (its `python.exe` reports no version and cannot
+execute reliably). Override the location with the `MINDINGUFLAC_VENV_DIR`
+environment variable. Never point one OS at the other's venv.
+
+### Setup (macOS)
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python3.12 -m venv venv-macos
+source venv-macos/bin/activate
+pip install -r requirements.txt
+python app.py            # or: ./run.sh (auto-creates venv-macos)
+```
+
+### Setup (Windows)
+```powershell
+# Build the desktop app (creates the local-disk venv automatically):
+scripts\build_windows.ps1
+
+# Or to run from source, create the venv on the LOCAL disk (not the share):
+py -3.12 -m venv $env:LOCALAPPDATA\mindinguflac\venv-windows
+& "$env:LOCALAPPDATA\mindinguflac\venv-windows\Scripts\Activate.ps1"
 pip install -r requirements.txt
 python app.py
 ```

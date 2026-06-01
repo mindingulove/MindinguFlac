@@ -5,10 +5,14 @@ cd "$DIR"
 
 PYTHON="${VENV_PYTHON:-python3.12}"
 
-if [ ! -d "$DIR/venv" ]; then
-  echo "Creating venv..."
-  "$PYTHON" -m venv "$DIR/venv"
-  "$DIR/venv/bin/pip" install -r "$DIR/requirements.txt"
+# macOS uses its own venv (venv-macos) so it never collides with the Windows
+# build venv (venv-windows) when the project folder is shared (e.g. Parallels).
+VENV="$DIR/venv-macos"
+
+if [ ! -d "$VENV" ]; then
+  echo "Creating venv-macos..."
+  "$PYTHON" -m venv "$VENV"
+  "$VENV/bin/pip" install -r "$DIR/requirements.txt"
 fi
 
 export PORT=8888
@@ -19,4 +23,4 @@ export PYTHONUNBUFFERED=1
 echo "Freeing up port $PORT..."
 lsof -t -i:"$PORT" | xargs kill -9 2>/dev/null || true
 
-exec "$DIR/venv/bin/python" app.py "$@"
+exec "$VENV/bin/python" app.py "$@"

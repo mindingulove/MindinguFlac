@@ -532,13 +532,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
         handle.set_sequential_download(True)
         priorities = [0] * torrent_info.num_files(); priorities[best_f_idx] = 7
         handle.prioritize_files(priorities)
-        # Flatten file directly into output_dir (no torrent subdirectory)
-        flat_name = Path(torrent_info.file_at(best_f_idx).path).name
-        try:
-            handle.rename_file(best_f_idx, flat_name)
-        except Exception:
-            pass
-        target_abs = torrent_save_path / flat_name
+        # Do NOT rename_file here: the torrent session can be shared across jobs
+        # (swarm reuse), and renaming would move the file out from under another
+        # job that is streaming the same torrent. Copy to output_dir on completion.
+        target_abs = torrent_save_path / torrent_info.file_at(best_f_idx).path
         target_size = torrent_info.file_at(best_f_idx).size
         with manager._lock:
             job["active_audio_path"] = str(target_abs)
@@ -562,7 +559,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 job["active_audio_size"] = total
                 job["active_audio_ready_bytes"] = done
             if done >= total and total > 0:
-                manager._append_cache_event(job, "provider", f"Torrent engine produced {target_abs.name}")
+                # Copy the single requested file (flattened) into this job's own
+                # output_dir so _find_audio_files locates it regardless of any
+                # torrent subdirectory or shared session save_path.
+                output_dir.mkdir(parents=True, exist_ok=True)
+                final_dest = output_dir / target_abs.name
+                if target_abs.resolve() != final_dest.resolve():
+                    for old_file in output_dir.glob("*"):
+                        if old_file.is_file(): old_file.unlink()
+                    shutil.copy2(target_abs, final_dest)
+                manager._append_cache_event(job, "provider", f"Torrent engine produced {final_dest.name}")
                 if album != "Unknown":
                     catalog[f"{primary_artist.lower()}||{album.lower()}"] = current_magnet
                     _save_catalog(manager, catalog)

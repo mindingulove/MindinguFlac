@@ -1,6 +1,9 @@
 __pycache__/
 .venv/
 venv/
+venv-macos/
+venv-windows/
+.venv-build/
 data/
 .DS_Store
 claude.md
