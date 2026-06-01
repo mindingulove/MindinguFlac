@@ -470,14 +470,20 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         break
 
                     elapsed = time.time() - meta_start
-                    # No swarm at all: give up fast so discovery keeps moving.
-                    if elapsed > 15 and max_seen == 0 and _GLOBAL_SES.status().dht_nodes > 100:
-                        break
-                    # A peered source that can't even deliver its file list in
-                    # 60s is just slow -- move on. (Active downloads, which have
-                    # already fetched metadata, get far more patience in the
-                    # streaming loop.) Truly peerless sources are dropped above.
-                    if elapsed > (60 if max_seen > 0 else discovery_timeout):
+                    # Scale metadata patience to swarm health. A source that
+                    # can't deliver its file list quickly with few peers is
+                    # almost certainly dead, so cycle to the next candidate fast.
+                    # (Active downloads, which already have metadata, get far
+                    # more patience in the streaming loop.)
+                    if max_seen == 0:
+                        meta_budget = 15 if _GLOBAL_SES.status().dht_nodes > 100 else discovery_timeout
+                    elif max_seen <= 1:
+                        meta_budget = 25   # single weak peer
+                    elif max_seen <= 4:
+                        meta_budget = 45
+                    else:
+                        meta_budget = 60
+                    if elapsed > meta_budget:
                         break
                     if elapsed % 15 < 1.5:
                         candidate_handle.force_reannounce()
