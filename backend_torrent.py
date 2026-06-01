@@ -576,29 +576,20 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 handle = None
                 current_magnet = None
 
+            # 1. Search the clicked album DIRECTLY first. This is the album the
+            #    user saw when pressing play, with correct metadata + cover. If
+            #    it's found here we keep the Spotify metadata and never touch
+            #    MusicBrainz or the broad discography sweep.
             if album_clean:
-                if album_looks_like_primary_artist_release():
-                    handle = run_search_phase(
-                        "Artist inventory for clicked album",
-                        album_clean,
-                        candidate_inventory_queries(),
-                        max_sources=50,
-                        allow_album_miss=True,
-                    )
-                else:
-                    manager._append_cache_event(
-                        job,
-                        "trying",
-                        "Skipping artist inventory because clicked album looks like a compilation",
-                    )
-
-            if album_clean and not handle:
                 handle = run_search_phase(
                     "Clicked album",
                     album_clean,
                     candidate_queries_for_album(album_clean),
                 )
 
+            # 2. Clicked album failed (or was a single with no real album):
+            #    resolve the track's real album(s) via MusicBrainz and search
+            #    each one, applying that album's metadata when a match is found.
             if not handle:
                 manager._append_cache_event(job, "trying", "Clicked album failed; checking MusicBrainz album hierarchy...")
                 try:
@@ -620,6 +611,18 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     if handle:
                         _apply_resolved_album(alt_clean)
                         break
+
+            # 3. Last resort: broad artist-inventory sweep (any release that may
+            #    contain the track). Demoted below targeted searches and capped
+            #    so it can't grind through the whole discography.
+            if not handle and album_clean and album_looks_like_primary_artist_release():
+                handle = run_search_phase(
+                    "Artist inventory (broad fallback)",
+                    album_clean,
+                    candidate_inventory_queries(),
+                    max_sources=20,
+                    allow_album_miss=True,
+                )
 
             if not handle:
                 broad_phases = [
