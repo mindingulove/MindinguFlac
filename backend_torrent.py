@@ -228,6 +228,19 @@ def run(output_dir: Path, job: dict, manager) -> None:
     current_magnet = None
     blacklist: set[str] = set()  # magnets that stalled mid-download
 
+    def _apply_resolved_album(new_album: str) -> None:
+        # When the track is found on a different album than Spotify reported
+        # (resolved via MusicBrainz), tag/sidecar the saved file with that real
+        # album instead of the Spotify single/remaster name.
+        if not new_album or new_album.lower() == (album_clean or "").lower():
+            return
+        with manager._lock:
+            job["album"] = new_album
+            meta = job.get("metadata")
+            if isinstance(meta, dict):
+                meta["album"] = new_album
+        manager._append_cache_event(job, "provider", f"Using MusicBrainz album: {new_album}")
+
     try:
         from service_downloader import AUDIO_SUFFIXES
 
@@ -598,6 +611,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         candidate_queries_for_album(alt_clean),
                     )
                     if handle:
+                        _apply_resolved_album(alt_clean)
                         break
 
             if not handle:
