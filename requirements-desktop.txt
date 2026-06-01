@@ -8,4 +8,4 @@ sounddevice>=0.5.1; sys_platform == "win32"
 soundfile>=0.12.1; sys_platform == "win32"
 numpy>=1.26.0; sys_platform == "win32"
 torrfetch
-libtorrent
+libtorrent; sys_platform != "win32"

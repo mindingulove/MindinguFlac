@@ -102,6 +102,25 @@ Write-Host "--- Installing Dependencies ---"
 Invoke-Checked { & $python -m pip install --upgrade pip }
 Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
 
+Write-Host "--- Installing libtorrent (best-effort) ---"
+$ltInstalled = $false
+try {
+    & $python -m pip install --only-binary=libtorrent libtorrent 2>&1 | Tee-Object -Variable ltOut
+    if ($LASTEXITCODE -eq 0) { $ltInstalled = $true }
+} catch {}
+if (-not $ltInstalled) {
+    Write-Host "Native libtorrent wheel not found, trying win_amd64 fallback..."
+    try {
+        & $python -m pip install --only-binary=libtorrent `
+            --platform win_amd64 --python-version 312 --implementation cp --abi cp312 `
+            --target (Join-Path $venvDir "Lib\site-packages") libtorrent 2>&1 | Out-Host
+        if ($LASTEXITCODE -eq 0) { $ltInstalled = $true }
+    } catch {}
+}
+if (-not $ltInstalled) {
+    Write-Warning "libtorrent could not be installed — torrent downloads will be unavailable."
+}
+
 Write-Host "--- Preparing Assets ---"
 Invoke-Checked { & $python scripts\make_desktop_icons.py }
 
