@@ -473,10 +473,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     # No swarm at all: give up fast so discovery keeps moving.
                     if elapsed > 15 and max_seen == 0 and _GLOBAL_SES.status().dht_nodes > 100:
                         break
-                    # Peers present means the source is worth waiting for; give
-                    # it real patience for metadata. Only the truly dead (no
-                    # peers ever) is abandoned quickly above.
-                    if elapsed > (120 if max_seen > 0 else discovery_timeout):
+                    # A peered source that can't even deliver its file list in
+                    # 60s is just slow -- move on. (Active downloads, which have
+                    # already fetched metadata, get far more patience in the
+                    # streaming loop.) Truly peerless sources are dropped above.
+                    if elapsed > (60 if max_seen > 0 else discovery_timeout):
                         break
                     if elapsed % 15 < 1.5:
                         candidate_handle.force_reannounce()
