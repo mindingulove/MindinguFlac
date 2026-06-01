@@ -21,7 +21,7 @@ $requiredPython = "3.12"
 # when the project folder is shared (e.g. Parallels).
 #
 # IMPORTANT: the venv must live on the LOCAL Windows disk, not on the shared
-# folder. A venv created on a \\psf\ (Parallels) share is broken — its
+# folder. A venv created on a \\psf\ (Parallels) share is broken - its
 # python.exe reports an empty version and cannot reliably execute. We therefore
 # place it under %LOCALAPPDATA% by default (override with MINDINGUFLAC_VENV_DIR).
 if ($env:MINDINGUFLAC_VENV_DIR) {
@@ -48,6 +48,28 @@ function Get-PythonMinorVersion {
     return $null
 }
 
+function Get-PythonArch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Exe,
+        [string[]]$Args = @()
+    )
+    try {
+        $arch = & $Exe @Args -c "import platform; print(platform.machine())"
+        if ($LASTEXITCODE -eq 0) {
+            return $arch.Trim().ToUpper()
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+# We require an x64 (AMD64) Python on Windows. On Windows-on-ARM (e.g. Parallels)
+# the native interpreter is ARM64, but many dependencies (multidict, libtorrent,
+# yarl, frozenlist, ...) ship no win_arm64 wheels and would try to compile from
+# source. An x64 interpreter resolves every dependency to a win_amd64 wheel and
+# runs fine under Windows' x64 emulation.
 function Resolve-Python313 {
     $candidates = @(
         [pscustomobject]@{ Exe = "py"; Args = @("-3.12") },
@@ -70,32 +92,41 @@ function Resolve-Python313 {
         }
     } catch {}
 
+    $arm64Fallback = $null
     foreach ($candidate in $candidates) {
         if (($candidate.Exe -match "[\\/]") -and -not (Test-Path $candidate.Exe)) {
             continue
         }
         $version = Get-PythonMinorVersion -Exe $candidate.Exe -Args $candidate.Args
-        if ($version -eq $requiredPython) {
+        if ($version -ne $requiredPython) {
+            continue
+        }
+        $arch = Get-PythonArch -Exe $candidate.Exe -Args $candidate.Args
+        if ($arch -eq "AMD64") {
             return $candidate
         }
+        if (-not $arm64Fallback) { $arm64Fallback = $candidate }
     }
 
+    # No AMD64 3.12 found. Return $null so the installer fetches the x64 build.
+    # (The ARM64 interpreter is intentionally not used.)
     return $null
 }
 
 function Install-Python313 {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "Python 3.12 is required, but winget is not available to install it automatically. Install Python 3.12 from python.org, then rerun this script."
+        throw "An x64 Python 3.12 is required, but winget is not available to install it automatically. Install the 64-bit Python 3.12 from python.org, then rerun this script."
     }
 
-    Write-Host "--- Installing Python 3.12 ---"
-    & winget install --id Python.Python.3.12 -e --source winget --accept-package-agreements --accept-source-agreements
+    Write-Host "--- Installing x64 Python 3.12 ---"
+    # --architecture x64 forces the AMD64 build even on Windows-on-ARM.
+    & winget install --id Python.Python.3.12 -e --architecture x64 --source winget --accept-package-agreements --accept-source-agreements
     $code = $LASTEXITCODE
-    # winget returns non-zero "no upgrade / already installed" codes when 3.12
-    # is already present; treat those as success.
+    # winget returns non-zero "no upgrade / already installed" codes when the
+    # x64 build is already present; treat those as success.
     $okCodes = @(0, -1978335189, -1978335135, -1978335212)
     if ($okCodes -notcontains $code) {
-        throw "winget failed to install Python 3.12 (exit code $code)."
+        throw "winget failed to install x64 Python 3.12 (exit code $code)."
     }
 
     # Refresh PATH so a freshly installed interpreter is discoverable this session.
@@ -109,13 +140,16 @@ if (-not $python313) {
     $python313 = Resolve-Python313
 }
 if (-not $python313) {
-    throw "Python 3.12 was not found after installation. Open a new PowerShell window and rerun this script."
+    throw "An x64 Python 3.12 was not found after installation. Open a new PowerShell window and rerun this script, or install the 64-bit Python 3.12 from python.org."
 }
 
+# Recreate the venv if it is the wrong version OR the wrong architecture
+# (e.g. an old ARM64 venv from before the x64 switch).
 if (Test-Path $venvPython) {
     $venvVersion = Get-PythonMinorVersion -Exe $venvPython
-    if ($venvVersion -ne $requiredPython) {
-        Write-Host "Removing $venvDir because it uses Python $venvVersion instead of Python $requiredPython."
+    $venvArch = Get-PythonArch -Exe $venvPython
+    if ($venvVersion -ne $requiredPython -or $venvArch -ne "AMD64") {
+        Write-Host "Removing $venvDir (Python '$venvVersion' arch '$venvArch'; need $requiredPython AMD64)."
         Remove-Item $venvDir -Recurse -Force
     }
 }
@@ -138,12 +172,11 @@ Write-Host "--- Installing Dependencies ---"
 Invoke-Checked { & $python -m pip install --upgrade pip }
 Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
 
-Write-Host "--- Installing libtorrent (win_amd64 wheel via x64 emulation) ---"
+Write-Host "--- Installing libtorrent ---"
+# The venv is x64, so the normal win_amd64 wheel installs directly.
 $ltInstalled = $false
 try {
-    & $python -m pip install --only-binary=libtorrent `
-        --platform win_amd64 --python-version 312 --implementation cp --abi cp312 `
-        --target (Join-Path $venvDir "Lib\site-packages") libtorrent 2>&1 | Out-Host
+    & $python -m pip install --only-binary=libtorrent libtorrent 2>&1 | Out-Host
     if ($LASTEXITCODE -eq 0) { $ltInstalled = $true }
 } catch {}
 if (-not $ltInstalled) {

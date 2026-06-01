@@ -215,6 +215,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
     discovery_timeout = 60 if is_prefetch else 120
     current_magnet = None
+    blacklist: set[str] = set()  # magnets that stalled mid-download
 
     try:
         from service_downloader import AUDIO_SUFFIXES
@@ -254,17 +255,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
         
         handle = None
         torrent_save_path = output_dir
-        if cached_magnet:
-            handle, torrent_save_path = _register_job_to_torrent(cached_magnet, job_id, output_dir, manager)
-            current_magnet = cached_magnet
-            time.sleep(0.5)
-            s = handle.status()
-            if s.num_peers > 0 or not s.active_duration > 15:
-                 manager._append_cache_event(job, "trying", f"Step 0: Reusing swarm for: {album}")
-            else:
-                 _unregister_job_from_torrent(current_magnet, job_id)
-                 handle = None
-                 current_magnet = None
+        # The cached-magnet fast path is attempted later, once stream_to_completion
+        # is defined (see "INSTANT CACHE attempt" below).
 
         # 2. DISCOVERY ENGINE
         if not handle:
@@ -345,10 +337,77 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         queries.append(f"{art_var} {suffix}".strip())
                 return list(dict.fromkeys(queries))
 
+            def stream_to_completion(handle, magnet) -> bool:
+                # Download the best matching file to completion. Returns True on
+                # success (file placed in output_dir), False if the swarm stalls
+                # so the caller can fall back to the next candidate torrent.
+                torrent_info = handle.get_torrent_info()
+                best_f_idx, best_f_score = find_best_audio_file(torrent_info)
+                if best_f_idx == -1 or best_f_score < 40:
+                    return False
+
+                handle.set_sequential_download(True)
+                priorities = [0] * torrent_info.num_files(); priorities[best_f_idx] = 7
+                handle.prioritize_files(priorities)
+                # Do NOT rename_file: the torrent session can be shared across
+                # jobs (swarm reuse); renaming would move the file out from under
+                # another job streaming the same torrent. Copy on completion.
+                target_abs = torrent_save_path / torrent_info.file_at(best_f_idx).path
+                target_size = torrent_info.file_at(best_f_idx).size
+                with manager._lock:
+                    job["active_audio_path"] = str(target_abs)
+                    job["active_audio_size"] = target_size
+                    job["active_audio_ready_bytes"] = 0
+                manager._append_cache_event(job, "trying", f"Streaming: {target_abs.name}")
+
+                start_time = time.time(); last_progress_time = time.time(); last_done = 0
+                while True:
+                    if job_id in manager._cancel_flags: raise RuntimeError("Cancelled")
+                    s = handle.status()
+                    done = handle.file_progress()[best_f_idx]
+                    total = torrent_info.file_at(best_f_idx).size
+                    if done > last_done:
+                        last_done = done; last_progress_time = time.time()
+                    prog = (done / total) * 100 if total > 0 else 0
+                    with manager._lock:
+                        job["progress"] = int(prog)
+                        job["last_status"] = f"Streaming: {int(prog)}% ({s.download_rate/1024:.1f}kB/s, {s.num_peers}p)"
+                        job["active_audio_path"] = str(target_abs)
+                        job["active_audio_size"] = total
+                        job["active_audio_ready_bytes"] = done
+                    if done >= total and total > 0:
+                        # Copy the single requested file (flattened) into this
+                        # job's own output_dir so _find_audio_files locates it
+                        # regardless of any torrent subdirectory or shared
+                        # session save_path.
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        final_dest = output_dir / target_abs.name
+                        if target_abs.resolve() != final_dest.resolve():
+                            # Only replace a same-named file; never wipe the dir,
+                            # which for download mode is the shared album folder.
+                            if final_dest.exists():
+                                try: final_dest.unlink()
+                                except Exception: pass
+                            shutil.copy2(target_abs, final_dest)
+                        manager._append_cache_event(job, "provider", f"Torrent engine produced {final_dest.name}")
+                        if album != "Unknown":
+                            catalog[f"{primary_artist.lower()}||{album.lower()}"] = magnet
+                            _save_catalog(manager, catalog)
+                        return True
+                    # Stall detection: no progress for 65s, or 30s with no peers.
+                    stalled = time.time() - last_progress_time > 65
+                    if not stalled and s.num_peers == 0 and time.time() - last_progress_time > 30:
+                        stalled = True
+                    if stalled: return False
+                    if time.time() - start_time > 1800: return False
+                    time.sleep(2)
+
             def try_result_source(r: dict, r_idx: int, phase_label: str, require_track_list: bool):
                 nonlocal current_magnet, torrent_save_path
                 m_link = r.get("magnet")
                 if not m_link:
+                    return None
+                if m_link in blacklist:
                     return None
                 import urllib.parse
                 if "&tr=" not in m_link:
@@ -414,7 +473,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     _unregister_job_from_torrent(current_magnet, job_id)
                     current_magnet = None
                     return None
-                return candidate_handle
+                # Actually download it now. If the swarm stalls mid-download,
+                # blacklist this magnet and let the phase loop try the next one.
+                if stream_to_completion(candidate_handle, current_magnet):
+                    return candidate_handle
+                manager._append_cache_event(job, "trying", "Source stalled mid-download, trying next...")
+                blacklist.add(current_magnet)
+                _unregister_job_from_torrent(current_magnet, job_id)
+                current_magnet = None
+                return None
 
             def run_search_phase(
                 phase_label: str,
@@ -460,6 +527,20 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     if winner:
                         return winner
                 return None
+
+            # INSTANT CACHE attempt: reuse the known-good magnet for this album.
+            if cached_magnet and cached_magnet not in blacklist:
+                handle, torrent_save_path = _register_job_to_torrent(cached_magnet, job_id, output_dir, manager)
+                current_magnet = cached_magnet
+                time.sleep(0.5)
+                if handle.status().num_peers > 0:
+                    manager._append_cache_event(job, "trying", f"Step 0: Reusing swarm for: {album}")
+                    if stream_to_completion(handle, current_magnet):
+                        return
+                blacklist.add(cached_magnet)
+                _unregister_job_from_torrent(current_magnet, job_id)
+                handle = None
+                current_magnet = None
 
             if album_clean:
                 if album_looks_like_primary_artist_release():
@@ -521,61 +602,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 queries = [f"{art_var} {title_clean}" for art_var in artist_variations if title_clean]
                 handle = run_search_phase("Track fallback", "", queries, max_sources=60, require_track_list=False)
 
-        if not handle: raise RuntimeError("All sources failed.")
-
-        # 3. Final Streaming
-        torrent_info = handle.get_torrent_info()
-        best_f_idx, best_f_score = find_best_audio_file(torrent_info)
-        if best_f_idx == -1 or best_f_score < 40:
-            raise RuntimeError("Winning torrent did not contain the requested track.")
-
-        handle.set_sequential_download(True)
-        priorities = [0] * torrent_info.num_files(); priorities[best_f_idx] = 7
-        handle.prioritize_files(priorities)
-        # Do NOT rename_file here: the torrent session can be shared across jobs
-        # (swarm reuse), and renaming would move the file out from under another
-        # job that is streaming the same torrent. Copy to output_dir on completion.
-        target_abs = torrent_save_path / torrent_info.file_at(best_f_idx).path
-        target_size = torrent_info.file_at(best_f_idx).size
-        with manager._lock:
-            job["active_audio_path"] = str(target_abs)
-            job["active_audio_size"] = target_size
-            job["active_audio_ready_bytes"] = 0
-        manager._append_cache_event(job, "trying", f"Streaming: {target_abs.name}")
-        
-        start_time = time.time(); last_progress_time = time.time(); last_done = 0
-        while True:
-            if job_id in manager._cancel_flags: raise RuntimeError("Cancelled")
-            s = handle.status()
-            done = handle.file_progress()[best_f_idx]
-            total = torrent_info.file_at(best_f_idx).size
-            if done > last_done:
-                last_done = done; last_progress_time = time.time()
-            prog = (done / total) * 100 if total > 0 else 0
-            with manager._lock:
-                job["progress"] = int(prog)
-                job["last_status"] = f"Streaming: {int(prog)}% ({s.download_rate/1024:.1f}kB/s, {s.num_peers}p)"
-                job["active_audio_path"] = str(target_abs)
-                job["active_audio_size"] = total
-                job["active_audio_ready_bytes"] = done
-            if done >= total and total > 0:
-                # Copy the single requested file (flattened) into this job's own
-                # output_dir so _find_audio_files locates it regardless of any
-                # torrent subdirectory or shared session save_path.
-                output_dir.mkdir(parents=True, exist_ok=True)
-                final_dest = output_dir / target_abs.name
-                if target_abs.resolve() != final_dest.resolve():
-                    for old_file in output_dir.glob("*"):
-                        if old_file.is_file(): old_file.unlink()
-                    shutil.copy2(target_abs, final_dest)
-                manager._append_cache_event(job, "provider", f"Torrent engine produced {final_dest.name}")
-                if album != "Unknown":
-                    catalog[f"{primary_artist.lower()}||{album.lower()}"] = current_magnet
-                    _save_catalog(manager, catalog)
-                return
-            if time.time() - last_progress_time > 65: break
-            if time.time() - start_time > 1800: break
-            time.sleep(2)
-        raise RuntimeError("Stalled.")
+        # Each candidate is downloaded to completion inside try_result_source;
+        # a truthy handle here means the file was already produced. A falsy
+        # handle means every candidate failed or stalled.
+        if not handle:
+            raise RuntimeError("All sources failed or stalled.")
     finally:
         if current_magnet: _unregister_job_from_torrent(current_magnet, job_id)

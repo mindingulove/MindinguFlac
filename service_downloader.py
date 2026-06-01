@@ -1252,7 +1252,10 @@ class ServiceDownloadManager:
             kind = payload.get("kind", job.get("kind", "track"))
 
             output_dir = self._output_dir(job)
-            if output_dir.exists():
+            # Stream cache dirs are per-job UUIDs and safe to wipe. Download
+            # dirs are the shared album folder (music_dir/artist/album), so
+            # wiping them would delete sibling tracks already in the library.
+            if job.get("mode", "stream") == "stream" and output_dir.exists():
                 try:
                     shutil.rmtree(output_dir, ignore_errors=True)
                 except Exception:
