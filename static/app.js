@@ -32,6 +32,9 @@ const state = {
   playerStatus: "Choose a track to stream",
   playbackRequestId: 0,
   currentStreamUrl: "",
+  currentLibraryPath: "",
+  nativeAudio: { active: false, playing: false, position: 0, duration: 0, path: "", ended: false },
+  nativeAudioPollTimer: null,
   prefetchedForRequestId: -1,
   catalogRefreshTimer: null,
   cacheLogTimer: null,
@@ -78,17 +81,7 @@ const SERVICE_QUALITIES = {
     { value: "LOSSLESS", label: "FLAC / ALAC" },
   ],
   apple_music: [
-    { value: "256", label: "256kbps AAC" },
-    { value: "192", label: "192kbps AAC" },
-    { value: "128", label: "128kbps AAC" },
-  ],
-  soundcloud: [
-    { value: "HIGH", label: "High (256kbps)" },
-    { value: "LOW",  label: "Low (128kbps)" },
-  ],
-  youtube: [
-    { value: "HIGH", label: "High (256kbps)" },
-    { value: "LOW",  label: "Low (128kbps)" },
+    { value: "LOSSLESS", label: "ALAC" },
   ],
 };
 
@@ -103,15 +96,25 @@ const ENGINE_PROVIDERS = {
     { value: "youtube",     label: "YouTube" },
   ],
   tidal_hifi: [
-    { value: "tidal", label: "Tidal" },
+    { value: "tidal",       label: "Tidal" },
+    { value: "deezer",      label: "Deezer" },
+    { value: "qobuz",       label: "Qobuz" },
+    { value: "amazon",      label: "Amazon Music" },
+    { value: "apple_music", label: "Apple Music" },
+  ],
+  torrent: [
+    { value: "all",           label: "All Trackers (Parallel)" },
+    { value: "piratebay",     label: "The Pirate Bay" },
+    { value: "yts",           label: "YTS" },
   ],
 };
 
 const ENGINE_QUALITIES = {
   spotiflac: null,
-  tidal_hifi: [
-    { value: "HI_RES_LOSSLESS", label: "Hi-Res (FLAC)" },
-    { value: "LOSSLESS",        label: "CD (FLAC)" },
+  tidal_hifi: null,
+  torrent: [
+    { value: "LOSSLESS", label: "FLAC / Lossless" },
+    { value: "MP3",      label: "MP3 / Lossy" },
   ],
 };
 
@@ -1513,9 +1516,22 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
 
 async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library") {
   if (requestId !== state.playbackRequestId) return;
+  state.currentLibraryPath = filePath;
   const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}`;
   state.currentStreamUrl = streamUrl;
   const audio = $("audioPlayer");
+  if (isNativeAudioSelected()) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    state.currentPlayableReady = true;
+    state.autoplayWanted = false;
+    setPlayerStatusIcon("ready");
+    setPlayerStatus(statusText, track);
+    await startNativeAudio(filePath, track, requestId, 0);
+    return;
+  }
+  await stopNativeAudio();
   audio.src = streamUrl;
   state.currentPlayableReady = true;
   state.autoplayWanted = true;
@@ -1552,10 +1568,12 @@ function updatePlayerPie(pct) {
 function prepareSelectedTrackUi(track, status = "Opening stream...") {
   const audio = $("audioPlayer");
   audio.pause();
+  stopNativeAudio().catch(() => {});
   try {
     audio.currentTime = 0;
   } catch (e) {}
   resetSeekUi();
+  state.currentLibraryPath = "";
   state.currentPlayableReady = false;
   state.autoplayWanted = false;
   setPlayerStatusIcon("downloading", 0);
@@ -1622,17 +1640,26 @@ async function prefetchNextTrack() {
   if (nextIdx >= state.queue.length) return;
   const next = state.queue[nextIdx];
   if (!next || next.type === "artist" || next.type === "album") return;
+  
+  console.log("[Prefetch] Starting for:", next.title);
+  
   try {
     const source = await api("/api/playback/source", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream")) });
-    if (source.path) return; // already cached, nothing to do
+    if (source.path) {
+      console.log("[Prefetch] Already cached:", next.title);
+      return;
+    }
   } catch (e) {}
   try {
     const job = await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream", true)) });
     if (job && job.id) {
+      console.log("[Prefetch] Job started:", job.id, "for", next.title);
       state.activePrefetchJobId = job.id;
       state.prefetchedTrackKey = trackKey(next);
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error("[Prefetch] Failed to start:", e);
+  }
 }
 
 async function toggleTrackLibrary(track, button, refresh) {
@@ -1749,7 +1776,12 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
     
     if (mode === "stream") {
       if (job.status === "finished" && job.library_path) {
-        playFromLibraryPath(job.library_path, track, requestId, job.id, "Playing from cache");
+        await playFromLibraryPath(job.library_path, track, requestId, job.id, "Playing from cache");
+      } else if (isNativeAudioSelected()) {
+        state.currentPlayableReady = false;
+        state.autoplayWanted = false;
+        setPlayerStatusIcon("downloading", job.progress || 0);
+        setPlayerStatus("Loading...", track);
       } else {
         const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
         state.currentStreamUrl = streamUrl;
@@ -1803,7 +1835,12 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
           // Don't interrupt active HLS playback — FLAC is cached for next play.
           // Only switch if playback hasn't meaningfully started yet.
           if (!audio || audio.paused || audio.currentTime < 2) {
-            await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache");
+            try {
+              await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache");
+            } catch (error) {
+              setPlayerStatusIcon("error");
+              setPlayerStatus(error.message || "Native audio failed", track);
+            }
           }
         }
         return;
@@ -2040,9 +2077,9 @@ async function renderSettings() {
   setActiveView("settings");
   startCacheLogPolling();
   state.settings = await api("/api/settings");
-  console.log("Settings loaded from API:", state.settings);
-  
+
   $("cacheDir").value = state.settings.cache_dir || "";
+
   $("musicDir").value = state.settings.music_dir || "";
 
   const engine = state.settings.download_engine || "spotiflac";
@@ -2097,13 +2134,122 @@ async function saveSettings(e) {
 // Player & Boot
 // ---------------------------------------------------------------------------
 
+function isNativeAudioSelected() {
+  return typeof _activeSinkId === "string" && _activeSinkId.startsWith("native:") && !!_nativeAudioDeviceUid;
+}
+
+function nativeAudioVolume() {
+  const audio = $("audioPlayer");
+  return audio ? Number(audio.volume || 0) : storedVolume();
+}
+
+async function stopNativeAudio() {
+  if (state.nativeAudioPollTimer) {
+    clearInterval(state.nativeAudioPollTimer);
+    state.nativeAudioPollTimer = null;
+  }
+  if (state.nativeAudio.active) {
+    await api("/api/native_audio/stop", { method: "POST", body: "{}" }).catch(() => {});
+  }
+  state.nativeAudio = { active: false, playing: false, position: 0, duration: 0, path: "", ended: false };
+  syncPlayPauseButton();
+}
+
+async function startNativeAudio(filePath, track, requestId, position = 0) {
+  if (!isNativeAudioSelected()) return false;
+  const result = await api("/api/native_audio/play", {
+    method: "POST",
+    body: JSON.stringify({
+      path: filePath,
+      device_uid: _nativeAudioDeviceUid,
+      volume: nativeAudioVolume(),
+      position,
+      metadata: track,
+    }),
+  });
+  if (!result.ok) {
+    throw new Error(result.error || "Native audio failed");
+  }
+  state.nativeAudio = {
+    active: true,
+    playing: !!result.playing,
+    position: result.position || 0,
+    duration: result.duration || 0,
+    path: filePath,
+    ended: false,
+  };
+  syncPlayPauseButton();
+  updateMediaSession(track);
+  startNativeAudioPolling(requestId);
+  return true;
+}
+
+function startNativeAudioPolling(requestId) {
+  if (state.nativeAudioPollTimer) clearInterval(state.nativeAudioPollTimer);
+  state.nativeAudioPollTimer = setInterval(async () => {
+    if (requestId !== state.playbackRequestId || !state.nativeAudio.active) {
+      clearInterval(state.nativeAudioPollTimer);
+      state.nativeAudioPollTimer = null;
+      return;
+    }
+    const status = await api("/api/native_audio/status").catch(() => null);
+    if (!status) return;
+    state.nativeAudio = {
+      ...state.nativeAudio,
+      playing: !!status.playing,
+      position: status.position || 0,
+      duration: status.duration || 0,
+      ended: !!status.ended,
+    };
+    syncNativeAudioUi();
+    if (status.ended) {
+      await stopNativeAudio();
+      clearMediaSession();
+      if (state.queue.length) {
+        state.queueIndex = (state.queueIndex + 1) % state.queue.length;
+        selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
+      }
+    }
+  }, 500);
+}
+
+function syncNativeAudioUi() {
+  if (!state.nativeAudio.active) return;
+  const duration = state.nativeAudio.duration || 0;
+  const position = state.nativeAudio.position || 0;
+  if (duration > 0) {
+    $("seekBar").value = (position / duration) * 1000;
+    $("currentTime").textContent = formatTime(position);
+    $("durationTime").textContent = formatTime(duration);
+    $("seekBar").style.backgroundSize = `${(position / duration) * 100}% 100%`;
+  }
+  syncPlayPauseButton();
+  if (state.currentTrack) updateMediaSession(state.currentTrack);
+}
+
+async function toggleNativeAudioPlayback() {
+  if (!state.nativeAudio.active) return;
+  if (state.nativeAudio.playing) {
+    const status = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
+    state.nativeAudio.playing = !!status.playing;
+    _callNowPlaying("set_playback_state", 2);
+  } else {
+    const status = await api("/api/native_audio/resume", { method: "POST", body: "{}" });
+    if (!status.ok) throw new Error(status.error || "Native audio failed to resume");
+    state.nativeAudio.playing = !!status.playing;
+    _callNowPlaying("set_playback_state", 1);
+  }
+  syncPlayPauseButton();
+}
+
 function syncPlayPauseButton() {
   const audio = $("audioPlayer");
   const playPause = $("playPause");
   if (!playPause) return;
   const icon = playPause.querySelector("i");
   if (icon) {
-    icon.className = audio.paused ? "bi bi-play-fill" : "bi bi-pause-fill";
+    const paused = state.nativeAudio.active ? !state.nativeAudio.playing : audio.paused;
+    icon.className = paused ? "bi bi-play-fill" : "bi bi-pause-fill";
   }
 }
 
@@ -2116,6 +2262,14 @@ function syncVolumeBar() {
 }
 
 function seekBy(seconds) {
+  if (state.nativeAudio.active) {
+    const duration = state.nativeAudio.duration || 0;
+    const target = Math.max(0, Math.min(duration || 0, (state.nativeAudio.position || 0) + seconds));
+    api("/api/native_audio/seek", { method: "POST", body: JSON.stringify({ position: target }) }).catch(() => {});
+    state.nativeAudio.position = target;
+    syncNativeAudioUi();
+    return;
+  }
   const audio = $("audioPlayer");
   if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
   audio.currentTime = Math.max(0, Math.min(audio.duration, audio.currentTime + seconds));
@@ -2134,6 +2288,9 @@ function changeVolumeBy(delta) {
   if (!audio) return;
   audio.volume = Math.max(0, Math.min(1, audio.volume + delta));
   localStorage.setItem(STORAGE_KEYS.volume, String(audio.volume));
+  if (state.nativeAudio.active) {
+    api("/api/native_audio/volume", { method: "POST", body: JSON.stringify({ volume: audio.volume }) }).catch(() => {});
+  }
   syncVolumeBar();
 }
 
@@ -2166,6 +2323,10 @@ function bindKeyboardControls() {
     if (isTypingTarget(event.target)) return;
     if (event.code === "Space") {
       event.preventDefault();
+      if (state.nativeAudio.active) {
+        toggleNativeAudioPlayback().catch(() => {});
+        return;
+      }
       const audio = $("audioPlayer");
       if (!audio.src && !state.currentStreamUrl) return;
       audio.paused ? audio.play() : audio.pause();
@@ -2241,7 +2402,7 @@ function _callNowPlaying(fnName, arg) {
 
 function shouldExposeNowPlaying() {
   const audio = $("audioPlayer");
-  return !!audio && !audio.paused;
+  return state.nativeAudio.active ? !!state.nativeAudio.playing : !!audio && !audio.paused;
 }
 
 function clearMediaSession() {
@@ -2274,15 +2435,20 @@ function updateMediaSession(track) {
   }
   // macOS Touch Bar / Now Playing
   const audio = $("audioPlayer");
-  const durSec = (audio && isFinite(audio.duration) && audio.duration > 0)
+  const durSec = state.nativeAudio.active && state.nativeAudio.duration > 0
+    ? state.nativeAudio.duration
+    : (audio && isFinite(audio.duration) && audio.duration > 0)
     ? audio.duration
     : (track.duration_ms ? track.duration_ms / 1000 : 300);
+  const position = state.nativeAudio.active
+    ? state.nativeAudio.position
+    : ((audio && isFinite(audio.currentTime)) ? audio.currentTime : 0);
   _callNowPlaying("set_now_playing", {
     title: track.title || "Unknown",
     artist: track.artist || "",
     album: track.album || "",
     duration: durSec,
-    position: (audio && isFinite(audio.currentTime)) ? audio.currentTime : 0,
+    position,
     artwork_url: art,
   });
 }
@@ -2297,7 +2463,15 @@ function bindPlayer() {
   const audio = $("audioPlayer");
   audio.volume = storedVolume();
   syncVolumeBar();
-  $("playPause").onclick = () => audio.paused ? audio.play() : audio.pause();
+  $("playPause").onclick = () => {
+    if (state.nativeAudio.active) {
+      toggleNativeAudioPlayback().catch((error) => {
+        if (state.currentTrack) setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
+      });
+      return;
+    }
+    audio.paused ? audio.play() : audio.pause();
+  };
   audio.onplay = audio.onpause = () => {
     syncPlayPauseButton();
     syncActiveTrackRows();
@@ -2348,6 +2522,18 @@ function bindPlayer() {
     }
   };
   $("seekBar").oninput = () => {
+    if (state.nativeAudio.active) {
+      const duration = state.nativeAudio.duration || 0;
+      if (duration > 0) {
+        const position = ($("seekBar").value / 1000) * duration;
+        state.nativeAudio.position = position;
+        api("/api/native_audio/seek", { method: "POST", body: JSON.stringify({ position }) }).catch(() => {});
+        if (shouldExposeNowPlaying()) {
+          _callNowPlaying("set_now_playing", { position });
+        }
+      }
+      return;
+    }
     if (audio.duration) {
       audio.currentTime = ($("seekBar").value / 1000) * audio.duration;
       if (shouldExposeNowPlaying()) {
@@ -2358,6 +2544,9 @@ function bindPlayer() {
   $("volumeBar").oninput = () => {
     audio.volume = Number($("volumeBar").value);
     persistVolume(audio.volume);
+    if (state.nativeAudio.active) {
+      api("/api/native_audio/volume", { method: "POST", body: JSON.stringify({ volume: audio.volume }) }).catch(() => {});
+    }
     syncVolumeBar();
   };
   window.addEventListener("focus", () => {
@@ -2734,6 +2923,38 @@ function bindPlaylistDialogs() {
   });
 }
 
+async function restorePlaybackState() {
+  try {
+    const status = await api("/api/native_audio/status");
+    if (status && status.metadata && status.path) {
+      const track = status.metadata;
+      state.currentTrack = track;
+      state.playbackRequestId++;
+      state.nativeAudio = {
+        active: true,
+        playing: !!status.playing,
+        position: status.position || 0,
+        duration: status.duration || 0,
+        path: status.path,
+        ended: !!status.ended,
+      };
+      
+      // If playing, start polling
+      if (status.playing) {
+        startNativeAudioPolling(state.playbackRequestId);
+      }
+      
+      syncNativeAudioUi();
+      renderNowPlaying();
+      updateMediaSession(track);
+      
+      console.log("[Boot] Restored playback state for:", track.title);
+    }
+  } catch (e) {
+    console.warn("[Boot] Failed to restore playback state:", e);
+  }
+}
+
 async function boot() {
   state.dockRecentItems = storedDockRecentItems();
   bindSearch();
@@ -2774,6 +2995,10 @@ async function boot() {
 
   await Promise.all([loadCatalog(), loadPlaylists()]);
   seedDockRecentTracks();
+  
+  // Try to restore playback state before showing home page
+  await restorePlaybackState();
+  
   replacePage(renderHomePage);
 }
 
@@ -2797,6 +3022,8 @@ window.addEventListener("keydown", (event) => {
 let _audioCtx = null;
 let _audioSrcNode = null;
 let _activeSinkId = "";  // "" = default (this computer)
+let _nativeAudioDeviceUid = "";
+let _nativeAudioAvailable = false;
 
 function _ensureAudioContext() {
   if (_audioCtx) return _audioCtx;
@@ -2809,6 +3036,22 @@ function _ensureAudioContext() {
 
 async function setAudioOutputDevice(deviceId) {
   _activeSinkId = deviceId;
+  if (deviceId && deviceId.startsWith("native:")) {
+    _nativeAudioDeviceUid = deviceId.slice("native:".length);
+    const audio = $("audioPlayer");
+    audio.pause();
+    if (state.currentLibraryPath && state.currentTrack) {
+      try {
+        await startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, audio.currentTime || 0);
+      } catch (error) {
+        setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
+      }
+    }
+    syncPlayPauseButton();
+    return;
+  }
+  _nativeAudioDeviceUid = "";
+  await stopNativeAudio();
   const audio = $("audioPlayer");
   if (typeof audio.setSinkId === "function") {
     try {
@@ -2834,16 +3077,52 @@ async function _getOutputDevices() {
   if (!navigator.mediaDevices?.enumerateDevices) return [];
   let devices = await navigator.mediaDevices.enumerateDevices();
   let outputs = devices.filter(d => d.kind === "audiooutput");
-  // Labels may be empty without mic permission - request once to unlock.
-  if (outputs.length && !outputs[0].label) {
+  
+  // CRITICAL: macOS/Browsers hide names like "Edifier" until the user grants permission.
+  // We check if the first output has a name; if not, we must ask.
+  if (outputs.length && (!outputs[0].label || outputs[0].label === "")) {
     try {
+      console.log("[Audio] Hardware labels locked. Requesting temporary permission...");
       const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach(t => t.stop());
+      s.getTracks().forEach(t => t.stop()); // Stop immediately
       devices = await navigator.mediaDevices.enumerateDevices();
       outputs = devices.filter(d => d.kind === "audiooutput");
-    } catch (_) {}
+    } catch (e) {
+      console.warn("[Audio] Permission denied, hardware labels will remain generic.", e);
+    }
   }
   return outputs;
+}
+
+function _audioLabelsMatch(left, right) {
+  const a = (left || "").toLowerCase().trim();
+  const b = (right || "").toLowerCase().trim();
+  return !!a && !!b && (a === b || a.includes(b) || b.includes(a));
+}
+
+async function _selectBrowserAudioOutput(label = "") {
+  if (typeof navigator.mediaDevices?.selectAudioOutput !== "function") return null;
+  try {
+    const selected = await navigator.mediaDevices.selectAudioOutput();
+    if (!selected) return null;
+    if (label && selected.label && !_audioLabelsMatch(selected.label, label)) {
+      console.warn("[Audio] User selected a different output:", selected.label);
+    }
+    return selected;
+  } catch (e) {
+    console.warn("[Audio] Output chooser failed:", e);
+    return null;
+  }
+}
+
+function _canChooseBrowserAudioOutput() {
+  return typeof navigator.mediaDevices?.selectAudioOutput === "function";
+}
+
+function _showBrowserAudioRouteUnavailable(name) {
+  const msg = `App-only output routing to ${name} is not available in this browser. Use Chrome/Edge for per-app audio output, or select the device as the Mac output.`;
+  console.warn("[Audio]", msg);
+  alert(msg);
 }
 
 function _deviceIcon(name) {
@@ -2861,25 +3140,75 @@ function _deviceIcon(name) {
 
 let _btScanInterval = null;
 
-async function _renderConnectDevices(backendDevices, btState) {
+async function _renderConnectDevices(backendDevices, btState, nativeAvailable = false) {
   const list = $("connectDeviceList");
   list.innerHTML = "";
+  _nativeAudioAvailable = !!nativeAvailable;
 
   const browserOutputs = await _getOutputDevices();
 
-  // Section: connected output devices.
+  // Section: available output devices.
   const items = [];
+  // "This computer" is our universal "Default" which handles built-in speakers automatically.
   items.push({ name: "This computer", deviceId: "", icon: "bi-laptop", sub: "Default output" });
 
+  const filterKeywords = ["speaker", "internal speaker", "built-in", "microphone", "input", "driver", "background music", "teams", "zoom"];
+
   for (const bd of backendDevices) {
-    const match = browserOutputs.find(b => b.deviceId === bd.uid && b.deviceId !== "default");
-    if (match) items.push({ name: bd.name, deviceId: match.deviceId, icon: _deviceIcon(bd.name), sub: "" });
+    if (bd.uid === "default") continue;
+    const lname = bd.name.toLowerCase();
+    
+    // Strictly hide built-in speakers from the list so they don't duplicate "This computer"
+    // except for explicitly allowed external ones.
+    if (filterKeywords.some(k => lname.includes(k)) && !lname.includes("airplay") && !lname.includes("edifier")) {
+        continue;
+    }
+    
+    // Cross-reference to get browser-internal ID
+    const match = browserOutputs.find(b =>
+        (b.label && _audioLabelsMatch(b.label, bd.name)) ||
+        b.deviceId === bd.uid
+    );
+
+    const label = bd.name || "Audio Device";
+    const isAirPlay = label.toLowerCase().includes("airplay");
+    
+    const nativeId = bd.uid ? `native:${bd.uid}` : "";
+    items.push({
+        name: label,
+        deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
+        backendUid: bd.uid,
+        nativeUid: !match && nativeAvailable ? bd.uid : "",
+        needsBrowserRoute: !match && !nativeAvailable,
+        icon: isAirPlay ? "bi-broadcast-pin" : _deviceIcon(label),
+        sub: isAirPlay ? "AirPlay" : (match ? "" : (nativeAvailable ? "App audio only" : (_canChooseBrowserAudioOutput() ? "Choose output" : "Browser unsupported")))
+    });
   }
-  const matchedIds = new Set(items.map(i => i.deviceId));
+
+  // PASS 2: Add any browser-discovered external devices we missed (but apply same filters)
   for (const b of browserOutputs) {
-    if (b.deviceId === "default" || matchedIds.has(b.deviceId)) continue;
-    const label = b.label || "Audio Device";
-    items.push({ name: label, deviceId: b.deviceId, icon: _deviceIcon(label), sub: "" });
+    if (b.deviceId === "default" || !b.label) continue;
+    const lname = b.label.toLowerCase();
+    
+    // Apply strict filtering to browser list too
+    if (filterKeywords.some(k => lname.includes(k)) && !lname.includes("airplay") && !lname.includes("edifier")) {
+        continue;
+    }
+
+    if (!items.find(i => i.deviceId === b.deviceId || (i.name && i.name === b.label))) {
+        items.push({ name: b.label, deviceId: b.deviceId, backendUid: "", needsBrowserRoute: false, icon: _deviceIcon(b.label), sub: "" });
+    }
+  }
+
+  if (_canChooseBrowserAudioOutput() && !items.find(i => i.deviceId === "__choose_output__")) {
+    items.push({
+      name: "Choose audio output...",
+      deviceId: "__choose_output__",
+      backendUid: "",
+      needsBrowserRoute: false,
+      icon: "bi-broadcast-pin",
+      sub: "Bluetooth / AirPlay",
+    });
   }
 
   for (const item of items) {
@@ -2894,21 +3223,51 @@ async function _renderConnectDevices(backendDevices, btState) {
       ${item.deviceId === _activeSinkId ? `<i class="bi bi-check-circle-fill connect-active-check"></i>` : ""}
     `;
     li.onclick = async () => {
-      await setAudioOutputDevice(item.deviceId);
-      list.querySelectorAll(".connect-device-item").forEach(el => el.classList.remove("active"));
-      list.querySelectorAll(".connect-active-check").forEach(el => el.remove());
-      li.classList.add("active");
-      const check = document.createElement("i");
-      check.className = "bi bi-check-circle-fill connect-active-check";
-      li.appendChild(check);
-      $("btnConnectDevice").classList.toggle("active", item.deviceId !== "");
+      let targetId = item.deviceId;
+      if (targetId === "__choose_output__") {
+        const selected = await _selectBrowserAudioOutput();
+        if (!selected) return;
+        await setAudioOutputDevice(selected.deviceId);
+        _activeSinkId = selected.deviceId;
+        await _refreshConnectPanel();
+        return;
+      }
+      
+      // Find the browser internal ID by case-insensitive matching
+      const freshDevs = await _getOutputDevices();
+      const targetName = item.name.toLowerCase();
+      const match = freshDevs.find(d => {
+        if (!d.label) return false;
+        return _audioLabelsMatch(d.label, targetName);
+      });
+      
+      if (match) {
+          console.log("[Audio] Mapped to:", match.label);
+          targetId = match.deviceId;
+      } else if (item.nativeUid) {
+          targetId = `native:${item.nativeUid}`;
+      } else if (item.needsBrowserRoute || (targetId && (targetId.includes(":") || targetId.length > 40))) {
+          console.warn("[Audio] No match for:", item.name);
+          const selected = await _selectBrowserAudioOutput(item.name);
+          if (selected) {
+            targetId = selected.deviceId;
+          } else if (item.deviceId !== "") {
+            _showBrowserAudioRouteUnavailable(item.name);
+            return;
+          }
+      }
+
+      console.log("[Audio] Routing to:", item.name, targetId || "Default");
+      await setAudioOutputDevice(targetId);
+      await _refreshConnectPanel();
     };
     list.appendChild(li);
   }
 
   // Section: nearby / unpaired Bluetooth devices.
-  // Paired-but-disconnected + brand-new unpaired devices all go in the list
-  const nearby = (btState?.devices || []).filter(d => !d.connected);
+  // We show paired-but-disconnected devices here, AND connected devices that aren't in the top list.
+  const matchedNames = new Set(items.map(i => i.name.toLowerCase()));
+  const nearby = (btState?.devices || []).filter(d => !d.connected || !matchedNames.has(d.name.toLowerCase()));
 
   const scanHeader = document.createElement("li");
   scanHeader.className = "connect-section-header";
@@ -2951,13 +3310,17 @@ async function _renderConnectDevices(backendDevices, btState) {
     const li = document.createElement("li");
     li.className = "connect-device-item connect-nearby";
     li.dataset.address = dev.address;
+    const subtext = dev.connected ? "Connected" : dev.address;
+    const btnText = dev.connected ? "Active" : (dev.paired ? "Connect" : "Pair");
+    const btnClass = dev.connected ? "connect-pair-btn connected" : "connect-pair-btn";
+
     li.innerHTML = `
       <div class="connect-device-icon"><i class="bi ${_deviceIcon(dev.name)}"></i></div>
       <div class="connect-device-info">
         <span class="connect-device-name">${dev.name}</span>
-        <span class="connect-device-sub">${dev.address}</span>
+        <span class="connect-device-sub">${subtext}</span>
       </div>
-      <button class="connect-pair-btn" type="button">${dev.paired ? "Connect" : "Pair"}</button>
+      <button class="${btnClass}" type="button" ${dev.connected ? 'disabled' : ''}>${btnText}</button>
     `;
     li.querySelector(".connect-pair-btn").onclick = async (e) => {
       e.stopPropagation();
@@ -2992,8 +3355,8 @@ async function _refreshConnectPanel(btState) {
   }
   try {
     const data = await api("/api/audio/devices");
-    await _renderConnectDevices(data.devices || [], btState);
-  } catch { await _renderConnectDevices([], btState); }
+    await _renderConnectDevices(data.devices || [], btState, !!data.native_available);
+  } catch { await _renderConnectDevices([], btState, false); }
 }
 
 async function openConnectPanel() {

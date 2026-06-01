@@ -293,6 +293,27 @@ def _audio_duration_ms(path: Path) -> int:
 
 
 def downloaded_track_matches_request(path: Path, job: dict) -> tuple[bool, str]:
+    """Valida se o arquivo baixado corresponde ao pedido, principalmente via duração."""
+    meta = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    expected_ms = (
+        _parse_duration_ms(meta.get("duration_ms"))
+        or _parse_duration_ms(meta.get("length"))
+        or _parse_duration_ms(meta.get("duration"))
+    )
+    if expected_ms <= 0:
+        return True, ""
+
+    actual_ms = _audio_duration_ms(path)
+    if actual_ms <= 0:
+        # Se não conseguirmos ler a duração (arquivo corrompido ou formato não suportado), 
+        # confiamos no processo por enquanto, mas logamos.
+        return True, ""
+
+    diff_s = abs(expected_ms - actual_ms) / 1000
+    # Tolerância de 15 segundos (comum para remasters, intros extras, etc.)
+    if diff_s > 15:
+        return False, f"Duration mismatch: expected {expected_ms/1000:.1f}s, got {actual_ms/1000:.1f}s (diff {diff_s:.1f}s)"
+
     return True, ""
 
 
@@ -789,9 +810,9 @@ class ServiceDownloadManager:
             "mode": mode,
             "isrc": meta.get("isrc") or "",
             "metadata": meta,
-            "service": (payload.get("service") or self.config.download_service or "tidal").lower(),
-            "engine": (payload.get("engine") or self.config.download_engine or "spotiflac").lower(),
-            "quality": payload.get("quality") or self.config.default_quality or "flac",
+            "service": (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower(),
+            "engine": (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower(),
+            "quality": payload.get("quality") or getattr(self.config, "default_quality", "flac") or "flac",
             "status": "finished",
             "progress": 100,
             "created_at": time.time(),
@@ -1178,9 +1199,9 @@ class ServiceDownloadManager:
             "prefetch": bool(payload.get("prefetch")),
             "isrc": isrc,
             "metadata": metadata,
-            "service": (payload.get("service") or self.config.download_service or "tidal").lower(),
-            "engine": (payload.get("engine") or self.config.download_engine or "spotiflac").lower(),
-            "quality": payload.get("quality") or self.config.default_quality or "flac",
+            "service": (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower(),
+            "engine": (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower(),
+            "quality": payload.get("quality") or getattr(self.config, "default_quality", "flac") or "flac",
             "status": "starting",
             "last_status": "Starting...",
             "progress": 0,
@@ -1271,15 +1292,40 @@ class ServiceDownloadManager:
                 import backend_qobuz_dlp
                 backend_qobuz_dlp.run(output_dir, job, self)
 
-            elif engine == "tidal_hifi":
+            elif engine == "torrent":
                 with self._lock:
                     job["status"] = "running"
                     job["output_dir"] = str(output_dir)
                 if job.get("mode", "stream") == "stream":
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
-                import backend_tidal_hifi
-                backend_tidal_hifi.run(output_dir, job, self)
+                import backend_torrent
+                backend_torrent.run(output_dir, job, self)
+
+            elif engine == "tidal_hifi":
+                # Use the specific service selected in the UI (amazon, apple, etc.)
+                svc = job.get("service") or self.config.download_service or "tidal"
+                
+                # Priority 1: Try specific service (Amazon, etc.)
+                resolved_url = resolve_download_url(merged, service=svc, kind=kind)
+                
+                # Priority 2: Fallback to searching for the Spotify URL (The engines handle Spotify -> Service resolution best)
+                if not resolved_url:
+                    print(f"[Engine] {svc} resolution failed, falling back to Spotify metadata...")
+                    resolved_url = resolve_download_url(merged, service="spotify", kind=kind)
+                
+                if not resolved_url:
+                    raise RuntimeError(f"Could not resolve a {svc} or Spotify URL for this track")
+                
+                with self._lock:
+                    job["status"] = "running"
+                    job["resolved_url"] = resolved_url
+                    job["output_dir"] = str(output_dir)
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
+                self._ensure_progress_thread()
+                import backend_other
+                backend_other.run(resolved_url, output_dir, job, self)
 
             else:  # spotiflac (default)
                 resolved_url = resolve_download_url(merged, service="spotify", kind=kind)

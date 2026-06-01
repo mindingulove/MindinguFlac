@@ -60,6 +60,13 @@ def _start_tor() -> bool:
     _TOR_DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("[Tor] Starting local Tor daemon…")
     try:
+        # Hide terminal window on Windows
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0 # SW_HIDE
+
         proc = subprocess.Popen(
             [tor_bin,
              "--SocksPort", "9050",
@@ -68,6 +75,7 @@ def _start_tor() -> bool:
              "--DataDirectory", str(_TOR_DATA_DIR),
              "--Log", "notice stdout"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            startupinfo=startupinfo
         )
         _tor_process = proc
     except Exception as e:

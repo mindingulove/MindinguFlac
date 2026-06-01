@@ -23,6 +23,8 @@ _CLIENT_SECRET = "dQjy0MinCEvxi1O4UmxvxWnDjt4cgHBPw8ll6nYBk98="
 _FALLBACK_API = [
     "https://monochrome-api.samidy.com",
     "https://api.monochrome.tf",
+    "https://eu-central.monochrome.tf",
+    "https://us-west.monochrome.tf",
     "https://hifi.geeked.wtf",
     "https://wolf.qqdl.site",
     "https://maus.qqdl.site",
@@ -336,6 +338,13 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
             _ffmpeg = os.path.join(_sys._MEIPASS, _ffmpeg_name)
         else:
             _ffmpeg = "ffmpeg"
+            
+        si = None
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0 # SW_HIDE
+
         proc = subprocess.Popen(
             [
                 _ffmpeg, "-y",
@@ -348,6 +357,7 @@ def _download_hls_ffmpeg(requests_module, media_m3u8_url: str, flac_out: Path, j
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            startupinfo=si,
         )
 
         # Parse ffmpeg stderr for time= progress in a background thread
@@ -443,6 +453,12 @@ def _download_dash_native(requests_module, mpd_url: str, flac_out: Path, job: di
     else:
         _ffmpeg = "ffmpeg"
 
+    si = None
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0 # SW_HIDE
+
     # Start ffmpeg listening on stdin
     proc = subprocess.Popen(
         [
@@ -454,6 +470,7 @@ def _download_dash_native(requests_module, mpd_url: str, flac_out: Path, job: di
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        startupinfo=si,
     )
 
     streaming_ready = False
@@ -545,13 +562,22 @@ def _download_direct(requests_module, cdn_url: str, out: Path, job: dict, manage
 
 def _fetch_manifest(requests_module, base_url: str, track_id: int, quality: str = "LOSSLESS", headers: dict | None = None) -> tuple[str, str, str, bool] | None:
     """Return (manifest_text, mime_type, cdn_url, is_full) or None. Handle HLS, DASH, and BTS."""
-    hdrs = headers or _get_headers()
     
+    # Logic: Only send our Authorization token to official domains. 
+    # Sending a 'free' client credentials token to community proxies often
+    # causes them to downgrade the stream to a PREVIEW sample.
+    hdrs = headers or _get_headers()
+    is_official = any(x in base_url for x in ["monochrome.tf", "samidy.com", "lossless.wtf", "ship-it.lol"])
+    
+    if not is_official and "Authorization" in hdrs:
+        hdrs = hdrs.copy()
+        del hdrs["Authorization"]
+        
     perms = [
-        {"manifestType": "MPEG_DASH", "usage": "PLAYBACK"},
-        {"manifestType": "MPEG_DASH", "usage": "DOWNLOAD"},
         {"manifestType": "HLS",       "usage": "PLAYBACK"},
         {"manifestType": "HLS",       "usage": "DOWNLOAD"},
+        {"manifestType": "MPEG_DASH", "usage": "PLAYBACK"},
+        {"manifestType": "MPEG_DASH", "usage": "DOWNLOAD"},
     ]
     
     best_preview = None
@@ -676,34 +702,47 @@ def run(output_dir: Path, job: dict, manager) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     out_base = output_dir / f"{title} - {artist}"
 
-    all_instances = [_MONOCHROME_PROXY] + list(stream_instances) + [u for u in api_instances if u not in stream_instances]
+    # Prioritize official and known high-quality proxies
+    prioritized_proxies = [
+        "https://hifi-api.kennyy.com.br",
+        "https://monochrome-api.samidy.com",
+        "https://api.monochrome.tf",
+    ]
+    all_instances = prioritized_proxies + [u for u in api_instances if u not in prioritized_proxies]
 
     _log(f"Fetching stream manifest for track {track_id}...")
     manifest_info = None
+    best_preview = None
+
     for s_url in all_instances:
-        manifest_info = _fetch_manifest(requests, s_url, track_id, quality, headers=authed_headers)
-        if manifest_info:
-            if manifest_info[3]: # Is full
+        # Pass headers=None to use _get_headers() inside, which handles the is_official logic
+        res = _fetch_manifest(requests, s_url, track_id, quality, headers=None)
+        if res:
+            if res[3]: # Is full
+                manifest_info = res
                 break
-            # If it's a preview, we keep searching other proxies for a full one
-            # but we keep this one as a fallback.
-            best_info = manifest_info
-        else:
-            best_info = None
+            elif best_preview is None:
+                best_preview = res
 
-    if not manifest_info and best_info:
-        manifest_info = best_info
+    if not manifest_info:
+        manifest_info = best_preview
 
-    # If we only found previews, take it
     if manifest_info and not manifest_info[3]:
-        _log("Full track unavailable on proxies, using PREVIEW sample.")
+        _log("Full track unavailable on all known proxies, using PREVIEW sample.")
 
     if not manifest_info and quality == "HI_RES_LOSSLESS":
         _log("Hi-Res unavailable, trying LOSSLESS...")
         for s_url in all_instances:
-            manifest_info = _fetch_manifest(requests, s_url, track_id, "LOSSLESS", headers=authed_headers)
-            if manifest_info and manifest_info[3]:
-                break
+            res = _fetch_manifest(requests, s_url, track_id, "LOSSLESS", headers=None)
+            if res:
+                if res[3]:
+                    manifest_info = res
+                    break
+                elif best_preview is None:
+                    best_preview = res
+        
+        if not manifest_info:
+            manifest_info = best_preview
 
     if not manifest_info:
         raise RuntimeError(f"Tidal HiFi: no stream manifest for track {track_id} (proxies failed)")

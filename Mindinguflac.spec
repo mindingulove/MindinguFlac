@@ -4,7 +4,7 @@ from pathlib import Path
 
 datas = [('static', 'static')]
 binaries = []
-hiddenimports = ['bluetooth_scan', 'IOBluetooth']
+hiddenimports = ['bluetooth_scan', 'IOBluetooth', 'AVFoundation', 'CoreAudio', 'torrfetch', 'libtorrent']
 tmp_ret = collect_all('SpotiFLAC')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -68,5 +68,6 @@ app = BUNDLE(
     info_plist={
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
+        'NSMicrophoneUsageDescription': 'Mindinguflac needs microphone access to correctly identify some audio output devices.',
     },
 )

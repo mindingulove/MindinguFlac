@@ -37,6 +37,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, load_config, save_config
 from music_metadata import album_metadata, album_tracks, artist_page, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, search_music, search_relevance
+from native_audio import native_audio
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
 
 
@@ -91,9 +92,10 @@ def _list_audio_output_devices() -> list[dict]:
             sz = ctypes.c_uint32(0)
             if ca.AudioObjectGetPropertyDataSize(dev, ctypes.byref(pa), 0, None, ctypes.byref(sz)):
                 return False
-            return sz.value > 4  # > just mNumberBuffers=0 means real channels exist
+            # Virtual devices often report 4 bytes (0 buffers). Real ones > 4.
+            return sz.value > 4
 
-        # Enumerate all device IDs
+        # Enumerate
         pa = _PA(kDevices, kGlob, 0)
         sz = ctypes.c_uint32(0)
         if ca.AudioObjectGetPropertyDataSize(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz)):
@@ -103,14 +105,36 @@ def _list_audio_output_devices() -> list[dict]:
         if ca.AudioObjectGetPropertyData(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz), ids):
             return []
 
+        # Keywords to ignore (virtual drivers, strictly inputs, specific default labels)
+        ignore_list = [
+            "microphone", "input", "background music", "microsoft teams", 
+            "zoom", "mirror", "instashare", "airbeam", "ace", "driver"
+        ]
+        
+        # CoreAudio labels for built-in speakers vary: "MacBook Pro Speakers", "iMac Speakers", "Internal Speakers"
+        default_ignore = ["speaker", "internal speaker", "built-in"]
+
         devices = []
         for dev_id in ids:
             if not _has_outputs(dev_id):
                 continue
             name = _get_str(dev_id, kName)
             uid  = _get_str(dev_id, kUID)
-            if name:
-                devices.append({"name": name, "uid": uid})
+            
+            if not name:
+                continue
+                
+            lname = name.lower()
+            # Strict ignore list (virtual/inputs)
+            if any(k in lname for k in ignore_list):
+                continue
+            
+            # Hide built-in speakers to avoid duplicating "This computer"
+            # We check for "speaker" (singular) to catch "MacBook Pro Speakers"
+            if any(k in lname for k in default_ignore) and "airplay" not in lname and "edifier" not in lname:
+                continue
+                
+            devices.append({"name": name, "uid": uid})
         return devices
     except Exception:
         return []
@@ -118,6 +142,29 @@ def _list_audio_output_devices() -> list[dict]:
 
 def _list_audio_output_devices_windows() -> list[dict]:
     import subprocess, json as _json
+    devices: list[dict] = []
+    
+    # Hide terminal window on Windows
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0 # SW_HIDE
+
+    try:
+        import sounddevice as sd
+
+        for index, info in enumerate(sd.query_devices()):
+            if int(info.get("max_output_channels") or 0) <= 0:
+                continue
+            name = str(info.get("name") or f"Output {index}")
+            hostapi = sd.query_hostapis(info.get("hostapi", 0)).get("name", "")
+            devices.append({"name": name, "uid": f"sounddevice:{index}", "driver": hostapi})
+    except Exception:
+        devices = []
+    if devices:
+        return devices
+
     script = r"""
 try {
     $out = Get-WmiObject -Class Win32_SoundDevice -ErrorAction SilentlyContinue |
@@ -130,6 +177,7 @@ try {
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True, text=True, timeout=8,
+            startupinfo=startupinfo
         )
         items = _json.loads(r.stdout.strip() or "[]")
         if isinstance(items, dict):
@@ -567,8 +615,12 @@ def active_audio_candidate(output_dir: Path) -> Path | None:
             -f.stat().st_mtime,
         )
     )
-    candidates = [f for f in files if is_download_audio_candidate(f)]
-    return sorted(candidates or files, key=priority)[0] if (candidates or files) else None
+    candidates = [
+        f
+        for f in files
+        if is_download_audio_candidate(f) and (_candidate_is_streamable(f) or is_valid_audio_file(f))
+    ]
+    return sorted(candidates, key=priority)[0] if candidates else None
 
 
 # Formats/files SpotiFLAC may expose before the final rename. Some providers write
@@ -795,7 +847,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"jobs": service_downloader.list_jobs()})
                 return
             if path == "/api/audio/devices":
-                self.send_json({"devices": _list_audio_output_devices()})
+                self.send_json({"devices": _list_audio_output_devices(), "native_available": native_audio.available()})
+                return
+            if path == "/api/native_audio/status":
+                self.send_json(native_audio.status())
                 return
             if path == "/api/bluetooth/state":
                 import bluetooth_scan
@@ -812,9 +867,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
             if path == "/api/bluetooth/pair":
-                body = read_body(self)
+                # For GET, we check query params instead of body
+                addr = query.get("address", [""])[0]
                 import bluetooth_scan
-                error = bluetooth_scan.pair_device(body.get("address", ""))
+                error = bluetooth_scan.pair_device(addr)
                 self.send_json({"ok": not error, "error": error})
                 return
             if path == "/api/library/stream":
@@ -899,26 +955,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        body = read_body(self)
         try:
             if path == "/api/dock/recent":
-                body = read_body(self)
                 set_dock_recent_items(body.get("entries") or [])
                 self.send_json({"ok": True})
                 return
             if path == "/api/dock/playing-state":
-                body = read_body(self)
                 import desktop as _desktop
                 _desktop._macos_dock_state["playing"] = bool(body.get("playing"))
                 self.send_json({"ok": True})
                 return
             if path == "/api/now_playing":
-                body = read_body(self)
                 if _np_update_fn:
                     _np_update_fn(body)
                 self.send_json({"ok": True})
                 return
             if path == "/api/now_playing/state":
-                body = read_body(self)
                 if _np_state_fn:
                     _np_state_fn(int(body.get("state", 2)))
                 self.send_json({"ok": True})
@@ -929,7 +982,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
             if path == "/api/macos_media_command":
-                body = read_body(self)
                 action = str(body.get("action") or "")
                 if _macos_media_command_fn and action:
                     _macos_media_command_fn(action)
@@ -946,23 +998,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
             if path == "/api/bluetooth/pair":
-                body = read_body(self)
                 import bluetooth_scan
                 error = bluetooth_scan.pair_device(body.get("address", ""))
                 self.send_json({"ok": not error, "error": error})
                 return
             if path == "/api/artist/about":
-                body = read_body(self)
                 from music_metadata import artist_about
                 self.send_json(artist_about(body.get("artist_id"), body.get("name")))
                 return
             if path == "/api/music/enrich":
-                body = read_body(self)
                 tracks = body.get("tracks") or []
                 self.send_json({"tracks": enrich_artwork_batch(tracks)})
                 return
             if path == "/api/settings":
-                body = read_body(self)
                 updated = AppConfig.from_public_dict(body)
                 with config_lock:
                     global app_config, service_downloader
@@ -972,7 +1020,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
             if path == "/api/playlists":
-                body = read_body(self)
                 user_name = body.get("name", "").strip()
                 spotify_url = body.get("spotify_url", "").strip()
                 imported = {"name": "", "artwork_url": "", "tracks": []}
@@ -1002,7 +1049,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({**playlist, "imported": bool(imported["tracks"])}, 201)
                 return
             if path == "/api/playlists/refresh":
-                body = read_body(self)
                 playlist_id = body.get("id", "")
                 with playlists_lock:
                     data = load_playlists()
@@ -1035,7 +1081,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(pl)
                 return
             if path == "/api/playlists/tracks":
-                body = read_body(self)
                 playlist_id = body.get("playlist_id", "")
                 track = body.get("track") or {}
                 action = body.get("action", "toggle")
@@ -1069,25 +1114,46 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "in_playlist": in_playlist})
                 return
             if path == "/api/service/download":
-                body = enrich_download_payload(read_body(self))
-                job = service_downloader.start_job(body)
+                job = service_downloader.start_job(enrich_download_payload(body))
                 self.send_json(job, 201)
                 return
             if path == "/api/library/status":
-                self.send_json(service_downloader.library_status(read_body(self)))
+                self.send_json(service_downloader.library_status(body))
                 return
             if path == "/api/library/status/batch":
-                body = read_body(self)
                 self.send_json(service_downloader.library_status_batch(body.get("tracks", [])))
                 return
             if path == "/api/library/toggle":
-                self.send_json(service_downloader.toggle_library(enrich_download_payload(read_body(self))))
+                self.send_json(service_downloader.toggle_library(enrich_download_payload(body)))
                 return
             if path == "/api/playback/source":
-                self.send_json(service_downloader.playback_source(enrich_download_payload(read_body(self))))
+                self.send_json(service_downloader.playback_source(enrich_download_payload(body)))
+                return
+            if path == "/api/native_audio/play":
+                self.send_json(native_audio.play(
+                    body.get("path", ""),
+                    body.get("device_uid", ""),
+                    float(body.get("volume", 1) or 1),
+                    float(body.get("position", 0) or 0),
+                    body.get("metadata"),
+                ))
+                return
+            if path == "/api/native_audio/pause":
+                self.send_json(native_audio.pause())
+                return
+            if path == "/api/native_audio/resume":
+                self.send_json(native_audio.resume())
+                return
+            if path == "/api/native_audio/stop":
+                self.send_json(native_audio.stop())
+                return
+            if path == "/api/native_audio/seek":
+                self.send_json(native_audio.seek(float(body.get("position", 0) or 0)))
+                return
+            if path == "/api/native_audio/volume":
+                self.send_json(native_audio.set_volume(float(body.get("volume", 1) or 1)))
                 return
             if path == "/api/service/promote":
-                body = read_body(self)
                 result = service_downloader.promote_to_library(
                     body.get("job_id"),
                 )

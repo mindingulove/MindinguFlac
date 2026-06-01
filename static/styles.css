@@ -883,6 +883,12 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   color: var(--muted);
   margin-bottom: 16px;
   font-weight: 700;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  padding: 16px 0;
+  z-index: 10;
+  margin-top: 0;
 }
 
 .settings-row {

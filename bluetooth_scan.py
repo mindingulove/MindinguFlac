@@ -84,7 +84,13 @@ try {
     def pair_device(address: str) -> str:
         """On Windows, open Bluetooth settings for the user to complete pairing."""
         try:
-            _sp.Popen(["explorer.exe", "ms-settings:bluetooth"])
+            # Hide terminal window on Windows
+            si = None
+            if sys.platform == "win32":
+                si = _sp.STARTUPINFO()
+                si.dwFlags |= _sp.STARTF_USESHOWWINDOW
+                si.wShowWindow = 0 # SW_HIDE
+            _sp.Popen(["explorer.exe", "ms-settings:bluetooth"], startupinfo=si)
             return ""
         except Exception as exc:
             return str(exc)
@@ -92,9 +98,17 @@ try {
     def get_state() -> dict:
         known: dict[str, dict] = {}
         try:
+            # Hide terminal window on Windows
+            si = None
+            if sys.platform == "win32":
+                si = _sp.STARTUPINFO()
+                si.dwFlags |= _sp.STARTF_USESHOWWINDOW
+                si.wShowWindow = 0 # SW_HIDE
+
             r = _sp.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_PAIRED],
                 capture_output=True, text=True, timeout=8,
+                startupinfo=si
             )
             items = _json.loads(r.stdout.strip() or "[]")
             if isinstance(items, dict):
@@ -301,26 +315,28 @@ else:
             return False
 
     def get_state() -> dict:
-        # Paired devices - audio class only
+        # Paired devices - filter by audio class to hide keyboards/trackpads
         known: dict[str, dict] = {}
         try:
-            for d in (IOBluetoothDevice.pairedDevices() or []):
-                if not _is_audio(d):
-                    continue
-                addr = d.getAddressString() or ""
-                name = d.getName() or d.getNameOrAddress() or addr
-                if addr:
-                    known[addr] = {
-                        "name": name,
-                        "address": addr,
-                        "paired": True,
-                        "connected": bool(d.isConnected()),
-                    }
-        except Exception:
-            pass
+            paired = IOBluetoothDevice.pairedDevices()
+            if paired:
+                for d in paired:
+                    if not _is_audio(d):
+                        continue
+                    addr = d.getAddressString() or ""
+                    name = d.getName() or d.getNameOrAddress() or addr
+                    if addr:
+                        known[addr] = {
+                            "name": name,
+                            "address": addr,
+                            "paired": True,
+                            "connected": bool(d.isConnected()),
+                        }
+        except Exception as exc:
+            _set_error(f"Failed to list paired devices: {exc}")
 
         with _lock:
-            # Merge freshly scanned devices (filter audio class too)
+            # Merge freshly scanned devices (also filter audio class)
             for addr, dev in _state["devices"].items():
                 if addr not in known:
                     try:

@@ -412,6 +412,133 @@ def musicbrainz_recording_identifiers(artist: str, title: str, album: str = "", 
     return {key: value for key, value in identifiers.items() if value}
 
 
+@functools.lru_cache(maxsize=1024)
+def get_artist_id(artist_name: str) -> str | None:
+    """Fetch MusicBrainz Artist ID."""
+    if not artist_name: return None
+    try:
+        url = "https://musicbrainz.org/ws/2/artist/?" + urllib.parse.urlencode({
+            "query": f'artist:"{artist_name}"',
+            "fmt": "json",
+        })
+        data = get_json(url)
+        artists = data.get("artists") or []
+        if artists:
+            # Prefer exact match if possible
+            for a in artists[:3]:
+                if norm_name(a.get("name", "")) == norm_name(artist_name):
+                    return a["id"]
+            return artists[0]["id"]
+    except Exception: pass
+    return None
+
+
+@functools.lru_cache(maxsize=1024)
+def get_alternative_albums(artist: str, title: str) -> list[str]:
+    """Fetch all known album titles for a specific track from MusicBrainz."""
+    if not artist or not title:
+        return []
+    try:
+        url = "https://musicbrainz.org/ws/2/recording/?" + urllib.parse.urlencode({
+            "query": f'recording:"{title}" AND artist:"{artist}"',
+            "limit": "30",
+            "fmt": "json",
+            "inc": "releases",
+        })
+        data = get_json(url)
+        albums = set()
+        for rec in data.get("recordings") or []:
+            if norm_name(rec.get("title", "")) == norm_name(title):
+                for rel in rec.get("releases") or []:
+                    album_name = rel.get("title")
+                    if album_name:
+                        albums.add(album_name)
+        return sorted(list(albums), key=len)
+    except Exception:
+        return []
+
+
+@functools.lru_cache(maxsize=1024)
+def get_alternative_albums_hierarchical(artist: str, title: str) -> list[str]:
+    """
+    Fetch all albums for an artist from MusicBrainz, categorized by type, 
+    and filter for those containing the specific track.
+    Follows priority: Album -> Compilation -> Live -> EP -> Single.
+    """
+    artist_id = get_artist_id(artist)
+    if not artist_id:
+        return get_alternative_albums(artist, title)
+    
+    try:
+        # 1. Get ALL recordings matching title + artist to find which Releases (and thus RGs) have it
+        rec_url = "https://musicbrainz.org/ws/2/recording/?" + urllib.parse.urlencode({
+            "query": f'recording:"{title}" AND arid:{artist_id}',
+            "fmt": "json", "limit": "100", "inc": "releases"
+        })
+        rec_data = get_json(rec_url)
+        
+        # Track which Release Group IDs contain this recording
+        # (We need RG IDs to match against the artist's discography list)
+        valid_rg_ids = set()
+        for rec in rec_data.get("recordings") or []:
+            if norm_name(rec.get("title", "")) == norm_name(title):
+                for rel in rec.get("releases") or []:
+                    # Release -> Release Group is not in this specific inc=releases output 
+                    # but we can fetch release-groups for the artist and match titles,
+                    # or better: we use the Release Group list and check if the recording search confirms the album.
+                    pass
+
+        # 2. Get the official Discography (Release Groups)
+        url = f"https://musicbrainz.org/ws/2/release-group?artist={artist_id}&fmt=json&limit=100"
+        data = get_json(url)
+        groups = data.get("release-groups") or []
+        
+        # 3. Use get_alternative_albums to get the "Truth Set" of album titles where the track exists
+        confirmed_titles = get_alternative_albums(artist, title)
+        confirmed_set = {norm_name(t) for t in confirmed_titles}
+
+        # 4. Categorize based on MusicBrainz official hierarchy
+        # Priority order: Album, Compilation, Live, EP, Single
+        hierarchy = ["album", "compilation", "live", "ep", "single", "other"]
+        cats = {k: [] for k in hierarchy}
+        
+        for rg in groups:
+            p_type = (rg.get("primary-type") or "").lower()
+            s_types = [t.lower() for t in (rg.get("secondary-types") or [])]
+            rg_title = rg.get("title")
+            if not rg_title or norm_name(rg_title) not in confirmed_set:
+                continue
+            
+            target = "other"
+            if p_type == "album":
+                if "compilation" in s_types: target = "compilation"
+                elif "live" in s_types: target = "live"
+                else: target = "album"
+            elif p_type == "ep":
+                target = "ep"
+            elif p_type == "single":
+                target = "single"
+            
+            if rg_title not in cats[target]:
+                cats[target].append(rg_title)
+
+        # 5. Flatten in hierarchy order
+        result_order = []
+        for key in hierarchy:
+            # Sort each category by name length to find most likely "original" titles
+            result_order.extend(sorted(cats[key], key=len))
+            
+        # 6. Final fallback: Any confirmed titles we missed (e.g. from Other artists / Various)
+        seen = {norm_name(t) for t in result_order}
+        for t in confirmed_titles:
+            if norm_name(t) not in seen:
+                result_order.append(t)
+                
+        return result_order
+    except Exception:
+        return get_alternative_albums(artist, title)
+
+
 def enrich_track_identifiers(track: dict) -> dict:
     if not isinstance(track, dict) or track.get("type", "track") != "track":
         return dict(track or {})
@@ -481,6 +608,7 @@ def spotify_search_track(artist: str, title: str) -> dict:
             "spotify_url": (item.get("external_urls") or {}).get("spotify", ""),
             "spotify_id": item.get("id", ""),
             "artist_id": artist_id,
+            "album": (item.get("album") or {}).get("name", ""),
             "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
             "isrc": ext_ids.get("isrc", ""),
             "ean": ext_ids.get("ean", ""),

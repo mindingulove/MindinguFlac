@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parent
 APP_NAME = "Mindinguflac"
 
 
+if getattr(sys, "frozen", False):
+    os.environ.setdefault("MINDINGUFLAC_DESKTOP", "1")
+
+
 def is_desktop_mode() -> bool:
     return os.environ.get("MINDINGUFLAC_DESKTOP") == "1"
 
@@ -77,7 +81,7 @@ class AppConfig:
     cache_dir: Path = field(default_factory=default_cache_dir)
     music_dir: Path = field(default_factory=default_music_dir)
     default_quality: str = "LOSSLESS"
-    download_service: str = "tidal"
+    download_service: str = "amazon"
     cache_cleanup_frequency: str = "never"
     last_cache_cleanup: float = 0
     strict_title_match: bool = False
@@ -85,7 +89,7 @@ class AppConfig:
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
     volume: float = 1.0
     track_max_retries: int = 1
-    download_engine: str = "spotiflac"
+    download_engine: str = "tidal_hifi"
     discogs_token: str = ""
     qobuz_token: str = ""
 
@@ -140,7 +144,7 @@ class AppConfig:
             cache_dir=_to_path(cache_dir_str, default_cache_dir),
             music_dir=_to_path(music_dir_str, default_music_dir),
             default_quality=value.get("default_quality", "LOSSLESS"),
-            download_service=value.get("download_service", "tidal"),
+            download_service=value.get("download_service", cls.download_service),
             cache_cleanup_frequency=value.get("cache_cleanup_frequency", "never"),
             last_cache_cleanup=float(value.get("last_cache_cleanup", 0) or 0),
             strict_title_match=bool(value.get("strict_title_match", False)),
@@ -148,7 +152,7 @@ class AppConfig:
             music_indexers=music_indexers,
             volume=float(value.get("volume", 1.0)),
             track_max_retries=rt,
-            download_engine=value.get("download_engine", "spotiflac"),
+            download_engine=value.get("download_engine", cls.download_engine),
             discogs_token=str(value.get("discogs_token", "") or "").strip(),
             qobuz_token=str(value.get("qobuz_token", "") or "").strip(),
         )

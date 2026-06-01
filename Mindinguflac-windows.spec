@@ -9,6 +9,8 @@ hiddenimports = [
     'webview.platforms.edgechromium',
     'webview.platforms.mshtml',
     'clr',
+    'torrfetch',
+    'libtorrent',
 ]
 
 tmp_ret = collect_all('SpotiFLAC')
@@ -28,7 +30,7 @@ try:
 except Exception:
     pass
 
-for package_name in ('PIL', 'git', 'pythonnet', 'clr_loader'):
+for package_name in ('PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy'):
     try:
         tmp_ret = collect_all(package_name)
         datas += tmp_ret[0]

@@ -384,13 +384,17 @@ import ctypes
 
 def main() -> None:
     global webview
+    # Set desktop mode immediately before any other imports
+    os.environ["MINDINGUFLAC_DESKTOP"] = "1"
+    
     log_path = setup_desktop_logging()
-    os.environ.setdefault("MINDINGUFLAC_DESKTOP", "1")
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
     
     if sys.platform == "win32":
-        # Use netfx for proper WinForms application loop blocking
-        os.environ["PYTHONNET_RUNTIME"] = "netfx"
+        # pywebview's Windows backends set pythonnet to coreclr when needed.
+        # Forcing netfx here makes the packaged app exit on systems where that
+        # runtime is not available before a window can be shown.
+        os.environ.pop("PYTHONNET_RUNTIME", None)
         
         # Stability flags: disable features known to cause hangs in shared/restricted environments
         os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
@@ -401,7 +405,7 @@ def main() -> None:
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mindinguflac.desktop")
         except Exception:
-            pass
+            log_step("SetCurrentProcessExplicitAppUserModelID failed")
 
         # Use a consistent folder for WebView2 data
         runtime_dir = get_runtime_dir()
@@ -410,8 +414,8 @@ def main() -> None:
             wv2_data.mkdir(parents=True, exist_ok=True)
             # Setting this variable ensures WebView2 loader picks it up immediately
             os.environ["WEBVIEW2_USER_DATA_FOLDER"] = str(wv2_data)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_step(f"Unable to prepare WebView2 data folder: {exc}")
 
     log_step(f"startup log: {log_path}")
     log_step("importing pywebview")
