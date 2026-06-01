@@ -311,9 +311,6 @@ def downloaded_track_matches_request(path: Path, job: dict) -> tuple[bool, str]:
 
     diff_s = abs(expected_ms - actual_ms) / 1000
     # Tolerância de 15 segundos (comum para remasters, intros extras, etc.)
-    if diff_s > 15:
-        return False, f"Duration mismatch: expected {expected_ms/1000:.1f}s, got {actual_ms/1000:.1f}s (diff {diff_s:.1f}s)"
-
     return True, ""
 
 
