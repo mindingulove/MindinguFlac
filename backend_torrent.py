@@ -104,7 +104,7 @@ def _create_optimized_session():
 
 _GLOBAL_SES = _create_optimized_session()
 
-def _register_job_to_torrent(magnet: str, job_id: str, manager) -> lt.torrent_handle:
+def _register_job_to_torrent(magnet: str, job_id: str, output_dir: Path, manager) -> tuple:
     with _SESSIONS_LOCK:
         if magnet in _ACTIVE_SESSIONS:
             entry = _ACTIVE_SESSIONS[magnet]
@@ -112,14 +112,15 @@ def _register_job_to_torrent(magnet: str, job_id: str, manager) -> lt.torrent_ha
             handle = entry["handle"]
             if handle.is_valid():
                 handle.resume()
-                return handle
+                return handle, Path(entry["save_path"])
+        output_dir.mkdir(parents=True, exist_ok=True)
         params = {
-            'save_path': str(Path(manager.config.cache_dir) / "torrent_downloads"),
+            'save_path': str(output_dir),
             'storage_mode': lt.storage_mode_t(2)
         }
         handle = lt.add_magnet_uri(_GLOBAL_SES, magnet, params)
-        _ACTIVE_SESSIONS[magnet] = {"handle": handle, "refs": {job_id}}
-        return handle
+        _ACTIVE_SESSIONS[magnet] = {"handle": handle, "refs": {job_id}, "save_path": str(output_dir)}
+        return handle, output_dir
 
 def _unregister_job_from_torrent(magnet: str, job_id: str):
     with _SESSIONS_LOCK:
@@ -252,8 +253,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
         cached_magnet = catalog.get(album_key)
         
         handle = None
+        torrent_save_path = output_dir
         if cached_magnet:
-            handle = _register_job_to_torrent(cached_magnet, job_id, manager)
+            handle, torrent_save_path = _register_job_to_torrent(cached_magnet, job_id, output_dir, manager)
             current_magnet = cached_magnet
             time.sleep(0.5)
             s = handle.status()
@@ -344,7 +346,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 return list(dict.fromkeys(queries))
 
             def try_result_source(r: dict, r_idx: int, phase_label: str, require_track_list: bool):
-                nonlocal current_magnet
+                nonlocal current_magnet, torrent_save_path
                 m_link = r.get("magnet")
                 if not m_link:
                     return None
@@ -358,7 +360,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     "trying",
                     f"{phase_label} source #{r_idx+1} (Score: {int(r.get('_score',0))}): {r.get('title','')[:35]}...",
                 )
-                candidate_handle = _register_job_to_torrent(m_link, job_id, manager)
+                candidate_handle, torrent_save_path = _register_job_to_torrent(m_link, job_id, output_dir, manager)
                 current_magnet = m_link
                 for tr in trackers:
                     try: candidate_handle.add_tracker(lt.announce_entry(tr))
@@ -530,7 +532,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         handle.set_sequential_download(True)
         priorities = [0] * torrent_info.num_files(); priorities[best_f_idx] = 7
         handle.prioritize_files(priorities)
-        target_abs = Path(manager.config.cache_dir) / "torrent_downloads" / torrent_info.file_at(best_f_idx).path
+        target_abs = torrent_save_path / torrent_info.file_at(best_f_idx).path
         target_size = torrent_info.file_at(best_f_idx).size
         with manager._lock:
             job["active_audio_path"] = str(target_abs)
@@ -555,10 +557,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 job["active_audio_ready_bytes"] = done
             if done >= total and total > 0:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                final_dest = output_dir / target_abs.name
-                for old_file in output_dir.glob("*"):
-                    if old_file.is_file(): old_file.unlink()
-                shutil.copy2(target_abs, final_dest)
+                if target_abs.parent.resolve() == output_dir.resolve():
+                    final_dest = target_abs
+                else:
+                    final_dest = output_dir / target_abs.name
+                    for old_file in output_dir.glob("*"):
+                        if old_file.is_file(): old_file.unlink()
+                    shutil.copy2(target_abs, final_dest)
                 manager._append_cache_event(job, "provider", f"Torrent engine produced {final_dest.name}")
                 if album != "Unknown":
                     catalog[f"{primary_artist.lower()}||{album.lower()}"] = current_magnet

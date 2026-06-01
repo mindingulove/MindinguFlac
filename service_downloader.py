@@ -25,11 +25,12 @@ def is_valid_audio_file(path: Path) -> bool:
         if size < 100 * 1024:
             return False
         with path.open("rb") as audio_file:
-            header = audio_file.read(64)
+            header = audio_file.read(512)
     except Exception:
         return False
     suffix = path.suffix.lower()
     if suffix == ".flac":
+        # fLaC marker may appear after an ID3v2 tag on torrent-sourced files
         return b"fLaC" in header
     if suffix in {".ogg", ".opus"}:
         return b"OggS" in header

@@ -16,7 +16,7 @@ function Invoke-Checked {
     }
 }
 
-$requiredPython = "3.13"
+$requiredPython = "3.12"
 $venvDir = ".venv-build"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 
@@ -39,10 +39,10 @@ function Get-PythonMinorVersion {
 
 function Resolve-Python313 {
     $candidates = @(
-        [pscustomobject]@{ Exe = "py"; Args = @("-3.13") },
-        [pscustomobject]@{ Exe = "python3.13"; Args = @() },
-        [pscustomobject]@{ Exe = (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe"); Args = @() },
-        [pscustomobject]@{ Exe = (Join-Path $env:ProgramFiles "Python313\python.exe"); Args = @() }
+        [pscustomobject]@{ Exe = "py"; Args = @("-3.12") },
+        [pscustomobject]@{ Exe = "python3.12"; Args = @() },
+        [pscustomobject]@{ Exe = (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"); Args = @() },
+        [pscustomobject]@{ Exe = (Join-Path $env:ProgramFiles "Python312\python.exe"); Args = @() }
     )
 
     foreach ($candidate in $candidates) {
@@ -60,11 +60,11 @@ function Resolve-Python313 {
 
 function Install-Python313 {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "Python 3.13 is required for Windows torrent builds, but winget is not available to install it automatically. Install Python 3.13 from python.org, then rerun this script."
+        throw "Python 3.12 is required, but winget is not available to install it automatically. Install Python 3.12 from python.org, then rerun this script."
     }
 
-    Write-Host "--- Installing Python 3.13 ---"
-    Invoke-Checked { winget install --id Python.Python.3.13 -e --source winget --accept-package-agreements --accept-source-agreements }
+    Write-Host "--- Installing Python 3.12 ---"
+    Invoke-Checked { winget install --id Python.Python.3.12 -e --source winget --accept-package-agreements --accept-source-agreements }
 }
 
 $python313 = Resolve-Python313
