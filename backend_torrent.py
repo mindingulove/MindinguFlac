@@ -443,7 +443,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     elapsed = time.time() - meta_start
                     if elapsed > 15 and max_seen == 0 and _GLOBAL_SES.status().dht_nodes > 100:
                         break
-                    if elapsed > (180 if max_seen > 0 else discovery_timeout):
+                    # Fetching just the file list shouldn't take long. Give a
+                    # peered source 45s, an unpeered one a shorter window, then
+                    # move on to the next candidate.
+                    if elapsed > (45 if max_seen > 0 else min(45, discovery_timeout)):
                         break
                     if elapsed % 15 < 1.5:
                         candidate_handle.force_reannounce()
