@@ -111,7 +111,7 @@ try {
     if ($LASTEXITCODE -eq 0) { $ltInstalled = $true }
 } catch {}
 if (-not $ltInstalled) {
-    Write-Warning "libtorrent could not be installed — torrent downloads will be unavailable."
+    Write-Warning "libtorrent could not be installed - torrent downloads will be unavailable."
 }
 
 Write-Host "--- Preparing Assets ---"
