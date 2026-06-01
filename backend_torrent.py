@@ -126,7 +126,7 @@ def _save_catalog(manager, catalog: dict) -> None:
     except Exception: pass
 
 def run(output_dir: Path, job: dict, manager) -> None:
-    # 0. Initial Setup
+    # 0. Query Cleaning
     job_id = job["id"]
     is_prefetch = bool(job.get("prefetch"))
     raw_title = job.get("title") or "Unknown"
@@ -166,6 +166,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         if cached_magnet:
             handle = _register_job_to_torrent(cached_magnet, job_id, manager)
             current_magnet = cached_magnet
+            # Fast check health
             time.sleep(0.5)
             s = handle.status()
             if s.num_peers > 0 or not s.active_duration > 15:
@@ -188,24 +189,33 @@ def run(output_dir: Path, job: dict, manager) -> None:
         def score_torrent_result(r, target_artist, target_title, target_album):
             torrent_title = r.get("title", "").lower()
             if any(k in torrent_title for k in ["s01","s02","e01","movie","1080p","x264"]): return -1
+            
+            # Identity Verification
             artist_tokens = set(re.findall(r'\w+', target_artist.lower()))
             title_tokens = set(re.findall(r'\w+', torrent_title))
             meaningful_artist = {t for t in artist_tokens if len(t) >= 2 and t not in {"the","and","feat","with"}}
             if not meaningful_artist: meaningful_artist = artist_tokens
+            
             artist_verified = False
             matches = meaningful_artist.intersection(title_tokens)
             if len(meaningful_artist) <= 2:
                 if len(matches) >= len(meaningful_artist): artist_verified = True
             elif len(matches) >= (len(meaningful_artist) * 0.7): artist_verified = True
+            
             if not artist_verified and target_artist.replace("'", "") in torrent_title: artist_verified = True
+
             album_verified = False
             if target_album != "unknown":
                 if rapidfuzz.fuzz.token_set_ratio(target_album.lower(), torrent_title) > 85: album_verified = True
+            
             if not artist_verified and not album_verified: return -1
+            
+            # Scoring
             score = rapidfuzz.fuzz.token_set_ratio(target_title.lower(), torrent_title)
             score += 40 if artist_verified else 0
             score += 40 if album_verified else 0
             if any(k in torrent_title for k in ["discography", "complete", "collection"]): score += 30
+            
             health = int(r.get("seeders") or 0)
             if health > 0:
                 import math
@@ -214,7 +224,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
         results_pool = []
         if not handle:
-            # PHASE 1: TARGETED SEARCH (Artist + Album)
+            # --- STEP 1: PHASE 1 - TARGETED SEARCH (Clicked Album) ---
             if album != "Unknown":
                 manager._append_cache_event(job, "trying", f"Step 1: Searching targeted release: {primary_artist} - {album_clean}")
                 p1_queries = [f"{art_var} {album_clean}" for art_var in artist_variations]
@@ -226,125 +236,134 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             r["_score"] = s
                             r["_search_album"] = album_clean
                             results_pool.append(r)
-                    if results_pool and any(int(r.get("seeders", 0)) >= 3 for r in results_pool): break
-            
-            # PHASE 2: BROAD ARTIST SCAN
-            if not any(r.get("_score", 0) > 95 for r in results_pool):
-                manager._append_cache_event(job, "trying", f"Step 2: Launching broad artist scan for '{primary_artist}'...")
-                for art_var in artist_variations:
-                    broad_results = do_search_safe(art_var, service)
-                    for r in broad_results:
-                        s = score_torrent_result(r, primary_artist, title_clean, album_clean)
-                        if s > 65:
-                            r["_score"] = s
-                            r["_search_album"] = album_clean
-                            results_pool.append(r)
-
-            # PHASE 3: HIERARCHICAL PARALLEL DISCOVERY
-            if not any(int(r.get("seeders", 0)) > 2 for r in results_pool):
-                manager._append_cache_event(job, "trying", "Step 3: Initiating parallel hierarchical discography discovery...")
-                search_candidates = []
-                try:
-                    from music_metadata import get_alternative_albums_hierarchical
-                    search_candidates.extend(get_alternative_albums_hierarchical(primary_artist, title_clean))
-                except Exception: pass
-                search_candidates = [c for c in search_candidates if c.lower() != album.lower()][:15]
-                search_candidates.append(None)
-
-                def p2_worker(cand):
-                    worker_res = []
+                    if results_pool: break
+                
+                # Check if we have healthy targeted results to skip broad discovery
+                if results_pool and any(int(r.get("seeders", 0)) >= 3 for r in results_pool):
+                    manager._append_cache_event(job, "trying", "Healthy targeted matches found, skipping broad discovery.")
+                else:
+                    # --- STEP 2: PHASE 0 - BROAD ARTIST SCAN ---
+                    manager._append_cache_event(job, "trying", f"Step 2: Targeted weak, launching broad artist scan for '{primary_artist}'...")
                     for art_var in artist_variations:
-                        q = f"{art_var} {clean_term(cand)}" if cand else f"{art_var} {title_simple}"
-                        res = do_search_safe(q, service)
-                        for r in res:
-                            s = score_torrent_result(r, primary_artist, title_clean, cand or album_clean)
-                            if s > 50:
+                        broad_results = do_search_safe(art_var, service)
+                        for r in broad_results:
+                            s = score_torrent_result(r, primary_artist, title_clean, album_clean)
+                            if s > 65: # High bar for broad
                                 r["_score"] = s
-                                r["_search_album"] = cand or album_clean
-                                worker_res.append(r)
-                        if worker_res: break
-                    return worker_res
+                                r["_search_album"] = album_clean
+                                results_pool.append(r)
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as exec:
-                    futs = [exec.submit(p2_worker, c) for c in search_candidates]
-                    for f in concurrent.futures.as_completed(futs):
-                        results_pool.extend(f.result() or [])
+                    # --- STEP 3: PHASE 2 - HIERARCHICAL PARALLEL DISCOVERY ---
+                    if not any(int(r.get("seeders", 0)) > 2 for r in results_pool):
+                        manager._append_cache_event(job, "trying", "Step 3: Initiating parallel hierarchical discography discovery...")
+                        search_candidates = []
+                        try:
+                            from music_metadata import get_alternative_albums_hierarchical
+                            search_candidates.extend(get_alternative_albums_hierarchical(primary_artist, title_clean))
+                        except Exception: pass
+                        
+                        search_candidates = [c for c in search_candidates if c.lower() != album.lower()][:15]
+                        search_candidates.append(None) # Track fallback
 
-            # --- STEP 4 & 5: UNLIMITED PARALLEL HEALTH RACE ---
+                        def p2_worker(cand):
+                            worker_res = []
+                            for art_var in artist_variations:
+                                q = f"{art_var} {clean_term(cand)}" if cand else f"{art_var} {title_simple}"
+                                res = do_search_safe(q, service)
+                                for r in res:
+                                    s = score_torrent_result(r, primary_artist, title_clean, cand or album_clean)
+                                    if s > 50:
+                                        r["_score"] = s
+                                        r["_search_album"] = cand or album_clean
+                                        worker_res.append(r)
+                                if worker_res: break
+                            return worker_res
+
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as exec:
+                            futs = [exec.submit(p2_worker, c) for c in search_candidates]
+                            for f in concurrent.futures.as_completed(futs):
+                                results_pool.extend(f.result() or [])
+
+            # --- STEP 4: PHASE 3 - HEALTH-WEIGHTED RACE ---
             if not results_pool: raise RuntimeError(f"No valid torrents found for {primary_artist} - {title_clean}.")
+
             trackers = _get_best_trackers()
             ordered_results = sorted(results_pool, key=lambda x: x.get("_score", 0), reverse=True)
-            
-            manager._append_cache_event(job, "trying", f"Step 4: Launching parallel health race across {len(ordered_results)} sources...")
-            
-            winning_handle = None
-            winning_result = None
-            tried_magnets = []
-            
-            # Probe in batches of 6 for extreme parallelism without crashing
-            batch_size = 6
-            for i in range(0, min(len(ordered_results), 100), batch_size):
-                batch = ordered_results[i : i + batch_size]
-                active_probes = []
+
+            for r_idx, r in enumerate(ordered_results[:max_discovery_attempts]):
+                m_link = r.get("magnet")
+                if not m_link: continue
+                import urllib.parse
+                if "&tr=" not in m_link:
+                    for tr in trackers: m_link += f"&tr={urllib.parse.quote(tr)}"
                 
-                with _SESSIONS_LOCK:
-                    for r in batch:
-                        m_link = r.get("magnet")
-                        if not m_link: continue
-                        if "&tr=" not in m_link:
-                            for tr in trackers: m_link += f"&tr={urllib.parse.quote(tr)}"
-                        
-                        h = _register_job_to_torrent(m_link, job_id, manager)
-                        for tr in trackers:
-                            try: h.add_tracker(lt.announce_entry(tr))
-                            except: pass
-                        h.force_reannounce()
-                        active_probes.append((h, m_link, r))
-                        tried_magnets.append(m_link)
-                
-                # Monitor batch for 30s
-                probe_start = time.time()
-                while time.time() - probe_start < 35:
+                manager._append_cache_event(job, "trying", f"Attaching source #{r_idx+1} (Score: {int(r.get('_score',0))}): {r.get('title')[:35]}...")
+                handle = _register_job_to_torrent(m_link, job_id, manager)
+                current_magnet = m_link
+                for tr in trackers:
+                    try: handle.add_tracker(lt.announce_entry(tr))
+                    except: pass
+                handle.force_reannounce()
+
+                # Health Loop
+                meta_start = time.time()
+                got_meta = False
+                last_log = 0
+                while time.time() - meta_start < discovery_timeout:
                     if job_id in manager._cancel_flags: raise RuntimeError("Cancelled")
-                    
-                    best_peers = 0
-                    for h, m, r in active_probes:
-                        s = h.status()
-                        if s.num_peers > best_peers: best_peers = s.num_peers
-                        if h.has_metadata():
-                            # Metadata received! Now verify track exists in this specific swarm
-                            torrent_info = h.get_torrent_info()
-                            from service_downloader import AUDIO_SUFFIXES
-                            found_track = False
-                            for fi in range(torrent_info.num_files()):
-                                f_path = Path(torrent_info.file_at(fi).path)
-                                if f_path.suffix.lower() in AUDIO_SUFFIXES:
-                                    if rapidfuzz.fuzz.token_set_ratio(raw_title, f_path.name) > 40:
-                                        found_track = True; break
-                            if found_track:
-                                winning_handle = h
-                                winning_result = r
-                                break
-                    
-                    if winning_handle: break
+                    s = handle.status()
+                    r["_live_peers"] = s.num_peers
+                    if handle.has_metadata():
+                        got_meta = True
+                        break
+                    if time.time() - last_log > 12:
+                        manager._append_cache_event(job, "trying", f"Connecting... ({s.num_peers} peers seen)")
+                        last_log = time.time()
+                    if time.time() - meta_start > 15 and s.num_peers == 0: break
                     with manager._lock:
                         job["progress"] = 1
-                        job["last_status"] = f"Probing {len(active_probes)} sources ({best_peers} peers max)..."
-                    time.sleep(1.5)
-                
-                if winning_handle:
-                    manager._append_cache_event(job, "trying", f"Winner found: {winning_result.get('title')[:35]}")
-                    break
-                else:
-                    # Batch failed, clean up before next batch
-                    for h, m, r in active_probes:
-                        _unregister_job_from_torrent(m, job_id)
-            
-            if not winning_handle: raise RuntimeError("All sources failed parallel health check.")
-            handle = winning_handle
-            current_magnet = winning_result.get("magnet")
+                        job["last_status"] = f"Swarm: {s.num_peers} peers, {_GLOBAL_SES.status().dht_nodes} nodes"
+                    time.sleep(1.2)
+                    
+                if not got_meta:
+                    manager._append_cache_event(job, "trying", f"Source dead ({r.get('_live_peers', 0)} real peers), trying next...")
+                    _unregister_job_from_torrent(current_magnet, job_id)
+                    handle = None
+                    current_magnet = None
+                    # RE-SORT based on live peers
+                    tried_ids = {ordered_results[i].get("magnet") for i in range(r_idx + 1)}
+                    ordered_results.sort(key=lambda x: (x.get("magnet") not in tried_ids, x.get("_live_peers", 0) > 0, x.get("_score", 0)), reverse=True)
+                    continue
 
-        # 3. Final Selective Download
+                # --- STEP 5: PHASE 4 - PRECISION EXTRACTION ---
+                torrent_info = handle.get_torrent_info()
+                best_f_idx = -1
+                best_f_score = -1
+                from service_downloader import AUDIO_SUFFIXES
+                track_pats = [f"{track_num.zfill(2)}.", f" {track_num.zfill(2)} ", f"- {track_num.zfill(2)} "] if track_num else []
+                for i in range(torrent_info.num_files()):
+                    f_path = Path(torrent_info.file_at(i).path)
+                    if f_path.suffix.lower() in AUDIO_SUFFIXES:
+                        score = rapidfuzz.fuzz.token_set_ratio(raw_title, f_path.name)
+                        if any(p in f_path.name for p in track_pats): score += 40
+                        if f"cd{disc_num}" in str(f_path).lower(): score += 20
+                        for kw in ["live", "demo", "remix", "mix", "edit"]:
+                            if kw in f_path.name.lower() and kw not in raw_title.lower(): score -= 50
+                        if score > best_f_score:
+                            best_f_score = score
+                            best_f_idx = i
+
+                if best_f_idx == -1 or best_f_score < 40:
+                    manager._append_cache_event(job, "trying", "Track missing from source, trying next...")
+                    _unregister_job_from_torrent(current_magnet, job_id)
+                    handle = None
+                    current_magnet = None
+                    continue
+                break
+
+        if not handle: raise RuntimeError("All search attempts failed.")
+
+        # 3. Final Streaming
         torrent_info = handle.get_torrent_info()
         best_f_idx = -1
         best_f_score = -1
@@ -379,7 +398,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
             done = handle.file_progress()[best_f_idx]
             total = torrent_info.file_at(best_f_idx).size
             if done > last_done:
-                last_done = done; last_progress_time = time.time()
+                last_done = done
+                last_progress_time = time.time()
             prog = (done / total) * 100 if total > 0 else 0
             with manager._lock:
                 job["progress"] = int(prog)
