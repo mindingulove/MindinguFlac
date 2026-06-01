@@ -2093,8 +2093,10 @@ async function renderSettings() {
 
   $("cacheCleanupFrequency").value = state.settings.cache_cleanup_frequency || "never";
 
-  $("demoMusicIndexer").checked = !!state.settings.demo_music_indexer;
-  $("strictTitleMatch").checked = !!state.settings.strict_title_match;
+  const demoMusicIndexer = $("demoMusicIndexer");
+  if (demoMusicIndexer) demoMusicIndexer.checked = !!state.settings.demo_music_indexer;
+  const strictTitleMatch = $("strictTitleMatch");
+  if (strictTitleMatch) strictTitleMatch.checked = !!state.settings.strict_title_match;
   $("qobuzToken").value = state.settings.qobuz_token || "";
   $("discogsToken").value = state.settings.discogs_token || "";
 
@@ -2117,8 +2119,8 @@ async function saveSettings(e) {
 
     cache_cleanup_frequency: $("cacheCleanupFrequency").value,
 
-    demo_music_indexer: $("demoMusicIndexer").checked,
-    strict_title_match: $("strictTitleMatch").checked,
+    demo_music_indexer: $("demoMusicIndexer") ? $("demoMusicIndexer").checked : !!state.settings.demo_music_indexer,
+    strict_title_match: $("strictTitleMatch") ? $("strictTitleMatch").checked : !!state.settings.strict_title_match,
     qobuz_token: $("qobuzToken").value.trim(),
     discogs_token: $("discogsToken").value.trim(),
     music_indexers: []
@@ -3178,10 +3180,10 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
         name: label,
         deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
         backendUid: bd.uid,
-        nativeUid: !match && nativeAvailable ? bd.uid : "",
+        nativeUid: nativeAvailable && bd.uid ? bd.uid : "",
         needsBrowserRoute: !match && !nativeAvailable,
         icon: isAirPlay ? "bi-broadcast-pin" : _deviceIcon(label),
-        sub: isAirPlay ? "AirPlay" : (match ? "" : (nativeAvailable ? "App audio only" : (_canChooseBrowserAudioOutput() ? "Choose output" : "Browser unsupported")))
+        sub: isAirPlay ? "AirPlay" : (match && !nativeAvailable ? "" : (nativeAvailable ? "App audio only" : (_canChooseBrowserAudioOutput() ? "Choose output" : "Browser unsupported")))
     });
   }
 
@@ -3233,6 +3235,10 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
         return;
       }
       
+      // Native bridge takes priority in the desktop app (WebKit setSinkId doesn't work)
+      if (item.nativeUid) {
+          targetId = `native:${item.nativeUid}`;
+      } else {
       // Find the browser internal ID by case-insensitive matching
       const freshDevs = await _getOutputDevices();
       const targetName = item.name.toLowerCase();
@@ -3240,12 +3246,10 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
         if (!d.label) return false;
         return _audioLabelsMatch(d.label, targetName);
       });
-      
+
       if (match) {
           console.log("[Audio] Mapped to:", match.label);
           targetId = match.deviceId;
-      } else if (item.nativeUid) {
-          targetId = `native:${item.nativeUid}`;
       } else if (item.needsBrowserRoute || (targetId && (targetId.includes(":") || targetId.length > 40))) {
           console.warn("[Audio] No match for:", item.name);
           const selected = await _selectBrowserAudioOutput(item.name);
@@ -3256,6 +3260,7 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
             return;
           }
       }
+      } // end else (browser path)
 
       console.log("[Audio] Routing to:", item.name, targetId || "Default");
       await setAudioOutputDevice(targetId);

@@ -388,7 +388,7 @@ def main() -> None:
     os.environ["MINDINGUFLAC_DESKTOP"] = "1"
     
     log_path = setup_desktop_logging()
-    os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG")
+    os.environ.setdefault("PYWEBVIEW_LOG", "INFO")
     
     if sys.platform == "win32":
         # pywebview's Windows backends set pythonnet to coreclr when needed.
@@ -463,7 +463,7 @@ def main() -> None:
 
         log_step("starting pywebview event loop")
         start_kwargs = {
-            "debug": True,
+            "debug": False,
             "private_mode": False,  # Required for WebView2 in many bundled environments
         }
         if sys.platform == "win32":

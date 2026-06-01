@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 from pathlib import Path
 
 datas = [('static', 'static')]
@@ -7,6 +7,13 @@ binaries = []
 hiddenimports = ['bluetooth_scan', 'IOBluetooth', 'AVFoundation', 'CoreAudio', 'torrfetch', 'libtorrent']
 tmp_ret = collect_all('SpotiFLAC')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+try:
+    tmp_ret = collect_all('torrfetch')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('torrfetch')
+except Exception:
+    pass
 
 helper = Path('build/macos/MindinguflacNowPlayingHelper')
 if helper.is_file():

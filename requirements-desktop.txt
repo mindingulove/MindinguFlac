@@ -1,6 +1,7 @@
 pywebview>=6.2.1
 pyinstaller>=6.12
 pillow>=10.0
+httpx[http2]>=0.27.0
 pyobjc-framework-AVFoundation>=12.2; sys_platform == "darwin"
 pyobjc-framework-CoreAudio>=12.2; sys_platform == "darwin"
 sounddevice>=0.5.1; sys_platform == "win32"

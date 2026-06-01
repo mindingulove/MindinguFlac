@@ -905,6 +905,11 @@ class Handler(BaseHTTPRequestHandler):
                         output_dir = Path(job.get("output_dir") or "")
                     if output_dir.exists():
                         candidate = active_audio_candidate(output_dir)
+                    if not candidate and job.get("active_audio_path"):
+                        active_path = Path(job.get("active_audio_path") or "")
+                        ready_bytes = int(job.get("active_audio_ready_bytes") or 0)
+                        if active_path.exists() and ready_bytes > 512 * 1024:
+                            candidate = active_path
                     if candidate:
                         break
                     time.sleep(1)
