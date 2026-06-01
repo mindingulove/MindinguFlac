@@ -2216,6 +2216,12 @@ function startNativeAudioPolling(requestId) {
       ended: !!status.ended,
     };
     syncNativeAudioUi();
+    // Prefetch the next track once playback is underway. The <audio> element's
+    // ontimeupdate never fires on the native path, so trigger it here too.
+    if (state.nativeAudio.position >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
+      state.prefetchedForRequestId = state.playbackRequestId;
+      prefetchNextTrack().catch(() => {});
+    }
     if (status.ended) {
       await stopNativeAudio();
       clearMediaSession();

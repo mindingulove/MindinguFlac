@@ -418,9 +418,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             catalog[f"{primary_artist.lower()}||{album.lower()}"] = magnet
                             _save_catalog(manager, catalog)
                         return True
-                    # Stall detection: no progress for 65s, or 30s with no peers.
-                    stalled = time.time() - last_progress_time > 65
-                    if not stalled and s.num_peers == 0 and time.time() - last_progress_time > 30:
+                    # Stall detection (only when NOT making progress):
+                    #   - no progress at all for 120s, or
+                    #   - peers dropped to 0 and no progress for 60s.
+                    # As long as bytes keep arriving, last_progress_time updates
+                    # and we never abandon an actively-downloading source.
+                    since_progress = time.time() - last_progress_time
+                    stalled = since_progress > 120
+                    if not stalled and s.num_peers == 0 and since_progress > 60:
                         stalled = True
                     if stalled: return False
                     if time.time() - start_time > 1800: return False
@@ -465,12 +470,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         break
 
                     elapsed = time.time() - meta_start
+                    # No swarm at all: give up fast so discovery keeps moving.
                     if elapsed > 15 and max_seen == 0 and _GLOBAL_SES.status().dht_nodes > 100:
                         break
-                    # Fetching just the file list shouldn't take long. Give a
-                    # peered source 45s, an unpeered one a shorter window, then
-                    # move on to the next candidate.
-                    if elapsed > (45 if max_seen > 0 else min(45, discovery_timeout)):
+                    # Peers present means the source is worth waiting for; give
+                    # it real patience for metadata. Only the truly dead (no
+                    # peers ever) is abandoned quickly above.
+                    if elapsed > (120 if max_seen > 0 else discovery_timeout):
                         break
                     if elapsed % 15 < 1.5:
                         candidate_handle.force_reannounce()

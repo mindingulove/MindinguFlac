@@ -1344,6 +1344,31 @@ class ServiceDownloadManager:
             self._save_sidecar_files(output_dir, job)
             self._capture_cache_activity(job)
 
+            # If the engine resolved a different album (e.g. the torrent engine
+            # fell back to a MusicBrainz album), the download-mode folder was
+            # created under the original album name. Relocate the files to the
+            # correct album folder so the library reflects the real album.
+            if job.get("mode") == "download":
+                desired_dir = self._output_dir(job)
+                if desired_dir.resolve() != output_dir.resolve():
+                    try:
+                        desired_dir.mkdir(parents=True, exist_ok=True)
+                        for f in output_dir.glob("*"):
+                            if f.is_file():
+                                target = desired_dir / f.name
+                                if target.exists():
+                                    target.unlink()
+                                shutil.move(str(f), str(target))
+                        try:
+                            output_dir.rmdir()
+                        except OSError:
+                            pass
+                        output_dir = desired_dir
+                        with self._lock:
+                            job["output_dir"] = str(output_dir)
+                    except Exception:
+                        pass
+
             with self._lock:
                 already_finished = job.get("status") == "finished" and bool(job.get("library_path"))
                 library_requested = bool(job.get("library_requested"))
