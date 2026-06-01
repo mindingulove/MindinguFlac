@@ -100,7 +100,7 @@ Write-Host "Using Python: $python ($pythonVersion)"
 
 Write-Host "--- Installing Dependencies ---"
 Invoke-Checked { & $python -m pip install --upgrade pip }
-Invoke-Checked { & $python -m pip install --prefer-binary -r requirements.txt -r requirements-desktop.txt }
+Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
 
 Write-Host "--- Preparing Assets ---"
 Invoke-Checked { & $python scripts\make_desktop_icons.py }
