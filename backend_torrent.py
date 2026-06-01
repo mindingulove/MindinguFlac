@@ -285,12 +285,23 @@ def run(output_dir: Path, job: dict, manager) -> None:
         # 2. DISCOVERY ENGINE
         if not handle:
             def do_search_safe(q, svc):
+                results = []
                 try:
-                    if svc == "all": return torrfetch.search_torrents(q, mode="parallel")
+                    if svc == "all":
+                        results = torrfetch.search_torrents(q, mode="parallel") or []
                     else:
-                        try: return torrfetch.search_torrents(q, only=[svc])
-                        except: return torrfetch.search_torrents(q, mode="parallel")
-                except Exception: return []
+                        try: results = torrfetch.search_torrents(q, only=[svc]) or []
+                        except: results = torrfetch.search_torrents(q, mode="parallel") or []
+                except Exception:
+                    results = []
+                # Augment torrfetch (TPB-only for music) with extra indexers:
+                # apibay (reliable TPB JSON) + knaben aggregator (many trackers).
+                try:
+                    import torrent_sources
+                    results = list(results) + torrent_sources.search_extra(q)
+                except Exception:
+                    pass
+                return results
 
             def score_torrent_result(r, target_artist, target_title, target_album, allow_album_miss=False):
                 torrent_title = r.get("title", "").lower()

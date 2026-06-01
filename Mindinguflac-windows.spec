@@ -11,6 +11,7 @@ hiddenimports = [
     'clr',
     'torrfetch',
     'libtorrent',
+    'torrent_sources',
 ]
 
 tmp_ret = collect_all('SpotiFLAC')

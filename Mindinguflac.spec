@@ -4,7 +4,7 @@ from pathlib import Path
 
 datas = [('static', 'static')]
 binaries = []
-hiddenimports = ['bluetooth_scan', 'IOBluetooth', 'AVFoundation', 'CoreAudio', 'torrfetch', 'libtorrent']
+hiddenimports = ['bluetooth_scan', 'IOBluetooth', 'AVFoundation', 'CoreAudio', 'torrfetch', 'libtorrent', 'torrent_sources']
 tmp_ret = collect_all('SpotiFLAC')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
