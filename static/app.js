@@ -962,9 +962,18 @@ function renderTrackList(containerId, items, context = "general", playbackContex
     trackIdxs.forEach((itemIdx, i) => {
       const btn = container.querySelector(`[data-library-action="${itemIdx}"]`);
       if (!btn) return;
+      const status = statuses[i] || {};
       const temp = document.createElement("div");
-      temp.innerHTML = makeLibraryBtn(itemIdx, statuses[i] || {});
-      btn.replaceWith(temp.firstElementChild);
+      temp.innerHTML = makeLibraryBtn(itemIdx, status);
+      const newBtn = temp.firstElementChild;
+      btn.replaceWith(newBtn);
+      // Re-attach a progress poller for downloads still in flight. The backend
+      // job keeps running across tab switches; without this the re-rendered
+      // button freezes on a static pie and never finalizes to "downloaded".
+      if (status.library_requested && !status.in_library) {
+        newBtn.dataset.activeJobId = status.active_job_id || "";
+        waitForLibraryToggle(items[itemIdx], status.active_job_id || "", newBtn).catch(() => {});
+      }
     });
     bindLibraryButtons();
   }).catch(() => {});
@@ -1726,8 +1735,11 @@ function updateLibraryProgressButton(button, status) {
 async function waitForLibraryToggle(track, jobId = "", button = null) {
   for (let attempt = 0; attempt < 900; attempt++) {
     if (button && button.dataset.cancelled === "1") return null;
+    // Stop polling a button that has been removed from the DOM (e.g. the tab
+    // was re-rendered); a fresh poller is attached to the replacement button.
+    if (button && !button.isConnected) return null;
     await new Promise(resolve => setTimeout(resolve, 1000));
-    if (button && button.dataset.cancelled === "1") return null;
+    if (button && (button.dataset.cancelled === "1" || !button.isConnected)) return null;
     const status = await api("/api/library/status", {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
