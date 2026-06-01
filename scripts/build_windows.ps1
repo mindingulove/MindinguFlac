@@ -70,8 +70,14 @@ function Get-PythonArch {
 # yarl, frozenlist, ...) ship no win_arm64 wheels and would try to compile from
 # source. An x64 interpreter resolves every dependency to a win_amd64 wheel and
 # runs fine under Windows' x64 emulation.
+# Dedicated location for the x64 build we install ourselves (kept separate from
+# any ARM64 Python the system may already have).
+$x64PythonDir = Join-Path $env:LOCALAPPDATA "mindinguflac\python312-x64"
+$x64PythonExe = Join-Path $x64PythonDir "python.exe"
+
 function Resolve-Python313 {
     $candidates = @(
+        [pscustomobject]@{ Exe = $x64PythonExe; Args = @() },
         [pscustomobject]@{ Exe = "py"; Args = @("-3.12") },
         [pscustomobject]@{ Exe = "python3.12"; Args = @() },
         [pscustomobject]@{ Exe = "python"; Args = @() },
@@ -114,24 +120,35 @@ function Resolve-Python313 {
 }
 
 function Install-Python313 {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "An x64 Python 3.12 is required, but winget is not available to install it automatically. Install the 64-bit Python 3.12 from python.org, then rerun this script."
+    # winget keys on package ID, not architecture: if an ARM64 Python 3.12 is
+    # already installed it reports "already installed" and refuses to add the
+    # x64 build. So we download the official x64 installer from python.org and
+    # install it (per-user, embedded, no PATH change) into our own directory.
+    $pyVersion = "3.12.8"
+    $url = "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-amd64.exe"
+    $installer = Join-Path $env:TEMP "python-$pyVersion-amd64.exe"
+
+    Write-Host "--- Downloading x64 Python $pyVersion from python.org ---"
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+    } catch {
+        throw "Failed to download x64 Python from $url : $_"
     }
 
-    Write-Host "--- Installing x64 Python 3.12 ---"
-    # --architecture x64 forces the AMD64 build even on Windows-on-ARM.
-    & winget install --id Python.Python.3.12 -e --architecture x64 --source winget --accept-package-agreements --accept-source-agreements
-    $code = $LASTEXITCODE
-    # winget returns non-zero "no upgrade / already installed" codes when the
-    # x64 build is already present; treat those as success.
-    $okCodes = @(0, -1978335189, -1978335135, -1978335212)
-    if ($okCodes -notcontains $code) {
-        throw "winget failed to install x64 Python 3.12 (exit code $code)."
+    Write-Host "--- Installing x64 Python $pyVersion to $x64PythonDir ---"
+    $procArgs = @(
+        "/quiet",
+        "InstallAllUsers=0",
+        "PrependPath=0",
+        "Include_launcher=0",
+        "Include_test=0",
+        "TargetDir=$x64PythonDir"
+    )
+    $proc = Start-Process -FilePath $installer -ArgumentList $procArgs -Wait -PassThru
+    if ($proc.ExitCode -ne 0 -and -not (Test-Path $x64PythonExe)) {
+        throw "Python installer exited with code $($proc.ExitCode) and $x64PythonExe was not created."
     }
-
-    # Refresh PATH so a freshly installed interpreter is discoverable this session.
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("Path", "User")
 }
 
 $python313 = Resolve-Python313
