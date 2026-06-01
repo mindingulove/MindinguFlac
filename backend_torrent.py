@@ -382,7 +382,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         break
 
                     elapsed = time.time() - meta_start
-                    if elapsed > 45 and max_seen == 0 and _GLOBAL_SES.status().dht_nodes > 100:
+                    if elapsed > 15 and max_seen == 0 and _GLOBAL_SES.status().dht_nodes > 100:
                         break
                     if elapsed > (180 if max_seen > 0 else discovery_timeout):
                         break
@@ -532,7 +532,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
         handle.set_sequential_download(True)
         priorities = [0] * torrent_info.num_files(); priorities[best_f_idx] = 7
         handle.prioritize_files(priorities)
-        target_abs = torrent_save_path / torrent_info.file_at(best_f_idx).path
+        # Flatten file directly into output_dir (no torrent subdirectory)
+        flat_name = Path(torrent_info.file_at(best_f_idx).path).name
+        try:
+            handle.rename_file(best_f_idx, flat_name)
+        except Exception:
+            pass
+        target_abs = torrent_save_path / flat_name
         target_size = torrent_info.file_at(best_f_idx).size
         with manager._lock:
             job["active_audio_path"] = str(target_abs)
@@ -556,15 +562,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 job["active_audio_size"] = total
                 job["active_audio_ready_bytes"] = done
             if done >= total and total > 0:
-                output_dir.mkdir(parents=True, exist_ok=True)
-                if target_abs.parent.resolve() == output_dir.resolve():
-                    final_dest = target_abs
-                else:
-                    final_dest = output_dir / target_abs.name
-                    for old_file in output_dir.glob("*"):
-                        if old_file.is_file(): old_file.unlink()
-                    shutil.copy2(target_abs, final_dest)
-                manager._append_cache_event(job, "provider", f"Torrent engine produced {final_dest.name}")
+                manager._append_cache_event(job, "provider", f"Torrent engine produced {target_abs.name}")
                 if album != "Unknown":
                     catalog[f"{primary_artist.lower()}||{album.lower()}"] = current_magnet
                     _save_catalog(manager, catalog)

@@ -30,8 +30,7 @@ def is_valid_audio_file(path: Path) -> bool:
         return False
     suffix = path.suffix.lower()
     if suffix == ".flac":
-        # fLaC marker may appear after an ID3v2 tag on torrent-sourced files
-        return b"fLaC" in header
+        return header[:4] == b"fLaC" or header[:3] == b"ID3"
     if suffix in {".ogg", ".opus"}:
         return b"OggS" in header
     if suffix == ".mp3":
