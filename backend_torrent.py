@@ -182,6 +182,17 @@ def run(output_dir: Path, job: dict, manager) -> None:
         if not text or text == "Unknown": return ""
         return re.sub(r'\s*[\(\[].*?[\)\]]', '', text).strip()
     album_clean = clean_term(album)
+    # Strip remaster/edition/single suffixes that aren't part of the real album
+    # name (e.g. "Empire - Remastered 2003", "... - Single", "... - Deluxe").
+    album_clean = re.sub(
+        r'\s*[-–]\s*(remaster|remastered|single|ep|deluxe|expanded|anniversary|edition|version|mono|stereo|re-?master).*$',
+        '', album_clean, flags=re.IGNORECASE,
+    ).strip()
+    # When the "album" is really just the track title (a single release), Spotify
+    # gave us no real album. Drop it so the MusicBrainz hierarchy below resolves
+    # the track's actual album (e.g. "Silent Lucidity" -> "Empire").
+    if album_clean and title_clean and album_clean.lower() == title_clean.lower():
+        album_clean = ""
 
     quality_str = str(job.get("quality") or "LOSSLESS").upper()
     service = _normalize_service(job.get("service") or "all")
