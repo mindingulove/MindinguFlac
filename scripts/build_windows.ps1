@@ -77,7 +77,29 @@ $x64PythonExe = Join-Path $x64PythonDir "python.exe"
 
 function Resolve-Python313 {
     $candidates = @(
-        [pscustomobject]@{ Exe = $x64PythonExe; Args = @() },
+        [pscustomobject]@{ Exe = $x64PythonExe; Args = @() }
+    )
+
+    # Most reliable: read the Windows registry for installed Python 3.12. The
+    # python.org x64 build is tagged "3.12" (ARM64 would be "3.12-arm64", which
+    # we ignore). This finds the install regardless of its folder.
+    foreach ($hive in @("HKCU:", "HKLM:")) {
+        foreach ($sub in @("Software\Python\PythonCore\3.12\InstallPath",
+                           "Software\WOW6432Node\Python\PythonCore\3.12\InstallPath")) {
+            try {
+                $key = Get-ItemProperty -Path "$hive\$sub" -ErrorAction Stop
+                $exe = $key.ExecutablePath
+                if (-not $exe -and $key.'(default)') {
+                    $exe = Join-Path $key.'(default)' "python.exe"
+                }
+                if ($exe -and (Test-Path $exe)) {
+                    $candidates += [pscustomobject]@{ Exe = $exe; Args = @() }
+                }
+            } catch {}
+        }
+    }
+
+    $candidates += @(
         [pscustomobject]@{ Exe = "py"; Args = @("-3.12") },
         [pscustomobject]@{ Exe = "python3.12"; Args = @() },
         [pscustomobject]@{ Exe = "python"; Args = @() },
