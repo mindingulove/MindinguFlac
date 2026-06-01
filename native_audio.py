@@ -22,6 +22,11 @@ class NativeAudioManager:
         self._duration = 0.0
         self._volume = 1.0
         self._metadata = {}
+        # macOS NSSound finish-detection: currentTime() can reset to 0 when a
+        # sound finishes, so "position near duration" is unreliable. Track
+        # whether we paused and whether playback was ever observed instead.
+        self._paused = False
+        self._has_played = False
 
     def available(self) -> bool:
         if sys.platform == "darwin":
@@ -81,6 +86,8 @@ class NativeAudioManager:
                 self._error = ""
                 self._volume = max(0.0, min(1.0, float(volume)))
                 self._metadata = metadata or {}
+                self._paused = False
+                self._has_played = False
 
             if not sound.play():
                 with self._lock:
@@ -96,6 +103,7 @@ class NativeAudioManager:
 
     def pause(self) -> dict:
         with self._lock:
+            self._paused = True
             if sys.platform == "win32" and self._thread is not None:
                 self._pause_event.set()
                 self._playing = False
@@ -105,6 +113,7 @@ class NativeAudioManager:
 
     def resume(self) -> dict:
         with self._lock:
+            self._paused = False
             if sys.platform == "win32" and self._thread is not None:
                 self._pause_event.clear()
                 self._playing = True
@@ -165,7 +174,12 @@ class NativeAudioManager:
             duration = float(sound.duration() or 0)
             position = float(sound.currentTime() or 0)
             playing = bool(sound.isPlaying())
-            ended = bool(duration > 0 and position >= max(0, duration - 0.25) and not playing)
+            if playing:
+                self._has_played = True
+            # NSSound resets currentTime to 0 on finish, so the position check
+            # is unreliable. A sound that was playing and is now stopped without
+            # the user pausing it has finished on its own.
+            ended = bool(self._has_played and not playing and not self._paused)
             return {
                 "available": True,
                 "playing": playing,
