@@ -36,6 +36,7 @@ const state = {
   nativeAudio: { active: false, playing: false, position: 0, duration: 0, path: "", ended: false },
   nativeAudioPollTimer: null,
   prefetchedForRequestId: -1,
+  preMuteVolume: 1,
   catalogRefreshTimer: null,
   cacheLogTimer: null,
 };
@@ -1643,13 +1644,19 @@ function trackKey(item) {
 }
 
 async function prefetchNextTrack() {
-  if (state.isRepeat) return;
-  if (!state.queue.length || state.queueIndex < 0) return;
-  const nextIdx = state.queueIndex + 1;
-  if (nextIdx >= state.queue.length) return;
+  if (state.isRepeat) { console.log("[Prefetch] skipped: repeat on"); return; }
+  if (!state.queue.length) { console.log("[Prefetch] skipped: empty queue"); return; }
+  // queueIndex can desync; recover it from the current track if needed.
+  let idx = state.queueIndex;
+  if (idx < 0 && state.currentTrack) {
+    idx = state.queue.findIndex(t => t.title === state.currentTrack.title && t.artist === state.currentTrack.artist);
+  }
+  if (idx < 0) { console.log("[Prefetch] skipped: no queue index"); return; }
+  const nextIdx = idx + 1;
+  if (nextIdx >= state.queue.length) { console.log("[Prefetch] skipped: at last track"); return; }
   const next = state.queue[nextIdx];
   if (!next || next.type === "artist" || next.type === "album") return;
-  
+
   console.log("[Prefetch] Starting for:", next.title);
   
   try {
@@ -2279,6 +2286,25 @@ function syncVolumeBar() {
   if (!audio || !volume) return;
   volume.value = audio.volume;
   volume.style.backgroundSize = `${audio.volume * 100}% 100%`;
+  const icon = document.querySelector("#muteToggle i");
+  if (icon) {
+    const v = audio.volume;
+    icon.className = v <= 0.0001 ? "bi bi-volume-mute"
+                   : v < 0.5 ? "bi bi-volume-down"
+                   : "bi bi-volume-up";
+  }
+}
+
+function setPlayerVolume(v) {
+  const audio = $("audioPlayer");
+  if (!audio) return;
+  audio.volume = Math.max(0, Math.min(1, v));
+  localStorage.setItem(STORAGE_KEYS.volume, String(audio.volume));
+  persistVolume(audio.volume);
+  if (state.nativeAudio.active) {
+    api("/api/native_audio/volume", { method: "POST", body: JSON.stringify({ volume: audio.volume }) }).catch(() => {});
+  }
+  syncVolumeBar();
 }
 
 function seekBy(seconds) {
@@ -2562,12 +2588,19 @@ function bindPlayer() {
     }
   };
   $("volumeBar").oninput = () => {
-    audio.volume = Number($("volumeBar").value);
-    persistVolume(audio.volume);
-    if (state.nativeAudio.active) {
-      api("/api/native_audio/volume", { method: "POST", body: JSON.stringify({ volume: audio.volume }) }).catch(() => {});
+    const v = Number($("volumeBar").value);
+    if (v > 0.0001) state.preMuteVolume = v;
+    setPlayerVolume(v);
+  };
+  $("muteToggle").onclick = () => {
+    const cur = Number(audio.volume) || 0;
+    if (cur > 0.0001) {
+      state.preMuteVolume = cur;
+      setPlayerVolume(0);
+    } else {
+      const restore = state.preMuteVolume > 0.0001 ? state.preMuteVolume : (storedVolume() || 1);
+      setPlayerVolume(restore);
     }
-    syncVolumeBar();
   };
   window.addEventListener("focus", () => {
     if (state.currentTrack && !audio.paused) {

@@ -76,9 +76,28 @@ $x64PythonDir = Join-Path $env:LOCALAPPDATA "mindinguflac\python312-x64"
 $x64PythonExe = Join-Path $x64PythonDir "python.exe"
 
 function Resolve-Python313 {
-    $candidates = @(
-        [pscustomobject]@{ Exe = $x64PythonExe; Args = @() }
-    )
+    $candidates = @()
+
+    # Explicit override: point MINDINGUFLAC_PYTHON at an x64 python.exe to skip
+    # all auto-detection (most reliable on Windows-on-ARM).
+    if ($env:MINDINGUFLAC_PYTHON -and (Test-Path $env:MINDINGUFLAC_PYTHON)) {
+        $candidates += [pscustomobject]@{ Exe = $env:MINDINGUFLAC_PYTHON; Args = @() }
+    }
+
+    $candidates += [pscustomobject]@{ Exe = $x64PythonExe; Args = @() }
+
+    # Filesystem sweep of standard python.org install roots (catches Python312,
+    # Python312-x64, etc. under both per-user and all-users locations).
+    foreach ($base in @((Join-Path $env:LOCALAPPDATA "Programs\Python"), $env:ProgramFiles, "${env:SystemDrive}\")) {
+        if ($base -and (Test-Path $base)) {
+            try {
+                Get-ChildItem -Path $base -Directory -Filter "Python312*" -ErrorAction SilentlyContinue | ForEach-Object {
+                    $exe = Join-Path $_.FullName "python.exe"
+                    if (Test-Path $exe) { $candidates += [pscustomobject]@{ Exe = $exe; Args = @() } }
+                }
+            } catch {}
+        }
+    }
 
     # Most reliable: read the Windows registry for installed Python 3.12. The
     # python.org x64 build is tagged "3.12" (ARM64 would be "3.12-arm64", which
@@ -168,9 +187,7 @@ function Install-Python313 {
         "TargetDir=$x64PythonDir"
     )
     $proc = Start-Process -FilePath $installer -ArgumentList $procArgs -Wait -PassThru
-    if ($proc.ExitCode -ne 0 -and -not (Test-Path $x64PythonExe)) {
-        throw "Python installer exited with code $($proc.ExitCode) and $x64PythonExe was not created."
-    }
+    Write-Host "Installer exit code: $($proc.ExitCode)"
 }
 
 $python313 = Resolve-Python313
@@ -179,7 +196,20 @@ if (-not $python313) {
     $python313 = Resolve-Python313
 }
 if (-not $python313) {
-    throw "An x64 Python 3.12 was not found after installation. Open a new PowerShell window and rerun this script, or install the 64-bit Python 3.12 from python.org."
+    throw @"
+An x64 (AMD64) Python 3.12 could not be found or installed automatically.
+
+This usually happens on Windows-on-ARM (Parallels) when only an ARM64 Python is
+present. To fix it, install the 64-bit (AMD64) Python 3.12 manually:
+
+  1. Download: https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe
+  2. Run it (default options are fine).
+  3. Either rerun this script, or point it directly at the x64 interpreter:
+       `$env:MINDINGUFLAC_PYTHON = "C:\path\to\python.exe"`
+       powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+
+Verify an interpreter is x64 with:  & "C:\path\to\python.exe" -c "import platform; print(platform.machine())"  (must print AMD64)
+"@
 }
 
 # Recreate the venv if it is the wrong version OR the wrong architecture
