@@ -87,13 +87,28 @@ def _create_optimized_session():
         'enable_upnp': True,
         'enable_natpmp': True,
         'enable_lsd': True,
-        'active_downloads': 20,
+        # Aggressive connection limits
+        'active_downloads': 30,
         'active_seeds': 5,
-        'active_limit': 30,
-        'inactivity_timeout': 30,
-        'peer_connect_timeout': 10,
-        # Aggressive peer discovery
-        'dht_announce_interval': 60,
+        'active_limit': 50,
+        'connections_limit': 400,
+        'peer_connect_timeout': 5,
+        'connection_speed': 100,
+        'inactivity_timeout': 45,
+        # High throughput & caching optimizations
+        'disk_io_write_mode': 2, # disable_os_cache
+        'disk_io_read_mode': 2,  # disable_os_cache
+        'max_queued_disk_bytes': 10 * 1024 * 1024,
+        'cache_size': 512, # 512 * 16KB = 8MB cache
+        'send_buffer_watermark': 3 * 1024 * 1024,
+        'recv_socket_buffer_size': 2 * 1024 * 1024,
+        'send_socket_buffer_size': 2 * 1024 * 1024,
+        'mixed_mode_algorithm': 1, # prefer_tcp
+        # Aggressive peer discovery & requesting
+        'dht_announce_interval': 30,
+        'min_announce_interval': 60,
+        'choking_algorithm': 1, # rate_based_choker
+        'seed_choking_algorithm': 1, # fastest_upload
         'out_enc_policy': 1, # enabled
         'in_enc_policy': 1,  # enabled
         'allowed_enc_level': 2, # both
