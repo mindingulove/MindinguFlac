@@ -19,7 +19,7 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - **Native Integration**:
   - **macOS**: Full "Now Playing" integration, Touch Bar support, and Media Key handling.
   - **Windows**: Native audio output device selection and silent background processing.
-- **Advanced Streaming**: Intelligent buffer management allowing you to listen while your media is being indexed or moved.
+- **Advanced Streaming**: Intelligent buffer management allowing you to listen while your media is being indexed or moved, with stable pause/resume across active-download and cached-file handoffs.
 - **Spotify Playlists**: Import any public Spotify playlist by link — Mindinguflac loads the full track list, artwork, and metadata, then lets you stream or download each track in lossless quality (see the *70s 80s 90s* playlist below).
 - **Discogs Integration**: Optionally provide a Discogs personal token in Settings to fetch high-resolution vinyl sleeves, booklet images, and extended metadata for your album galleries.
 - **Playlist Engine**: Create local playlists, manage queues, and import metadata from public share links.

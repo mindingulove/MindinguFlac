@@ -22,6 +22,7 @@
 
 ### Playback and Queue Polish
 
+- Manual pause now stays paused during active-download and finished-cache handoffs; the player no longer reloads the same track or cancels prefetch when pausing.
 - Shuffle immediately rebuilds the active queue and refreshes the prefetched next track.
 - Shuffle and repeat controls now toggle their active state immediately and highlight when enabled.
 - Selecting a new track cancels active or prefetched background jobs before starting the selected track.

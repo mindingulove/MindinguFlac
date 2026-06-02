@@ -28,6 +28,7 @@ const state = {
   suggestionVisibleCount: 0,
   forwardHistory: [],
   autoplayWanted: false,
+  manualPauseRequested: false,
   currentPlayableReady: false,
   playerStatus: "Choose a track to stream",
   playbackRequestId: 0,
@@ -1485,6 +1486,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
 
   
   const requestId = ++state.playbackRequestId;
+  state.manualPauseRequested = false;
   state.activeJobId = null;
   state.currentTrack = item;
   recordDockRecentSelection(item, playbackContext);
@@ -1537,7 +1539,30 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   await startServiceDownload(item, mode, requestId);
 }
 
-async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library") {
+function isActiveJobStreamUrl(url) {
+  return !!url && url.includes("/api/library/stream_active_job");
+}
+
+function seekAfterMetadata(audio, position) {
+  const target = Number(position);
+  if (!Number.isFinite(target) || target <= 0) return;
+
+  const apply = () => {
+    const duration = Number(audio.duration);
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    try {
+      audio.currentTime = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
+    } catch (e) {}
+    audio.removeEventListener("loadedmetadata", apply);
+    audio.removeEventListener("canplay", apply);
+  };
+
+  audio.addEventListener("loadedmetadata", apply);
+  audio.addEventListener("canplay", apply);
+  apply();
+}
+
+async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library", startAt = 0) {
   if (requestId !== state.playbackRequestId) return;
   state.currentLibraryPath = filePath;
   const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}`;
@@ -1562,8 +1587,50 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
   setPlayerStatusIcon("ready");
   setPlayerStatus(statusText, track);
   audio.load();
+  seekAfterMetadata(audio, startAt);
   syncPlayPauseButton();
   tryStartAudio(audio, track, requestId, jobId);
+}
+
+async function resumeBrowserAudioFromStableSource(audio) {
+  if (!audio) return;
+  state.manualPauseRequested = false;
+  const hasMissingSource = !audio.src || audio.src === window.location.href;
+  const shouldUseFinishedFile = state.currentLibraryPath && (
+    hasMissingSource ||
+    isActiveJobStreamUrl(audio.src) ||
+    isActiveJobStreamUrl(state.currentStreamUrl)
+  );
+
+  if (shouldUseFinishedFile) {
+    const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    await playFromLibraryPath(
+      state.currentLibraryPath,
+      state.currentTrack,
+      state.playbackRequestId,
+      state.activeJobId,
+      "Playing from cache",
+      resumeAt
+    );
+    return;
+  }
+
+  state.autoplayWanted = true;
+  audio.play().catch((error) => {
+    console.error("[Player] Play failed:", error);
+    if (state.currentTrack && error.name !== "NotAllowedError" && error.name !== "AbortError") {
+      console.log("[Player] Attempting to re-resolve track after play failure...");
+      selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+    } else if (state.currentTrack) {
+      setPlayerStatus(error.message || "Playback failed", state.currentTrack);
+    }
+  });
+}
+
+function pauseBrowserAudio(audio) {
+  state.manualPauseRequested = true;
+  state.autoplayWanted = false;
+  if (audio) audio.pause();
 }
 
 function setPlayerStatusIcon(mode, pct) {
@@ -1866,22 +1933,28 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       }
       const pct = job.progress ? Math.max(0, Math.min(99, Math.round(job.progress))) : 0;
       if (job.status === "finished") {
+        if (mode === "stream" && job.library_path) {
+          state.currentLibraryPath = job.library_path;
+          state.currentPlayableReady = true;
+        }
         setPlayerStatusIcon("ready");
         setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track);
         if (!switchedToFinal && mode === "stream" && job.library_path) {
           switchedToFinal = true;
           const audio = $("audioPlayer");
-          // Don't interrupt active HLS playback — FLAC is cached for next play.
+          // Don't interrupt active stream playback; the finished file is used on resume.
           // Only switch if playback hasn't meaningfully started yet.
-          if (!audio || audio.paused || audio.currentTime < 2) {
+          if (!state.manualPauseRequested && (!audio || audio.paused || audio.currentTime < 2)) {
             try {
-              await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache");
+              const resumeAt = audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+              await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache", resumeAt);
             } catch (error) {
               setPlayerStatusIcon("error");
               setPlayerStatus(error.message || "Native audio failed", track);
             }
           }
         }
+        state.activeJobId = null;
         return;
       }
       updatePlayerPie(pct);
@@ -2436,8 +2509,14 @@ function bindKeyboardControls() {
         return;
       }
       const audio = $("audioPlayer");
-      if (!audio.src && !state.currentStreamUrl) return;
-      audio.paused ? audio.play() : audio.pause();
+      if (!audio.src && !state.currentStreamUrl && !state.currentLibraryPath) return;
+      if (audio.paused) {
+        resumeBrowserAudioFromStableSource(audio).catch((error) => {
+          if (state.currentTrack) setPlayerStatus(error.message || "Playback failed", state.currentTrack);
+        });
+      } else {
+        pauseBrowserAudio(audio);
+      }
       return;
     }
     if (event.key === "ArrowRight") {
@@ -2579,14 +2658,20 @@ function bindPlayer() {
       return;
     }
     if (audio.paused) {
-      if (!audio.src || audio.src === window.location.href) {
+      const icon = $("playPause")?.querySelector("i");
+      const buttonShowsPause = !!icon && icon.classList.contains("bi-pause-fill");
+      if (buttonShowsPause && (state.autoplayWanted || audio.currentTime > 0)) {
+        pauseBrowserAudio(audio);
+        return;
+      }
+      if ((!audio.src || audio.src === window.location.href) && !state.currentLibraryPath) {
           // If a download is actively running, ignore the play button so we don't restart it
           if ($("playerStatusIcon") && $("playerStatusIcon").classList.contains("downloading")) {
               console.log("[Player] Download in progress, ignoring play click.");
               return;
           }
           // If it's already "Opening stream..." or "BUFFERING...", ignore the play click
-          const status = $("playerStatus")?.textContent || "";
+          const status = $("playerMeta")?.textContent || "";
           if (status.includes("...") || status === "BUFFERING...") {
               console.log("[Player] Already resolving or buffering, ignoring play click.");
               return;
@@ -2595,19 +2680,11 @@ function bindPlayer() {
           return;
       }
       console.log("[Player] Manual play requested. Current src:", audio.src);
-      audio.play().catch((error) => {
-        console.error("[Player] Play failed:", error);
-        // If play failed and we have a track, it might be a stale/failed stream.
-        // Try to re-select the track if the error isn't just a browser policy block.
-        if (state.currentTrack && error.name !== "NotAllowedError" && error.name !== "AbortError") {
-            console.log("[Player] Attempting to re-resolve track after play failure...");
-            selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
-        } else if (state.currentTrack) {
-            setPlayerStatus(error.message || "Playback failed", state.currentTrack);
-        }
+      resumeBrowserAudioFromStableSource(audio).catch((error) => {
+        if (state.currentTrack) setPlayerStatus(error.message || "Playback failed", state.currentTrack);
       });
     } else {
-      audio.pause();
+      pauseBrowserAudio(audio);
     }
   };
   audio.onplay = audio.onpause = () => {
@@ -2655,7 +2732,7 @@ function bindPlayer() {
     }
   };
   audio.oncanplay = () => {
-    if (state.autoplayWanted && audio.paused) {
+    if (state.autoplayWanted && !state.manualPauseRequested && audio.paused) {
       audio.play().catch(() => {});
     }
   };
@@ -2663,6 +2740,8 @@ function bindPlayer() {
     if (state.currentTrack) setPlayerStatus("Buffering...", state.currentTrack);
   };
   audio.onplaying = () => {
+    state.manualPauseRequested = false;
+    state.autoplayWanted = false;
     if (state.currentTrack) {
         const isCache = state.currentStreamUrl && state.currentStreamUrl.includes("/api/library/stream");
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
@@ -2672,8 +2751,19 @@ function bindPlayer() {
     const error = audio.error;
     // Ignore errors if we don't have a source (common when using native output)
     if (!audio.src || audio.src === window.location.href) return;
+    if (state.manualPauseRequested) return;
 
-    if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {        console.log("[Player] Media error 4 (Safari/Transient). Retrying stream...");
+    if (state.currentLibraryPath && isActiveJobStreamUrl(state.currentStreamUrl) && state.currentTrack) {
+        const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        playFromLibraryPath(
+          state.currentLibraryPath,
+          state.currentTrack,
+          state.playbackRequestId,
+          state.activeJobId,
+          "Playing from cache",
+          resumeAt
+        ).catch(() => {});
+    } else if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {        console.log("[Player] Media error 4 (Safari/Transient). Retrying stream...");
         const pos = audio.currentTime;
         const url = new URL(state.currentStreamUrl, window.location.origin);
         url.searchParams.set("t", Date.now()); // Bust cache on retry
