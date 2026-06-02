@@ -299,9 +299,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
             best_f_score = -1
             track_pats = [f"{track_num.zfill(2)}.", f" {track_num.zfill(2)} ", f"- {track_num.zfill(2)} "] if track_num else []
             
-            # Words that MUST appear for the match to be considered valid
+            # Words that MUST appear for the match to be considered valid.
+            # We filter out common noise that might be in Spotify title but not filename.
+            noise_words = {"remastered", "remaster", "live", "edit", "version", "mono", "stereo", "mix", "remix", "single", "digitally"}
             title_tokens = set(re.findall(r'\w+', title_clean.lower()))
-            meaningful_tokens = {t for t in title_tokens if len(t) > 2 and t not in {"the", "and", "feat", "with"}}
+            meaningful_tokens = {t for t in title_tokens if len(t) > 2 and t not in {"the", "and", "feat", "with"} and t not in noise_words}
             if not meaningful_tokens: meaningful_tokens = title_tokens
 
             for i in range(torrent_info.num_files()):
@@ -312,23 +314,19 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         rapidfuzz.fuzz.token_set_ratio(raw_title, f_path.name),
                         rapidfuzz.fuzz.token_set_ratio(title_clean, f_path.stem),
                     )
-                    # Significant word check: a majority of meaningful words from target MUST exist in the filename.
-                    # We check the filename stem specifically to avoid "Sirius" matching "Eye in the Sky"
-                    # just because it's inside a folder named "Eye in the Sky".
-                    filename_tokens = set(re.findall(r'\w+', f_path.stem.lower()))
-                    match_count = sum(1 for t in meaningful_tokens if t in filename_tokens)
+                    # Significant word check: 
+                    # For short titles (1-2 words), we want a perfect match to avoid "Kill the King" vs "Temple of the King".
+                    # For longer titles, we allow some flexibility (70%).
+                    path_tokens = set(re.findall(r'\w+', str(f_path).lower()))
+                    match_count = sum(1 for t in meaningful_tokens if t in path_tokens)
                     match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
                     
-                    if match_ratio < 0.7:
-                        # Fallback: if the filename is very short (e.g. "01.flac"), check the immediate parent folder too
-                        parent_tokens = set(re.findall(r'\w+', f_path.parent.name.lower())) if f_path.parent.name else set()
-                        combined_tokens = filename_tokens.union(parent_tokens)
-                        match_count = sum(1 for t in meaningful_tokens if t in combined_tokens)
-                        match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
-                        if match_ratio < 0.7:
-                            continue
+                    required_ratio = 0.7 if len(meaningful_tokens) > 2 else 0.99
+                    if match_ratio < required_ratio:
+                        continue
 
-                    if title_score < 62:
+                    if title_score < 58: # Balanced for better inclusivity
+                        continue
                     
                     score = title_score
                     if any(p in f_path.name for p in track_pats): score += 40
