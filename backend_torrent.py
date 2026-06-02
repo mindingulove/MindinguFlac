@@ -337,7 +337,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         continue
                     
                     score = title_score
-                    if any(p in f_path.name for p in track_pats): score += 40
+                    is_track_match = any(p in f_path.name for p in track_pats)
+                    if track_num:
+                        if is_track_match:
+                            score += 40
+                        elif re.search(r'\b\d{1,2}\b', f_path.name) and not is_track_match:
+                            # If filename has a different track number, penalize it heavily
+                            score -= 60
+
                     if f"cd{disc_num}" in str(f_path).lower(): score += 20
                     for kw in ["live", "demo", "remix", "mix", "edit"]:
                         if kw in f_name_lower and kw not in raw_title.lower(): score -= 50
@@ -879,6 +886,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
                                 # Found metadata!
                                 torrent_info = h.get_torrent_info()
+                                
+                                # CRITICAL: Immediately zero-out all file priorities so libtorrent 
+                                # doesn't start downloading the whole album while we are probing.
+                                try:
+                                    h.prioritize_files([0] * torrent_info.num_files())
+                                except Exception:
+                                    pass
+
                                 candidate_score, skip_reason = score_metadata_candidate(
                                     torrent_info,
                                     r,
@@ -889,10 +904,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
                                 if candidate_score:
                                     metadata_candidates.append((candidate_score["score"], h, m, r, r_idx, save_path, candidate_score))
+                                    # Cap display scores at 100 to avoid confusing "120% match" logs
+                                    disp_song = min(100, int(candidate_score['file_score']))
+                                    disp_album = min(100, int(candidate_score['album_score']))
                                     manager._append_cache_event(
                                         job,
                                         "trying",
-                                        f"Source #{r_idx+1} match: {int(candidate_score['file_score'])}% (song), {int(candidate_score['album_score'])}% (album). Final score: {int(candidate_score['score'])}",
+                                        f"Source #{r_idx+1} match: {disp_song}% (song), {disp_album}% (album). Final score: {int(candidate_score['score'])}",
                                     )
                                 else:
                                     # Metadata was found but it's the wrong torrent/contents.
