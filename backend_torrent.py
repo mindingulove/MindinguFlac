@@ -362,7 +362,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         best_f_idx = i
             return best_f_idx, best_f_score
 
-        def score_metadata_candidate(torrent_info, result: dict, target_album: str, require_track_list: bool):
+        def score_metadata_candidate(torrent_info, result: dict, target_album: str, require_track_list: bool, live_peers: int = 0):
             audio_indexes = audio_file_indexes(torrent_info)
             if require_track_list and len(audio_indexes) < 2:
                 return None, "Single-file album"
@@ -397,6 +397,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 return None, f"Album mismatch ({int(album_score)}%)"
 
             score = (best_f_score * 2) + (album_score * 2) + (float(result.get("_score") or 0) * 0.25)
+            
+            # Live Peer Health bonus
+            if live_peers > 0:
+                score += min(live_peers * 10, 100) # Up to +100 for healthy connections
+            else:
+                score -= 50 # Ghost source penalty
+            
             if album_is_specific:
                 if album_score >= 80:
                     score += 220
@@ -898,6 +905,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
                                 # Found metadata!
                                 torrent_info = h.get_torrent_info()
+                                s = h.status()
+                                live_peers = s.num_peers
                                 
                                 # CRITICAL: Immediately zero-out all file priorities so libtorrent 
                                 # doesn't start downloading the whole album while we are probing.
@@ -911,6 +920,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                     r,
                                     r.get("_search_album") or target_album,
                                     require_track_list=require_track_list,
+                                    live_peers=live_peers
                                 )
                                 scored_magnets.add(m)
 
@@ -922,7 +932,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                     manager._append_cache_event(
                                         job,
                                         "trying",
-                                        f"Source #{r_idx+1} match: {disp_song}% (song), {disp_album}% (album). Final score: {int(candidate_score['score'])}",
+                                        f"Source #{r_idx+1} match: {disp_song}% (song), {disp_album}% (album). Swarm: {live_peers}p. Score: {int(candidate_score['score'])}",
                                     )
                                 else:
                                     # Metadata was found but it's the wrong torrent/contents.
