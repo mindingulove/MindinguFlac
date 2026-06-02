@@ -2300,10 +2300,17 @@ async function toggleNativeAudioPlayback() {
     }
     _callNowPlaying("set_playback_state", 2);
   } else {
-    // If it already ended or lost the handle, re-resolve instead of resume
-    if (state.nativeAudio.ended || !state.currentLibraryPath) {
-        console.log("[Player] Native audio ended or handle lost, re-resolving...");
-        selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+    // If it already ended, advance to next
+    if (state.nativeAudio.ended) {
+        if (state.queue.length) {
+            state.queueIndex = (state.queueIndex + 1) % state.queue.length;
+            selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
+        }
+        return;
+    }
+    
+    if (!state.currentLibraryPath) {
+        console.log("[Player] Native audio has no path to resume, doing nothing.");
         return;
     }
     
@@ -2314,9 +2321,7 @@ async function toggleNativeAudioPlayback() {
         if (forced && forced.playing) {
             state.nativeAudio.playing = true;
         } else {
-            console.warn("[Player] Native resume failed, falling back to full re-resolve");
-            selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
-            return;
+            console.warn("[Player] Native resume failed:", status.error);
         }
     } else {
         state.nativeAudio.playing = !!status.playing;
@@ -2580,12 +2585,13 @@ function bindPlayer() {
               console.log("[Player] Download in progress, ignoring play click.");
               return;
           }
-          // If browser player has no source but we have a track, try to re-resolve it.
-          // This handles cases where switching output or transient errors cleared the src.
-          if (state.currentTrack) {
-              console.log("[Player] Browser audio has no src, re-resolving...");
-              selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+          // If it's already "Opening stream..." or "BUFFERING...", ignore the play click
+          const status = $("playerStatus")?.textContent || "";
+          if (status.includes("...") || status === "BUFFERING...") {
+              console.log("[Player] Already resolving or buffering, ignoring play click.");
+              return;
           }
+          console.log("[Player] Browser audio has no src and not busy, doing nothing.");
           return;
       }
       console.log("[Player] Manual play requested. Current src:", audio.src);
