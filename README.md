@@ -20,10 +20,39 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
   - **macOS**: Full "Now Playing" integration, Touch Bar support, and Media Key handling.
   - **Windows**: Native audio output device selection and silent background processing.
 - **Advanced Streaming**: Intelligent buffer management allowing you to listen while your media is being indexed or moved.
+- **Spotify Playlists**: Import any public Spotify playlist by link — Mindinguflac loads the full track list, artwork, and metadata, then lets you stream or download each track in lossless quality (see the *70s 80s 90s* playlist below).
 - **Playlist Engine**: Create local playlists, manage queues, and import metadata from public share links.
 - **High-Quality Trackers**: Integrated real-time health monitoring for public metadata swarms to ensure the most reliable connection.
 
-## Installation
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/home.png" width="800" alt="Home Screen">
+  <br><i>Home - Discover and search your music</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/artists.png" width="800" alt="Artists Screen">
+  <br><i>Artists - Explore your library by artist</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/albums.png" width="800" alt="Albums Screen">
+  <br><i>Albums - High-fidelity album browsing</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/playlist.png" width="800" alt="Playlist Screen">
+  <br><i>Playlists - Import and manage your Spotify collections</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/settings.png" width="800" alt="Settings Screen">
+  <br><i>Settings - Configure download engines and quality</i>
+</p>
+
+## Setup & Usage
+
 
 ### Prerequisites
 - Python 3.12 (the Windows torrent build requires 3.12; `libtorrent` has no 3.13/3.14 wheels)

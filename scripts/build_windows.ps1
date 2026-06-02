@@ -344,8 +344,18 @@ Write-Host "Using Python: $python"
 Invoke-Checked { & $python -m pip install --upgrade pip }
 Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
 Invoke-Checked { & $python -m pip install --only-binary=libtorrent libtorrent }
-Invoke-Checked { & $python scripts\make_desktop_icons.py }
+# libtorrent's win_amd64 wheel links OpenSSL 1.1 (libssl-1_1-x64.dll /
+# libcrypto-1_1-x64.dll), which Python 3.12 (OpenSSL 3, libcrypto-3.dll) does
+# NOT provide. Without these the .pyd fails with "DLL load failed ... The
+# specified module could not be found." This package drops the OpenSSL 1.1 DLLs
+# into the libtorrent package dir so the .pyd loads and PyInstaller bundles them.
+Invoke-Checked { & $python -m pip install libtorrent-windows-dll }
+# Install the x64 VC++ runtime BEFORE importing libtorrent (it also needs it).
 Ensure-VCRedistX64
+# Fail fast if libtorrent still can't load, instead of shipping a broken app
+# (PyInstaller silently skips an un-importable libtorrent in collect_all).
+Invoke-Checked { & $python -c "import libtorrent; print('libtorrent OK', libtorrent.version)" }
+Invoke-Checked { & $python scripts\make_desktop_icons.py }
 Invoke-Checked { & $python -m PyInstaller --clean --noconfirm Mindinguflac-windows.spec }
 
 Write-Host "--- Packaging ---"

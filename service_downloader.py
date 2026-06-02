@@ -1136,15 +1136,23 @@ class ServiceDownloadManager:
         if progress <= 0:
             return False
 
-        # Watchdog: If bytes haven't changed for 5 minutes, it's probably a dead socket
+        # Watchdog: if bytes haven't changed for 5 minutes it's probably a dead
+        # socket. Count the torrent engine's libtorrent-reported byte progress
+        # too: it streams into a ".parts" file that isn't an audio candidate, so
+        # a big, actively-downloading torrent would otherwise look frozen here
+        # (a stale partial audio file in the folder stops growing) and get a
+        # false "no progress" timeout. active_audio_ready_bytes comes straight
+        # from handle.file_progress(), so this reflects the real download rate.
+        engine_bytes = int(job.get("active_audio_ready_bytes") or 0)
+        active_bytes = max(downloaded_bytes, engine_bytes)
         now = time.time()
         prev_bytes = int(job.get("_last_active_bytes") or 0)
         last_time = float(job.get("_last_active_time") or now)
 
-        if downloaded_bytes > prev_bytes:
-            job["_last_active_bytes"] = downloaded_bytes
+        if active_bytes > prev_bytes:
+            job["_last_active_bytes"] = active_bytes
             job["_last_active_time"] = now
-        elif now - last_time > 300: # 5 minutes of zero progress
+        elif now - last_time > 300: # 5 minutes of genuine zero progress
             with self._lock:
                 if job.get("status") == "running":
                     job["status"] = "error"

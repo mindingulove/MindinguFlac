@@ -250,7 +250,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
     discovery_timeout = 60 if is_prefetch else 120
     current_magnet = None
-    blacklist: set[str] = set()  # magnets that stalled mid-download
+    blacklist: set[str] = set()  # magnets that are dead/wrong; never retry
+    # magnets that stalled but had real progress on the correct file: counted
+    # so they get a bounded number of resume attempts before being blacklisted.
+    stall_retry_counts: dict[str, int] = {}
 
     def _apply_resolved_album(new_album: str) -> None:
         # When the track is found on a different album than Spotify reported
@@ -501,8 +504,23 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 def finalize_selected_file() -> bool:
                     if not target_abs.exists():
                         return False
+                    # Completeness MUST be judged by bytes actually downloaded,
+                    # not file size: sparse storage (storage_mode_t(2)) allocates
+                    # the full size up front, so st_size == target_size even when
+                    # pieces are still missing. Without this, a handle that dies
+                    # mid-download would "finalize" a sparse, hole-riddled file
+                    # (no FLAC header, unplayable) into the library.
+                    if last_done < target_size:
+                        return False
                     try:
                         if target_abs.stat().st_size < target_size:
+                            return False
+                        # Defense-in-depth: a finished audio file never begins
+                        # with a run of zero bytes. A zero head means the first
+                        # piece is a sparse hole, i.e. the download is incomplete.
+                        with open(target_abs, "rb") as fh:
+                            head = fh.read(16)
+                        if not head or head == b"\x00" * len(head):
                             return False
                     except OSError:
                         return False
@@ -520,6 +538,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     return True
 
                 start_time = time.time(); last_progress_time = time.time(); last_done = 0
+                last_reannounce = time.time()
                 reacquire_attempts = 0
                 while True:
                     if job_id in manager._cancel_flags: raise RuntimeError("Cancelled")
@@ -573,16 +592,41 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         job["active_audio_ready_bytes"] = done
                     if done >= total and total > 0:
                         return finalize_selected_file()
-                    # Stall detection (only when NOT making progress):
-                    #   - no progress at all for 120s, or
-                    #   - peers dropped to 0 and no progress for 60s.
-                    # As long as bytes keep arriving, last_progress_time updates
-                    # and we never abandon an actively-downloading source.
+                    # Stall handling. Don't abandon a source the instant bytes
+                    # pause: first re-announce to wake a quiet swarm, and stay
+                    # patient (more so for background prefetch, where no user is
+                    # waiting). Only give up after the extended budget — and if
+                    # the source made real progress on the correct file, return
+                    # None instead of False so the caller keeps it as a retryable
+                    # fallback (its .parts resume cheaply) rather than blacklisting
+                    # it and falling back to a worse source that lacks the track.
                     since_progress = time.time() - last_progress_time
-                    stalled = since_progress > 120
-                    if not stalled and s.num_peers == 0 and since_progress > 60:
+                    if since_progress > 30 and time.time() - last_reannounce > 45:
+                        try:
+                            for tr in trackers:
+                                handle.add_tracker(lt.announce_entry(tr))
+                        except Exception:
+                            pass
+                        try:
+                            handle.force_reannounce()
+                        except Exception:
+                            pass
+                        last_reannounce = time.time()
+                        manager._append_cache_event(job, "trying", f"Streaming stalled {int(since_progress)}s ({s.num_peers}p); re-announcing to wake swarm...")
+                    max_stall = 300 if is_prefetch else 120
+                    no_peer_stall = 180 if is_prefetch else 60
+                    stalled = since_progress > max_stall
+                    if not stalled and s.num_peers == 0 and since_progress > no_peer_stall:
                         stalled = True
-                    if stalled: return False
+                    if stalled:
+                        if last_done > 0:
+                            key = _torrent_key(magnet)
+                            stall_retry_counts[key] = stall_retry_counts.get(key, 0) + 1
+                            limit = 3 if is_prefetch else 1
+                            if stall_retry_counts[key] <= limit:
+                                manager._append_cache_event(job, "trying", "Source stalled but had progress; keeping it as a fallback to resume later...")
+                                return None
+                        return False
                     if time.time() - start_time > 1800: return False
                     time.sleep(2)
 
@@ -663,12 +707,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     _unregister_job_from_torrent(current_magnet, job_id)
                     current_magnet = None
                     return None
-                # Actually download it now. If the swarm stalls mid-download,
-                # blacklist this magnet and let the phase loop try the next one.
-                if stream_to_completion(candidate_handle, current_magnet, torrent_save_path):
+                # Actually download it now. False = dead/wrong -> blacklist;
+                # None = stalled with real progress -> keep retryable (resume).
+                _scr = stream_to_completion(candidate_handle, current_magnet, torrent_save_path)
+                if _scr:
                     return candidate_handle
-                manager._append_cache_event(job, "trying", "Source stalled mid-download, trying next...")
-                blacklist.add(current_magnet)
+                if _scr is False:
+                    blacklist.add(current_magnet)
+                    manager._append_cache_event(job, "trying", "Source stalled mid-download, trying next...")
+                else:
+                    manager._append_cache_event(job, "trying", "Source stalled but kept as fallback, trying next...")
                 _unregister_job_from_torrent(current_magnet, job_id)
                 current_magnet = None
                 return None
@@ -838,12 +886,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
                         current_magnet = m
                         torrent_save_path = save_path
-                        if stream_to_completion(h, m, save_path):
+                        _scr = stream_to_completion(h, m, save_path)
+                        if _scr:
                             if apply_search_album:
                                 resolved_album_from_search = selected_result.get("_search_album") or target_album
                             return h
 
-                        blacklist.add(m)
+                        if _scr is False:
+                            blacklist.add(m)
                         _unregister_job_from_torrent(m, job_id)
                         current_magnet = None
                         active_window_handles = [x for x in active_window_handles if x[1] != m]
@@ -862,9 +912,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 time.sleep(0.5)
                 if handle.status().num_peers > 0:
                     manager._append_cache_event(job, "trying", f"Step 0: Reusing swarm for: {album}")
-                    if stream_to_completion(handle, current_magnet, torrent_save_path):
+                    _scr = stream_to_completion(handle, current_magnet, torrent_save_path)
+                    if _scr:
                         return
-                blacklist.add(cached_magnet)
+                    # Only blacklist on a hard failure; a stalled-with-progress
+                    # cache magnet (None) stays retryable so a later phase resumes.
+                    if _scr is False:
+                        blacklist.add(cached_magnet)
+                else:
+                    blacklist.add(cached_magnet)
                 _unregister_job_from_torrent(current_magnet, job_id)
                 handle = None
                 current_magnet = None

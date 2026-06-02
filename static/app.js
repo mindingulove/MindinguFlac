@@ -229,12 +229,23 @@ const STORAGE_KEYS = {
 };
 
 async function api(path, options = {}) {
-  const resp = await fetch(`${API_BASE}${path}`, options);
-  if (!resp.ok) {
-    const error = await resp.json().catch(() => ({ error: resp.statusText }));
-    throw new Error(error.error || "API call failed");
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      signal: controller.signal,
+    });
+    clearTimeout(id);
+    if (!resp.ok) {
+      const error = await resp.json().catch(() => ({ error: resp.statusText }));
+      throw new Error(error.error || "API call failed");
+    }
+    return resp.json();
+  } catch (err) {
+    clearTimeout(id);
+    throw err;
   }
-  return resp.json();
 }
 
 function $(id) { return document.getElementById(id); }
@@ -2579,6 +2590,22 @@ function bindPlayer() {
   audio.oncanplay = () => {
     if (state.autoplayWanted && audio.paused) {
       audio.play().catch(() => {});
+    }
+  };
+  audio.onerror = () => {
+    const error = audio.error;
+    if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {
+        console.log("[Player] Media error 4 (Safari/Transient). Retrying stream...");
+        const pos = audio.currentTime;
+        const url = new URL(state.currentStreamUrl, window.location.origin);
+        url.searchParams.set("t", Date.now()); // Bust cache on retry
+        audio.src = url.toString();
+        audio.load();
+        audio.currentTime = pos;
+        audio.play().catch(() => {});
+    } else if (error && state.currentTrack) {
+        console.error("[Player] Media error:", error.code, error.message);
+        setPlayerStatus(`Playback error (${error.code})`, state.currentTrack);
     }
   };
   $("seekBar").oninput = () => {
