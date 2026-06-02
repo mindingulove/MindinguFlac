@@ -21,6 +21,7 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
   - **Windows**: Native audio output device selection and silent background processing.
 - **Advanced Streaming**: Intelligent buffer management allowing you to listen while your media is being indexed or moved.
 - **Spotify Playlists**: Import any public Spotify playlist by link — Mindinguflac loads the full track list, artwork, and metadata, then lets you stream or download each track in lossless quality (see the *70s 80s 90s* playlist below).
+- **Discogs Integration**: Optionally provide a Discogs personal token in Settings to fetch high-resolution vinyl sleeves, booklet images, and extended metadata for your album galleries.
 - **Playlist Engine**: Create local playlists, manage queues, and import metadata from public share links.
 - **High-Quality Trackers**: Integrated real-time health monitoring for public metadata swarms to ensure the most reliable connection.
 
@@ -37,6 +38,11 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/artist_detail.png" width="800" alt="Artist Detail">
+  <br><i>Artist Detail - Rich metadata and discography browsing</i>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/albums.png" width="800" alt="Albums Screen">
   <br><i>Albums - High-fidelity album browsing</i>
 </p>
@@ -47,8 +53,8 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/settings.png" width="800" alt="Settings Screen">
-  <br><i>Settings - Configure download engines and quality</i>
+  <img src="docs/screenshots/settings_discogs.png" width="800" alt="Discogs Settings">
+  <br><i>Settings - Integration with Qobuz and Discogs for enhanced metadata</i>
 </p>
 
 ## Setup & Usage
