@@ -13,6 +13,18 @@ from pathlib import Path
 
 from config import jobs_path
 
+# Import backends at top level for PyInstaller detection
+try:
+    import backend_monochrome
+    import backend_musicdl
+    import backend_spotiflac
+    import backend_tidal_hifi
+    import backend_torrent
+    import backend_other
+except ImportError:
+    pass
+
+
 
 def clean_part(value: str) -> str:
     cleaned = "".join(char for char in value if char not in '/\\:*?"<>|').strip()
@@ -1279,7 +1291,6 @@ class ServiceDownloadManager:
                 if job.get("mode", "stream") == "stream":
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
-                import backend_monochrome
                 backend_monochrome.run(output_dir, job, self)
 
             elif engine == "musicdl":
@@ -1289,7 +1300,6 @@ class ServiceDownloadManager:
                 if job.get("mode", "stream") == "stream":
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
-                import backend_musicdl
                 backend_musicdl.run(output_dir, job, self)
 
             elif engine == "qobuz-dlp":
@@ -1307,7 +1317,6 @@ class ServiceDownloadManager:
                 if job.get("mode", "stream") == "stream":
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
-                import backend_torrent
                 backend_torrent.run(output_dir, job, self)
 
             elif engine == "tidal_hifi":
@@ -1332,7 +1341,6 @@ class ServiceDownloadManager:
                 if job.get("mode", "stream") == "stream":
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
-                import backend_other
                 backend_other.run(resolved_url, output_dir, job, self)
 
             else:  # spotiflac (default)
@@ -1346,7 +1354,6 @@ class ServiceDownloadManager:
                 if job.get("mode", "stream") == "stream":
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
-                import backend_spotiflac
                 backend_spotiflac.run(resolved_url, output_dir, job, self)
 
             self._save_sidecar_files(output_dir, job)
