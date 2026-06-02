@@ -315,15 +315,23 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         rapidfuzz.fuzz.token_set_ratio(title_clean, f_path.stem),
                     )
                     # Significant word check: 
-                    # For short titles (1-2 words), we want a perfect match to avoid "Kill the King" vs "Temple of the King".
-                    # For longer titles, we allow some flexibility (70%).
-                    path_tokens = set(re.findall(r'\w+', str(f_path).lower()))
-                    match_count = sum(1 for t in meaningful_tokens if t in path_tokens)
+                    # For short titles (1-2 words), we want a high match to avoid "Kill the King" vs "Temple of the King".
+                    # For longer titles, we allow some flexibility (65%).
+                    # We check the filename stem specifically to avoid "Sirius" matching "Eye in the Sky"
+                    # just because it's inside a folder named "Eye in the Sky".
+                    filename_tokens = set(re.findall(r'\w+', f_path.stem.lower()))
+                    match_count = sum(1 for t in meaningful_tokens if t in filename_tokens)
                     match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
                     
-                    required_ratio = 0.7 if len(meaningful_tokens) > 2 else 0.99
+                    required_ratio = 0.65 if len(meaningful_tokens) > 2 else 0.85
                     if match_ratio < required_ratio:
-                        continue
+                        # Fallback: if the filename is very short (e.g. "01.flac"), check the immediate parent folder too
+                        parent_tokens = set(re.findall(r'\w+', f_path.parent.name.lower())) if f_path.parent.name else set()
+                        combined_tokens = filename_tokens.union(parent_tokens)
+                        match_count = sum(1 for t in meaningful_tokens if t in combined_tokens)
+                        match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
+                        if match_ratio < required_ratio:
+                            continue
 
                     if title_score < 58: # Balanced for better inclusivity
                         continue
@@ -884,7 +892,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                     manager._append_cache_event(
                                         job,
                                         "trying",
-                                        f"Source #{r_idx+1} scored {int(candidate_score['score'])}: album {int(candidate_score['album_score'])}%, file {int(candidate_score['file_score'])}%...",
+                                        f"Source #{r_idx+1} match: {int(candidate_score['file_score'])}% (song), {int(candidate_score['album_score'])}% (album). Final score: {int(candidate_score['score'])}",
                                     )
                                 else:
                                     # Metadata was found but it's the wrong torrent/contents.
