@@ -2575,6 +2575,11 @@ function bindPlayer() {
     }
     if (audio.paused) {
       if (!audio.src || audio.src === window.location.href) {
+          // If a download is actively running, ignore the play button so we don't restart it
+          if ($("playerStatusIcon") && $("playerStatusIcon").classList.contains("downloading")) {
+              console.log("[Player] Download in progress, ignoring play click.");
+              return;
+          }
           // If browser player has no source but we have a track, try to re-resolve it.
           // This handles cases where switching output or transient errors cleared the src.
           if (state.currentTrack) {
