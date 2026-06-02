@@ -39,13 +39,11 @@ environments so they never overwrite each other:
 | OS      | venv location                                   | Created/used by               |
 |---------|-------------------------------------------------|-------------------------------|
 | macOS   | `venv-macos` (in project folder)                | `run.sh`, `Mindinguflac.spec` |
-| Windows | `%LOCALAPPDATA%\mindinguflac\venv-windows`      | `scripts/build_windows.ps1`   |
+| Windows | `venv-windows` (in project folder)              | `scripts/build_windows.ps1`   |
 
-The macOS venv is git-ignored. The **Windows venv is created on the local disk
-(`%LOCALAPPDATA%`), not in the project folder** — a venv built on a Parallels
-`\\psf\` share is broken (its `python.exe` reports no version and cannot
-execute reliably). Override the location with the `MINDINGUFLAC_VENV_DIR`
-environment variable. Never point one OS at the other's venv.
+The macOS and Windows venvs are both git-ignored. Keep them separate and never
+point one OS at the other's venv. Override the Windows location with the
+`MINDINGUFLAC_VENV_DIR` environment variable only when needed.
 
 ### Setup (macOS)
 ```bash
@@ -57,15 +55,38 @@ python app.py            # or: ./run.sh (auto-creates venv-macos)
 
 ### Setup (Windows)
 ```powershell
-# Build the desktop app (creates the local-disk venv automatically):
-scripts\build_windows.ps1
+# Build the desktop app (uses/creates .\venv-windows automatically):
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 
-# Or to run from source, create the venv on the LOCAL disk (not the share):
-py -3.12 -m venv $env:LOCALAPPDATA\mindinguflac\venv-windows
-& "$env:LOCALAPPDATA\mindinguflac\venv-windows\Scripts\Activate.ps1"
+# Or to run from source, create/use the project venv:
+py -3.12 -m venv .\venv-windows
+.\venv-windows\Scripts\Activate.ps1
 pip install -r requirements.txt
 python app.py
 ```
+
+Windows desktop builds are always AMD64/x64, including on Windows-on-ARM or
+Parallels. The build script rejects ARM64 Python and, when it can't find a usable
+AMD64 interpreter, installs AMD64 Python 3.12 under
+`%LOCALAPPDATA%\mindinguflac\python312-amd64` (falling back to the AMD64
+`pythonx64` NuGet package under `%LOCALAPPDATA%\mindinguflac\python312-amd64-nuget`
+if the python.org installer exits without creating the target interpreter).
+Discovery is deliberately minimal: it uses `MINDINGUFLAC_PYTHON` if set, then the
+hardcoded user install at
+`C:\Users\<you>\AppData\Local\Programs\Python\Python312\python.exe`, then the
+installer-target paths.
+
+> **Windows-on-ARM / Parallels gotcha:** do **not** verify the architecture with
+> `platform.machine()` — an AMD64 Python running under x64 emulation prints
+> `ARM64` there (it reports the native host arch via `PROCESSOR_ARCHITEW6432`),
+> even though the interpreter is genuinely x64. The build script ignores
+> `platform.machine()` and reads the real architecture from the `python.exe`
+> PE header instead. To check arch yourself, look at the installed-apps entry
+> (e.g. "Python 3.12.8 (64-bit)") rather than `platform.machine()`.
+
+The interpreter must also be a full Python install with `venv` available. A
+runtime/embedded folder that only has `python.exe`, DLLs, and no standard
+library can exist on disk but is not usable for the Windows build.
 
 Open your browser to `http://127.0.0.1:8888`.
 

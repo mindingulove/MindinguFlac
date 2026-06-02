@@ -17,246 +17,335 @@ function Invoke-Checked {
 }
 
 $requiredPython = "3.12"
-# Windows uses its own venv so it never collides with the macOS venv (venv-macos)
-# when the project folder is shared (e.g. Parallels).
-#
-# IMPORTANT: the venv must live on the LOCAL Windows disk, not on the shared
-# folder. A venv created on a \\psf\ (Parallels) share is broken - its
-# python.exe reports an empty version and cannot reliably execute. We therefore
-# place it under %LOCALAPPDATA% by default (override with MINDINGUFLAC_VENV_DIR).
-if ($env:MINDINGUFLAC_VENV_DIR) {
-    $venvDir = $env:MINDINGUFLAC_VENV_DIR
-} else {
-    $venvDir = Join-Path $env:LOCALAPPDATA "mindinguflac\venv-windows"
-}
+$venvDir = if ($env:MINDINGUFLAC_VENV_DIR) { $env:MINDINGUFLAC_VENV_DIR } else { Join-Path $root "venv-windows" }
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 
 function Get-PythonMinorVersion {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Exe,
-        [string[]]$Args = @()
-    )
+    param([string]$Exe, [string[]]$Args = @())
     try {
-        $version = & $Exe @Args -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-        if ($LASTEXITCODE -eq 0) {
+        $versionOutput = & $Exe @Args -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>&1
+        $version = $versionOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^\d+\.\d+$' } | Select-Object -Last 1
+        if ($version) {
             return $version.Trim()
         }
-    } catch {
-        return $null
-    }
-    return $null
-}
-
-function Get-PythonArch {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Exe,
-        [string[]]$Args = @()
-    )
-    try {
-        $arch = & $Exe @Args -c "import platform; print(platform.machine())"
-        if ($LASTEXITCODE -eq 0) {
-            return $arch.Trim().ToUpper()
+        if (($LASTEXITCODE -ne 0) -and $versionOutput) {
+            Write-Host "  -> Version probe output: $($versionOutput -join ' | ')" -ForegroundColor DarkYellow
         }
-    } catch {
-        return $null
-    }
-    return $null
-}
-
-# We require an x64 (AMD64) Python on Windows. On Windows-on-ARM (e.g. Parallels)
-# the native interpreter is ARM64, but many dependencies (multidict, libtorrent,
-# yarl, frozenlist, ...) ship no win_arm64 wheels and would try to compile from
-# source. An x64 interpreter resolves every dependency to a win_amd64 wheel and
-# runs fine under Windows' x64 emulation.
-# Dedicated location for the x64 build we install ourselves (kept separate from
-# any ARM64 Python the system may already have).
-$x64PythonDir = Join-Path $env:LOCALAPPDATA "mindinguflac\python312-x64"
-$x64PythonExe = Join-Path $x64PythonDir "python.exe"
-
-function Resolve-Python313 {
-    $candidates = @()
-
-    # Explicit override: point MINDINGUFLAC_PYTHON at an x64 python.exe to skip
-    # all auto-detection (most reliable on Windows-on-ARM).
-    if ($env:MINDINGUFLAC_PYTHON -and (Test-Path $env:MINDINGUFLAC_PYTHON)) {
-        $candidates += [pscustomobject]@{ Exe = $env:MINDINGUFLAC_PYTHON; Args = @() }
-    }
-
-    $candidates += [pscustomobject]@{ Exe = $x64PythonExe; Args = @() }
-
-    # Filesystem sweep of standard python.org install roots (catches Python312,
-    # Python312-x64, etc. under both per-user and all-users locations).
-    foreach ($base in @((Join-Path $env:LOCALAPPDATA "Programs\Python"), $env:ProgramFiles, "${env:SystemDrive}\")) {
-        if ($base -and (Test-Path $base)) {
-            try {
-                Get-ChildItem -Path $base -Directory -Filter "Python312*" -ErrorAction SilentlyContinue | ForEach-Object {
-                    $exe = Join-Path $_.FullName "python.exe"
-                    if (Test-Path $exe) { $candidates += [pscustomobject]@{ Exe = $exe; Args = @() } }
-                }
-            } catch {}
-        }
-    }
-
-    # Most reliable: read the Windows registry for installed Python 3.12. The
-    # python.org x64 build is tagged "3.12" (ARM64 would be "3.12-arm64", which
-    # we ignore). This finds the install regardless of its folder.
-    foreach ($hive in @("HKCU:", "HKLM:")) {
-        foreach ($sub in @("Software\Python\PythonCore\3.12\InstallPath",
-                           "Software\WOW6432Node\Python\PythonCore\3.12\InstallPath")) {
-            try {
-                $key = Get-ItemProperty -Path "$hive\$sub" -ErrorAction Stop
-                $exe = $key.ExecutablePath
-                if (-not $exe -and $key.'(default)') {
-                    $exe = Join-Path $key.'(default)' "python.exe"
-                }
-                if ($exe -and (Test-Path $exe)) {
-                    $candidates += [pscustomobject]@{ Exe = $exe; Args = @() }
-                }
-            } catch {}
-        }
-    }
-
-    $candidates += @(
-        [pscustomobject]@{ Exe = "py"; Args = @("-3.12") },
-        [pscustomobject]@{ Exe = "python3.12"; Args = @() },
-        [pscustomobject]@{ Exe = "python"; Args = @() },
-        [pscustomobject]@{ Exe = "python3"; Args = @() },
-        [pscustomobject]@{ Exe = (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"); Args = @() },
-        [pscustomobject]@{ Exe = (Join-Path $env:ProgramFiles "Python312\python.exe"); Args = @() }
-    )
-
-    # Discover any 3.12 interpreter registered with the py launcher.
-    try {
-        $pyList = & py -0p 2>$null
-        if ($LASTEXITCODE -eq 0 -and $pyList) {
-            foreach ($line in $pyList) {
-                if ($line -match "3\.12" -and $line -match "([A-Za-z]:\\[^\s].*python\.exe)") {
-                    $candidates += [pscustomobject]@{ Exe = $Matches[1]; Args = @() }
+        if (($Args.Count -eq 0) -and ($Exe -match "[\\/]") -and (Test-Path $Exe)) {
+            $fileVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Exe)
+            foreach ($candidateVersion in @($fileVersion.ProductVersion, $fileVersion.FileVersion)) {
+                if ($candidateVersion -and $candidateVersion -match '^(\d+)\.(\d+)') {
+                    return "$($Matches[1]).$($Matches[2])"
                 }
             }
         }
-    } catch {}
-
-    $arm64Fallback = $null
-    foreach ($candidate in $candidates) {
-        if (($candidate.Exe -match "[\\/]") -and -not (Test-Path $candidate.Exe)) {
-            continue
+    } catch {
+        if (($Args.Count -eq 0) -and ($Exe -match "[\\/]") -and (Test-Path $Exe)) {
+            try {
+                $fileVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Exe)
+                foreach ($candidateVersion in @($fileVersion.ProductVersion, $fileVersion.FileVersion)) {
+                    if ($candidateVersion -and $candidateVersion -match '^(\d+)\.(\d+)') {
+                        return "$($Matches[1]).$($Matches[2])"
+                    }
+                }
+            } catch {}
         }
-        $version = Get-PythonMinorVersion -Exe $candidate.Exe -Args $candidate.Args
-        if ($version -ne $requiredPython) {
-            continue
-        }
-        $arch = Get-PythonArch -Exe $candidate.Exe -Args $candidate.Args
-        if ($arch -eq "AMD64") {
-            return $candidate
-        }
-        if (-not $arm64Fallback) { $arm64Fallback = $candidate }
+        return $null
     }
-
-    # No AMD64 3.12 found. Return $null so the installer fetches the x64 build.
-    # (The ARM64 interpreter is intentionally not used.)
     return $null
 }
 
-function Install-Python313 {
-    # winget keys on package ID, not architecture: if an ARM64 Python 3.12 is
-    # already installed it reports "already installed" and refuses to add the
-    # x64 build. So we download the official x64 installer from python.org and
-    # install it (per-user, embedded, no PATH change) into our own directory.
+function Get-PEMachineArch {
+    param([string]$Exe)
+    if (-not $Exe -or -not (Test-Path $Exe)) { return $null }
+    try {
+        $fs = [System.IO.File]::OpenRead($Exe)
+        try {
+            $reader = New-Object System.IO.BinaryReader($fs)
+            $fs.Seek(0x3c, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $peOffset = $reader.ReadInt32()
+            if ($peOffset -le 0) { return $null }
+            $fs.Seek($peOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $signature = $reader.ReadUInt32()
+            if ($signature -ne 0x00004550) { return $null }
+            $machine = $reader.ReadUInt16()
+            switch ($machine) {
+                0x8664 { return "AMD64" }
+                0xAA64 { return "ARM64" }
+                0x01C4 { return "ARM" }
+                0x014C { return "X86" }
+                default { return $null }
+            }
+        } finally {
+            $fs.Close()
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Get-PythonArch {
+    param([string]$Exe, [string[]]$Args = @())
+    # The PE header machine field is ground truth for the binary's real
+    # architecture. platform.machine() is UNRELIABLE under Windows-on-ARM
+    # (Parallels): an AMD64 python.exe running via x64 emulation reports
+    # "ARM64" there, because PROCESSOR_ARCHITEW6432 exposes the native host
+    # arch. Read the PE bytes first for any real exe path; only fall back to
+    # platform.machine() for launcher-style candidates ("py -3.12").
+    if (($Args.Count -eq 0) -and ($Exe -match "[\\/]")) {
+        $peArch = Get-PEMachineArch -Exe $Exe
+        if ($peArch) { return $peArch }
+    }
+    try {
+        $archOutput = & $Exe @Args -c "import platform; print(platform.machine())" 2>&1
+        $arch = $archOutput | ForEach-Object { "$_".Trim().ToUpper() } | Where-Object { $_ -match '^(AMD64|X86_64|ARM64|AARCH64|X86|I386)$' } | Select-Object -Last 1
+        if ($arch) {
+            $val = $arch.Trim().ToUpper()
+            if ($val -eq "X86_64") { return "AMD64" }
+            if ($val -eq "AARCH64") { return "ARM64" }
+            return $val
+        }
+        if (($LASTEXITCODE -ne 0) -and $archOutput) {
+            Write-Host "  -> Arch probe output: $($archOutput -join ' | ')" -ForegroundColor DarkYellow
+        }
+        if (($Args.Count -eq 0) -and ($Exe -match "[\\/]")) {
+            return Get-PEMachineArch -Exe $Exe
+        }
+    } catch {
+        if (($Args.Count -eq 0) -and ($Exe -match "[\\/]")) {
+            return Get-PEMachineArch -Exe $Exe
+        }
+        return $null
+    }
+    return $null
+}
+
+function Test-PythonCanCreateVenv {
+    param([string]$Exe, [string[]]$Args = @())
+    try {
+        $probeOutput = & $Exe @Args -c "import sys, venv; print('venv-ok')" 2>&1
+        $ok = $probeOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -eq "venv-ok" } | Select-Object -Last 1
+        if ($ok) { return $true }
+        if ($probeOutput) {
+            Write-Host "  -> Venv probe output: $($probeOutput -join ' | ')" -ForegroundColor DarkYellow
+        }
+    } catch {}
+    return $false
+}
+
+$amd64PythonDir = Join-Path $env:LOCALAPPDATA "mindinguflac\python312-amd64"
+$amd64PythonExe = Join-Path $amd64PythonDir "python.exe"
+$nugetPythonDir = Join-Path $env:LOCALAPPDATA "mindinguflac\python312-amd64-nuget"
+$nugetPythonExe = Join-Path $nugetPythonDir "tools\python.exe"
+$hardcodedPython312Exe = "C:\Users\jaymeeduardo\AppData\Local\Programs\Python\Python312\python.exe"
+
+function Add-PythonCandidate {
+    param(
+        [System.Collections.ArrayList]$Candidates,
+        [string]$Exe,
+        [string[]]$Args = @()
+    )
+    if (-not $Exe) { return }
+    $key = "$Exe $($Args -join ' ')"
+    foreach ($candidate in $Candidates) {
+        if ($candidate.Key -ceq $key) { return }
+    }
+    [void]$Candidates.Add([pscustomobject]@{ Key = $key; Exe = $Exe; Args = $Args })
+}
+
+function Get-CandidateDisplayName {
+    param($Candidate)
+    $suffix = if ($Candidate.Args -and $Candidate.Args.Count -gt 0) { " $($Candidate.Args -join ' ')" } else { "" }
+    return "$($Candidate.Exe)$suffix"
+}
+
+function Resolve-Python312Amd64 {
+    $candidates = [System.Collections.ArrayList]::new()
+    if ($env:MINDINGUFLAC_PYTHON) {
+        Add-PythonCandidate -Candidates $candidates -Exe $env:MINDINGUFLAC_PYTHON
+    }
+    Add-PythonCandidate -Candidates $candidates -Exe $hardcodedPython312Exe
+    # Installer targets, kept so the auto-install fallback below can be found
+    # after Install-Python312Amd64 runs.
+    Add-PythonCandidate -Candidates $candidates -Exe $amd64PythonExe
+    Add-PythonCandidate -Candidates $candidates -Exe $nugetPythonExe
+
+    $foundRejected = $false
+    foreach ($candidate in $candidates) {
+        $display = Get-CandidateDisplayName -Candidate $candidate
+        if (($candidate.Exe -match "[\\/]") -and -not (Test-Path $candidate.Exe)) {
+            Write-Host "Checking candidate: $display"
+            Write-Host "  -> Not found on disk."
+            continue
+        }
+        Write-Host "Checking candidate: $display"
+        $v = Get-PythonMinorVersion -Exe $candidate.Exe -Args $candidate.Args
+        if (-not $v) {
+            Write-Host "  -> Version: Failed"
+            $foundRejected = $true
+            continue
+        }
+        Write-Host "  -> Version: $v"
+        if ($v -ne $requiredPython) {
+            Write-Host "  -> Ignoring: Python $requiredPython is required." -ForegroundColor Yellow
+            $foundRejected = $true
+            continue
+        }
+        $a = Get-PythonArch -Exe $candidate.Exe -Args $candidate.Args
+        Write-Host "  -> Arch: $a"
+        if ($a -ne "AMD64") {
+            Write-Host "  -> Ignoring: Windows builds must use AMD64/x64 Python, never ARM64." -ForegroundColor Yellow
+            $foundRejected = $true
+            continue
+        }
+        if (-not (Test-PythonCanCreateVenv -Exe $candidate.Exe -Args $candidate.Args)) {
+            Write-Host "  -> Ignoring: Python cannot import venv; install may be incomplete." -ForegroundColor Yellow
+            $foundRejected = $true
+            continue
+        }
+        return $candidate
+    }
+    if ($foundRejected) {
+        Write-Host "No existing Python candidate was accepted; only now trying the AMD64 installer." -ForegroundColor Yellow
+    }
+    return $null
+}
+
+function Install-Python312Amd64 {
     $pyVersion = "3.12.8"
     $url = "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-amd64.exe"
     $installer = Join-Path $env:TEMP "python-$pyVersion-amd64.exe"
 
     Write-Host "--- Downloading x64 Python $pyVersion from python.org ---"
-    try {
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
-    } catch {
-        throw "Failed to download x64 Python from $url : $_"
-    }
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
 
-    Write-Host "--- Installing x64 Python $pyVersion to $x64PythonDir ---"
+    Write-Host "--- Installing AMD64 Python $pyVersion to $amd64PythonDir ---"
+    New-Item -ItemType Directory -Path $amd64PythonDir -Force | Out-Null
+    $logFile = Join-Path $env:TEMP "mindinguflac-python-$pyVersion-amd64-install.log"
     $procArgs = @(
         "/quiet",
         "InstallAllUsers=0",
         "PrependPath=0",
         "Include_launcher=0",
         "Include_test=0",
-        "TargetDir=$x64PythonDir"
+        "TargetDir=$amd64PythonDir",
+        "/log",
+        $logFile
     )
     $proc = Start-Process -FilePath $installer -ArgumentList $procArgs -Wait -PassThru
-    Write-Host "Installer exit code: $($proc.ExitCode)"
+    if ($proc.ExitCode -ne 0) {
+        throw "AMD64 Python installer failed with code $($proc.ExitCode). Installer log: $logFile"
+    }
+    if (Test-Path $amd64PythonExe) {
+        return
+    }
+
+    Write-Host "--- Python.org installer did not create $amd64PythonExe; using AMD64 NuGet Python fallback ---" -ForegroundColor Yellow
+    $nugetUrl = "https://www.nuget.org/api/v2/package/pythonx64/$pyVersion"
+    $nugetZip = Join-Path $env:TEMP "pythonx64-$pyVersion.zip"
+    if (Test-Path $nugetPythonDir) {
+        Remove-Item $nugetPythonDir -Recurse -Force
+    }
+    Invoke-WebRequest -Uri $nugetUrl -OutFile $nugetZip -UseBasicParsing
+    New-Item -ItemType Directory -Path $nugetPythonDir -Force | Out-Null
+    Expand-Archive -Path $nugetZip -DestinationPath $nugetPythonDir -Force
+    if (-not (Test-Path $nugetPythonExe)) {
+        throw "AMD64 NuGet Python fallback did not create $nugetPythonExe"
+    }
 }
 
-$python313 = Resolve-Python313
-if (-not $python313) {
-    Install-Python313
-    $python313 = Resolve-Python313
+function Ensure-VCRedistX64 {
+    # The packaged app runs x64 (emulated on Windows-on-ARM) and libtorrent's
+    # win_amd64 wheel needs the x64 VC++ 2015-2022 runtime. A fresh
+    # Windows-on-ARM box ships only the ARM64 runtime, so the app fails with
+    # "DLL load failed while importing libtorrent: The specified module could
+    # not be found." Install the x64 runtime here so the build machine works.
+    foreach ($k in @(
+        "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    )) {
+        try {
+            $v = Get-ItemProperty -Path $k -ErrorAction Stop
+            if ($v.Installed -eq 1) {
+                Write-Host "x64 VC++ runtime already installed (v$($v.Version))."
+                return
+            }
+        } catch {}
+    }
+    Write-Host "--- Installing x64 VC++ runtime (required by libtorrent) ---"
+    $url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    $installer = Join-Path $env:TEMP "vc_redist.x64.exe"
+    try {
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+        $proc = Start-Process -FilePath $installer -ArgumentList @("/install", "/passive", "/norestart") -Wait -PassThru
+        if ($proc.ExitCode -in 0, 3010, 1638) {
+            Write-Host "x64 VC++ runtime installed (exit $($proc.ExitCode))."
+        } else {
+            Write-Host "VC++ runtime installer exit code $($proc.ExitCode); install manually from $url if libtorrent fails to load." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "Could not auto-install the x64 VC++ runtime: $_" -ForegroundColor Yellow
+        Write-Host "If the app fails with 'DLL load failed while importing libtorrent', install it manually from $url (x64, not arm64)." -ForegroundColor Yellow
+    }
 }
-if (-not $python313) {
-    throw @"
-An x64 (AMD64) Python 3.12 could not be found or installed automatically.
 
-This usually happens on Windows-on-ARM (Parallels) when only an ARM64 Python is
-present. To fix it, install the 64-bit (AMD64) Python 3.12 manually:
-
-  1. Download: https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe
-  2. Run it (default options are fine).
-  3. Either rerun this script, or point it directly at the x64 interpreter:
-       `$env:MINDINGUFLAC_PYTHON = "C:\path\to\python.exe"`
-       powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
-
-Verify an interpreter is x64 with:  & "C:\path\to\python.exe" -c "import platform; print(platform.machine())"  (must print AMD64)
-"@
-}
-
-# Recreate the venv if it is the wrong version OR the wrong architecture
-# (e.g. an old ARM64 venv from before the x64 switch).
+$usingExistingVenv = $false
 if (Test-Path $venvPython) {
+    Write-Host "Checking existing build venv: $venvPython"
     $venvVersion = Get-PythonMinorVersion -Exe $venvPython
     $venvArch = Get-PythonArch -Exe $venvPython
-    if ($venvVersion -ne $requiredPython -or $venvArch -ne "AMD64") {
-        Write-Host "Removing $venvDir (Python '$venvVersion' arch '$venvArch'; need $requiredPython AMD64)."
+    Write-Host "  -> Version: $venvVersion"
+    Write-Host "  -> Arch: $venvArch"
+    if (($venvVersion -eq $requiredPython) -and ($venvArch -eq "AMD64")) {
+        $usingExistingVenv = $true
+    } else {
+        Write-Host "Removing non-AMD64 or wrong-version venv at $venvDir" -ForegroundColor Yellow
         Remove-Item $venvDir -Recurse -Force
     }
 }
 
-if (-not (Test-Path $venvPython)) {
-    Write-Host "--- Creating Python 3.12 build venv ---"
-    $venvArgs = @($python313.Args) + @("-m", "venv", $venvDir)
-    Invoke-Checked { & $python313.Exe @venvArgs }
+if (-not $usingExistingVenv) {
+    $python312 = Resolve-Python312Amd64
+    if (-not $python312) {
+        Install-Python312Amd64
+        $python312 = Resolve-Python312Amd64
+    }
+
+    if (-not $python312) {
+        throw @"
+An AMD64/x64 Python 3.12 could not be found or installed automatically.
+
+Windows builds must use AMD64 Python even on Windows-on-ARM/Parallels. ARM64
+Python is intentionally rejected because PyInstaller and libtorrent must produce
+the same x64 artifact as GitHub Actions.
+
+Install the AMD64 build manually if needed:
+  1. Download: https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe
+  2. Install it for the current user.
+  3. Rerun this script, or point it at the AMD64 interpreter:
+       `$env:MINDINGUFLAC_PYTHON = "C:\path\to\python.exe"
+       powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+
+Verify the interpreter with:
+  & "C:\path\to\python.exe" -c "import platform; print(platform.machine())"
+
+It must print AMD64 or X86_64. If it prints ARM64, do not use it.
+"@
+    }
+
+    Write-Host "--- Creating AMD64 Build Venv ---"
+    Invoke-Checked { & $python312.Exe @($python312.Args) -m venv $venvDir }
 }
 
 $python = $venvPython
-$pythonVersion = Get-PythonMinorVersion -Exe $python
-if ($pythonVersion -ne $requiredPython) {
-    throw "Build venv is using Python $pythonVersion, but Windows torrent builds require Python $requiredPython."
-}
-
-Write-Host "Using Python: $python ($pythonVersion)"
-
-Write-Host "--- Installing Dependencies ---"
+Write-Host "Using Python: $python"
 Invoke-Checked { & $python -m pip install --upgrade pip }
 Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
-
-Write-Host "--- Installing libtorrent ---"
-# The venv is x64, so the normal win_amd64 wheel installs directly.
-$ltInstalled = $false
-try {
-    & $python -m pip install --only-binary=libtorrent libtorrent 2>&1 | Out-Host
-    if ($LASTEXITCODE -eq 0) { $ltInstalled = $true }
-} catch {}
-if (-not $ltInstalled) {
-    Write-Warning "libtorrent could not be installed - torrent downloads will be unavailable."
-}
-
-Write-Host "--- Preparing Assets ---"
+Invoke-Checked { & $python -m pip install --only-binary=libtorrent libtorrent }
 Invoke-Checked { & $python scripts\make_desktop_icons.py }
-
-Write-Host "--- Building Executable ---"
-# Use python -m PyInstaller to bypass PATH issues
+Ensure-VCRedistX64
 Invoke-Checked { & $python -m PyInstaller --clean --noconfirm Mindinguflac-windows.spec }
 
 Write-Host "--- Packaging ---"
@@ -267,8 +356,7 @@ if (Test-Path $zipPath) {
 
 $exePath = Join-Path $root "dist\Mindinguflac.exe"
 if (-not (Test-Path $exePath)) {
-    Write-Error "Build failed: $exePath not found."
-    exit 1
+    throw "Build failed: $exePath not found."
 }
 
 Compress-Archive -Path $exePath -DestinationPath $zipPath

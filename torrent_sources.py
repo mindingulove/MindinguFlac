@@ -53,6 +53,15 @@ def search_apibay(query: str, timeout: int = 12) -> list[dict]:
             name = item.get("name")
             if not name or not info_hash or info_hash == _DEAD_HASH:
                 continue
+            
+            # Map TPB categories to generic ones
+            cat_id = str(item.get("category") or "0")
+            category = "unknown"
+            if cat_id.startswith("1"): # Audio
+                category = "audio"
+            elif cat_id.startswith("2"): # Video
+                category = "video"
+            
             out.append({
                 "title": name,
                 "magnet": _magnet(info_hash, name),
@@ -60,6 +69,7 @@ def search_apibay(query: str, timeout: int = 12) -> list[dict]:
                 "seeders": int(item.get("seeders") or 0),
                 "leechers": int(item.get("leechers") or 0),
                 "source": "apibay",
+                "category": category,
             })
     except Exception:
         pass
@@ -90,6 +100,14 @@ def search_knaben(query: str, timeout: int = 12) -> list[dict]:
                 magnet = _magnet(info_hash, title or "")
             if not title or not magnet:
                 continue
+            
+            cat = str(item.get("category") or "unknown").lower()
+            category = "unknown"
+            if "audio" in cat or "music" in cat:
+                category = "audio"
+            elif "video" in cat or "movie" in cat or "show" in cat:
+                category = "video"
+
             out.append({
                 "title": title,
                 "magnet": magnet,
@@ -97,19 +115,63 @@ def search_knaben(query: str, timeout: int = 12) -> list[dict]:
                 "seeders": int(item.get("seeders") or 0),
                 "leechers": int(item.get("peers") or 0),
                 "source": "knaben:" + str(item.get("tracker") or "agg"),
+                "category": category,
             })
     except Exception:
         pass
     return out
 
 
+def search_solid(query: str, timeout: int = 12) -> list[dict]:
+    """Search SolidTorrents which aggregates 1337x, KAT, etc."""
+    out: list[dict] = []
+    try:
+        # SolidTorrents has a nice JSON API
+        url = f"https://solidtorrents.to/api/v1/search?q={urllib.parse.quote(query)}&category=Audio"
+        data = json.loads(_http(url, timeout=timeout))
+        for item in data.get("results", []):
+            title = item.get("title")
+            info_hash = item.get("infohash")
+            if not title or not info_hash:
+                continue
+            
+            out.append({
+                "title": title,
+                "magnet": f"magnet:?xt=urn:btih:{info_hash}&dn={urllib.parse.quote(title)}",
+                "size": str(item.get("size") or ""),
+                "seeders": int(item.get("seeders") or 0),
+                "leechers": int(item.get("leechers") or 0),
+                "source": "solid",
+                "category": "audio",
+            })
+    except Exception:
+        pass
+    return out
+
+
+def search_1337x(query: str, timeout: int = 12) -> list[dict]:
+    """1337x search via SolidTorrents and extra query flags."""
+    # Since direct 1337x is Cloudflare-protected, we use an aggregator
+    # but append the site name to favor those results if the aggregator supports it.
+    return search_solid(query + " 1337x", timeout)
+
+
+def search_kickass(query: str, timeout: int = 12) -> list[dict]:
+    """Kickass search via SolidTorrents and extra query flags."""
+    return search_solid(query + " kickass", timeout)
+
+
 def search_extra(query: str, timeout: int = 12) -> list[dict]:
     """Query all extra sources in parallel and return the merged results."""
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    # Reordered to prioritize 1337x and Kickass results in the execution pool
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = [
-            executor.submit(search_apibay, query, timeout),
+            executor.submit(search_1337x, query, timeout),
+            executor.submit(search_kickass, query, timeout),
+            executor.submit(search_solid, query, timeout),
             executor.submit(search_knaben, query, timeout),
+            executor.submit(search_apibay, query, timeout),
         ]
         for future in futures:
             try:

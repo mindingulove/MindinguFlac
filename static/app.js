@@ -106,6 +106,8 @@ const ENGINE_PROVIDERS = {
   torrent: [
     { value: "all",           label: "All Trackers (Parallel)" },
     { value: "piratebay",     label: "The Pirate Bay" },
+    { value: "1337x",         label: "1337x" },
+    { value: "kickass",       label: "KickassTorrents" },
     { value: "yts",           label: "YTS" },
   ],
 };
@@ -2075,7 +2077,19 @@ async function refreshCacheLogs() {
     output.textContent = events.map((event) => {
       const clock = new Date((event.timestamp || 0) * 1000).toLocaleTimeString();
       const track = event.title ? `[${event.title}] ` : "";
-      return `[${clock}] ${track}${event.message}`;
+      const msg = event.message || "";
+      
+      // Auto-play / High-performance transition to local file
+      if (msg.includes("Ready to play") && state.currentTrack && !state.nativeAudio.playing && $("audioPlayer").paused) {
+        const title = (state.currentTrack.title || "").toLowerCase();
+        if (msg.toLowerCase().includes(title)) {
+           console.log("[Player] Detected file readiness, forcing high-fidelity stream...");
+           // This switches from the live torrent stream to the finalized local file
+           selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+        }
+      }
+      
+      return `[${clock}] ${track}${msg}`;
     }).join("\n");
     const autoScroll = $("cacheAutoScroll");
     if (!autoScroll || autoScroll.checked) {

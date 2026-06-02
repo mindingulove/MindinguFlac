@@ -97,7 +97,11 @@ def configure_tls_certificates() -> None:
     cert_runtime_dir = get_runtime_dir()
     cert_runtime_dir.mkdir(parents=True, exist_ok=True)
     stable_cert = cert_runtime_dir / "cacert.pem"
-    shutil.copy2(bundled_cert, stable_cert)
+    try:
+        shutil.copy2(bundled_cert, stable_cert)
+    except (PermissionError, OSError) as e:
+        log_step(f"Using existing certificate bundle (locked: {e})")
+
     for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         os.environ[name] = str(stable_cert)
 

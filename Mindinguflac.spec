@@ -1,10 +1,33 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
+import os
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 from pathlib import Path
 
+# Ensure project root is in path for analysis
+sys.path.insert(0, os.path.abspath('.'))
+
 datas = [('static', 'static')]
 binaries = []
-hiddenimports = ['bluetooth_scan', 'IOBluetooth', 'AVFoundation', 'CoreAudio', 'torrfetch', 'libtorrent', 'torrent_sources']
+hiddenimports = [
+    'bluetooth_scan', 
+    'IOBluetooth', 
+    'AVFoundation', 
+    'CoreAudio', 
+    'torrfetch', 
+    'libtorrent', 
+    'torrent_sources',
+    'music_metadata',
+    'isrc_resolver',
+    'discogs_metadata',
+    'spotify_web_metadata',
+    'backend_torrent',
+    'backend_spotiflac',
+    'backend_tidal_hifi',
+    'backend_monochrome',
+    'backend_other',
+    'catalog'
+]
 tmp_ret = collect_all('SpotiFLAC')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

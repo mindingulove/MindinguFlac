@@ -506,9 +506,17 @@ def get_alternative_albums_hierarchical(artist: str, title: str) -> list[str]:
             p_type = (rg.get("primary-type") or "").lower()
             s_types = [t.lower() for t in (rg.get("secondary-types") or [])]
             rg_title = rg.get("title")
+
+            # Hard override for common metadata errors (e.g. Videograffitti)
+            if rg_title and artist.lower() == "extreme" and rg_title.lower() == "videograffitti":
+                rg_title = "Pornograffitti"
+
+            # FILTER: Skip obvious video content
+            if rg_title and any(k in rg_title.lower() for k in ["video", "dvd", "blu-ray", "concert film", "laserdisc"]):
+                continue
+
             if not rg_title or norm_name(rg_title) not in confirmed_set:
                 continue
-            
             target = "other"
             if p_type == "album":
                 if "compilation" in s_types: target = "compilation"

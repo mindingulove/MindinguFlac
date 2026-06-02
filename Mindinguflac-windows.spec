@@ -12,6 +12,7 @@ hiddenimports = [
     'torrfetch',
     'libtorrent',
     'torrent_sources',
+    'vcredist',
 ]
 
 tmp_ret = collect_all('SpotiFLAC')
@@ -40,7 +41,12 @@ try:
 except Exception:
     pass
 
-for package_name in ('PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy'):
+# libtorrent must be collected, not just hidden-imported: its win_amd64 wheel
+# ships dependent native DLLs (OpenSSL etc.) next to libtorrent.pyd. Without
+# collect_all those DLLs are missing from the bundle and the packaged app fails
+# with "DLL load failed while importing libtorrent: The specified module could
+# not be found."
+for package_name in ('libtorrent', 'PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy'):
     try:
         tmp_ret = collect_all(package_name)
         datas += tmp_ret[0]
