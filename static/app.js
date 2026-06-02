@@ -2285,6 +2285,13 @@ function syncNativeAudioUi() {
 
 async function toggleNativeAudioPlayback() {
   if (!state.nativeAudio.active) return;
+  
+  // Fetch latest status to ensure we're in sync with backend
+  const current = await api("/api/native_audio/status").catch(() => null);
+  if (current) {
+      state.nativeAudio.playing = !!current.playing;
+  }
+
   if (state.nativeAudio.playing) {
     const status = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
     state.nativeAudio.playing = !!status.playing;
@@ -2546,6 +2553,15 @@ function bindPlayer() {
       return;
     }
     if (audio.paused) {
+      if (!audio.src || audio.src === window.location.href) {
+          // If browser player has no source but we have a track, try to re-resolve it.
+          // This handles cases where switching output or transient errors cleared the src.
+          if (state.currentTrack) {
+              console.log("[Player] Browser audio has no src, re-resolving...");
+              selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+          }
+          return;
+      }
       console.log("[Player] Manual play requested. Current src:", audio.src);
       audio.play().catch((error) => {
         console.error("[Player] Play failed:", error);
@@ -2622,8 +2638,10 @@ function bindPlayer() {
   };
   audio.onerror = () => {
     const error = audio.error;
-    if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {
-        console.log("[Player] Media error 4 (Safari/Transient). Retrying stream...");
+    // Ignore errors if we don't have a source (common when using native output)
+    if (!audio.src || audio.src === window.location.href) return;
+
+    if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {        console.log("[Player] Media error 4 (Safari/Transient). Retrying stream...");
         const pos = audio.currentTime;
         const url = new URL(state.currentStreamUrl, window.location.origin);
         url.searchParams.set("t", Date.now()); // Bust cache on retry
