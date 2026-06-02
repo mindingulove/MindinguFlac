@@ -43,8 +43,18 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/artist_about.png" width="800" alt="About Artist">
+  <br><i>About Artist - Extended biographies, follower counts, and global listening stats</i>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/albums.png" width="800" alt="Albums Screen">
   <br><i>Albums - High-fidelity album browsing</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/album_booklet.png" width="800" alt="Album Booklet">
+  <br><i>Album Booklet - View high-resolution liner notes and booklets (Discogs integration)</i>
 </p>
 
 <p align="center">
