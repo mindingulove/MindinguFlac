@@ -6,7 +6,6 @@ venv-windows/
 .venv-build/
 data/
 .DS_Store
-claude.md
 codex.md
 gemini.md
 .env

@@ -546,7 +546,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if finalize_selected_file():
                             return True
                         # A libtorrent handle can go invalid mid-stream from
-                        # session churn (CLAUDE.md: treat as retryable, not
+                        # session churn (GEMINI.md: treat as retryable, not
                         # fatal). Re-add the SAME magnet and resume from the
                         # partial data already on disk before abandoning a
                         # confirmed high-quality match for worse candidates.

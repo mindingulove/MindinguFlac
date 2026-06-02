@@ -108,7 +108,11 @@ class NativeAudioManager:
                 self._pause_event.set()
                 self._playing = False
             elif self._sound is not None:
-                self._sound.pause()
+                try:
+                    if self._sound.isPlaying():
+                        self._sound.pause()
+                except Exception:
+                    pass
         return self.status() | {"ok": True}
 
     def resume(self) -> dict:
@@ -117,8 +121,13 @@ class NativeAudioManager:
             if sys.platform == "win32" and self._thread is not None:
                 self._pause_event.clear()
                 self._playing = True
-            elif self._sound is not None and not self._sound.resume():
-                return self.status() | {"ok": False, "error": "Native audio player refused to resume"}
+            elif self._sound is not None:
+                try:
+                    if not self._sound.resume():
+                        if not self._sound.play():
+                            return self.status() | {"ok": False, "error": "Native audio player refused to resume"}
+                except Exception as e:
+                    return self.status() | {"ok": False, "error": str(e)}
         return self.status() | {"ok": True}
 
     def stop(self) -> dict:
@@ -173,13 +182,16 @@ class NativeAudioManager:
                 }
             duration = float(sound.duration() or 0)
             position = float(sound.currentTime() or 0)
-            playing = bool(sound.isPlaying())
+            # NSSound.isPlaying() can incorrectly report True even after pause()
+            # is called, so we must explicitly check the _paused flag.
+            raw_playing = bool(sound.isPlaying())
+            playing = raw_playing and not self._paused
             if playing:
                 self._has_played = True
             # NSSound resets currentTime to 0 on finish, so the position check
             # is unreliable. A sound that was playing and is now stopped without
             # the user pausing it has finished on its own.
-            ended = bool(self._has_played and not playing and not self._paused)
+            ended = bool(self._has_played and not raw_playing and not self._paused)
             return {
                 "available": True,
                 "playing": playing,

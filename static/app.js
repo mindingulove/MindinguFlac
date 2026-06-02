@@ -1591,7 +1591,8 @@ function updatePlayerPie(pct) {
 function prepareSelectedTrackUi(track, status = "Opening stream...") {
   const audio = $("audioPlayer");
   audio.pause();
-  audio.src = ""; // Clear old source immediately
+  audio.removeAttribute("src");
+  audio.src = ""; 
   try {
     audio.load();
   } catch (e) {}
@@ -1814,6 +1815,8 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
       if (job.status === "finished" && job.library_path) {
         await playFromLibraryPath(job.library_path, track, requestId, job.id, "Playing from cache");
       } else if (isNativeAudioSelected()) {
+        // Skip browser playback for live jobs if native is selected.
+        // NSSound doesn't support streaming URLs, so we wait for the file to finish.
         state.currentPlayableReady = false;
         state.autoplayWanted = false;
         setPlayerStatusIcon("downloading", job.progress || 0);
@@ -2286,20 +2289,38 @@ function syncNativeAudioUi() {
 async function toggleNativeAudioPlayback() {
   if (!state.nativeAudio.active) return;
   
-  // Fetch latest status to ensure we're in sync with backend
-  const current = await api("/api/native_audio/status").catch(() => null);
-  if (current) {
-      state.nativeAudio.playing = !!current.playing;
-  }
-
   if (state.nativeAudio.playing) {
     const status = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
     state.nativeAudio.playing = !!status.playing;
+    // If it's still playing after a pause request, it might be out of sync
+    if (state.nativeAudio.playing) {
+        console.warn("[NativeAudio] Pause request did not stop playback, forcing state update");
+        const forced = await api("/api/native_audio/status").catch(() => null);
+        if (forced) state.nativeAudio.playing = !!forced.playing;
+    }
     _callNowPlaying("set_playback_state", 2);
   } else {
+    // If it already ended or lost the handle, re-resolve instead of resume
+    if (state.nativeAudio.ended || !state.currentLibraryPath) {
+        console.log("[Player] Native audio ended or handle lost, re-resolving...");
+        selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+        return;
+    }
+    
     const status = await api("/api/native_audio/resume", { method: "POST", body: "{}" });
-    if (!status.ok) throw new Error(status.error || "Native audio failed to resume");
-    state.nativeAudio.playing = !!status.playing;
+    if (!status.ok) {
+        // If resume failed, maybe it's already playing or needs a hard status check
+        const forced = await api("/api/native_audio/status").catch(() => null);
+        if (forced && forced.playing) {
+            state.nativeAudio.playing = true;
+        } else {
+            console.warn("[Player] Native resume failed, falling back to full re-resolve");
+            selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+            return;
+        }
+    } else {
+        state.nativeAudio.playing = !!status.playing;
+    }
     _callNowPlaying("set_playback_state", 1);
   }
   syncPlayPauseButton();
