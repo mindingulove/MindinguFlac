@@ -298,22 +298,35 @@ def run(output_dir: Path, job: dict, manager) -> None:
             best_f_idx = -1
             best_f_score = -1
             track_pats = [f"{track_num.zfill(2)}.", f" {track_num.zfill(2)} ", f"- {track_num.zfill(2)} "] if track_num else []
+            
+            # Words that MUST appear for the match to be considered valid
+            title_tokens = set(re.findall(r'\w+', title_clean.lower()))
+            meaningful_tokens = {t for t in title_tokens if len(t) > 2 and t not in {"the", "and", "feat", "with"}}
+            if not meaningful_tokens: meaningful_tokens = title_tokens
+
             for i in range(torrent_info.num_files()):
                 f_path = Path(torrent_info.file_at(i).path)
                 if f_path.suffix.lower() in AUDIO_SUFFIXES:
+                    f_name_lower = f_path.name.lower()
                     title_score = max(
                         rapidfuzz.fuzz.token_set_ratio(raw_title, f_path.name),
                         rapidfuzz.fuzz.token_set_ratio(title_clean, f_path.stem),
                     )
-                    # Track/disc numbers are only tie-breakers. They must not
-                    # make an unrelated file look like the requested song.
-                    if title_score < 60:
+                    # Significant word check: all meaningful words from target MUST exist in filename
+                    # This stops "Temple of the King" from matching "Kill the King" (missing 'temple')
+                    path_tokens = set(re.findall(r'\w+', str(f_path).lower()))
+                    if not meaningful_tokens.issubset(path_tokens):
                         continue
+
+                    if title_score < 70: # Increased from 60 for better precision
+                        continue
+                    
                     score = title_score
                     if any(p in f_path.name for p in track_pats): score += 40
                     if f"cd{disc_num}" in str(f_path).lower(): score += 20
                     for kw in ["live", "demo", "remix", "mix", "edit"]:
-                        if kw in f_path.name.lower() and kw not in raw_title.lower(): score -= 50
+                        if kw in f_name_lower and kw not in raw_title.lower(): score -= 50
+                    
                     if score > best_f_score:
                         best_f_score = score
                         best_f_idx = i
