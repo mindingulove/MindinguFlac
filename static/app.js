@@ -1591,6 +1591,10 @@ function updatePlayerPie(pct) {
 function prepareSelectedTrackUi(track, status = "Opening stream...") {
   const audio = $("audioPlayer");
   audio.pause();
+  audio.src = ""; // Clear old source immediately
+  try {
+    audio.load();
+  } catch (e) {}
   stopNativeAudio().catch(() => {});
   try {
     audio.currentTime = 0;
@@ -2541,7 +2545,22 @@ function bindPlayer() {
       });
       return;
     }
-    audio.paused ? audio.play() : audio.pause();
+    if (audio.paused) {
+      console.log("[Player] Manual play requested. Current src:", audio.src);
+      audio.play().catch((error) => {
+        console.error("[Player] Play failed:", error);
+        // If play failed and we have a track, it might be a stale/failed stream.
+        // Try to re-select the track if the error isn't just a browser policy block.
+        if (state.currentTrack && error.name !== "NotAllowedError" && error.name !== "AbortError") {
+            console.log("[Player] Attempting to re-resolve track after play failure...");
+            selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+        } else if (state.currentTrack) {
+            setPlayerStatus(error.message || "Playback failed", state.currentTrack);
+        }
+      });
+    } else {
+      audio.pause();
+    }
   };
   audio.onplay = audio.onpause = () => {
     syncPlayPauseButton();
@@ -2592,6 +2611,15 @@ function bindPlayer() {
       audio.play().catch(() => {});
     }
   };
+  audio.onwaiting = () => {
+    if (state.currentTrack) setPlayerStatus("Buffering...", state.currentTrack);
+  };
+  audio.onplaying = () => {
+    if (state.currentTrack) {
+        const isCache = state.currentStreamUrl && state.currentStreamUrl.includes("/api/library/stream");
+        setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
+    }
+  };
   audio.onerror = () => {
     const error = audio.error;
     if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {
@@ -2605,7 +2633,13 @@ function bindPlayer() {
         audio.play().catch(() => {});
     } else if (error && state.currentTrack) {
         console.error("[Player] Media error:", error.code, error.message);
-        setPlayerStatus(`Playback error (${error.code})`, state.currentTrack);
+        // Error codes: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED
+        if (error.code === 2 || error.code === 3) {
+            console.log("[Player] Fatal media error, attempting to re-resolve track...");
+            selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+        } else {
+            setPlayerStatus(`Playback error (${error.code})`, state.currentTrack);
+        }
     }
   };
   $("seekBar").oninput = () => {

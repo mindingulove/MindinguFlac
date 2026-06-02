@@ -1156,7 +1156,7 @@ class ServiceDownloadManager:
             with self._lock:
                 if job.get("status") == "running":
                     job["status"] = "error"
-                    job["error"] = "Download timed out (no progress for 5 minutes). Check your connection."
+                    job["error"] = "Download timed out (no progress). Check your connection."
             return True
 
         with self._lock:

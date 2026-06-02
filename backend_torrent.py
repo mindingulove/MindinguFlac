@@ -248,7 +248,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         }
         return not any(marker in album_norm for marker in compilation_markers)
 
-    discovery_timeout = 60 if is_prefetch else 120
+    discovery_timeout = 120
     current_magnet = None
     blacklist: set[str] = set()  # magnets that are dead/wrong; never retry
     # magnets that stalled but had real progress on the correct file: counted
@@ -613,8 +613,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             pass
                         last_reannounce = time.time()
                         manager._append_cache_event(job, "trying", f"Streaming stalled {int(since_progress)}s ({s.num_peers}p); re-announcing to wake swarm...")
-                    max_stall = 300 if is_prefetch else 120
-                    no_peer_stall = 180 if is_prefetch else 60
+                    max_stall = 120
+                    no_peer_stall = 60
                     stalled = since_progress > max_stall
                     if not stalled and s.num_peers == 0 and since_progress > no_peer_stall:
                         stalled = True
@@ -622,7 +622,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if last_done > 0:
                             key = _torrent_key(magnet)
                             stall_retry_counts[key] = stall_retry_counts.get(key, 0) + 1
-                            limit = 3 if is_prefetch else 1
+                            limit = 1
                             if stall_retry_counts[key] <= limit:
                                 manager._append_cache_event(job, "trying", "Source stalled but had progress; keeping it as a fallback to resume later...")
                                 return None
@@ -673,10 +673,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     if max_seen == 0:
                         meta_budget = 15 if _GLOBAL_SES.status().dht_nodes > 100 else discovery_timeout
                     elif max_seen <= 2:
-                        # Give small swarms more time, especially for prefetches
-                        meta_budget = 60 if is_prefetch else 45
+                        # Give small swarms more time
+                        meta_budget = 45
                     else:
-                        meta_budget = 90 if is_prefetch else 60
+                        meta_budget = 60
                     if elapsed > meta_budget:
                         break
                     if elapsed % 15 < 1.5:
@@ -822,7 +822,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     metadata_candidates = []
                     scored_magnets = set()
                     # Budget is shorter for parallel probing to keep the UI snappy
-                    probe_budget = 35 if is_prefetch else 25 
+                    probe_budget = 25 
                     
                     while time.time() - start_wait < probe_budget:
                         if job_id in manager._cancel_flags: raise RuntimeError("Cancelled")
