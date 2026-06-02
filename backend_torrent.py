@@ -346,6 +346,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             score -= 60
 
                     if f"cd{disc_num}" in str(f_path).lower(): score += 20
+                    
+                    # Massive penalty for "Full CD" / "Disc 1" filenames when we want a single track.
+                    # This prevents matching "Eye in the Sky CD1.flac" (469MB) as the song "Eye in the Sky".
+                    album_indicators = ["cd1", "cd2", "cd3", "disc 1", "disc 2", "full album", "complete album"]
+                    if any(ind in f_name_lower for ind in album_indicators):
+                        if not any(ind in raw_title.lower() for ind in album_indicators):
+                            score -= 100
+
                     for kw in ["live", "demo", "remix", "mix", "edit"]:
                         if kw in f_name_lower and kw not in raw_title.lower(): score -= 50
                     
@@ -632,9 +640,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         return False
                     total = torrent_info.file_at(best_f_idx).size
                     if done > last_done:
-                        last_done = done; last_progress_time = time.time()
-                    elif s.download_payload_rate > 0 or s.download_rate > 0:
+                        last_done = done
                         last_progress_time = time.time()
+                        # Reset re-announce flag so we can wake the swarm again if it stalls later
+                        reannounced_once = False
+                    elif s.download_payload_rate > 100 * 1024: # > 100 KB/s overall is "healthy enough" to wait
+                        last_progress_time = time.time()
+
                     prog = (done / total) * 100 if total > 0 else 0
                     with manager._lock:
                         job["progress"] = int(prog)
@@ -648,7 +660,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     # pause: first re-announce to wake a quiet swarm, and stay
                     # patient. Only give up after the extended budget.
                     since_progress = time.time() - last_progress_time
-                    if since_progress > 30 and not reannounced_once:
+                    if since_progress > 25 and not reannounced_once:
                         try:
                             for tr in trackers:
                                 handle.add_tracker(lt.announce_entry(tr))
@@ -660,8 +672,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             pass
                         reannounced_once = True
                         manager._append_cache_event(job, "trying", f"Streaming stalled {int(since_progress)}s ({s.num_peers}p); re-announcing once to wake swarm...")
-                    max_stall = 120
-                    no_peer_stall = 60
+                    max_stall = 75
+                    no_peer_stall = 45
                     stalled = since_progress > max_stall
                     if not stalled and s.num_peers == 0 and since_progress > no_peer_stall:
                         stalled = True
@@ -936,7 +948,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         manager._append_cache_event(
                             job,
                             "trying",
-                            f"Selected source #{selected_idx+1}: {selected_result.get('title','')[:45]} (album {int(selected_meta['album_score'])}%, file {int(selected_meta['file_score'])}%)",
+                            f"Selected source #{selected_idx+1}: {selected_result.get('title','')[:45]} (album {min(100, int(selected_meta['album_score']))}%, file {min(100, int(selected_meta['file_score']))}%)",
                         )
                         selected_key = _torrent_key(m)
                         for _h_other, m_other, _r_other, _r_idx_other, _save_path_other in active_window_handles:
