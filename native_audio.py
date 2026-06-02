@@ -89,11 +89,10 @@ class NativeAudioManager:
                 self._paused = False
                 self._has_played = False
 
-            if not sound.play():
-                with self._lock:
+                if not sound.play():
                     self._sound = None
                     self._error = "Native audio player refused to start"
-                return {"ok": False, "error": self._error}
+                    return {"ok": False, "error": self._error}
 
             return self.status() | {"ok": True}
         except Exception as exc:

@@ -3208,10 +3208,15 @@ function _ensureAudioContext() {
 
 async function setAudioOutputDevice(deviceId) {
   _activeSinkId = deviceId;
+  const audio = $("audioPlayer");
+  
   if (deviceId && deviceId.startsWith("native:")) {
     _nativeAudioDeviceUid = deviceId.slice("native:".length);
-    const audio = $("audioPlayer");
+    // CRITICAL: Stop and clear browser audio so it doesn't conflict with native playback
     audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+
     if (state.currentLibraryPath && state.currentTrack) {
       try {
         await startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, audio.currentTime || 0);
@@ -3224,7 +3229,6 @@ async function setAudioOutputDevice(deviceId) {
   }
   _nativeAudioDeviceUid = "";
   await stopNativeAudio();
-  const audio = $("audioPlayer");
   if (typeof audio.setSinkId === "function") {
     try {
       await audio.setSinkId(deviceId);
