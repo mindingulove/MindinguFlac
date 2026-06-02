@@ -583,6 +583,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     total = torrent_info.file_at(best_f_idx).size
                     if done > last_done:
                         last_done = done; last_progress_time = time.time()
+                    elif s.download_payload_rate > 0 or s.download_rate > 0:
+                        last_progress_time = time.time()
                     prog = (done / total) * 100 if total > 0 else 0
                     with manager._lock:
                         job["progress"] = int(prog)
