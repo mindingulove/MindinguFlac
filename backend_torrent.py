@@ -553,7 +553,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     return True
 
                 start_time = time.time(); last_progress_time = time.time(); last_done = 0
-                last_reannounce = time.time()
+                reannounced_once = False
                 reacquire_attempts = 0
                 while True:
                     if job_id in manager._cancel_flags: raise RuntimeError("Cancelled")
@@ -611,14 +611,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         return finalize_selected_file()
                     # Stall handling. Don't abandon a source the instant bytes
                     # pause: first re-announce to wake a quiet swarm, and stay
-                    # patient (more so for background prefetch, where no user is
-                    # waiting). Only give up after the extended budget — and if
-                    # the source made real progress on the correct file, return
-                    # None instead of False so the caller keeps it as a retryable
-                    # fallback (its .parts resume cheaply) rather than blacklisting
-                    # it and falling back to a worse source that lacks the track.
+                    # patient. Only give up after the extended budget.
                     since_progress = time.time() - last_progress_time
-                    if since_progress > 30 and time.time() - last_reannounce > 45:
+                    if since_progress > 30 and not reannounced_once:
                         try:
                             for tr in trackers:
                                 handle.add_tracker(lt.announce_entry(tr))
@@ -628,8 +623,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             handle.force_reannounce()
                         except Exception:
                             pass
-                        last_reannounce = time.time()
-                        manager._append_cache_event(job, "trying", f"Streaming stalled {int(since_progress)}s ({s.num_peers}p); re-announcing to wake swarm...")
+                        reannounced_once = True
+                        manager._append_cache_event(job, "trying", f"Streaming stalled {int(since_progress)}s ({s.num_peers}p); re-announcing once to wake swarm...")
                     max_stall = 120
                     no_peer_stall = 60
                     stalled = since_progress > max_stall
@@ -643,6 +638,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             if stall_retry_counts[key] <= limit:
                                 manager._append_cache_event(job, "trying", "Source stalled but had progress; keeping it as a fallback to resume later...")
                                 return None
+                        manager._append_cache_event(job, "trying", f"Source stalled after {int(since_progress)}s; moving to next candidate.")
                         return False
                     if time.time() - start_time > 1800: return False
                     time.sleep(2)
