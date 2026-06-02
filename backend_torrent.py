@@ -312,18 +312,23 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         rapidfuzz.fuzz.token_set_ratio(raw_title, f_path.name),
                         rapidfuzz.fuzz.token_set_ratio(title_clean, f_path.stem),
                     )
-                    # Significant word check: a majority of meaningful words from target MUST exist in filename
-                    # This allows "Eye in the Sky" to match even with slight variations, 
-                    # while still stopping "Temple of the King" from matching "Kill the King".
-                    path_tokens = set(re.findall(r'\w+', str(f_path).lower()))
-                    match_count = sum(1 for t in meaningful_tokens if t in path_tokens)
+                    # Significant word check: a majority of meaningful words from target MUST exist in the filename.
+                    # We check the filename stem specifically to avoid "Sirius" matching "Eye in the Sky"
+                    # just because it's inside a folder named "Eye in the Sky".
+                    filename_tokens = set(re.findall(r'\w+', f_path.stem.lower()))
+                    match_count = sum(1 for t in meaningful_tokens if t in filename_tokens)
                     match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
                     
                     if match_ratio < 0.7:
-                        continue
+                        # Fallback: if the filename is very short (e.g. "01.flac"), check the immediate parent folder too
+                        parent_tokens = set(re.findall(r'\w+', f_path.parent.name.lower())) if f_path.parent.name else set()
+                        combined_tokens = filename_tokens.union(parent_tokens)
+                        match_count = sum(1 for t in meaningful_tokens if t in combined_tokens)
+                        match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
+                        if match_ratio < 0.7:
+                            continue
 
-                    if title_score < 62: # Reduced from 70 for better balance
-                        continue
+                    if title_score < 62:
                     
                     score = title_score
                     if any(p in f_path.name for p in track_pats): score += 40
