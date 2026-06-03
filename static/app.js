@@ -1585,7 +1585,7 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
     state.autoplayWanted = false;
     setPlayerStatusIcon("ready");
     setPlayerStatus(statusText, track);
-    await startNativeAudio(filePath, track, requestId, 0);
+    await startNativeAudio(filePath, track, requestId, startAt);
     return;
   }
   await stopNativeAudio();
@@ -3350,6 +3350,7 @@ async function setAudioOutputDevice(deviceId) {
     _nativeAudioDeviceUid = deviceId.slice("native:".length);
     const wasBrowserPlaying = !!audio && !audio.paused;
     const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    const shouldKeepPaused = !!state.manualPauseRequested;
     let nativePath = state.currentLibraryPath || "";
 
     if (!nativePath && state.currentTrack) {
@@ -3370,7 +3371,7 @@ async function setAudioOutputDevice(deviceId) {
         audio.pause();
         audio.removeAttribute("src");
         audio.load();
-        if (!wasBrowserPlaying) {
+        if (shouldKeepPaused) {
           await api("/api/native_audio/pause", { method: "POST", body: "{}" }).catch(() => {});
           state.nativeAudio.playing = false;
         }
