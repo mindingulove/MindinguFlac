@@ -89,7 +89,7 @@ class AppConfig:
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
     volume: float = 1.0
     track_max_retries: int = 1
-    download_engine: str = "tidal_hifi"
+    download_engine: str = "ytp-dl"
     discogs_token: str = ""
     qobuz_token: str = ""
 

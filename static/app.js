@@ -90,15 +90,7 @@ const SERVICE_QUALITIES = {
 };
 
 const ENGINE_PROVIDERS = {
-  spotiflac: [
-    { value: "tidal",       label: "Tidal" },
-    { value: "deezer",      label: "Deezer" },
-    { value: "qobuz",       label: "Qobuz" },
-    { value: "amazon",      label: "Amazon Music" },
-    { value: "apple_music", label: "Apple Music" },
-    { value: "soundcloud",  label: "SoundCloud" },
-    { value: "youtube",     label: "YouTube" },
-  ],
+  "ytp-dl": [],
   torrent: [
     { value: "all",           label: "All Trackers (Parallel)" },
     { value: "torlock",       label: "TorLock" },
@@ -109,20 +101,28 @@ const ENGINE_PROVIDERS = {
     { value: "kickass",       label: "KickassTorrents" },
     { value: "yts",           label: "YTS" },
   ],
-  "ytp-dl": [],
+  spotiflac: [
+    { value: "tidal",       label: "Tidal" },
+    { value: "deezer",      label: "Deezer" },
+    { value: "qobuz",       label: "Qobuz" },
+    { value: "amazon",      label: "Amazon Music" },
+    { value: "apple_music", label: "Apple Music" },
+    { value: "soundcloud",  label: "SoundCloud" },
+    { value: "youtube",     label: "YouTube" },
+  ],
 };
 
 const ENGINE_QUALITIES = {
-  spotiflac: null,
-  torrent: [
-    { value: "LOSSLESS", label: "FLAC / Lossless" },
-    { value: "MP3",      label: "MP3 / Lossy" },
-  ],
   "ytp-dl": [
     { value: "best", label: "Best available" },
     { value: "m4a",  label: "M4A / AAC" },
     { value: "mp3",  label: "MP3" },
   ],
+  torrent: [
+    { value: "LOSSLESS", label: "FLAC / Lossless" },
+    { value: "MP3",      label: "MP3 / Lossy" },
+  ],
+  spotiflac: null,
 };
 
 const MUSICDL_QUALITIES = {
@@ -1729,7 +1729,24 @@ function updateDetailsPanel(track) {
     }
   });
   $("sideTitle").innerHTML = albumLinkHtml(track, track.title || "No track selected");
-  $("sideMeta").innerHTML = artistLinkHtml(track) || "Search or choose from library";
+
+  let qualityHtml = "";
+  const currentPath = state.currentLibraryPath || "";
+  if (currentPath) {
+    const ext = currentPath.split(".").pop().toUpperCase();
+    if (["FLAC", "ALAC", "WAV"].includes(ext)) {
+      qualityHtml = `<span class="quality-pill">HI-RES</span>`;
+    } else if (ext === "MP3" || ext === "M4A" || ext === "AAC") {
+      qualityHtml = `<span class="quality-pill">HQ</span>`;
+    }
+  }
+
+  $("sideMeta").innerHTML = `
+    <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+      ${artistLinkHtml(track) || "Search or choose from library"}
+      ${qualityHtml}
+    </div>
+  `;
   bindEntityLinks(document.querySelector(".details-head"));
 }
 
