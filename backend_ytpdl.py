@@ -517,6 +517,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "no_warnings": True,
         "noprogress": True,
         "ignoreerrors": True,
+        "cachedir": False,
         "allow_unplayable_formats": False,
         "progress_hooks": [progress_cb],
 
