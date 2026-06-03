@@ -300,8 +300,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
         return not any(marker in album_norm for marker in compilation_markers)
 
     discovery_timeout = 120
+    import db
     current_magnet = None
-    blacklist: set[str] = set()  # magnets that are dead/wrong; never retry
     # magnets that stalled but had real progress on the correct file: counted
     # so they get a bounded number of resume attempts before being blacklisted.
     stall_retry_counts: dict[str, int] = {}
@@ -460,7 +460,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
         # 1. INSTANT CACHE
         catalog = _load_catalog(manager)
         album_key = f"{primary_artist.lower()}||{album.lower()}"
-        cached_magnet = catalog.get(album_key)
+        # RECOVERY attempt: use the persistent source from DB if available
+        cached_magnet = job.get("resolved_url")
+        if not cached_magnet or not cached_magnet.startswith("magnet:"):
+            cached_magnet = catalog.get(album_key)
         
         handle = None
         torrent_save_path = output_dir
@@ -726,6 +729,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     if album != "Unknown":
                         catalog[f"{primary_artist.lower()}||{album.lower()}"] = magnet
                         _save_catalog(manager, catalog)
+                    
+                    db.save_resolved_source(
+                        track_key=job.get("track_key") or f"{primary_artist.lower()}||{title_clean.lower()}",
+                        engine="torrent",
+                        service=job.get("service") or "all",
+                        quality=job.get("quality") or "LOSSLESS",
+                        resolved_url=magnet
+                    )
                     return True
 
                 start_time = time.time(); last_progress_time = time.time(); last_done = 0
@@ -832,7 +843,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 m_link = r.get("magnet")
                 if not m_link:
                     return None
-                if m_link in blacklist:
+                if db.is_blacklisted(m_link):
                     return None
                 import urllib.parse
                 if "&tr=" not in m_link:
@@ -916,7 +927,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 if _scr:
                     return candidate_handle
                 if _scr is False:
-                    blacklist.add(current_magnet)
+                    db.add_to_blacklist(current_magnet, "stalled or dead")
                     manager._append_cache_event(job, "trying", "Source stalled mid-download, trying next...")
                 else:
                     manager._append_cache_event(job, "trying", "Source stalled but kept as fallback, trying next...")
@@ -1038,7 +1049,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             active_window_keys = set()
                             for r_idx, r in enumerate(window):
                                 m_link = r.get("magnet")
-                                if not m_link or m_link in blacklist:
+                                if not m_link or db.is_blacklisted(m_link):
                                     continue
                                 import urllib.parse
                                 if "&tr=" not in m_link:
@@ -1126,7 +1137,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                         resolved_album_from_search = selected_result.get("_search_album") or target_album
                                     return h
                                 if _scr is False:
-                                    blacklist.add(m)
+                                    db.add_to_blacklist(m, "stalled during streaming")
                                 _unregister_job_from_torrent(m, job_id)
                                 current_magnet = None
                                 active_window_handles = [x for x in active_window_handles if x[1] != m]
@@ -1147,7 +1158,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         search_executor.shutdown(wait=False, cancel_futures=True)
 
             # INSTANT CACHE attempt: reuse the known-good magnet for this album.
-            if cached_magnet and cached_magnet not in blacklist:
+            if cached_magnet and not db.is_blacklisted(cached_magnet):
                 handle, torrent_save_path = _register_job_to_torrent(cached_magnet, job_id, output_dir, manager)
                 current_magnet = cached_magnet
                 time.sleep(0.5)
@@ -1159,9 +1170,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     # Only blacklist on a hard failure; a stalled-with-progress
                     # cache magnet (None) stays retryable so a later phase resumes.
                     if _scr is False:
-                        blacklist.add(cached_magnet)
+                        db.add_to_blacklist(cached_magnet, "cached source failed")
+                        db.delete_resolved_source(job.get("track_key") or "")
                 else:
-                    blacklist.add(cached_magnet)
+                    db.add_to_blacklist(cached_magnet, "cached source has no peers")
+                    db.delete_resolved_source(job.get("track_key") or "")
                 _unregister_job_from_torrent(current_magnet, job_id)
                 handle = None
                 current_magnet = None

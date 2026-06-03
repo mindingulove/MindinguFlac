@@ -481,7 +481,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     if job["id"] in manager._cancel_flags:
         return
 
-    blacklist: set[str] = set()
+    import db
     url = _resolved_youtube_url(job)
     if not url:
         raise RuntimeError("ytp-dl could not build a YouTube URL or search query from the selected track metadata")
@@ -539,27 +539,27 @@ def run(output_dir: Path, job: dict, manager) -> None:
     try:
         yt_dlp = _get_yt_dlp()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            def _try_download(target_url: str) -> bool:
+            def _try_download(target_url: str) -> str | None:
                 if target_url.startswith("ytsearch"):
                     try:
                         search_info = ydl.extract_info(target_url, download=False)
                         if not isinstance(search_info, dict):
-                            return False
+                            return None
                         candidates = _ranked_youtube_matches(search_info, job)
                     except Exception as exc:
                         manager._append_cache_event(job, "trying", f"YouTube search failed: {exc}")
-                        return False
+                        return None
                 else:
                     candidates = [(target_url, None)]
 
                 # Try up to 8 candidates in order of score
-                attempts = [(u, s) for u, s in candidates if u not in blacklist][:8]
+                attempts = [(u, s) for u, s in candidates if not db.is_blacklisted(u)][:8]
                 if not attempts:
-                    return False
+                    return None
 
                 for index, (download_url, selected) in enumerate(attempts):
                     if job["id"] in manager._cancel_flags:
-                        return False
+                        return None
                     if selected:
                         with manager._lock:
                             job["resolved_url"] = download_url
@@ -573,39 +573,39 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         )
                     try:
                         ydl.download([download_url])
-                        return True
+                        return download_url
                     except Exception as exc:
-                        blacklist.add(download_url)
+                        db.add_to_blacklist(download_url, "ytp-dl failure")
                         if index + 1 < len(attempts):
                             manager._append_cache_event(
                                 job, "trying", f"YouTube candidate unavailable, blacklisting and trying another: {exc}"
                             )
                         else:
                             manager._append_cache_event(job, "trying", f"YouTube candidate failed and blacklisted: {exc}")
-                return False
+                return None
 
-            success = False
+            worked_url = None
             if url:
-                success = _try_download(url)
+                worked_url = _try_download(url)
             
-            if not success:
+            if not worked_url:
                 if url and not url.startswith("ytsearch"):
-                    blacklist.add(url)
+                    db.add_to_blacklist(url, "direct url failed")
                 
                 # Phase 2: Full Search (Artist + Title + Album)
                 search_query = _youtube_search_query(job, clean=False)
                 if search_query and search_query != url:
                     manager._append_cache_event(job, "trying", "Falling back to full YouTube search...")
-                    success = _try_download(search_query)
+                    worked_url = _try_download(search_query)
             
-            if not success:
+            if not worked_url:
                 # Phase 3: Clean Search (Artist + Base Title, stripping Remastered/Deluxe/etc.)
                 clean_query = _youtube_search_query(job, clean=True)
                 if clean_query and clean_query != url:
                     manager._append_cache_event(job, "trying", "Falling back to clean YouTube search (stripping version suffixes)...")
-                    success = _try_download(clean_query)
+                    worked_url = _try_download(clean_query)
 
-            if not success:
+            if not worked_url:
                 raise RuntimeError("All YouTube download attempts failed")
 
     except Exception as exc:
@@ -616,6 +616,17 @@ def run(output_dir: Path, job: dict, manager) -> None:
         raise RuntimeError("ytp-dl reported success but no playable audio file was found")
 
     final = audio_files[0]
+    
+    # Persistence: save the successful URL
+    if worked_url:
+        db.save_resolved_source(
+            track_key=job.get("track_key") or f"{job.get('artist','').lower()}||{job.get('title','').lower()}",
+            engine="ytp-dl",
+            service="youtube",
+            quality=job.get("quality") or "best",
+            resolved_url=worked_url
+        )
+
     with manager._lock:
         job["library_path"] = str(final)
         job["provider_used"] = "ytp-dl"

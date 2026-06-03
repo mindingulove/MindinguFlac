@@ -411,7 +411,26 @@ def _track_identity_from_payload(payload: dict) -> dict:
     artist = meta.get("artist")
     album = meta.get("album")
     title = meta.get("title") or meta.get("name")
+    
+    # Generate a stable track key for persistent DB lookups
+    ids = []
+    for key in IDENTIFIER_FIELDS:
+        val = str(meta.get(key) or "").strip()
+        if val: ids.append(f"{key}:{val}")
+    
+    if ids:
+        track_key = ids[0]
+    else:
+        # Fallback to normalized title||artist||album
+        parts = [
+            str(title or "").strip().lower(),
+            str(artist or "").strip().lower(),
+            str(album or "").strip().lower()
+        ]
+        track_key = "||".join(parts)
+
     return {
+        "track_key": track_key,
         "artist": _norm(artist),
         "album": _norm(album),
         "title": _norm(title),
@@ -1218,6 +1237,7 @@ class ServiceDownloadManager:
             return self._create_job(payload)
 
     def _create_job(self, payload: dict) -> dict:
+        import db
         job_id = str(uuid.uuid4())
         isrc = (
             payload.get("isrc")
@@ -1226,7 +1246,28 @@ class ServiceDownloadManager:
             or ""
         )
         metadata = payload.get("metadata") or payload.get("track") or {}
-        track_key = f"{(payload.get('artist') or metadata.get('artist') or '').lower()}||{(payload.get('title') or metadata.get('title') or '').lower()}"
+        identity = _track_identity_from_payload(payload)
+        track_key = identity["track_key"]
+
+        # Persistent source recovery
+        resolved_data = db.get_resolved_source(track_key)
+        
+        # Determine engine/service with persistence fallback
+        engine = (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower()
+        service = (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower()
+        resolved_url = ""
+
+        if resolved_data:
+            # If the engine matches or we have a direct URL, we can reuse it
+            if resolved_data.get("engine") == engine:
+                resolved_url = resolved_data.get("resolved_url", "")
+                service = resolved_data.get("service") or service
+                # We can even adopt the old engine if it worked before and we don't have a strong preference
+            elif not payload.get("engine") and resolved_data.get("resolved_url"):
+                # Use what worked last time if the user didn't explicitly pick an engine for this request
+                engine = resolved_data.get("engine") or engine
+                service = resolved_data.get("service") or service
+                resolved_url = resolved_data.get("resolved_url", "")
 
         job = {
             "id": job_id,
@@ -1240,15 +1281,15 @@ class ServiceDownloadManager:
             "prefetch": bool(payload.get("prefetch")),
             "isrc": isrc,
             "metadata": metadata,
-            "service": (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower(),
-            "engine": (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower(),
+            "service": service,
+            "engine": engine,
             "quality": payload.get("quality") or getattr(self.config, "default_quality", "flac") or "flac",
             "status": "starting",
             "last_status": "Starting...",
             "progress": 0,
             "created_at": time.time(),
             "error": "",
-            "resolved_url": "",
+            "resolved_url": resolved_url,
             "output_dir": "",
             "library_path": "",
         }
