@@ -1074,24 +1074,25 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         return score
 
     gallery_images.sort(key=quality_score, reverse=True)
-# Use the best quality image as the main artwork_url if available
-top_art = gallery_images[0]["url"] if gallery_images else art
 
-result = {
-    "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
-    "total_duration": format_duration_ms(total_ms), "artwork_url": top_art,
-    "artist_artwork_url": spotify_artist_artwork(artist), "tracks": tracks,
-    "gallery_images": gallery_images,
-    "release_id": release_id,
-    "spotify_id": spotify_id,
-}
+    # Use the best quality image as the main artwork_url if available
+    top_art = gallery_images[0]["url"] if gallery_images else art
 
-# Cache it!
-import db
-album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
-db.save_album_metadata(album_key, result)
-
-return result
+    result = {
+        "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
+        "total_duration": format_duration_ms(total_ms), "artwork_url": top_art,
+        "artist_artwork_url": spotify_artist_artwork(artist), "tracks": tracks,
+        "gallery_images": gallery_images,
+        "release_id": release_id,
+        "spotify_id": spotify_id,
+    }
+    
+    # Cache it!
+    import db
+    album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
+    db.save_album_metadata(album_key, result)
+    
+    return result
 
 
 
