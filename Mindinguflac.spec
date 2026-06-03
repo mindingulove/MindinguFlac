@@ -39,6 +39,15 @@ try:
 except Exception:
     pass
 
+# imageio-ffmpeg bundles a static ffmpeg binary used by the ytp-dl YouTube
+# postprocessors. Collect its binaries folder so get_ffmpeg_exe() resolves in
+# the frozen app.
+try:
+    tmp_ret = collect_all('imageio_ffmpeg')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+except Exception:
+    pass
+
 helper = Path('build/macos/MindinguflacNowPlayingHelper')
 if helper.is_file():
     binaries.append((str(helper), '.'))

@@ -47,7 +47,7 @@ except Exception:
 # collect_all those DLLs are missing from the bundle and the packaged app fails
 # with "DLL load failed while importing libtorrent: The specified module could
 # not be found."
-for package_name in ('libtorrent', 'PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy'):
+for package_name in ('libtorrent', 'PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy', 'imageio_ffmpeg'):
     try:
         tmp_ret = collect_all(package_name)
         datas += tmp_ret[0]

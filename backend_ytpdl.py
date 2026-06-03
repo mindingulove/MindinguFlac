@@ -1,11 +1,39 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _ffmpeg_location() -> str:
+    """Return a path yt-dlp can use to find ffmpeg.
+
+    yt-dlp's postprocessors (FFmpegMetadata, FFmpegExtractAudio) require an
+    ffmpeg binary. Rather than expecting the user to install one, ship it via
+    the ``imageio-ffmpeg`` pip package, which bundles a static ffmpeg binary
+    per platform. Fall back to a frozen-bundle binary (``sys._MEIPASS``) or a
+    PATH ffmpeg if the package is unavailable."""
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+
+    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(getattr(sys, "_MEIPASS", ""), name)
+        if os.path.exists(bundled):
+            return bundled
+    return shutil.which(name) or shutil.which("ffmpeg") or ""
 
 
 def _get_yt_dlp():
@@ -420,6 +448,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "addmetadata": True,
         "postprocessors": postprocessors,
     }
+
+    ffmpeg_path = _ffmpeg_location()
+    if ffmpeg_path:
+        ydl_opts["ffmpeg_location"] = ffmpeg_path
 
     with manager._lock:
         job["status"] = "running"
