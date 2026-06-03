@@ -2,6 +2,7 @@ const API_BASE = "";
 const CATALOG_REFRESH_MS = 15 * 60 * 1000;
 const ARTIST_TRACK_PREVIEW_COUNT = 5;
 const ARTIST_ALBUM_PREVIEW_COUNT = 6;
+const PREFETCH_AHEAD_COUNT = 5;
 
 const state = {
   viewStack: [],
@@ -10,7 +11,7 @@ const state = {
   playlists: [],
   currentTrack: null,
   activeJobId: null,
-  activePrefetchJobId: null,
+  prefetchJobs: new Map(),
   isShuffle: false,
   isRepeat: false,
   queue: [],
@@ -1486,13 +1487,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
     api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activeJobId }) }).catch(() => {});
     state.activeJobId = null;
   }
-  // Only cancel the prefetch if the incoming track is NOT the one being prefetched.
-  // If it IS the prefetched track (queue auto-advance), keep it running and reuse it.
-  if (state.activePrefetchJobId && trackKey(item) !== state.prefetchedTrackKey) {
-    api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
-    state.activePrefetchJobId = null;
-    state.prefetchedTrackKey = null;
-  }
+  adoptPrefetchJobForTrack(item);
 
   
   const requestId = ++state.playbackRequestId;
@@ -1505,15 +1500,16 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   syncActiveTrackRows();
   
   if (contextList && contextList.length) {
-    state.originalQueue = [...contextList].filter(t => t.type !== "artist");
+    state.originalQueue = [...contextList].filter(playableQueueItem);
     state.queueContext = playbackContext;
     if (state.isShuffle) {
         state.queue = [...state.originalQueue].sort(() => Math.random() - 0.5);
     } else {
         state.queue = [...state.originalQueue];
     }
-    state.queueIndex = state.queue.findIndex(t => t.title === item.title && t.artist === item.artist);
+    state.queueIndex = state.queue.findIndex(t => trackKey(t) === trackKey(item));
   }
+  cancelPrefetchJobs("outside current queue window", currentPrefetchWindowKeys(), currentQueueOrderKey());
   
   try {
     const source = await api("/api/playback/source", { method: "POST", body: JSON.stringify(serviceDownloadPayload(item, "stream")) });
@@ -1642,7 +1638,7 @@ async function resumeBrowserAudioFromStableSource(audio) {
     console.error("[Player] Play failed:", error);
     if (state.currentTrack && error.name !== "NotAllowedError" && error.name !== "AbortError") {
       console.log("[Player] Attempting to re-resolve track after play failure...");
-      selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+      selectMusicItem(state.currentTrack, "stream", null, state.queueContext);
     } else if (state.currentTrack) {
       setPlayerStatus(error.message || "Playback failed", state.currentTrack);
     }
@@ -1761,26 +1757,102 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
   };
 }
 
-function trackKey(item) {
-  return `${(item?.title || "").toLowerCase()}||${(item?.artist || "").toLowerCase()}`;
+function trackIdentityValue(item, key) {
+  return item?.[key] || item?.metadata?.[key] || "";
 }
 
-async function prefetchNextTrack() {
-  if (state.isRepeat) { console.log("[Prefetch] skipped: repeat on"); return; }
-  if (!state.queue.length) { console.log("[Prefetch] skipped: empty queue"); return; }
-  // queueIndex can desync; recover it from the current track if needed.
+function trackKey(item) {
+  for (const key of ["spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_track_id", "deezer_id", "tidal_id"]) {
+    const value = String(trackIdentityValue(item, key) || "").trim();
+    if (value) return `${key}:${value}`;
+  }
+  return [
+    item?.title || item?.metadata?.title || "",
+    item?.artist || item?.metadata?.artist || "",
+    item?.album || item?.metadata?.album || "",
+  ].map(value => String(value).trim().toLowerCase()).join("||");
+}
+
+function playableQueueItem(item) {
+  return item && item.type !== "artist" && item.type !== "album";
+}
+
+function getQueueIndex() {
   let idx = state.queueIndex;
   if (idx < 0 && state.currentTrack) {
-    idx = state.queue.findIndex(t => t.title === state.currentTrack.title && t.artist === state.currentTrack.artist);
+    const currentKey = trackKey(state.currentTrack);
+    idx = state.queue.findIndex(t => trackKey(t) === currentKey);
+    if (idx >= 0) state.queueIndex = idx;
   }
-  if (idx < 0) { console.log("[Prefetch] skipped: no queue index"); return; }
-  const nextIdx = idx + 1;
-  if (nextIdx >= state.queue.length) { console.log("[Prefetch] skipped: at last track"); return; }
-  const next = state.queue[nextIdx];
-  if (!next || next.type === "artist" || next.type === "album") return;
+  return idx;
+}
 
-  console.log("[Prefetch] Starting for:", next.title);
-  
+function currentQueueOrderKey() {
+  return `${state.isShuffle ? "shuffle" : "linear"}|${state.queue.map(trackKey).join(">")}`;
+}
+
+function upcomingPrefetchTracks(limit = PREFETCH_AHEAD_COUNT) {
+  if (state.isRepeat || !state.queue.length) return [];
+  const idx = getQueueIndex();
+  if (idx < 0) return [];
+  const max = Math.min(limit, Math.max(0, state.queue.length - 1));
+  const tracks = [];
+  const seen = new Set([state.currentTrack ? trackKey(state.currentTrack) : ""]);
+  for (let offset = 1; offset <= max; offset++) {
+    const item = state.queue[(idx + offset) % state.queue.length];
+    const key = trackKey(item);
+    if (!playableQueueItem(item) || seen.has(key)) continue;
+    seen.add(key);
+    tracks.push(item);
+  }
+  return tracks;
+}
+
+function currentPrefetchWindowKeys() {
+  return new Set(upcomingPrefetchTracks().map(trackKey));
+}
+
+function cancelPrefetchJob(key, entry, reason = "stale") {
+  if (!entry || !entry.jobId) return;
+  console.log("[Prefetch] Cancelling", entry.jobId, reason);
+  api("/api/service/cancel", {
+    method: "DELETE",
+    body: JSON.stringify({ job_id: entry.jobId }),
+  }).catch(() => {});
+  state.prefetchJobs.delete(key);
+}
+
+function cancelPrefetchJobs(reason = "stale", keepKeys = new Set(), orderKey = currentQueueOrderKey()) {
+  for (const [key, entry] of Array.from(state.prefetchJobs.entries())) {
+    if (keepKeys.has(key) && entry.orderKey === orderKey) continue;
+    cancelPrefetchJob(key, entry, reason);
+  }
+}
+
+function cancelAllPrefetchJobs(reason = "queue changed") {
+  cancelPrefetchJobs(reason, new Set(), "");
+}
+
+function adoptPrefetchJobForTrack(track) {
+  const key = trackKey(track);
+  const entry = state.prefetchJobs.get(key);
+  if (entry) {
+    console.log("[Prefetch] Reusing prefetched job:", entry.jobId);
+    state.prefetchJobs.delete(key);
+  }
+  return entry || null;
+}
+
+function playQueueOffset(delta) {
+  if (!state.queue.length) return;
+  const idx = getQueueIndex();
+  state.queueIndex = ((idx < 0 ? 0 : idx) + delta + state.queue.length) % state.queue.length;
+  selectMusicItem(state.queue[state.queueIndex], "stream", null, state.queueContext);
+}
+
+async function prefetchOneTrack(next, orderKey) {
+  const key = trackKey(next);
+  if (state.prefetchJobs.has(key)) return;
   try {
     const source = await api("/api/playback/source", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream")) });
     if (source.path) {
@@ -1789,15 +1861,30 @@ async function prefetchNextTrack() {
     }
   } catch (e) {}
   try {
+    if (currentQueueOrderKey() !== orderKey || !currentPrefetchWindowKeys().has(key)) return;
     const job = await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream", true)) });
     if (job && job.id) {
+      if (currentQueueOrderKey() !== orderKey || !currentPrefetchWindowKeys().has(key)) {
+        api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: job.id }) }).catch(() => {});
+        return;
+      }
       console.log("[Prefetch] Job started:", job.id, "for", next.title);
-      state.activePrefetchJobId = job.id;
-      state.prefetchedTrackKey = trackKey(next);
+      state.prefetchJobs.set(key, { jobId: job.id, orderKey });
     }
   } catch (e) {
     console.error("[Prefetch] Failed to start:", e);
   }
+}
+
+async function prefetchNextTracks() {
+  if (state.isRepeat) { console.log("[Prefetch] skipped: repeat on"); return; }
+  if (!state.queue.length) { console.log("[Prefetch] skipped: empty queue"); return; }
+  const targets = upcomingPrefetchTracks();
+  if (!targets.length) { console.log("[Prefetch] skipped: no upcoming tracks"); return; }
+  const orderKey = currentQueueOrderKey();
+  cancelPrefetchJobs("outside current queue window", new Set(targets.map(trackKey)), orderKey);
+  console.log("[Prefetch] Starting window:", targets.map(track => track.title).join(", "));
+  await Promise.all(targets.map(track => prefetchOneTrack(track, orderKey)));
 }
 
 async function toggleTrackLibrary(track, button, refresh) {
@@ -2220,7 +2307,7 @@ async function refreshCacheLogs() {
         if (msg.toLowerCase().includes(title)) {
            console.log("[Player] Detected file readiness, forcing high-fidelity stream...");
            // This switches from the live torrent stream to the finalized local file
-           selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+           selectMusicItem(state.currentTrack, "stream", null, state.queueContext);
         }
       }
       
@@ -2376,15 +2463,12 @@ function startNativeAudioPolling(requestId) {
     // ontimeupdate never fires on the native path, so trigger it here too.
     if (state.nativeAudio.position >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
       state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTrack().catch(() => {});
+      prefetchNextTracks().catch(() => {});
     }
     if (status.ended && !state.manualPauseRequested) {
       await stopNativeAudio();
       clearMediaSession();
-      if (state.queue.length) {
-        state.queueIndex = (state.queueIndex + 1) % state.queue.length;
-        selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
-      }
+      playQueueOffset(1);
     }
   }, 500);
 }
@@ -2408,10 +2492,7 @@ async function toggleNativeAudioPlayback() {
 
   // If it already ended, advance to the next track regardless of pause intent.
   if (state.nativeAudio.ended) {
-    if (state.queue.length) {
-      state.queueIndex = (state.queueIndex + 1) % state.queue.length;
-      selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
-    }
+      playQueueOffset(1);
     return;
   }
 
@@ -2781,10 +2862,7 @@ function bindPlayer() {
     // track and replay it from the start.
     if (state.manualPauseRequested) return;
     clearMediaSession();
-    if (state.queue.length) {
-      state.queueIndex = (state.queueIndex + 1) % state.queue.length;
-      selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
-    }
+    playQueueOffset(1);
   };
   audio.ontimeupdate = () => {
     if (!audio.duration) return;
@@ -2794,7 +2872,7 @@ function bindPlayer() {
     $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
     if (audio.currentTime >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
       state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTrack().catch(() => {});
+      prefetchNextTracks().catch(() => {});
     }
   };
   audio.onloadedmetadata = () => {
@@ -2857,7 +2935,7 @@ function bindPlayer() {
         // Error codes: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED
         if (error.code === 2 || error.code === 3) {
             console.log("[Player] Fatal media error, attempting to re-resolve track...");
-            selectMusicItem(state.currentTrack, "stream", state.originalQueue, state.queueContext);
+            selectMusicItem(state.currentTrack, "stream", null, state.queueContext);
         } else {
             setPlayerStatus(`Playback error (${error.code})`, state.currentTrack);
         }
@@ -2910,30 +2988,28 @@ function bindPlayer() {
       updateMediaSession(state.currentTrack);
     }
   });
-  $("btnNext").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex + 1) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext); } };
-  $("btnPrev").onclick = () => { if (state.queue.length) { state.queueIndex = (state.queueIndex - 1 + state.queue.length) % state.queue.length; selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext); } };
+  $("btnNext").onclick = () => playQueueOffset(1);
+  $("btnPrev").onclick = () => playQueueOffset(-1);
   const btnShuffle = $("btnShuffle");
   if (btnShuffle) {
     btnShuffle.onclick = () => {
       state.isShuffle = !state.isShuffle;
       btnShuffle.classList.toggle("active", state.isShuffle);
 
-      if (state.activePrefetchJobId) {
-        api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
-        state.activePrefetchJobId = null;
-      }
+      cancelAllPrefetchJobs("queue order changed");
       
       if (state.queue.length > 0 && state.currentTrack) {
         const current = state.currentTrack;
         if (state.isShuffle) {
-          const others = state.originalQueue.filter(t => t.title !== current.title || t.artist !== current.artist);
+          const currentKey = trackKey(current);
+          const others = state.originalQueue.filter(t => trackKey(t) !== currentKey);
           state.queue = [current, ...others.sort(() => Math.random() - 0.5)];
           state.queueIndex = 0;
         } else {
           state.queue = [...state.originalQueue];
-          state.queueIndex = state.queue.findIndex(t => t.title === current.title && t.artist === current.artist);
+          state.queueIndex = state.queue.findIndex(t => trackKey(t) === trackKey(current));
         }
-        prefetchNextTrack().catch(() => {});
+        prefetchNextTracks().catch(() => {});
       }
     };
   }
@@ -2946,10 +3022,8 @@ function bindPlayer() {
       audio.loop = state.isRepeat;
       
       // If repeat is enabled, we don't need the next track prefetch anymore
-      if (state.isRepeat && state.activePrefetchJobId) {
-        api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: state.activePrefetchJobId }) }).catch(() => {});
-        state.activePrefetchJobId = null;
-      }
+      if (state.isRepeat) cancelAllPrefetchJobs("repeat enabled");
+      else prefetchNextTracks().catch(() => {});
     };
   }
   bindMediaSessionActions();

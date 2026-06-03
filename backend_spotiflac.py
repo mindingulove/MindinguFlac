@@ -9,12 +9,30 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # SpotiFLAC state
 # ---------------------------------------------------------------------------
-_spotiflac_lock = threading.Lock()
 _spotiflac_job_local = threading.local()
 _spotiflac_patch_installed = False
 _spotiflac_patch_lock = threading.Lock()
 _STREAM_CAPTURE = threading.local()
 _STREAM_CAPTURE_INSTALLED = False
+
+# Thread-safe httpx client management for parallel SpotiFLAC runs
+_sf_clients_lock = threading.Lock()
+_sf_clients: dict[str | None, object] = {}
+
+def _get_sf_client(proxy: str | None = None):
+    import httpx
+    with _sf_clients_lock:
+        if proxy not in _sf_clients:
+            # Create a dedicated client for this proxy configuration (or direct)
+            # SpotiFLAC uses httpx.Client internally; we provide a pooled one.
+            limits = httpx.Limits(max_keepalive_connections=30, max_connections=100)
+            _sf_clients[proxy] = httpx.Client(limits=limits, timeout=300.0, proxy=proxy)
+        return _sf_clients[proxy]
+
+def _patched_get_sync_client(cls):
+    # Returns a client configured with the current thread's proxy
+    proxy = getattr(_spotiflac_job_local, "proxy", None)
+    return _get_sf_client(proxy)
 
 _SPOTIFLAC_SERVICE_MAP: dict[str, str] = {
     "apple_music": "apple",
@@ -267,6 +285,11 @@ def _ensure_spotiflac_metadata_patch() -> None:
                 return requested_spotiflac_track_metadata(track, job)
 
             SpotifyMetadataClient.get_track = _thread_local_get_track
+
+            # Also patch the NetworkManager to return our proxy-aware clients
+            from SpotiFLAC.core.http import NetworkManager  # type: ignore
+            NetworkManager.get_sync_client = classmethod(_patched_get_sync_client)
+
             _spotiflac_patch_installed = True
         except Exception:
             pass
@@ -295,21 +318,12 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
     max_retries = max(2, manager.config.track_max_retries + 1)
     kwargs = spotiflac_download_options(output_dir, {**job, "resolved_url": url}, max_retries, services_list)
 
-    def _exec_sf_serialized(proxy=None) -> tuple[bool, bool]:
-        old_http = os.environ.get("HTTP_PROXY")
-        old_https = os.environ.get("HTTPS_PROXY")
+    def _exec_sf(proxy=None) -> tuple[bool, bool]:
+        # No lock here! Parallel downloads are enabled.
+        # Set the thread-local proxy for the NetworkManager patch
+        _spotiflac_job_local.proxy = proxy
+        
         old_ua = os.environ.get("USER_AGENT")
-        old_timeout = os.environ.get("TIMEOUT_S")
-
-        if proxy:
-            os.environ["HTTP_PROXY"] = proxy
-            os.environ["HTTPS_PROXY"] = proxy
-
-        # Standard SpotiFLAC providers often use 15-30s timeouts. 
-        # We increase this via environment variable in case the module supports it,
-        # otherwise it serves as documentation of intent.
-        os.environ["TIMEOUT_S"] = "300" 
-
         try:
             from fake_useragent import UserAgent
             os.environ["USER_AGENT"] = UserAgent().random
@@ -319,7 +333,11 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
         try:
             if job["id"] in manager._cancel_flags:
                 raise RuntimeError("Download cancelled")
+            
+            # SpotiFLAC uses documented constructor parameters.
+            # Parallel runs are handled by our patches to NetworkManager and SpotifyMetadataClient.
             SpotiFLAC(**kwargs)
+            
             tor_needed = False
             for msg in captured:
                 m = msg.lower()
@@ -343,18 +361,9 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
         except Exception:
             return False, False
         finally:
-            if old_http: os.environ["HTTP_PROXY"] = old_http
-            elif "HTTP_PROXY" in os.environ: del os.environ["HTTP_PROXY"]
-            if old_https: os.environ["HTTPS_PROXY"] = old_https
-            elif "HTTPS_PROXY" in os.environ: del os.environ["HTTPS_PROXY"]
             if old_ua: os.environ["USER_AGENT"] = old_ua
             elif "USER_AGENT" in os.environ: del os.environ["USER_AGENT"]
-            if old_timeout: os.environ["TIMEOUT_S"] = old_timeout
-            elif "TIMEOUT_S" in os.environ: del os.environ["TIMEOUT_S"]
-
-    def _exec_sf(proxy=None) -> tuple[bool, bool]:
-        with _spotiflac_lock:
-            return _exec_sf_serialized(proxy)
+            _spotiflac_job_local.proxy = None
 
     captured: list[str] = []
     rejected_paths: set[str] = set()

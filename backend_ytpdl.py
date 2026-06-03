@@ -125,6 +125,40 @@ def _expected_track(job: dict) -> dict:
     }
 
 
+def _clean_text(text: str) -> str:
+    if not text:
+        return ""
+    # Remove text in parentheses or brackets like (Remastered 2010) or [Official Video]
+    text = re.sub(r"\s*[\(\[].*?[\)\]]", "", text)
+    # Strip common suffixes that follow a dash or space
+    text = re.sub(
+        r"\s*[-–]\s*(remaster|remastered|single|ep|deluxe|expanded|anniversary|edition|version|mono|stereo|re-?master).*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()
+
+
+def _youtube_search_query(job: dict, clean: bool = False) -> str:
+    wanted = _expected_track(job)
+    artist = wanted["artist"]
+    title = wanted["title"]
+    album = wanted["album"]
+    
+    if clean:
+        title = _clean_text(title)
+        album = "" # Don't include album in clean search
+    
+    if artist and title:
+        query_parts = [artist, title]
+        if not clean and album and album.lower() not in {"unknown album", "unknown"}:
+            query_parts.append(album)
+        query_parts.extend(["official", "audio"])
+        return "ytsearch15:" + " ".join(query_parts)
+    return ""
+
+
 def _resolved_youtube_url(job: dict) -> str:
     merged = _job_metadata(job)
 
@@ -143,18 +177,7 @@ def _resolved_youtube_url(job: dict) -> str:
         if _is_youtube_url(value):
             return value
 
-    wanted = _expected_track(job)
-    artist = wanted["artist"]
-    title = wanted["title"]
-    album = wanted["album"]
-    if artist and title:
-        query_parts = [artist, title]
-        if album and album.lower() not in {"unknown album", "unknown"}:
-            query_parts.append(album)
-        query_parts.extend(["official", "audio"])
-        return "ytsearch15:" + " ".join(query_parts)
-
-    return ""
+    return _youtube_search_query(job)
 
 
 def _norm_text(value: object) -> str:
@@ -212,7 +235,6 @@ def _token_coverage(needles: list[str], haystack: str) -> int:
 def _candidate_url(entry: dict) -> str:
     return str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or "")
 
-
 def _candidate_has_drm(entry: dict) -> bool:
     drm_fields = (
         entry.get("has_drm"),
@@ -223,6 +245,20 @@ def _candidate_has_drm(entry: dict) -> bool:
     )
     if any(value not in ("", None, False) for value in drm_fields):
         return True
+
+    return False
+
+
+def _candidate_requires_auth(entry: dict) -> bool:
+    """Return True if the candidate likely requires age verification or
+    authentication (e.g. age-restricted or premium-only content)."""
+    if int(entry.get("age_limit") or 0) > 0:
+        return True
+    # 'needs_auth' usually means age verification or sign-in required.
+    # 'premium_only' means YouTube Premium required.
+    if entry.get("availability") in ("needs_auth", "premium_only"):
+        return True
+    return False
 
     formats = entry.get("formats")
     if not isinstance(formats, list) or not formats:
@@ -296,7 +332,8 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
 
     if not wanted_artist or not wanted_title or not candidate_title:
         return 0, {"reason": "missing title metadata"}
-    if _candidate_has_drm(entry):
+    if _candidate_has_drm(entry) or _candidate_requires_auth(entry):
+        reason = "drm" if _candidate_has_drm(entry) else "auth_required"
         return -999, {
             "title": raw_title,
             "uploader": raw_uploader,
@@ -308,7 +345,8 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
             "artist_coverage": 0,
             "duration_score": 0,
             "score": -999,
-            "drm": True,
+            "drm": reason == "drm",
+            "auth": reason == "auth_required",
         }
 
     wanted_title_tokens = _tokens(wanted_title)
@@ -398,10 +436,10 @@ def _scored_youtube_candidates(search_info: dict, job: dict) -> list[tuple[int, 
 
 def _candidate_is_confident(score: int, details: dict) -> bool:
     return not (
-        score < 65
-        or details.get("title_score", 0) < 60
-        or details.get("artist_score", 0) < 65
-        or details.get("source_score", 0) < 35
+        score < 55
+        or details.get("title_score", 0) < 55
+        or details.get("artist_score", 0) < 50
+        or details.get("source_score", 0) < 30
     )
 
 
@@ -415,16 +453,26 @@ def _best_youtube_search_match(search_info: dict, job: dict) -> tuple[str, dict]
 
 
 def _ranked_youtube_matches(search_info: dict, job: dict) -> list[tuple[str, dict]]:
-    """Return every confident candidate, best first, so the caller can fall
-    back to the next match if a chosen video turns out to be unavailable
-    (removed, private, or geo-blocked)."""
+    """Return candidates sorted by score so the caller can fall back to the
+    next match if a chosen video turns out to be unavailable. If no highly
+    confident matches exist, we still try the top somewhat-plausible matches."""
     scored = _scored_youtube_candidates(search_info, job)
+    
+    # We prefer 'confident' matches
     confident = [(url, details) for score, details, url in scored if _candidate_is_confident(score, details)]
-    if not confident:
-        best_score, best_details, _ = scored[0]
-        title = best_details.get("title") or "unknown result"
-        raise RuntimeError(f"ytp-dl could not find a confident YouTube match; best was {best_score}%: {title}")
-    return confident
+    if confident:
+        return confident
+
+    # If no matches are 'confident', we still try anything with a decent score (>40%)
+    # rather than failing immediately. This handles cases where metadata is slightly off.
+    plausible = [(url, details) for score, details, url in scored if score > 40]
+    if plausible:
+        return plausible
+
+    # If everything is <40%, it's likely total junk/unrelated.
+    best_score, best_details, _ = scored[0]
+    title = best_details.get("title") or "unknown result"
+    raise RuntimeError(f"ytp-dl could not find any plausible YouTube match; best was {best_score}%: {title}")
 
 
 def run(output_dir: Path, job: dict, manager) -> None:
@@ -433,6 +481,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     if job["id"] in manager._cancel_flags:
         return
 
+    blacklist: set[str] = set()
     url = _resolved_youtube_url(job)
     if not url:
         raise RuntimeError("ytp-dl could not build a YouTube URL or search query from the selected track metadata")
@@ -490,48 +539,75 @@ def run(output_dir: Path, job: dict, manager) -> None:
     try:
         yt_dlp = _get_yt_dlp()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            if url.startswith("ytsearch"):
-                search_info = ydl.extract_info(url, download=False)
-                if not isinstance(search_info, dict):
-                    raise RuntimeError("ytp-dl search did not return candidate metadata")
-                candidates = _ranked_youtube_matches(search_info, job)
-            else:
-                candidates = [(url, None)]
+            def _try_download(target_url: str) -> bool:
+                if target_url.startswith("ytsearch"):
+                    try:
+                        search_info = ydl.extract_info(target_url, download=False)
+                        if not isinstance(search_info, dict):
+                            return False
+                        candidates = _ranked_youtube_matches(search_info, job)
+                    except Exception as exc:
+                        manager._append_cache_event(job, "trying", f"YouTube search failed: {exc}")
+                        return False
+                else:
+                    candidates = [(target_url, None)]
 
-            # Try matches in score order; an unavailable video (removed,
-            # private, geo-blocked) should fall back to the next candidate
-            # rather than failing the whole download.
-            attempts = candidates[:5]
-            last_error: Exception | None = None
-            downloaded = False
-            for index, (download_url, selected) in enumerate(attempts):
-                if job["id"] in manager._cancel_flags:
-                    return
-                if selected:
-                    with manager._lock:
-                        job["resolved_url"] = download_url
-                        job["ytpdl_match"] = selected
-                        job["last_status"] = f"Downloading YouTube match: {selected.get('title', '')[:80]}"
-                    verb = "Trying next YouTube match" if index else "Selected YouTube match"
-                    manager._append_cache_event(
-                        job,
-                        "trying",
-                        f"{verb} ({selected.get('score', 0)}%): {selected.get('title', '')[:80]}",
-                    )
-                try:
-                    ydl.download([download_url])
-                    last_error = None
-                    downloaded = True
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    if index + 1 < len(attempts):
+                # Try up to 8 candidates in order of score
+                attempts = [(u, s) for u, s in candidates if u not in blacklist][:8]
+                if not attempts:
+                    return False
+
+                for index, (download_url, selected) in enumerate(attempts):
+                    if job["id"] in manager._cancel_flags:
+                        return False
+                    if selected:
+                        with manager._lock:
+                            job["resolved_url"] = download_url
+                            job["ytpdl_match"] = selected
+                            job["last_status"] = f"Downloading YouTube match: {selected.get('title', '')[:80]}"
+                        verb = "Trying next YouTube match" if index else "Selected YouTube match"
                         manager._append_cache_event(
-                            job, "trying", f"YouTube candidate unavailable, trying another: {exc}"
+                            job,
+                            "trying",
+                            f"{verb} ({selected.get('score', 0)}%): {selected.get('title', '')[:80]}",
                         )
+                    try:
+                        ydl.download([download_url])
+                        return True
+                    except Exception as exc:
+                        blacklist.add(download_url)
+                        if index + 1 < len(attempts):
+                            manager._append_cache_event(
+                                job, "trying", f"YouTube candidate unavailable, blacklisting and trying another: {exc}"
+                            )
+                        else:
+                            manager._append_cache_event(job, "trying", f"YouTube candidate failed and blacklisted: {exc}")
+                return False
 
-            if not downloaded and last_error is not None:
-                raise last_error
+            success = False
+            if url:
+                success = _try_download(url)
+            
+            if not success:
+                if url and not url.startswith("ytsearch"):
+                    blacklist.add(url)
+                
+                # Phase 2: Full Search (Artist + Title + Album)
+                search_query = _youtube_search_query(job, clean=False)
+                if search_query and search_query != url:
+                    manager._append_cache_event(job, "trying", "Falling back to full YouTube search...")
+                    success = _try_download(search_query)
+            
+            if not success:
+                # Phase 3: Clean Search (Artist + Base Title, stripping Remastered/Deluxe/etc.)
+                clean_query = _youtube_search_query(job, clean=True)
+                if clean_query and clean_query != url:
+                    manager._append_cache_event(job, "trying", "Falling back to clean YouTube search (stripping version suffixes)...")
+                    success = _try_download(clean_query)
+
+            if not success:
+                raise RuntimeError("All YouTube download attempts failed")
+
     except Exception as exc:
         raise RuntimeError(f"ytp-dl failed: {exc}") from exc
 
