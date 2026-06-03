@@ -574,16 +574,28 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             f"{verb} ({selected.get('score', 0)}%): {selected.get('title', '')[:80]}",
                         )
                     try:
-                        ydl.download([download_url])
-                        return download_url
-                    except Exception as exc:
-                        db.add_to_blacklist(download_url, "ytp-dl failure")
+                        result_code = ydl.download([download_url])
+                        
+                        # Verify that a file was actually produced. 
+                        # With ignoreerrors: True, ydl.download might return success-ish codes even if it skipped.
+                        if result_code == 0 and any(output_dir.iterdir()):
+                            return download_url
+                        
+                        # If we get here, it failed to produce a file
+                        db.add_to_blacklist(download_url, "ytp-dl produced no file (likely restricted or unplayable)")
                         if index + 1 < len(attempts):
                             manager._append_cache_event(
-                                job, "trying", f"YouTube candidate unavailable, blacklisting and trying another: {exc}"
+                                job, "trying", f"YouTube candidate failed to download, blacklisting and trying another..."
+                            )
+                        continue
+                    except Exception as exc:
+                        db.add_to_blacklist(download_url, f"ytp-dl error: {exc}")
+                        if index + 1 < len(attempts):
+                            manager._append_cache_event(
+                                job, "trying", f"YouTube candidate unavailable: {exc}"
                             )
                         else:
-                            manager._append_cache_event(job, "trying", f"YouTube candidate failed and blacklisted: {exc}")
+                            manager._append_cache_event(job, "trying", f"YouTube candidate failed: {exc}")
                 return None
 
             worked_url = None
