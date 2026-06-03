@@ -1167,9 +1167,6 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 current_magnet = None
 
             # 1. Race direct track, clicked-album, and artist inventory searches.
-            #    This lets sparse single-track sources compete with album packs
-            #    immediately, while still using one coordinated probe/download
-            #    loop for the job.
             first_pass_queries = candidate_first_pass_queries()
             if first_pass_queries:
                 handle = run_search_phase(
@@ -1181,12 +1178,43 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     require_track_list=False,
                 )
 
-            # 2. Search the selected artist's inventory first, then fuzzy-match
-            #    the requested album + track inside that artist-owned result set.
-            #    This avoids taking a wrong first responder from a direct album
-            #    query, and it handles cases like Bonnie Tyler where the right
-            #    album appears inside a discography/collection result.
-            if not handle and album_looks_like_primary_artist_release():
+            # Parallel YouTube Fallback: if the first pass failed to find a working torrent,
+            # kick in YouTube in the background so it's ready if all other torrent phases fail.
+            yt_fallback_thread = None
+            yt_fallback_done = threading.Event()
+            yt_fallback_produced = False
+
+            if not handle:
+                manager._append_cache_event(job, "trying", "First pass failed; kicking in background YouTube fallback...")
+                def run_yt_fallback():
+                    nonlocal yt_fallback_produced
+                    try:
+                        import backend_ytpdl
+                        # We use a shadow job to avoid clobbering the main job's status/progress
+                        # while torrent is still searching.
+                        shadow_job = dict(job)
+                        shadow_job["progress"] = 0
+                        shadow_job["last_status"] = "YouTube Fallback started"
+                        
+                        # Custom manager proxy to intercept logs
+                        class ShadowManager:
+                            def __getattr__(self, name): return getattr(manager, name)
+                            def _append_cache_event(self, _j, type, msg):
+                                manager._append_cache_event(job, type, f"[YT Fallback] {msg}")
+
+                        backend_ytpdl.run(output_dir, shadow_job, ShadowManager())
+                        # Check if it actually produced a file
+                        if any(p for p in output_dir.rglob("*") if p.is_file() and is_download_audio_candidate(p)):
+                            yt_fallback_produced = True
+                    except Exception as e:
+                        manager._append_cache_event(job, "trying", f"YouTube fallback failed: {e}")
+                    finally:
+                        yt_fallback_done.set()
+
+                yt_fallback_thread = threading.Thread(target=run_yt_fallback, daemon=True, name=f"yt-fallback-{job_id}")
+                yt_fallback_thread.start()
+
+            # 2. Search the selected artist's inventory first...
                 handle = run_search_phase(
                     "Artist inventory",
                     album_clean or "complete",
@@ -1270,6 +1298,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
         # a truthy handle here means the file was already produced. A falsy
         # handle means every candidate failed or stalled.
         if not handle:
+            if yt_fallback_thread:
+                manager._append_cache_event(job, "trying", "All torrent phases failed; waiting for YouTube fallback to finish...")
+                yt_fallback_done.wait(timeout=300) # Wait up to 5 more minutes for YT
+                if yt_fallback_produced:
+                    manager._append_cache_event(job, "provider", "Torrent failed, but successfully fell back to YouTube")
+                    return
+            
             raise RuntimeError("All sources failed or stalled.")
     finally:
         if current_magnet: _unregister_job_from_torrent(current_magnet, job_id)
