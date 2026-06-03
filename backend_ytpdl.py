@@ -511,13 +511,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
     ydl_opts = {
         "format": format_selector,
-        "outtmpl": _safe_outtmpl(output_dir),
+        "outtmpl": "%(title)s.%(ext)s",
         "paths": {"home": str(output_dir)},
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
+        "ignoreerrors": True,
         "allow_unplayable_formats": False,
         "progress_hooks": [progress_cb],
+
         "writethumbnail": True,
         "addmetadata": True,
         "postprocessors": postprocessors,

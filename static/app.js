@@ -1486,6 +1486,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   state.manualPauseRequested = false;
   state.activeJobId = null;
   state.currentTrack = item;
+  state.currentLibraryPath = ""; // Clear path for new selection
   recordDockRecentSelection(item, playbackContext);
   
   prepareSelectedTrackUi(item, "Loading...");
@@ -1731,14 +1732,25 @@ function updateDetailsPanel(track) {
   $("sideTitle").innerHTML = albumLinkHtml(track, track.title || "No track selected");
 
   let qualityHtml = "";
+  let qualityLabel = "";
+  
+  // 1. Check actual playing path
   const currentPath = state.currentLibraryPath || "";
   if (currentPath) {
     const ext = currentPath.split(".").pop().toUpperCase();
-    if (["FLAC", "ALAC", "WAV"].includes(ext)) {
-      qualityHtml = `<span class="quality-pill">HI-RES</span>`;
-    } else if (ext === "MP3" || ext === "M4A" || ext === "AAC") {
-      qualityHtml = `<span class="quality-pill">HQ</span>`;
-    }
+    if (["FLAC", "ALAC", "WAV"].includes(ext)) qualityLabel = "HI-RES";
+    else if (["MP3", "M4A", "AAC"].includes(ext)) qualityLabel = "HQ";
+  }
+  
+  // 2. Fallback to track metadata or global settings if not yet playing
+  if (!qualityLabel) {
+    const metaQual = (track.quality || state.settings.default_quality || "").toUpperCase();
+    if (metaQual === "LOSSLESS" || metaQual === "FLAC") qualityLabel = "HI-RES";
+    else if (metaQual === "MP3" || metaQual === "HQ") qualityLabel = "HQ";
+  }
+
+  if (qualityLabel) {
+    qualityHtml = `<span class="quality-pill">${qualityLabel}</span>`;
   }
 
   $("sideMeta").innerHTML = `
