@@ -148,4 +148,10 @@ Open your browser to `http://127.0.0.1:8888`.
 
 ---
 
+## Roadmap / TODO
+
+- [ ] **Queue Interface**: Dedicated UI for managing and reordering the playback queue.
+
+---
+
 *Disclaimer: Mindinguflac is a research-oriented meta-search tool. Users are responsible for ensuring that their use of the platform and any media they index complies with local copyright laws and the terms of service of the metadata providers.*
