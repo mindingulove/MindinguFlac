@@ -26,6 +26,7 @@ hiddenimports = [
     'backend_tidal_hifi',
     'backend_monochrome',
     'backend_other',
+    'backend_ytpdl',
     'catalog'
 ]
 tmp_ret = collect_all('SpotiFLAC')

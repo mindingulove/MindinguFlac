@@ -8,6 +8,7 @@
 - Setting download retries to `0` now skips the direct attempt and routes download attempts through Tor immediately.
 - The downloader iterates through providers and falls back through Tor when a provider is rate-limited or the direct attempt fails.
 - Improved progress estimates, including a `6.5 MB/min` estimate for identified FLAC/lossless downloads, so the progress ring more closely reflects downloaded bytes.
+- Added a separate `YTP-DL` engine for YouTube music fetches, alongside the existing SpotiFLAC, Other Providers, and Torrent engines.
 
 ### UI and UX Improvements
 
@@ -22,6 +23,8 @@
 
 ### Playback and Queue Polish
 
+- Fixed a bug where clicking pause while using native audio (external devices) on macOS could cause the song to restart due to premature 'ended' state detection.
+- Improved native audio resume logic on macOS to preserve playback position when resuming from a stopped state.
 - Manual pause now stays paused during active-download and finished-cache handoffs; the player no longer reloads the same track or cancels prefetch when pausing.
 - Shuffle immediately rebuilds the active queue and refreshes the prefetched next track.
 - Shuffle and repeat controls now toggle their active state immediately and highlight when enabled.

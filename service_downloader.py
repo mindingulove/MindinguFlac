@@ -45,6 +45,7 @@ def is_valid_audio_file(path: Path) -> bool:
 AUDIO_SUFFIXES = {
     ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".alac", ".webm",
     ".wma", ".wv", ".ape", ".mpc", ".mp4", ".m4b", ".m4p", ".m4r",
+    ".mpg", ".mpeg", ".mpe",
     ".mp2", ".mp1", ".mpa", ".m2a", ".m3a",
     ".aiff", ".aif", ".aifc",
     ".au", ".snd",
@@ -1291,6 +1292,16 @@ class ServiceDownloadManager:
                 self._ensure_progress_thread()
                 import backend_musicdl
                 backend_musicdl.run(output_dir, job, self)
+
+            elif engine == "ytp-dl":
+                with self._lock:
+                    job["status"] = "running"
+                    job["output_dir"] = str(output_dir)
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
+                self._ensure_progress_thread()
+                import backend_ytpdl
+                backend_ytpdl.run(output_dir, job, self)
 
             elif engine == "qobuz-dlp":
                 with self._lock:

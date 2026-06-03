@@ -88,9 +88,12 @@ class NativeAudioManager:
                 self._metadata = metadata or {}
                 self._paused = False
                 self._has_played = False
+                self._playing = True
+                self._ended = False
 
                 if not sound.play():
                     self._sound = None
+                    self._playing = False
                     self._error = "Native audio player refused to start"
                     return {"ok": False, "error": self._error}
 
@@ -103,13 +106,13 @@ class NativeAudioManager:
     def pause(self) -> dict:
         with self._lock:
             self._paused = True
+            self._playing = False
             if sys.platform == "win32" and self._thread is not None:
                 self._pause_event.set()
                 self._playing = False
             elif self._sound is not None:
                 try:
-                    if self._sound.isPlaying():
-                        self._sound.pause()
+                    self._sound.pause()
                 except Exception:
                     pass
         return self.status() | {"ok": True}
@@ -117,14 +120,22 @@ class NativeAudioManager:
     def resume(self) -> dict:
         with self._lock:
             self._paused = False
+            self._ended = False
             if sys.platform == "win32" and self._thread is not None:
                 self._pause_event.clear()
                 self._playing = True
             elif self._sound is not None:
                 try:
+                    if self._sound.isPlaying():
+                        self._playing = True
+                        return self.status() | {"ok": True}
                     if not self._sound.resume():
+                        pos = self._sound.currentTime()
+                        if pos > 0:
+                            self._sound.setCurrentTime_(pos)
                         if not self._sound.play():
                             return self.status() | {"ok": False, "error": "Native audio player refused to resume"}
+                    self._playing = True
                 except Exception as e:
                     return self.status() | {"ok": False, "error": str(e)}
         return self.status() | {"ok": True}
@@ -184,13 +195,23 @@ class NativeAudioManager:
             # NSSound.isPlaying() can incorrectly report True even after pause()
             # is called, so we must explicitly check the _paused flag.
             raw_playing = bool(sound.isPlaying())
-            playing = raw_playing and not self._paused
-            if playing:
-                self._has_played = True
+            if raw_playing:
+                self._playing = True
+                if position > 0:
+                    self._has_played = True
+
             # NSSound resets currentTime to 0 on finish, so the position check
-            # is unreliable. A sound that was playing and is now stopped without
-            # the user pausing it has finished on its own.
-            ended = bool(self._has_played and not raw_playing and not self._paused)
+            # is unreliable on its own. A sound that was playing (observed movement)
+            # and is now stopped (raw_playing=False) without the user pausing it,
+            # and is either at 0 or the end, has finished.
+            if not raw_playing and self._has_played and not self._paused:
+                if position == 0 or (duration > 0 and position >= duration - 0.1):
+                    self._playing = False
+                    self._ended = True
+
+            playing = bool((raw_playing or self._playing) and not self._paused and not self._ended)
+            # NSSound resets currentTime to 0 on finish.
+            ended = bool(self._ended or (not raw_playing and self._has_played and not self._paused and (position == 0 or (duration > 0 and position >= duration - 0.1))))
             return {
                 "available": True,
                 "playing": playing,
@@ -223,6 +244,7 @@ class NativeAudioManager:
             except Exception:
                 pass
         self._sound = None
+        self._playing = False
 
     def _play_windows(self, audio_path: Path, device_uid: str, volume: float, position: float) -> dict:
         try:

@@ -13,6 +13,7 @@ hiddenimports = [
     'libtorrent',
     'torrent_sources',
     'vcredist',
+    'backend_ytpdl',
 ]
 
 tmp_ret = collect_all('SpotiFLAC')

@@ -31,6 +31,7 @@ const state = {
   manualPauseRequested: false,
   currentPlayableReady: false,
   playerStatus: "Choose a track to stream",
+  activeJobPhase: "",
   playbackRequestId: 0,
   currentStreamUrl: "",
   currentLibraryPath: "",
@@ -106,11 +107,15 @@ const ENGINE_PROVIDERS = {
   ],
   torrent: [
     { value: "all",           label: "All Trackers (Parallel)" },
+    { value: "torlock",       label: "TorLock" },
+    { value: "torrentdownloads", label: "TorrentDownloads" },
+    { value: "limetorrents",  label: "LimeTorrents" },
     { value: "piratebay",     label: "The Pirate Bay" },
     { value: "1337x",         label: "1337x" },
     { value: "kickass",       label: "KickassTorrents" },
     { value: "yts",           label: "YTS" },
   ],
+  "ytp-dl": [],
 };
 
 const ENGINE_QUALITIES = {
@@ -119,6 +124,10 @@ const ENGINE_QUALITIES = {
   torrent: [
     { value: "LOSSLESS", label: "FLAC / Lossless" },
     { value: "MP3",      label: "MP3 / Lossy" },
+  ],
+  "ytp-dl": [
+    { value: "m4a", label: "M4A / AAC" },
+    { value: "mp3", label: "MP3" },
   ],
 };
 
@@ -1670,6 +1679,7 @@ function prepareSelectedTrackUi(track, status = "Opening stream...") {
   resetSeekUi();
   state.currentLibraryPath = "";
   state.currentPlayableReady = false;
+  state.activeJobPhase = "";
   state.autoplayWanted = false;
   setPlayerStatusIcon("downloading", 0);
   setPlayerStatus(status, track);
@@ -1692,6 +1702,20 @@ function setPlayerStatus(msg, track) {
     updateMediaSession(track);
     bindEntityLinks($("playerTitle").parentElement);
   }
+}
+
+function playerStatusForJob(job, fallback = "Loading...") {
+  const engine = String(job?.engine || "").toLowerCase();
+  const last = String(job?.last_status || "");
+  const hasActiveAudio = !!job?.active_audio_path || Number(job?.active_audio_ready_bytes || 0) > 0;
+  const isTorrentSearch = engine === "torrent" && !hasActiveAudio && (
+    !last ||
+    last === "Starting..." ||
+    /searching|probing|top candidates|no matching torrents|first pass|artist inventory|clicked album|track fallback|musicbrainz/i.test(last)
+  );
+  if (isTorrentSearch) return "Searching...";
+  if (/^Streaming:/i.test(last)) return "Buffering...";
+  return fallback;
 }
 
 function updateDetailsPanel(track) {
@@ -1885,15 +1909,17 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
         // Skip browser playback for live jobs if native is selected.
         // NSSound doesn't support streaming URLs, so we wait for the file to finish.
         state.currentPlayableReady = false;
+        state.activeJobPhase = playerStatusForJob(job);
         state.autoplayWanted = false;
         setPlayerStatusIcon("downloading", job.progress || 0);
-        setPlayerStatus("Loading...", track);
+        setPlayerStatus(state.activeJobPhase, track);
       } else {
         const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
         state.currentStreamUrl = streamUrl;
         const audio = $("audioPlayer");
         audio.src = streamUrl;
         state.currentPlayableReady = true;
+        state.activeJobPhase = playerStatusForJob(job);
         state.autoplayWanted = true;
         audio.load();
         syncPlayPauseButton();
@@ -1958,7 +1984,8 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         return;
       }
       updatePlayerPie(pct);
-      setPlayerStatus("Loading...", track);
+      state.activeJobPhase = playerStatusForJob(job);
+      setPlayerStatus(state.activeJobPhase, track);
     } catch (error) {}
   }
 }
@@ -2508,6 +2535,10 @@ function bindKeyboardControls() {
         toggleNativeAudioPlayback().catch(() => {});
         return;
       }
+      if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack) {
+        startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch(() => {});
+        return;
+      }
       const audio = $("audioPlayer");
       if (!audio.src && !state.currentStreamUrl && !state.currentLibraryPath) return;
       if (audio.paused) {
@@ -2657,6 +2688,12 @@ function bindPlayer() {
       });
       return;
     }
+    if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack) {
+      startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch((error) => {
+        if (state.currentTrack) setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
+      });
+      return;
+    }
     if (audio.paused) {
       const icon = $("playPause")?.querySelector("i");
       const buttonShowsPause = !!icon && icon.classList.contains("bi-pause-fill");
@@ -2737,11 +2774,14 @@ function bindPlayer() {
     }
   };
   audio.onwaiting = () => {
-    if (state.currentTrack) setPlayerStatus("Buffering...", state.currentTrack);
+    if (state.currentTrack) {
+      setPlayerStatus(state.activeJobPhase === "Searching..." ? "Searching..." : "Buffering...", state.currentTrack);
+    }
   };
   audio.onplaying = () => {
     state.manualPauseRequested = false;
     state.autoplayWanted = false;
+    state.activeJobPhase = "";
     if (state.currentTrack) {
         const isCache = state.currentStreamUrl && state.currentStreamUrl.includes("/api/library/stream");
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
@@ -3308,17 +3348,39 @@ async function setAudioOutputDevice(deviceId) {
   
   if (deviceId && deviceId.startsWith("native:")) {
     _nativeAudioDeviceUid = deviceId.slice("native:".length);
-    // CRITICAL: Stop and clear browser audio so it doesn't conflict with native playback
-    audio.pause();
-    audio.removeAttribute("src");
-    audio.load();
+    const wasBrowserPlaying = !!audio && !audio.paused;
+    const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    let nativePath = state.currentLibraryPath || "";
 
-    if (state.currentLibraryPath && state.currentTrack) {
+    if (!nativePath && state.currentTrack) {
+      const source = await api("/api/playback/source", {
+        method: "POST",
+        body: JSON.stringify(serviceDownloadPayload(state.currentTrack, "stream")),
+      }).catch(() => null);
+      if (source && source.path) {
+        nativePath = source.path;
+        state.currentLibraryPath = source.path;
+      }
+    }
+
+    if (nativePath && state.currentTrack) {
       try {
-        await startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, audio.currentTime || 0);
+        await startNativeAudio(nativePath, state.currentTrack, state.playbackRequestId, resumeAt);
+        // Stop browser audio only after native playback successfully starts.
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        if (!wasBrowserPlaying) {
+          await api("/api/native_audio/pause", { method: "POST", body: "{}" }).catch(() => {});
+          state.nativeAudio.playing = false;
+        }
       } catch (error) {
         setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
       }
+    } else if (state.currentTrack) {
+      // No completed/cache file exists yet. Keep browser playback alive; the
+      // finished-file path will switch to native output once the job completes.
+      setPlayerStatus("Native output will start when cache is ready", state.currentTrack);
     }
     syncPlayPauseButton();
     return;
