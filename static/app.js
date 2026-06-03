@@ -126,8 +126,9 @@ const ENGINE_QUALITIES = {
     { value: "MP3",      label: "MP3 / Lossy" },
   ],
   "ytp-dl": [
-    { value: "m4a", label: "M4A / AAC" },
-    { value: "mp3", label: "MP3" },
+    { value: "best", label: "Best available" },
+    { value: "m4a",  label: "M4A / AAC" },
+    { value: "mp3",  label: "MP3" },
   ],
 };
 
