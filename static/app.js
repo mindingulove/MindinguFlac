@@ -2366,7 +2366,9 @@ async function renderSettings() {
 
   try {
     const stats = await api("/api/cache");
-    $("cacheUsage").textContent = `${(stats.bytes / (1024 * 1024)).toFixed(1)} MB used by ${stats.files} files`;
+    const sizeMB = stats.bytes / (1024 * 1024);
+    const sizeText = sizeMB >= 1024 ? `${(sizeMB / 1024).toFixed(1)} GB` : `${sizeMB.toFixed(1)} MB`;
+    $("cacheUsage").textContent = `${sizeText} used by ${stats.files} files`;
   } catch (e) {}
 }
 

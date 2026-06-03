@@ -39,6 +39,20 @@ def _init_db(conn: sqlite3.Connection):
             last_failed REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS albums (
+            album_key TEXT PRIMARY KEY,
+            metadata_json TEXT,
+            last_updated REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tracks (
+            track_key TEXT PRIMARY KEY,
+            metadata_json TEXT,
+            last_updated REAL
+        )
+    """)
     conn.commit()
 
 
@@ -61,6 +75,46 @@ def delete_resolved_source(track_key: str):
     conn = _get_conn()
     conn.execute("DELETE FROM sources WHERE track_key = ?", (track_key,))
     conn.commit()
+
+
+def save_album_metadata(album_key: str, data: dict):
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO albums (album_key, metadata_json, last_updated)
+        VALUES (?, ?, ?)
+    """, (album_key, json.dumps(data), time.time()))
+    conn.commit()
+
+
+def get_album_metadata(album_key: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT metadata_json FROM albums WHERE album_key = ?", (album_key,)).fetchone()
+    if row:
+        try:
+            return json.loads(row["metadata_json"])
+        except Exception:
+            pass
+    return None
+
+
+def save_track_metadata(track_key: str, data: dict):
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO tracks (track_key, metadata_json, last_updated)
+        VALUES (?, ?, ?)
+    """, (track_key, json.dumps(data), time.time()))
+    conn.commit()
+
+
+def get_track_metadata(track_key: str) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT metadata_json FROM tracks WHERE track_key = ?", (track_key,)).fetchone()
+    if row:
+        try:
+            return json.loads(row["metadata_json"])
+        except Exception:
+            pass
+    return None
 
 
 def add_to_blacklist(url: str, reason: str = ""):

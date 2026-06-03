@@ -550,6 +550,18 @@ def get_alternative_albums_hierarchical(artist: str, title: str) -> list[str]:
 def enrich_track_identifiers(track: dict) -> dict:
     if not isinstance(track, dict) or track.get("type", "track") != "track":
         return dict(track or {})
+
+    import db
+    track_key = f"{str(track.get('artist') or '').strip().lower()}||{str(track.get('title') or '').strip().lower()}"
+    cached = db.get_track_metadata(track_key)
+    if cached:
+        # Merge cached IDs into current track
+        enriched = dict(track)
+        for key in ["spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"]:
+            if cached.get(key) and not enriched.get(key):
+                enriched[key] = cached[key]
+        return enriched
+
     enriched = dict(track)
     if not enriched.get("spotify_id") and enriched.get("title"):
         for key, value in spotify_search_track(
@@ -596,6 +608,11 @@ def enrich_track_identifiers(track: dict) -> dict:
         )
         if isrc:
             enriched["isrc"] = isrc
+
+    # Final result!
+    import db
+    track_key = f"{str(enriched.get('artist') or '').strip().lower()}||{str(enriched.get('title') or '').strip().lower()}"
+    db.save_track_metadata(track_key, enriched)
 
     return enriched
 
@@ -961,6 +978,13 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
 
 
 def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "", spotify_id: str = "") -> dict:
+    import db
+    album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
+    cached = db.get_album_metadata(album_key)
+    if cached:
+        print(f"[Metadata] Using cached album metadata for: {artist} - {album}")
+        return cached
+
     tracks, art, yr, total_ms = [], "", "", 0
     if spotify_id:
         try:
@@ -1050,17 +1074,25 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         return score
 
     gallery_images.sort(key=quality_score, reverse=True)
+# Use the best quality image as the main artwork_url if available
+top_art = gallery_images[0]["url"] if gallery_images else art
 
-    # Use the best quality image as the main artwork_url if available
-    top_art = gallery_images[0]["url"] if gallery_images else art
+result = {
+    "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
+    "total_duration": format_duration_ms(total_ms), "artwork_url": top_art,
+    "artist_artwork_url": spotify_artist_artwork(artist), "tracks": tracks,
+    "gallery_images": gallery_images,
+    "release_id": release_id,
+    "spotify_id": spotify_id,
+}
 
-    return {
-        "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
-        "total_duration": format_duration_ms(total_ms), "artwork_url": top_art,
-        "artist_artwork_url": spotify_artist_artwork(artist), "tracks": tracks,
-        "gallery_images": gallery_images,
-        "discogs_release_url": discogs_release.get("release_url", ""),
-    }
+# Cache it!
+import db
+album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
+db.save_album_metadata(album_key, result)
+
+return result
+
 
 
 def album_metadata(config: AppConfig, artist: str, album: str, track: str = "") -> dict:
