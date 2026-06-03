@@ -744,14 +744,38 @@ class ServiceDownloadManager:
         status = self.library_status(payload)
         library_path = Path(status["library_path"]) if status["library_path"] else None
         cache_path = Path(status["cache_path"]) if status["cache_path"] else None
+
+        requested_quality = payload.get("quality") or self.config.default_quality or "flac"
+        requested_rank = _quality_rank(Path(f"dummy.{requested_quality}"), requested_quality)
+
+        found_path = None
+        source_name = ""
+
         if library_path and cache_path:
-            if status["cache_quality"] > status["library_quality"]:
-                return {"source": "cache", "path": str(cache_path), **status}
-            return {"source": "library", "path": str(library_path), **status}
-        if library_path:
-            return {"source": "library", "path": str(library_path), **status}
-        if cache_path:
-            return {"source": "cache", "path": str(cache_path), **status}
+            if status["cache_quality"] >= status["library_quality"]:
+                found_path = cache_path
+                source_name = "cache"
+                found_rank = status["cache_quality"]
+            else:
+                found_path = library_path
+                source_name = "library"
+                found_rank = status["library_quality"]
+        elif library_path:
+            found_path = library_path
+            source_name = "library"
+            found_rank = status["library_quality"]
+        elif cache_path:
+            found_path = cache_path
+            source_name = "cache"
+            found_rank = status["cache_quality"]
+
+        # If the found quality is lower than requested, ignore it so start_job triggers a re-download
+        if found_path and found_rank < requested_rank:
+            print(f"[Engine] Existing {source_name} version (rank {found_rank}) is lower than requested {requested_quality} (rank {requested_rank}). Ignoring for re-download.")
+            return {"source": "", "path": "", **status}
+
+        if found_path:
+            return {"source": source_name, "path": str(found_path), **status}
         return {"source": "", "path": "", **status}
 
     def toggle_library(self, payload: dict) -> dict:
@@ -1175,11 +1199,22 @@ class ServiceDownloadManager:
             if payload.get("mode", "stream") == "stream":
                 identity = _track_identity_from_payload(payload)
                 cache = self._find_cache_entry(identity)
-                if cache and cache.get("job"):
-                    return self._public_job(cache["job"])
+
+                requested_quality = payload.get("quality") or self.config.default_quality or "flac"
+                requested_rank = _quality_rank(Path(f"dummy.{requested_quality}"), requested_quality)
+
+                if cache:
+                    found_rank = cache.get("quality") or 0
+                    if found_rank >= requested_rank and cache.get("job"):
+                        return self._public_job(cache["job"])
+
                 active = self._find_active_cache_job(identity)
                 if active:
-                    return active
+                    active_quality = active.get("quality") or ""
+                    active_rank = _quality_rank(Path(f"dummy.{active_quality}"), active_quality)
+                    if active_rank >= requested_rank:
+                        return active
+
             return self._create_job(payload)
 
     def _create_job(self, payload: dict) -> dict:
