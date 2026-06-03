@@ -198,6 +198,62 @@ class TestBackendYtpDl(unittest.TestCase):
         self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=official")
         self.assertEqual(job["ytpdl_match"]["title"], "Pink Floyd - See Emily Play (Official Audio)")
 
+    @patch("backend_ytpdl._get_yt_dlp")
+    @patch("backend_ytpdl._resolved_youtube_url", return_value="ytsearch15:Pink Floyd See Emily Play official audio")
+    @patch("service_downloader._find_audio_files", return_value=[Path("/tmp/out/song.webm")])
+    def test_run_falls_back_when_first_candidate_unavailable(self, find_audio_files, resolved_url, get_yt_dlp):
+        manager = MagicMock()
+        manager._cancel_flags = set()
+        manager._append_cache_event = MagicMock()
+
+        job = {
+            "id": "job-1",
+            "quality": "best",
+            "artist": "Pink Floyd",
+            "title": "See Emily Play",
+            "metadata": {"duration_ms": 176000},
+        }
+        output_dir = Path("/tmp/out")
+
+        yt_dlp_module = MagicMock()
+        yt_dlp_instance = MagicMock()
+        yt_dlp_instance.extract_info.return_value = {
+            "entries": [
+                {
+                    "title": "Pink Floyd - See Emily Play (Official Audio)",
+                    "uploader": "Pink Floyd",
+                    "duration": 176,
+                    "webpage_url": "https://www.youtube.com/watch?v=unavailable",
+                },
+                {
+                    "title": "Pink Floyd - See Emily Play (Official Audio)",
+                    "uploader": "Pink Floyd - Topic",
+                    "duration": 176,
+                    "webpage_url": "https://www.youtube.com/watch?v=playable",
+                },
+            ]
+        }
+        yt_dlp_instance.download.side_effect = [
+            Exception("This video is not available"),
+            None,
+        ]
+        yt_dlp_module.YoutubeDL.return_value.__enter__.return_value = yt_dlp_instance
+        get_yt_dlp.return_value = yt_dlp_module
+
+        backend_ytpdl.run(output_dir, job, manager)
+
+        self.assertEqual(yt_dlp_instance.download.call_count, 2)
+        self.assertEqual(
+            yt_dlp_instance.download.call_args_list[0].args[0],
+            ["https://www.youtube.com/watch?v=unavailable"],
+        )
+        self.assertEqual(
+            yt_dlp_instance.download.call_args_list[1].args[0],
+            ["https://www.youtube.com/watch?v=playable"],
+        )
+        self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=playable")
+        self.assertEqual(job["provider_used"], "ytp-dl")
+
 
 if __name__ == "__main__":
     unittest.main()

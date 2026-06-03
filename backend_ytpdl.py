@@ -367,7 +367,7 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     return score, details
 
 
-def _best_youtube_search_match(search_info: dict, job: dict) -> tuple[str, dict]:
+def _scored_youtube_candidates(search_info: dict, job: dict) -> list[tuple[int, dict, str]]:
     entries = [entry for entry in (search_info.get("entries") or []) if isinstance(entry, dict)]
     scored = []
     for entry in entries:
@@ -381,25 +381,38 @@ def _best_youtube_search_match(search_info: dict, job: dict) -> tuple[str, dict]
         raise RuntimeError("ytp-dl search returned no downloadable YouTube candidates")
 
     scored.sort(key=lambda item: item[0], reverse=True)
+    return scored
+
+
+def _candidate_is_confident(score: int, details: dict) -> bool:
+    return not (
+        score < 65
+        or details.get("title_score", 0) < 60
+        or details.get("artist_score", 0) < 65
+        or details.get("source_score", 0) < 35
+    )
+
+
+def _best_youtube_search_match(search_info: dict, job: dict) -> tuple[str, dict]:
+    scored = _scored_youtube_candidates(search_info, job)
     best_score, best_details, best_url = scored[0]
-    if (
-        best_score < 65
-        or best_details.get("title_score", 0) < 60
-        or best_details.get("artist_score", 0) < 65
-        or best_details.get("source_score", 0) < 35
-    ):
+    if not _candidate_is_confident(best_score, best_details):
         title = best_details.get("title") or "unknown result"
         raise RuntimeError(f"ytp-dl could not find a confident YouTube match; best was {best_score}%: {title}")
     return best_url, best_details
 
 
-def _resolve_search_match(ydl, url: str, job: dict) -> tuple[str, dict | None]:
-    if not url.startswith("ytsearch"):
-        return url, None
-    search_info = ydl.extract_info(url, download=False)
-    if not isinstance(search_info, dict):
-        raise RuntimeError("ytp-dl search did not return candidate metadata")
-    return _best_youtube_search_match(search_info, job)
+def _ranked_youtube_matches(search_info: dict, job: dict) -> list[tuple[str, dict]]:
+    """Return every confident candidate, best first, so the caller can fall
+    back to the next match if a chosen video turns out to be unavailable
+    (removed, private, or geo-blocked)."""
+    scored = _scored_youtube_candidates(search_info, job)
+    confident = [(url, details) for score, details, url in scored if _candidate_is_confident(score, details)]
+    if not confident:
+        best_score, best_details, _ = scored[0]
+        title = best_details.get("title") or "unknown result"
+        raise RuntimeError(f"ytp-dl could not find a confident YouTube match; best was {best_score}%: {title}")
+    return confident
 
 
 def run(output_dir: Path, job: dict, manager) -> None:
@@ -465,18 +478,48 @@ def run(output_dir: Path, job: dict, manager) -> None:
     try:
         yt_dlp = _get_yt_dlp()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            download_url, selected = _resolve_search_match(ydl, url, job)
-            if selected:
-                with manager._lock:
-                    job["resolved_url"] = download_url
-                    job["ytpdl_match"] = selected
-                    job["last_status"] = f"Downloading YouTube match: {selected.get('title', '')[:80]}"
-                manager._append_cache_event(
-                    job,
-                    "trying",
-                    f"Selected YouTube match ({selected.get('score', 0)}%): {selected.get('title', '')[:80]}",
-                )
-            ydl.download([download_url])
+            if url.startswith("ytsearch"):
+                search_info = ydl.extract_info(url, download=False)
+                if not isinstance(search_info, dict):
+                    raise RuntimeError("ytp-dl search did not return candidate metadata")
+                candidates = _ranked_youtube_matches(search_info, job)
+            else:
+                candidates = [(url, None)]
+
+            # Try matches in score order; an unavailable video (removed,
+            # private, geo-blocked) should fall back to the next candidate
+            # rather than failing the whole download.
+            attempts = candidates[:5]
+            last_error: Exception | None = None
+            downloaded = False
+            for index, (download_url, selected) in enumerate(attempts):
+                if job["id"] in manager._cancel_flags:
+                    return
+                if selected:
+                    with manager._lock:
+                        job["resolved_url"] = download_url
+                        job["ytpdl_match"] = selected
+                        job["last_status"] = f"Downloading YouTube match: {selected.get('title', '')[:80]}"
+                    verb = "Trying next YouTube match" if index else "Selected YouTube match"
+                    manager._append_cache_event(
+                        job,
+                        "trying",
+                        f"{verb} ({selected.get('score', 0)}%): {selected.get('title', '')[:80]}",
+                    )
+                try:
+                    ydl.download([download_url])
+                    last_error = None
+                    downloaded = True
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if index + 1 < len(attempts):
+                        manager._append_cache_event(
+                            job, "trying", f"YouTube candidate unavailable, trying another: {exc}"
+                        )
+
+            if not downloaded and last_error is not None:
+                raise last_error
     except Exception as exc:
         raise RuntimeError(f"ytp-dl failed: {exc}") from exc
 
