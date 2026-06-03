@@ -161,6 +161,14 @@ def _torrent_info_from_url(url: str, timeout: int = 8):
     except Exception:
         return None
 
+def _torrent_num_files(torrent_info) -> int:
+    try:
+        if torrent_info is None:
+            return 0
+        return int(torrent_info.num_files())
+    except Exception:
+        return 0
+
 def _register_job_to_torrent(magnet: str, job_id: str, output_dir: Path, manager, torrent_url: str = "") -> tuple:
     key = _torrent_key(magnet)
     with _SESSIONS_LOCK:
@@ -316,7 +324,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
         def audio_file_indexes(torrent_info) -> list[int]:
             indexes = []
-            for i in range(torrent_info.num_files()):
+            for i in range(_torrent_num_files(torrent_info)):
                 f_path = Path(torrent_info.file_at(i).path)
                 if f_path.suffix.lower() in AUDIO_SUFFIXES:
                     indexes.append(i)
@@ -334,7 +342,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
             meaningful_tokens = {t for t in title_tokens if len(t) > 2 and t not in {"the", "and", "feat", "with"} and t not in noise_words}
             if not meaningful_tokens: meaningful_tokens = title_tokens
 
-            for i in range(torrent_info.num_files()):
+            for i in range(_torrent_num_files(torrent_info)):
                 f_path = Path(torrent_info.file_at(i).path)
                 if f_path.suffix.lower() in AUDIO_SUFFIXES:
                     f_name_lower = f_path.name.lower()
@@ -664,7 +672,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
                 try:
                     handle.set_sequential_download(True)
-                    priorities = [0] * torrent_info.num_files(); priorities[best_f_idx] = 7
+                    file_count = _torrent_num_files(torrent_info)
+                    if file_count <= 0:
+                        return False
+                    priorities = [0] * file_count
+                    priorities[best_f_idx] = 7
                     handle.prioritize_files(priorities)
                 except Exception as exc:
                     manager._append_cache_event(job, "trying", f"Source could not be prioritized, trying next: {exc}")
@@ -743,7 +755,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                 try:
                                     torrent_info = handle.get_torrent_info()
                                     handle.set_sequential_download(True)
-                                    priorities = [0] * torrent_info.num_files(); priorities[best_f_idx] = 7
+                                    file_count = _torrent_num_files(torrent_info)
+                                    if file_count <= 0:
+                                        raise RuntimeError("torrent metadata unavailable")
+                                    priorities = [0] * file_count
+                                    priorities[best_f_idx] = 7
                                     handle.prioritize_files(priorities)
                                     last_progress_time = time.time()
                                     continue
@@ -1052,10 +1068,17 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                         if not h.is_valid() or not h.has_metadata() or m in scored_magnets:
                                             continue
                                         torrent_info = h.get_torrent_info()
+                                        if not torrent_info:
+                                            manager._append_cache_event(job, "trying", f"Source #{r_idx+1} metadata unavailable, trying next...")
+                                            _unregister_job_from_torrent(m, job_id)
+                                            active_window_handles = [x for x in active_window_handles if x[1] != m]
+                                            break
                                         s = h.status()
                                         live_peers = s.num_peers
                                         try:
-                                            h.prioritize_files([0] * torrent_info.num_files())
+                                            file_count = _torrent_num_files(torrent_info)
+                                            if file_count > 0:
+                                                h.prioritize_files([0] * file_count)
                                         except Exception:
                                             pass
                                         candidate_score, skip_reason = score_metadata_candidate(
