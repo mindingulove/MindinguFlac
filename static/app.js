@@ -99,13 +99,6 @@ const ENGINE_PROVIDERS = {
     { value: "soundcloud",  label: "SoundCloud" },
     { value: "youtube",     label: "YouTube" },
   ],
-  tidal_hifi: [
-    { value: "tidal",       label: "Tidal" },
-    { value: "deezer",      label: "Deezer" },
-    { value: "qobuz",       label: "Qobuz" },
-    { value: "amazon",      label: "Amazon Music" },
-    { value: "apple_music", label: "Apple Music" },
-  ],
   torrent: [
     { value: "all",           label: "All Trackers (Parallel)" },
     { value: "torlock",       label: "TorLock" },
@@ -121,7 +114,6 @@ const ENGINE_PROVIDERS = {
 
 const ENGINE_QUALITIES = {
   spotiflac: null,
-  tidal_hifi: null,
   torrent: [
     { value: "LOSSLESS", label: "FLAC / Lossless" },
     { value: "MP3",      label: "MP3 / Lossy" },
