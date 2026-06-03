@@ -56,6 +56,30 @@ class TestBackendYtpDl(unittest.TestCase):
         self.assertGreater(details["score"], 80)
         self.assertGreater(details["source_score"], 80)
 
+    def test_best_youtube_search_match_accepts_official_video_on_label_channel(self):
+        # The official music video is the correct song but lives on a label
+        # channel whose name does not contain the artist. It must still pass.
+        job = {
+            "artist": "CeCe Peniston",
+            "title": "Finally",
+            "metadata": {},
+        }
+        search_info = {
+            "entries": [
+                {
+                    "title": "CeCe Peniston - Finally (Official Music Video)",
+                    "uploader": "A&M Records",
+                    "duration": 250,
+                    "webpage_url": "https://www.youtube.com/watch?v=official",
+                },
+            ]
+        }
+
+        url, details = backend_ytpdl._best_youtube_search_match(search_info, job)
+
+        self.assertEqual(url, "https://www.youtube.com/watch?v=official")
+        self.assertGreaterEqual(details["source_score"], 35)
+
     def test_best_youtube_search_match_rejects_title_only_background_upload(self):
         job = {
             "artist": "Kevin MacLeod",

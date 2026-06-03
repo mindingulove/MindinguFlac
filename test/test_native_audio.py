@@ -109,9 +109,29 @@ class TestNativeAudioMacOS(unittest.TestCase):
         self.am._sound.setCurrentTime_ = MagicMock()
         
         self.am.resume()
-        
+
         self.am._sound.setCurrentTime_.assert_called_with(5.0)
         self.am._sound.play.assert_called()
+
+    @unittest.skipIf(sys.platform != "darwin", "macOS only")
+    def test_resume_actually_resumes_when_isplaying_lies(self):
+        # Regression guard: NSSound.isPlaying() keeps returning True even after
+        # pause(). resume() must NOT short-circuit on that, or the sound stays
+        # paused while the UI thinks it's playing — the "pause button locks and
+        # won't play again" bug. resume() must actually call sound.resume().
+        sound = MockSound(duration=10.0)
+        sound._position = 5.0
+        sound.isPlaying = MagicMock(return_value=True)  # the quirk
+        sound.resume = MagicMock(return_value=True)
+        sound.play = MagicMock(return_value=True)
+        self.am._sound = sound
+        self.am._paused = True
+
+        self.am.resume()
+
+        sound.resume.assert_called_once()
+        self.assertFalse(self.am._paused)
+        self.assertTrue(self.am._playing)
 
 if __name__ == "__main__":
     unittest.main()

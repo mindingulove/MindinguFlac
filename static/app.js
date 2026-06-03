@@ -1586,10 +1586,22 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
     state.autoplayWanted = false;
     setPlayerStatusIcon("ready");
     setPlayerStatus(statusText, track);
-    await startNativeAudio(filePath, track, requestId, startAt);
-    return;
+    try {
+      await startNativeAudio(filePath, track, requestId, startAt);
+      return;
+    } catch (error) {
+      // The native path (NSSound/CoreAudio on macOS) can't decode some formats,
+      // notably the webm/opus that YouTube downloads produce. Rather than hang
+      // at 0:00, fall back to browser playback (which handles webm) on the
+      // default output and tell the user app-only routing isn't available here.
+      console.warn("[NativeAudio] playback failed, falling back to browser:", error);
+      await stopNativeAudio();
+      setPlayerStatus("App-only output unavailable for this file — playing on default", track);
+      // fall through to the browser playback path below
+    }
+  } else {
+    await stopNativeAudio();
   }
-  await stopNativeAudio();
   audio.src = streamUrl;
   state.currentPlayableReady = true;
   state.autoplayWanted = true;
@@ -2198,8 +2210,12 @@ async function refreshCacheLogs() {
       const track = event.title ? `[${event.title}] ` : "";
       const msg = event.message || "";
       
-      // Auto-play / High-performance transition to local file
-      if (msg.includes("Ready to play") && state.currentTrack && !state.nativeAudio.playing && $("audioPlayer").paused) {
+      // Auto-play / High-performance transition: upgrade a LIVE active-job
+      // stream to the finalized local file. Only do this when we are actually
+      // on a live active-job stream — never when already playing the cache file
+      // or on native output (re-selecting there just redownloads/loops) and
+      // never if the user manually paused (re-selecting restarts from 0).
+      if (msg.includes("Ready to play") && state.currentTrack && !state.manualPauseRequested && !state.nativeAudio.playing && $("audioPlayer").paused && isActiveJobStreamUrl(state.currentStreamUrl)) {
         const title = (state.currentTrack.title || "").toLowerCase();
         if (msg.toLowerCase().includes(title)) {
            console.log("[Player] Detected file readiness, forcing high-fidelity stream...");
@@ -2362,7 +2378,7 @@ function startNativeAudioPolling(requestId) {
       state.prefetchedForRequestId = state.playbackRequestId;
       prefetchNextTrack().catch(() => {});
     }
-    if (status.ended) {
+    if (status.ended && !state.manualPauseRequested) {
       await stopNativeAudio();
       clearMediaSession();
       if (state.queue.length) {
@@ -2389,8 +2405,23 @@ function syncNativeAudioUi() {
 
 async function toggleNativeAudioPlayback() {
   if (!state.nativeAudio.active) return;
-  
-  if (state.nativeAudio.playing) {
+
+  // If it already ended, advance to the next track regardless of pause intent.
+  if (state.nativeAudio.ended) {
+    if (state.queue.length) {
+      state.queueIndex = (state.queueIndex + 1) % state.queue.length;
+      selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
+    }
+    return;
+  }
+
+  // Decide pause vs resume from the user's explicit pause intent, not from the
+  // poll-updated nativeAudio.playing flag. The poll can briefly report
+  // playing=false (NSSound isPlaying quirk / status lag); trusting it would
+  // misroute a pause click into the resume branch and restart the track from 0.
+  if (!state.manualPauseRequested) {
+    state.manualPauseRequested = true;
+    state.autoplayWanted = false;
     const status = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
     state.nativeAudio.playing = !!status.playing;
     // If it's still playing after a pause request, it might be out of sync
@@ -2401,20 +2432,11 @@ async function toggleNativeAudioPlayback() {
     }
     _callNowPlaying("set_playback_state", 2);
   } else {
-    // If it already ended, advance to next
-    if (state.nativeAudio.ended) {
-        if (state.queue.length) {
-            state.queueIndex = (state.queueIndex + 1) % state.queue.length;
-            selectMusicItem(state.queue[state.queueIndex], "stream", state.originalQueue, state.queueContext);
-        }
-        return;
-    }
-    
     if (!state.currentLibraryPath) {
         console.log("[Player] Native audio has no path to resume, doing nothing.");
         return;
     }
-    
+    state.manualPauseRequested = false;
     const status = await api("/api/native_audio/resume", { method: "POST", body: "{}" });
     if (!status.ok) {
         // If resume failed, maybe it's already playing or needs a hard status check
@@ -2438,7 +2460,9 @@ function syncPlayPauseButton() {
   if (!playPause) return;
   const icon = playPause.querySelector("i");
   if (icon) {
-    const paused = state.nativeAudio.active ? !state.nativeAudio.playing : audio.paused;
+    const paused = state.nativeAudio.active
+      ? (state.manualPauseRequested || !state.nativeAudio.playing)
+      : audio.paused;
     icon.className = paused ? "bi bi-play-fill" : "bi bi-pause-fill";
   }
 }
@@ -2536,7 +2560,8 @@ function bindKeyboardControls() {
         toggleNativeAudioPlayback().catch(() => {});
         return;
       }
-      if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack) {
+      if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack && $("audioPlayer").paused) {
+        state.manualPauseRequested = false;
         startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch(() => {});
         return;
       }
@@ -2689,7 +2714,13 @@ function bindPlayer() {
       });
       return;
     }
-    if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack) {
+    // Only hand a click to native-start when the browser isn't already playing.
+    // If a switch to native output didn't actually move playback (no cache file
+    // yet, or native start failed), the browser keeps playing while
+    // isNativeAudioSelected() is true; without this guard every click re-fires
+    // startNativeAudio and the pause button can never stop the browser audio.
+    if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack && audio.paused) {
+      state.manualPauseRequested = false;
       startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch((error) => {
         if (state.currentTrack) setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
       });
@@ -2744,6 +2775,11 @@ function bindPlayer() {
     }
   };
   audio.onended = () => {
+    // A user-paused stream must never auto-advance. A growing-file active-job
+    // stream can fire "ended" when playback reaches the current download head;
+    // if the user paused, that would wrap a length-1 queue back onto the same
+    // track and replay it from the start.
+    if (state.manualPauseRequested) return;
     clearMediaSession();
     if (state.queue.length) {
       state.queueIndex = (state.queueIndex + 1) % state.queue.length;
@@ -2780,7 +2816,11 @@ function bindPlayer() {
     }
   };
   audio.onplaying = () => {
-    state.manualPauseRequested = false;
+    // Do NOT clear manualPauseRequested here. This event also fires on buffer
+    // recovery; clearing the user's pause intent would let other auto-play
+    // triggers (onended, onerror, the job watcher) resume a track the user
+    // deliberately paused. The intent is cleared only by an explicit play /
+    // new-track action.
     state.autoplayWanted = false;
     state.activeJobPhase = "";
     if (state.currentTrack) {
@@ -3349,8 +3389,13 @@ async function setAudioOutputDevice(deviceId) {
   
   if (deviceId && deviceId.startsWith("native:")) {
     _nativeAudioDeviceUid = deviceId.slice("native:".length);
-    const wasBrowserPlaying = !!audio && !audio.paused;
-    const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    // When already on native output the browser <audio> element has no src
+    // (it was cleared when native took over), so its currentTime is 0/stale.
+    // Take the resume position from the native player in that case, otherwise
+    // switching outputs would restart the track from the beginning.
+    const resumeAt = state.nativeAudio.active
+      ? (state.nativeAudio.position || 0)
+      : (Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
     const shouldKeepPaused = !!state.manualPauseRequested;
     let nativePath = state.currentLibraryPath || "";
 
@@ -3388,24 +3433,42 @@ async function setAudioOutputDevice(deviceId) {
     return;
   }
   _nativeAudioDeviceUid = "";
+  // Capture native playback state before stopping it so we can hand playback
+  // back to the browser at the same position when switching off a native device.
+  const wasNativeActive = state.nativeAudio.active;
+  const nativeResumeAt = state.nativeAudio.position || 0;
+  const keepPaused = !!state.manualPauseRequested;
   await stopNativeAudio();
+
   if (typeof audio.setSinkId === "function") {
     try {
       await audio.setSinkId(deviceId);
-      return;
     } catch (e) {
       console.warn("audio.setSinkId failed:", e);
     }
+  } else {
+    const sinkSupported = typeof AudioContext !== "undefined" &&
+      typeof AudioContext.prototype.setSinkId === "function";
+    if (sinkSupported) {
+      try {
+        const ctx = _ensureAudioContext();
+        if (ctx.state === "suspended") await ctx.resume();
+        await ctx.setSinkId(deviceId);
+      } catch (e) {
+        console.warn("setSinkId failed:", e);
+      }
+    }
   }
-  const sinkSupported = typeof AudioContext !== "undefined" &&
-    typeof AudioContext.prototype.setSinkId === "function";
-  if (!sinkSupported) return;
-  try {
-    const ctx = _ensureAudioContext();
-    if (ctx.state === "suspended") await ctx.resume();
-    await ctx.setSinkId(deviceId);
-  } catch (e) {
-    console.warn("setSinkId failed:", e);
+
+  // Coming off a native device, the <audio> element has no src (native took
+  // over). Resume browser playback from the cached file at the same position.
+  // playFromLibraryPath streams the existing file — it never redownloads.
+  if (wasNativeActive && state.currentLibraryPath && state.currentTrack) {
+    await playFromLibraryPath(
+      state.currentLibraryPath, state.currentTrack, state.playbackRequestId,
+      state.activeJobId, "Playing from cache", nativeResumeAt
+    ).catch(() => {});
+    if (keepPaused) pauseBrowserAudio(audio);
   }
 }
 

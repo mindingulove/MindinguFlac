@@ -1,9 +1,73 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
+
+# Containers/codecs that neither macOS NSSound nor Windows soundfile can decode
+# directly. These are transcoded to WAV (via bundled ffmpeg) before playback so
+# native output works with every audio file, including YouTube webm/opus.
+_NATIVE_UNSUPPORTED_EXTS = {".webm", ".weba", ".opus", ".ogg", ".oga", ".mkv", ".m4v"}
+
+
+def _ffmpeg_exe() -> str:
+    """Locate an ffmpeg binary, preferring the bundled imageio-ffmpeg one."""
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(getattr(sys, "_MEIPASS", ""), name)
+        if os.path.exists(bundled):
+            return bundled
+    return shutil.which(name) or shutil.which("ffmpeg") or ""
+
+
+def _transcode_to_wav(src: Path) -> str:
+    """Transcode an audio file to a temp 16-bit WAV the native players can read.
+    Results are cached by source path so repeated plays don't re-encode."""
+    ffmpeg = _ffmpeg_exe()
+    if not ffmpeg:
+        return ""
+    src_res = str(src.resolve())
+    key = hashlib.md5(src_res.encode("utf-8")).hexdigest()
+    out = Path(tempfile.gettempdir()) / f"mindinguflac_native_{key}.wav"
+    if out.exists() and out.stat().st_size > 0:
+        return str(out)
+    cmd = [ffmpeg, "-y", "-i", src_res, "-vn", "-c:a", "pcm_s16le", str(out)]
+    creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+    try:
+        subprocess.run(
+            cmd, check=True, capture_output=True, timeout=300, creationflags=creationflags
+        )
+    except Exception:
+        try:
+            out.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return ""
+    return str(out) if (out.exists() and out.stat().st_size > 0) else ""
+
+
+def _native_playable_path(audio_path: Path) -> str:
+    """Return a path the native players can decode, transcoding only when the
+    source format is unsupported. Falls back to the original on transcode
+    failure so the caller can surface a clear error."""
+    if audio_path.suffix.lower() not in _NATIVE_UNSUPPORTED_EXTS:
+        return str(audio_path.resolve())
+    converted = _transcode_to_wav(audio_path)
+    return converted or str(audio_path.resolve())
 
 
 class NativeAudioManager:
@@ -14,6 +78,7 @@ class NativeAudioManager:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._path = ""
+        self._playback_path = ""  # actual file handed to the player (may be a transcode)
         self._device_uid = ""
         self._error = ""
         self._playing = False
@@ -67,8 +132,19 @@ class NativeAudioManager:
             from AppKit import NSSound
             from Foundation import NSURL
 
-            url = NSURL.fileURLWithPath_(str(audio_path.resolve()))
+            # NSSound can't decode some formats (notably YouTube webm/opus); use a
+            # transcoded WAV when needed so native output works with every file.
+            playback_path = _native_playable_path(audio_path)
+            url = NSURL.fileURLWithPath_(playback_path)
             sound = NSSound.alloc().initWithContentsOfURL_byReference_(url, True)
+            if (not sound or float(sound.duration() or 0) <= 0) and playback_path == str(audio_path.resolve()):
+                # Opened to nothing (or refused) on an extension we didn't expect
+                # to need transcoding — try converting once more.
+                converted = _transcode_to_wav(audio_path)
+                if converted:
+                    playback_path = converted
+                    url = NSURL.fileURLWithPath_(playback_path)
+                    sound = NSSound.alloc().initWithContentsOfURL_byReference_(url, True)
             if not sound:
                 return {"ok": False, "error": "Unable to open audio file"}
 
@@ -82,6 +158,7 @@ class NativeAudioManager:
                 self._stop_locked()
                 self._sound = sound
                 self._path = str(audio_path.resolve())
+                self._playback_path = playback_path
                 self._device_uid = device_uid
                 self._error = ""
                 self._volume = max(0.0, min(1.0, float(volume)))
@@ -126,9 +203,10 @@ class NativeAudioManager:
                 self._playing = True
             elif self._sound is not None:
                 try:
-                    if self._sound.isPlaying():
-                        self._playing = True
-                        return self.status() | {"ok": True}
+                    # NSSound.isPlaying() keeps returning True even after pause(),
+                    # so it can't tell us whether we actually need to resume.
+                    # Always attempt to resume; fall back to replaying from the
+                    # saved position only if resume() truly fails.
                     if not self._sound.resume():
                         pos = self._sound.currentTime()
                         if pos > 0:
@@ -247,16 +325,27 @@ class NativeAudioManager:
         self._playing = False
 
     def _play_windows(self, audio_path: Path, device_uid: str, volume: float, position: float) -> dict:
+        # soundfile (libsndfile) can't read m4a/mp3/opus/webm; transcode when needed.
+        playback_path = _native_playable_path(audio_path)
         try:
             import soundfile as sf
-            with sf.SoundFile(str(audio_path)) as audio_file:
-                duration = len(audio_file) / float(audio_file.samplerate or 1)
+            try:
+                with sf.SoundFile(playback_path) as audio_file:
+                    duration = len(audio_file) / float(audio_file.samplerate or 1)
+            except Exception:
+                converted = _transcode_to_wav(audio_path)
+                if not converted:
+                    raise
+                playback_path = converted
+                with sf.SoundFile(playback_path) as audio_file:
+                    duration = len(audio_file) / float(audio_file.samplerate or 1)
         except Exception as exc:
             return {"ok": False, "error": f"Unable to open audio file: {exc}"}
 
         with self._lock:
             self._stop_locked()
             self._path = str(audio_path.resolve())
+            self._playback_path = playback_path
             self._device_uid = device_uid
             self._error = ""
             self._ended = False
@@ -279,11 +368,13 @@ class NativeAudioManager:
 
     def _restart_windows_locked(self) -> None:
         path = self._path
+        playback_path = self._playback_path
         device_uid = self._device_uid
         position = self._position
         volume = self._volume
         self._stop_locked()
         self._path = path
+        self._playback_path = playback_path
         self._device_uid = device_uid
         self._position = position
         self._volume = volume
@@ -297,7 +388,7 @@ class NativeAudioManager:
             import sounddevice as sd
             import soundfile as sf
 
-            with sf.SoundFile(self._path) as audio_file:
+            with sf.SoundFile(self._playback_path or self._path) as audio_file:
                 with self._lock:
                     start_frame = int(max(0, self._position) * audio_file.samplerate)
                     device_index = self._windows_device_index()

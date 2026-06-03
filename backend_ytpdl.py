@@ -245,8 +245,18 @@ def _source_score(wanted_artist: str, uploader: str, candidate_title: str) -> in
     artist_tokens = _tokens(wanted_artist)
     uploader_norm = _norm_text(uploader)
     title_norm = _norm_text(candidate_title)
-    if not artist_tokens or not uploader_norm:
+    if not artist_tokens:
         return 0
+
+    # Official releases are frequently hosted on label/aggregator channels whose
+    # name does not contain the artist (so uploader_coverage is 0). Treat the
+    # title itself as a trust signal when it is clearly an official release that
+    # names the artist, e.g. "CeCe Peniston - Finally (Official Music Video)".
+    title_artist_coverage = _token_coverage(artist_tokens, title_norm)
+    official_release = "official" in title_norm and any(
+        marker in title_norm for marker in (" video", " audio")
+    )
+    official_titled_by_artist = official_release and title_artist_coverage >= 70
 
     uploader_coverage = _token_coverage(artist_tokens, uploader_norm)
     source = max(
@@ -254,7 +264,9 @@ def _source_score(wanted_artist: str, uploader: str, candidate_title: str) -> in
         fuzz.token_set_ratio(_norm_text(wanted_artist), uploader_norm),
     )
     if uploader_coverage == 0:
-        source = min(source, 30)
+        # Stay skeptical of unrelated channels, but don't reject an official
+        # video just because the label channel name omits the artist.
+        source = max(source, 70) if official_titled_by_artist else min(source, 30)
 
     if uploader_coverage == 100:
         source = max(source, 95)
