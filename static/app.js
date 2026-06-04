@@ -268,8 +268,7 @@ async function api(path, options = {}) {
 function $(id) { return document.getElementById(id); }
 
 // ---------------------------------------------------------------------------
-// DuckDuckGo duck.ai client (free, no API key). The backend handles the 
-// anti-bot bypass using static proofs derived from real browser traffic.
+// DuckDuckGo duck.ai client (free, no API key).
 // ---------------------------------------------------------------------------
 async function _sha256Base64(text) {
   const data = new TextEncoder().encode(text);
@@ -322,22 +321,21 @@ async function _duckToken(result, hashClient) {
 async function _duckSignals() {
   // DDG June 2026 format: {start, events:[], end}
   const start = Date.now();
-  const signals = {
+  return _utf8Base64(JSON.stringify({
     start: start,
     events: [],
     end: start + Math.floor(Math.random() * 1000) + 500 
-  };
-  return _utf8Base64(JSON.stringify(signals));
+  }));
 }
 
 async function harvestDuckBypass() {
+  const targetUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
   console.log("%c[Duck] Harvesting fresh browser proof...", "color: #00ffff; font-weight: bold;");
   try {
-    const ua = navigator.userAgent;
-    const status = await api("/api/ddg/status", { headers: { "X-Duck-UA": ua } });
+    const status = await api("/api/ddg/status");
     if (!status || !status.vqd_hash_1) return;
 
-    const result = await solveDuckChallenge(status.vqd_hash_1, ua);
+    const result = await solveDuckChallenge(status.vqd_hash_1, targetUA);
     const solvedToken = await _duckToken(result, false);
     const signals = await _duckSignals();
 
@@ -346,15 +344,16 @@ async function harvestDuckBypass() {
       body: JSON.stringify({
         vqd_hash_1: solvedToken,
         x_fe_signals: signals,
-        x_fe_version: "serp_20260604_140157_ET-c2ca44fdeb878a7f8afae5211b181ff031ff5440",
+        x_fe_version: "serp_20250710_090702_ET-70eaca6aea2948b0bb60",
         headers: {
-            "User-Agent": ua,
-            "Accept": "text/event-stream",
-            "Accept-Encoding": "gzip, deflate, br, zstd",
-            "Accept-Language": "en-GB,en;q=0.9",
-            "Referer": "https://duck.ai/",
-            "Origin": "https://duck.ai",
-            "x-ddg-journey-id": Math.random().toString(16).substring(2, 34)
+            "User-Agent": targetUA,
+            "Accept": "*/*",
+            "Accept-Language": "fr-FR,fr;q=0.6",
+            "Referer": "https://duckduckgo.com/",
+            "Origin": "https://duckduckgo.com",
+            "Sec-CH-UA": '"Not)A;Brand";v="8", "Chromium";v="138", "Brave";v="138"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"Windows"'
         }
       })
     });
@@ -380,13 +379,13 @@ async function duckChatAsk(messages, model = "gpt-5-mini") {
 
 window.testDuck = async function (query) {
   query = query || "Reply with exactly one word: pong";
-  console.log("%c[Duck] Running Breakthrough Bypass...", "color: #00ffff; font-weight: bold;");
+  console.log("%c[Duck] Running Automated Bypass...", "color: #00ffff; font-weight: bold;");
   try {
     const res = await duckChatAsk([{ role: "user", content: query }], "gpt-5-mini");
     if (res && res.ok) {
       console.log("%c[Duck] ✅ SUCCESS! -> " + res.text, "color: #00ff00; font-weight: bold;");
     } else {
-      console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`, "color: #ff0000;");
+      console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`);
       console.log("[Duck] Body:", res.body);
     }
   } catch (e) {
