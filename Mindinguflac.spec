@@ -27,7 +27,9 @@ hiddenimports = [
     'backend_monochrome',
     'backend_other',
     'backend_ytpdl',
-    'catalog'
+    'catalog',
+    'service_downloader',
+    'db'
 ]
 tmp_ret = collect_all('SpotiFLAC')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
