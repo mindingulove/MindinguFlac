@@ -501,7 +501,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         manager._append_cache_event(job, "provider", f"Using MusicBrainz album: {new_album}")
 
     try:
-        from service_downloader import AUDIO_SUFFIXES
+        from service_downloader import AUDIO_SUFFIXES, is_download_audio_candidate
 
         def audio_file_indexes(torrent_info) -> list[int]:
             indexes = []
