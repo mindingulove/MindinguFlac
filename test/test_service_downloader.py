@@ -613,9 +613,7 @@ class PlaybackSourceTests(unittest.TestCase):
 
 
 class DownloadedTrackMatchesRequestTests(unittest.TestCase):
-    """The duration gate keeps a multi-file album/discography torrent from binding
-    a job to the wrong sibling track (which native output then plays as the wrong
-    song). Regression: this function was dead code returning True unconditionally."""
+    """Final validation should not reject solely on duration metadata drift."""
 
     def _job(self, expected_ms):
         return {"metadata": {"duration_ms": expected_ms}}
@@ -634,11 +632,11 @@ class DownloadedTrackMatchesRequestTests(unittest.TestCase):
             ok, _ = service_downloader.downloaded_track_matches_request(Path("x.flac"), self._job(200000))
         self.assertTrue(ok)  # 8s off
 
-    def test_rejects_wrong_track(self):
+    def test_accepts_duration_mismatch_as_diagnostic(self):
         with patch.object(service_downloader, "_audio_duration_ms", return_value=320000):
             ok, msg = service_downloader.downloaded_track_matches_request(Path("x.flac"), self._job(200000))
-        self.assertFalse(ok)  # 120s off -> different track
-        self.assertIn("mismatch", msg)
+        self.assertTrue(ok)
+        self.assertIn("duration differs", msg)
 
 
 if __name__ == "__main__":

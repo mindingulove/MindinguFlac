@@ -293,7 +293,14 @@ def _audio_duration_ms(path: Path) -> int:
 
 
 def downloaded_track_matches_request(path: Path, job: dict) -> tuple[bool, str]:
-    """Valida se o arquivo baixado corresponde ao pedido, principalmente via duração."""
+    """Return whether a finished candidate should be accepted for this job.
+
+    Duration is too unreliable as a final reject gate for remasters, album cuts,
+    hidden silence and provider metadata drift. The download backends may still
+    use duration-like signals while ranking/selecting candidates, but once a
+    backend has produced a playable file we keep it instead of discarding it
+    after the expensive download finishes.
+    """
     meta = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
     expected_ms = (
         _parse_duration_ms(meta.get("duration_ms"))
@@ -305,19 +312,11 @@ def downloaded_track_matches_request(path: Path, job: dict) -> tuple[bool, str]:
 
     actual_ms = _audio_duration_ms(path)
     if actual_ms <= 0:
-        # Se não conseguirmos ler a duração (arquivo corrompido ou formato não suportado),
-        # confiamos no processo por enquanto, mas logamos.
         return True, ""
 
     diff_s = abs(expected_ms - actual_ms) / 1000
-    # Tolerância de 10 segundos (cobre remasters/intros extras, mas rejeita
-    # uma faixa diferente). Sem esta checagem, um torrent de álbum/discografia
-    # (vários arquivos numa pasta) podia ligar o library_path de uma faixa ao
-    # arquivo de uma faixa IRMÃ — fazendo a saída nativa tocar a música errada
-    # (a saída do navegador usa o job-id e não passa por aqui, por isso só a
-    # nativa era afetada).
     if diff_s > 10:
-        return False, f"duration mismatch: expected {expected_ms / 1000:.0f}s, got {actual_ms / 1000:.0f}s ({diff_s:.0f}s off)"
+        return True, f"duration differs: expected {expected_ms / 1000:.0f}s, got {actual_ms / 1000:.0f}s ({diff_s:.0f}s off)"
     return True, ""
 
 
@@ -1215,6 +1214,11 @@ class ServiceDownloadManager:
             job["_last_active_bytes"] = active_bytes
             job["_last_active_time"] = now
         elif now - last_time > 300: # 5 minutes of genuine zero progress
+            if str(job.get("engine") or "").lower() == "torrent":
+                job["_last_active_time"] = now
+                job["last_status"] = "Torrent source stalled; trying candidate/fallback path..."
+                self._append_cache_event(job, "trying", "Torrent source stalled; keeping fallback/candidate search alive...")
+                return True
             with self._lock:
                 if job.get("status") == "running":
                     job["status"] = "error"

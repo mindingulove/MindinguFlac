@@ -892,7 +892,6 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 output_dir = Path(job.get("output_dir") or "")
-                is_tidal_hifi = job.get("engine") == "tidal_hifi"
                 candidate = None
                 for _ in range(900):
                     job = service_downloader.get_job(job_id)
@@ -905,15 +904,17 @@ class Handler(BaseHTTPRequestHandler):
                             candidate = final_path
                             break
 
-                    if not output_dir.parts:
-                        output_dir = Path(job.get("output_dir") or "")
-                    if output_dir.exists():
-                        candidate = active_audio_candidate(output_dir)
-                    if not candidate and job.get("active_audio_path"):
+                    engine = str(job.get("engine") or "").lower()
+                    if job.get("active_audio_path"):
                         active_path = Path(job.get("active_audio_path") or "")
                         ready_bytes = int(job.get("active_audio_ready_bytes") or 0)
-                        if active_path.exists() and ready_bytes > 512 * 1024:
+                        if active_path.exists() and ready_bytes > 512 * 1024 and is_valid_audio_file(active_path):
                             candidate = active_path
+                    if not candidate and engine != "torrent":
+                        if not output_dir.parts:
+                            output_dir = Path(job.get("output_dir") or "")
+                        if output_dir.exists():
+                            candidate = active_audio_candidate(output_dir)
                     if candidate:
                         break
                     time.sleep(1)

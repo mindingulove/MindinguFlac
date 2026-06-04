@@ -597,6 +597,21 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.player-status:hover {
+  background: rgba(255,255,255,0.06);
+}
+
+.player-status-content {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
 }
 
 .player-status.downloading { animation: none; }
@@ -618,6 +633,56 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
 .player-pie.indeterminate {
   background: conic-gradient(var(--accent) 0 90deg, rgba(255,255,255,0.18) 90deg 360deg);
   animation: spin 0.9s linear infinite;
+}
+
+.tippy-box[data-theme~='mindingu-status'],
+.tippy-box[data-theme~='mindingu-progress'] {
+  background: #08090c;
+  color: var(--text);
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+  border-radius: 8px;
+}
+
+.tippy-box[data-theme~='mindingu-status'] {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tippy-box[data-theme~='mindingu-status'] .tippy-arrow,
+.tippy-box[data-theme~='mindingu-progress'] .tippy-arrow {
+  color: #08090c;
+}
+
+.tippy-box[data-theme~='mindingu-progress'] .tippy-content {
+  padding: 0;
+}
+
+.progress-tippy-body {
+  min-width: min(420px, calc(100vw - 32px));
+  max-width: min(520px, calc(100vw - 32px));
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  background: #08090c;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.progress-popover {
+  position: fixed;
+  z-index: 300;
+  display: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+}
+
+.progress-popover.open {
+  display: block;
 }
 
 .player-controls { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-width: 0; }

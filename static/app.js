@@ -43,6 +43,12 @@ const state = {
   preMuteVolume: 1,
   catalogRefreshTimer: null,
   cacheLogTimer: null,
+  progressLogOpen: false,
+  progressLogTimer: null,
+  progressLogTippy: null,
+  progressLogEl: null,
+  statusHintTippy: null,
+  statusHintRef: null,
 };
 
 const SERVICE_LABELS = {
@@ -192,10 +198,10 @@ function updateEngineControls(engine, currentService, currentQuality) {
   // Show/hide service row
   serviceRow.style.display = providers.length > 0 ? "" : "none";
 
-  // Show/hide duckModel row (Torrent AI advisor only)
+  // Show/hide duckModel row (candidate-ranking engines only)
   const duckModelRow = $("duckModelRow");
   if (duckModelRow) {
-    duckModelRow.style.display = engine === "torrent" ? "" : "none";
+    duckModelRow.style.display = engine === "torrent" || engine === "ytp-dl" ? "" : "none";
   }
 
   // Show/hide retries row (Tor is SpotiFLAC-only)
@@ -1724,17 +1730,48 @@ function pauseBrowserAudio(audio) {
   if (audio) audio.pause();
 }
 
+function syncPlayerStatusTooltip() {
+  const icon = $("playerStatusIcon");
+  if (!icon) return;
+  const title = state.playerStatus || "";
+  icon.title = title;
+  icon.setAttribute("aria-label", title);
+  if (window.tippy) {
+    const ref = icon.querySelector(".player-status-content") || icon;
+    if (state.statusHintTippy && state.statusHintRef !== ref) {
+      state.statusHintTippy.destroy();
+      state.statusHintTippy = null;
+    }
+    if (!state.statusHintTippy) {
+      state.statusHintTippy = tippy(ref, {
+        content: title || "No status",
+        trigger: "mouseenter focus",
+        placement: "top",
+        theme: "mindingu-status",
+        appendTo: () => document.body,
+      });
+      state.statusHintRef = ref;
+    } else {
+      state.statusHintTippy.setContent(title || "No status");
+    }
+    if (state.progressLogOpen) {
+      state.statusHintTippy.disable();
+    }
+  }
+}
+
 function setPlayerStatusIcon(mode, pct) {
   const icon = $("playerStatusIcon");
   icon.className = "player-status " + (mode === "ready" ? "ready" : mode === "error" ? "error" : "downloading");
   if (mode === "ready") {
-    icon.innerHTML = '<i class="bi bi-check-circle-fill"></i>';
+    icon.innerHTML = '<span class="player-status-content"><i class="bi bi-check-circle-fill"></i></span>';
   } else if (mode === "error") {
-    icon.innerHTML = '<i class="bi bi-exclamation-circle"></i>';
+    icon.innerHTML = '<span class="player-status-content"><i class="bi bi-exclamation-circle"></i></span>';
   } else {
     const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
-    icon.innerHTML = `<span class="player-pie${p > 0 ? "" : " indeterminate"}" style="--pct:${p}"></span>`;
+    icon.innerHTML = `<span class="player-status-content"><span class="player-pie${p > 0 ? "" : " indeterminate"}" style="--pct:${p}"></span></span>`;
   }
+  syncPlayerStatusTooltip();
 }
 
 function updatePlayerPie(pct) {
@@ -1746,11 +1783,123 @@ function updatePlayerPie(pct) {
   if (p > 0) pie.classList.remove("indeterminate");
 }
 
+function ensureProgressLogPopover() {
+  if (state.progressLogEl) return state.progressLogEl;
+  const body = document.createElement("pre");
+  body.id = "playerProgressPopover";
+  body.className = "progress-tippy-body";
+  body.textContent = "Loading...";
+  state.progressLogEl = body;
+
+  const icon = $("playerStatusIcon");
+  if (window.tippy && icon) {
+    state.progressLogTippy = tippy(icon, {
+      content: body,
+      trigger: "manual",
+      interactive: true,
+      placement: "top",
+      maxWidth: 520,
+      theme: "mindingu-progress",
+      appendTo: () => document.body,
+      onHide() {
+        if (state.progressLogOpen) {
+          state.progressLogOpen = false;
+          if (state.progressLogTimer) {
+            clearInterval(state.progressLogTimer);
+            state.progressLogTimer = null;
+          }
+        }
+      },
+    });
+  } else {
+    body.classList.add("progress-popover");
+    document.body.appendChild(body);
+  }
+  return body;
+}
+
+function positionProgressLogPopover() {
+  if (state.progressLogTippy) {
+    state.progressLogTippy.popperInstance?.update();
+    return;
+  }
+  const popover = state.progressLogEl;
+  const icon = $("playerStatusIcon");
+  if (!popover || !icon || !state.progressLogOpen) return;
+  const rect = icon.getBoundingClientRect();
+  const margin = 12;
+  const width = popover.offsetWidth || 420;
+  const left = Math.max(margin, Math.min(window.innerWidth - width - margin, rect.left + rect.width / 2 - width / 2));
+  const top = Math.max(margin, rect.top - popover.offsetHeight - 14);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+}
+
+function progressLogText(events) {
+  const currentTitle = (state.currentTrack?.title || "").toLowerCase();
+  let rows = Array.isArray(events) ? events : [];
+  if (currentTitle) {
+    const matching = rows.filter(event => String(event.title || "").toLowerCase() === currentTitle);
+    if (matching.length) rows = matching;
+  }
+  rows = rows.slice(-14);
+  if (!rows.length) return state.playerStatus || "Waiting for progress...";
+  return rows.map((event) => {
+    const clock = new Date((event.timestamp || 0) * 1000).toLocaleTimeString();
+    const track = event.title ? `[${event.title}] ` : "";
+    return `[${clock}] ${track}${event.message || ""}`;
+  }).join("\n");
+}
+
+async function refreshProgressLogPopover() {
+  if (!state.progressLogOpen) return;
+  const body = ensureProgressLogPopover();
+  try {
+    const data = await api("/api/cache/logs");
+    body.textContent = progressLogText(data.events || []);
+  } catch (error) {
+    body.textContent = state.playerStatus || "Unable to read progress log.";
+  }
+  positionProgressLogPopover();
+}
+
+function hideProgressLogPopover() {
+  state.progressLogOpen = false;
+  if (state.progressLogTimer) {
+    clearInterval(state.progressLogTimer);
+    state.progressLogTimer = null;
+  }
+  state.statusHintTippy?.enable();
+  if (state.progressLogTippy) {
+    state.progressLogTippy.hide();
+  } else if (state.progressLogEl) {
+    state.progressLogEl.classList.remove("open");
+  }
+}
+
+function toggleProgressLogPopover() {
+  if (state.progressLogOpen) {
+    hideProgressLogPopover();
+    return;
+  }
+  state.progressLogOpen = true;
+  const popover = ensureProgressLogPopover();
+  state.statusHintTippy?.hide();
+  state.statusHintTippy?.disable();
+  if (state.progressLogTippy) {
+    state.progressLogTippy.show();
+  } else {
+    popover.classList.add("open");
+  }
+  refreshProgressLogPopover();
+  state.progressLogTimer = setInterval(refreshProgressLogPopover, 1000);
+}
+
 function prepareSelectedTrackUi(track, status = "Opening stream...") {
   const audio = $("audioPlayer");
   audio.pause();
   audio.removeAttribute("src");
-  audio.src = ""; 
+  audio.src = "";
   try {
     audio.load();
   } catch (e) {}
@@ -1777,6 +1926,7 @@ function setPlayerStatus(msg, track) {
     meta.textContent = msg;
     meta.classList.add("fade-in");
   }
+  syncPlayerStatusTooltip();
   if (track) {
     $("playerTitle").innerHTML = albumLinkHtml(track, track.title || "Unknown");
     $("playerArtist").innerHTML = artistLinkHtml(track);
@@ -2209,6 +2359,9 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
           audio.load();
           tryStartAudio(audio, track, requestId, job.id);
         }
+      }
+      if (mode === "stream" && $("playerStatusIcon")?.classList.contains("error")) {
+        setPlayerStatusIcon("downloading", pct);
       }
       updatePlayerPie(pct);
       state.activeJobPhase = playerStatusForJob(job);
@@ -3540,9 +3693,24 @@ function bindPlaylistDialogs() {
 
   $("createPlaylistBtn").onclick = () => openCreatePlaylistDialog();
 
-  $("playerStatusIcon").addEventListener("click", () => {
-    if (!state.currentTrack) return;
-    loadPlaylists().then(() => openPlaylistPicker(state.currentTrack));
+  $("playerStatusIcon").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleProgressLogPopover();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!state.progressLogOpen) return;
+    const icon = $("playerStatusIcon");
+    const tippyBox = document.querySelector(".tippy-box[data-theme~='mindingu-progress']");
+    if (icon?.contains(event.target) || tippyBox?.contains(event.target)) return;
+    hideProgressLogPopover();
+  });
+
+  window.addEventListener("resize", () => {
+    if (state.progressLogOpen) {
+      positionProgressLogPopover();
+    }
   });
 }
 

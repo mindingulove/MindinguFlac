@@ -18,3 +18,4 @@ dist/
 Mindinguflac-macos-arm64.zip\n# Build artifacts\nMindinguflac-macos-arm64.zip\ndist/\nbuild/\n*.spec
 !Mindinguflac.spec
 !Mindinguflac-windows.spec
+test_output/
