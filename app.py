@@ -1136,7 +1136,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(duck_proxy.send_chat(
                     token=body.get("vqd_hash_1", ""),
                     messages=body.get("messages", []),
-                    model=body.get("model", "gpt-4o-mini"),
+                    model=body.get("model", "gpt-5-mini"),
                 ))
                 return
             if path == "/api/library/status":

@@ -268,8 +268,12 @@ async function api(path, options = {}) {
 function $(id) { return document.getElementById(id); }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// DuckDuckGo duck.ai client (free, no API key).
+// DuckDuckGo duck.ai client (free, no API key). DDG gates every request behind
+// `x-vqd-hash-1`, a per-request anti-bot token produced by EXECUTING an
+// obfuscated JS challenge in a real browser DOM. This frontend IS a real browser
+// (WKWebView on macOS, Edge WebView2 on Windows), so we solve the challenge here;
+// the Python backend only relays the solved request to DDG (CORS forbids the
+// browser calling duckduckgo.com directly).
 // ---------------------------------------------------------------------------
 async function _sha256Base64(text) {
   const data = new TextEncoder().encode(text);
@@ -279,99 +283,17 @@ async function _sha256Base64(text) {
   return btoa(bin);
 }
 
-function _utf8Base64(text) {
-  return btoa(unescape(encodeURIComponent(text)));
-}
-
-async function solveDuckChallenge(challengeB64, targetUA) {
-  const src = atob(challengeB64);
-  const shadowSrc = `
-    (async function() {
-      const navigator = new Proxy(window.navigator, {
-        get(target, prop) {
-          if (prop === 'userAgent') return ${JSON.stringify(targetUA)};
-          return target[prop];
-        }
-      });
-      return await eval(${JSON.stringify(src)});
-    })();
-  `;
-  const result = await (0, eval)(shadowSrc); 
-  if (!result || typeof result !== "object") throw new Error("challenge produced no object");
-  return result;
-}
-
-async function _duckToken(result, hashClient) {
-  let client = Array.isArray(result.client_hashes) ? result.client_hashes.slice() : [];
-  if (hashClient) {
-    const h = [];
-    for (const v of client) h.push(await _sha256Base64(String(v)));
-    client = h;
-  } else {
-    client = client.map((v) => String(v));
-  }
-  const obj = {
-    server_hashes: result.server_hashes || [],
-    client_hashes: client,
-    signals: result.signals || {},
-    meta: result.meta || {},
-  };
-  return _utf8Base64(JSON.stringify(obj));
-}
-
-async function _duckSignals() {
-  const start = Date.now();
-  return _utf8Base64(JSON.stringify({
-    start: start,
-    events: [],
-    end: start + Math.floor(Math.random() * 1000) + 500 
-  }));
-}
-
-async function harvestDuckBypass() {
-  const targetUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
-  console.log("%c[Duck] Harvesting fresh browser proof...", "color: #00ffff; font-weight: bold;");
-  try {
-    const status = await api("/api/ddg/status");
-    if (!status || !status.vqd_hash_1) return;
-
-    const result = await solveDuckChallenge(status.vqd_hash_1, targetUA);
-    const solvedToken = await _duckToken(result, false);
-    const signals = await _duckSignals();
-
-    await api("/api/ddg/bypass", {
-      method: "POST",
-      body: JSON.stringify({
-        vqd_hash_1: solvedToken,
-        x_fe_signals: signals,
-        x_fe_version: "serp_20250710_090702_ET-70eaca6aea2948b0bb60",
-        headers: {
-            "User-Agent": targetUA,
-            "Accept": "*/*",
-            "Accept-Language": "fr-FR,fr;q=0.6",
-            "Referer": "https://duckduckgo.com/",
-            "Origin": "https://duckduckgo.com",
-            "Sec-CH-UA": '"Not)A;Brand";v="8", "Chromium";v="138", "Brave";v="138"',
-            "Sec-CH-UA-Mobile": "?0",
-            "Sec-CH-UA-Platform": '"Windows"'
-        }
-      })
-    });
-    console.log("%c[Duck] ✅ Browser proof harvested and saved to backend.", "color: #00ff00;");
-  } catch (e) {
-    console.error("[Duck] ❌ Harvesting failed:", e);
-  }
-}
-
-async function duckChatAsk(messages, model = "gpt-5-mini") {
+async function duckChatAsk(messages, model = "gpt-4o-mini") {
+  // The backend now completely handles the anti-bot bypass.
+  // We just fetch the VQD token and pass it to the chat endpoint.
   const status = await api("/api/ddg/status");
-  if (!status || !status.vqd_hash_1) throw new Error("DDG token unavailable");
+  if (!status || !status.vqd_hash_1) throw new Error("DDG token unavailable: " + ((status && status.error) || "no token"));
 
   return api("/api/ddg/chat", {
     method: "POST",
-    body: JSON.stringify({ 
-      vqd_hash_1: status.vqd_hash_1, 
-      model, 
+    body: JSON.stringify({
+      vqd_hash_1: status.vqd_hash_1,
+      model,
       messages
     }),
   });
@@ -379,14 +301,25 @@ async function duckChatAsk(messages, model = "gpt-5-mini") {
 
 window.testDuck = async function (query) {
   query = query || "Reply with exactly one word: pong";
-  console.log("%c[Duck] Running Breakthrough Bypass...", "color: #00ffff; font-weight: bold;");
+  console.log("%c[Duck] Running Hardcoded Bypass...", "color: #00ffff; font-weight: bold;");
   try {
-    const res = await duckChatAsk([{ role: "user", content: query }], "gpt-5-mini");
+    const st = await api("/api/ddg/status");
+    if (!st || !st.vqd_hash_1) {
+      console.error("[Duck] ❌ Failed to get token:", st.error);
+      return;
+    }
+    console.log("[Duck] Token obtained:", st.vqd_hash_1.substring(0, 15) + "...");
+
+    const res = await api("/api/ddg/chat", {
+      method: "POST",
+      body: JSON.stringify({ vqd_hash_1: st.vqd_hash_1, model: "gpt-4o-mini", messages: [{ role: "user", content: query }] }),
+    });
+
     if (res && res.ok) {
       console.log("%c[Duck] ✅ SUCCESS! -> " + res.text, "color: #00ff00; font-weight: bold;");
     } else {
       console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`, "color: #ff0000;");
-      console.log("[Duck] Body:", res.body);
+      console.log("[Duck] Error Body:", res.body);
     }
   } catch (e) {
     console.error("[Duck] ❌ error:", e);
