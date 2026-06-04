@@ -380,7 +380,7 @@ async function duckChatAsk(messages, model = "gpt-5-mini") {
 
 window.testDuck = async function (query) {
   query = query || "Reply with exactly one word: pong";
-  console.log("%c[Duck] Running Reverse Engineering Bypass...", "color: #00ffff; font-weight: bold;");
+  console.log("%c[Duck] Running Breakthrough Bypass...", "color: #00ffff; font-weight: bold;");
   try {
     const res = await duckChatAsk([{ role: "user", content: query }], "gpt-5-mini");
     if (res && res.ok) {
