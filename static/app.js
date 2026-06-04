@@ -283,7 +283,7 @@ async function _sha256Base64(text) {
   return btoa(bin);
 }
 
-async function duckChatAsk(messages, model = "gpt-4o-mini") {
+async function duckChatAsk(messages, model = "gpt-5-mini") {
   // The backend now completely handles the anti-bot bypass.
   // We just fetch the VQD token and pass it to the chat endpoint.
   const status = await api("/api/ddg/status");
@@ -312,7 +312,7 @@ window.testDuck = async function (query) {
 
     const res = await api("/api/ddg/chat", {
       method: "POST",
-      body: JSON.stringify({ vqd_hash_1: st.vqd_hash_1, model: "gpt-4o-mini", messages: [{ role: "user", content: query }] }),
+      body: JSON.stringify({ vqd_hash_1: st.vqd_hash_1, model: "gpt-5-mini", messages: [{ role: "user", content: query }] }),
     });
 
     if (res && res.ok) {
