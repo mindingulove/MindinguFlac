@@ -360,6 +360,8 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
         fuzz.token_set_ratio(wanted_title, candidate_title),
         fuzz.token_set_ratio(wanted_full, candidate_title),
     )
+    
+    # Use token_set_ratio for artist to handle variations like "Artist - Topic" or "ArtistVEVO"
     artist_score = max(artist_coverage, fuzz.token_set_ratio(wanted_artist, combined))
 
     expected_duration = int(wanted.get("duration") or 0)
@@ -439,7 +441,7 @@ def _candidate_is_confident(score: int, details: dict) -> bool:
         score < 55
         or details.get("title_score", 0) < 55
         or details.get("artist_score", 0) < 50
-        or details.get("source_score", 0) < 30
+        or (details.get("source_score", 0) < 25 and score < 70)
     )
 
 

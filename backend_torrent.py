@@ -573,10 +573,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     for token in album_tokens
                 )
                 if target_album:
-                    # If the artist isn't mentioned, we must be extremely confident about the album.
-                    # Generic album names (like 'Trilogy') without an artist match are rejected.
+                    # Generic album names (like 'Trilogy') are accepted IF the artist is confirmed.
                     if not artist_verified and not album_verified:
                         return -1
+                    # If artist is verified, we can be much more relaxed about generic album names
                     if not artist_verified and not album_has_distinctive_token and rapidfuzz.fuzz.ratio(target_album.lower(), torrent_title) < 95:
                         return -1
                     if allow_album_miss and not album_verified and not artist_verified:
