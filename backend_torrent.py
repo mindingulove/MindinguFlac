@@ -337,7 +337,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
             
             # Words that MUST appear for the match to be considered valid.
             # We filter out common noise that might be in Spotify title but not filename.
-            noise_words = {"remastered", "remaster", "live", "edit", "version", "mono", "stereo", "mix", "remix", "single", "digitally"}
+            noise_words = {"remastered", "remaster", "live", "edit", "version", "mono", "stereo", "mix", "remix", "single", "digitally", "trilogy", "beginning", "part", "vol", "volume", "ost"}
             title_tokens = set(re.findall(r'\w+', title_clean.lower()))
             meaningful_tokens = {t for t in title_tokens if len(t) > 2 and t not in {"the", "and", "feat", "with"} and t not in noise_words}
             if not meaningful_tokens: meaningful_tokens = title_tokens
@@ -350,6 +350,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         rapidfuzz.fuzz.token_set_ratio(raw_title, f_path.name),
                         rapidfuzz.fuzz.token_set_ratio(title_clean, f_path.stem),
                     )
+                    
+                    # If artist is not verified in the torrent title, we MUST have a strong filename match
+                    if not artist_verified and title_score < 75:
+                        continue
                     # Significant word check: 
                     # For short titles (1-2 words), we want a high match to avoid "Kill the King" vs "Temple of the King".
                     # For longer titles, we allow some flexibility (65%).
@@ -561,13 +565,19 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     "in", "on", "of", "for", "me", "you", "now", "out", "up", "down",
                     "greatest", "hits", "hit", "best", "collection", "collections", "complete",
                     "ultimate", "essential", "singles", "anthology", "platinum", "gold",
+                    "trilogy", "beginning", "part", "vol", "volume", "ost", "soundtrack",
+                    "original", "motion", "picture", "limited", "deluxe", "edition",
                 }
                 album_has_distinctive_token = any(
                     len(token) >= 4 and token not in generic_album_tokens
                     for token in album_tokens
                 )
                 if target_album:
+                    # If the artist isn't mentioned, we must be extremely confident about the album.
+                    # Generic album names (like 'Trilogy') without an artist match are rejected.
                     if not artist_verified and not album_verified:
+                        return -1
+                    if not artist_verified and not album_has_distinctive_token and rapidfuzz.fuzz.ratio(target_album.lower(), torrent_title) < 95:
                         return -1
                     if allow_album_miss and not album_verified and not artist_verified:
                         return -1
