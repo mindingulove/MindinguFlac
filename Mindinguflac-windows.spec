@@ -20,7 +20,6 @@ hiddenimports = [
     'backend_spotiflac',
     'backend_tidal_hifi',
     'backend_monochrome',
-    'backend_other',
     'vcredist',
     'backend_ytpdl',
     'catalog',

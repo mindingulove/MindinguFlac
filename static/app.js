@@ -271,6 +271,64 @@ function $(id) { return document.getElementById(id); }
 // DuckDuckGo duck.ai client (free, no API key). The backend handles the 
 // anti-bot bypass using static proofs derived from real browser traffic.
 // ---------------------------------------------------------------------------
+async function _sha256Base64(text) {
+  const data = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  let bin = "";
+  for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function _utf8Base64(text) {
+  return btoa(unescape(encodeURIComponent(text)));
+}
+
+async function solveDuckChallenge(challengeB64, targetUA) {
+  const src = atob(challengeB64);
+  const shadowSrc = `
+    (async function() {
+      const navigator = new Proxy(window.navigator, {
+        get(target, prop) {
+          if (prop === 'userAgent') return ${JSON.stringify(targetUA)};
+          return target[prop];
+        }
+      });
+      return await eval(${JSON.stringify(src)});
+    })();
+  `;
+  const result = await (0, eval)(shadowSrc); 
+  if (!result || typeof result !== "object") throw new Error("challenge produced no object");
+  return result;
+}
+
+async function _duckToken(result, hashClient) {
+  let client = Array.isArray(result.client_hashes) ? result.client_hashes.slice() : [];
+  if (hashClient) {
+    const h = [];
+    for (const v of client) h.push(await _sha256Base64(String(v)));
+    client = h;
+  } else {
+    client = client.map((v) => String(v));
+  }
+  const obj = {
+    server_hashes: result.server_hashes || [],
+    client_hashes: client,
+    signals: result.signals || {},
+    meta: result.meta || {},
+  };
+  return _utf8Base64(JSON.stringify(obj));
+}
+
+async function _duckSignals() {
+  const signals = {
+    s: `${window.screen.width}x${window.screen.height}`,
+    p: navigator.platform,
+    c: navigator.hardwareConcurrency || 4,
+    v: "serp_20260604"
+  };
+  return _utf8Base64(JSON.stringify(signals));
+}
+
 async function harvestDuckBypass() {
   console.log("%c[Duck] Harvesting fresh browser proof...", "color: #00ffff; font-weight: bold;");
   try {
@@ -287,7 +345,7 @@ async function harvestDuckBypass() {
       body: JSON.stringify({
         vqd_hash_1: solvedToken,
         x_fe_signals: signals,
-        x_fe_version: "serp_20250710_090702_ET-70eaca6aea2948b0bb60",
+        x_fe_version: "serp_20260604_140157_ET-c2ca44fdeb878a7f8afae5211b181ff031ff5440",
         headers: {
             "User-Agent": ua,
             "Accept": "text/event-stream",

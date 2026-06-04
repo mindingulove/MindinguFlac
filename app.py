@@ -1135,8 +1135,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/ddg/chat":
                 import duck_proxy
                 self.send_json(duck_proxy.send_chat(
-                    vqd_4=body.get("vqd_4", ""),
-                    vqd_hash_1=body.get("vqd_hash_1", ""),
+                    vqd_4=body.get("vqd_hash_1", ""),
                     messages=body.get("messages", []),
                     model=body.get("model", "gpt-5-mini"),
                 ))

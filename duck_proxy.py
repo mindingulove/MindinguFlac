@@ -1,52 +1,60 @@
 """Thin CORS-bypass proxy for DuckDuckGo's duck.ai chat endpoints.
 
-This module follows the reverse-engineered logic from benoitpetit/duckduckgo-chat-cli
-to bypass anti-bot measures (418/429 errors) without a headless browser.
+This module implements a dynamic bypass that periodically 'harvests' fresh 
+anti-bot proofs from the app's real browser environment.
 """
 from __future__ import annotations
 
 import json
 import urllib.error
 import urllib.request
-import time
+import os
+import config
 
-_STATUS_URL = "https://duckduckgo.com/duckchat/v1/status"
-_CHAT_URL = "https://duckduckgo.com/duckchat/v1/chat"
+_STATUS_URL = "https://duck.ai/duckchat/v1/status"
+_CHAT_URL = "https://duck.ai/duckchat/v1/chat"
 
-# Static headers and tokens as per the reverse engineering documentation
-_BROWSER_HEADERS = {
-    "Accept": "*/*",
-    "Accept-Language": "fr-FR,fr;q=0.6",
+def _bypass_path() -> str:
+    return str(config.app_data_dir() / "duck_bypass.json")
+
+def _load_bypass() -> dict:
+    path = _bypass_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: pass
+    return {}
+
+def save_bypass(data: dict):
+    """Save a fresh browser proof harvested from the frontend."""
+    path = _bypass_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+# Fallback headers (Mac/Safari June 4, 2026)
+_DEFAULT_HEADERS = {
+    "Accept": "text/event-stream",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Accept-Language": "en-GB,en;q=0.9",
     "Cache-Control": "no-store",
-    "DNT": "1",
-    "Priority": "u=1, i",
-    "Referer": "https://duckduckgo.com/",
-    "Sec-CH-UA": '"Not)A;Brand";v="8", "Chromium";v="138", "Brave";v="138"',
-    "Sec-CH-UA-Mobile": "?0",
-    "Sec-CH-UA-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-GPC": "1",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-    "Cookie": "5=1; dcm=3; dcs=1",
+    "Origin": "https://duck.ai",
+    "Referer": "https://duck.ai/",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15",
+    "x-ddg-journey-id": "9cc6bed97b1bf9ae5c398c7fef8c5a49"
 }
 
-# The "Breakthrough" Static Proofs
-_STATIC_VQD_HASH_1 = "eyJzZXJ2ZXJfaGFzaGVzIjpbImRQSlJJTWczZnFYQXIvaStaa3c2cEpFVzEwckdTdmxJVlVkNlFsOVRGWXc9IiwiMUN3Qzg3N0Q3WXE1dzlEeTc4UjhBVi9qZVZWaUlYbmV0Q0xvckx3c01QZz0iLCJQSzc3TGc2L25weDdWQ2J2UWxsTEhBR3cyenJIVmEvQUFBRFBhQTl1ekVRPSJdLCJjbGllbnRfaGFzaGVzIjpbImxWblI0MStCMVFWZ0o4d0hhMUdBNmdxR0JoSjlWdjN5K0dISkdGekJmTGM9IiwiVS9RRUc2RE1qdEU4V2hHU1FxOUU1Z0VGNmw1SWJrNk9NVlBuY01DU1licz0iLCJ6SURsYUNvZG9JUjNwbTNSVTlWOUJXaUJkZDJqenRMODAyN0VYTHhkWll3PSJdLCJzaWduYWxzIjp7fSwibWV0YSI6eyJ2IjoiNCIsImNoYWxsZW5nZV9pZCI6ImM4M2Q0ZTc5NTU2MjJmZjU3Mzc0ZDUzOTk2ZjliMmJhZGE2ZDQxZTMzNDM1ZjVlNzMyYjFmNmZjNmQ0ZTE1NzVoOGpidCIsInRpbWVzdGFtcCI6IjE3NTIxNTU3Nzc4NjYiLCJvcmlnaW4iOiJodHRwczovL2R1Y2tkdWNrZ28uY29tIiwic3RhY2siOiJFcnJvclxuYXQgRSAoaHR0cHM6Ly9kdWNrZHVja2dvLmNvbS9kaXN0L3dwbS5jaGF0LjcwZWFjYTZhZWEyOTQ4YjBiYjYwLmpzOjE6MTQ4MjUpXG5hdCBhc3luYyBodHRwczovL2R1Y2tkdWNrZ28uY29tIiwic3RhY2siOiJvdGhlcnMvY29yZS9sb2dvLnBuZyIsImR1cmF0aW9uIjoiNTgifX0="
-_STATIC_FE_SIGNALS = "eyJzdGFydCI6MTc1MjE1NTc3NzQ4MCwiZXZlbnRzIjpbeyJuYW1lIjoic3RhcnROZXdDaGF0IiwiZGVsdGEiOjc1fSx7Im5hbWUiOiJyZWNlbnRDaGF0c0xpc3RJbXByZXNzaW9uIiwiZGVsdGEiOjEyNH1dLCJlbmQiOjQzNDN9"
-_STATIC_FE_VERSION = "serp_20250710_090702_ET-70eaca6aea2948b0bb60"
-
-
 def fetch_status(user_agent: str = "") -> dict:
-    """GET request to /status to obtain the dynamic x-vqd-4 header."""
-    headers = dict(_BROWSER_HEADERS)
+    """GET the dynamic VQD for the current turn."""
+    bypass = _load_bypass()
+    headers = bypass.get("headers", dict(_DEFAULT_HEADERS))
     headers["x-vqd-accept"] = "1"
+    headers["Accept"] = "*/*"
     
     req = urllib.request.Request(_STATUS_URL, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            # The VQD header for chat requests is returned as x-vqd-hash-1 in /status
             vqd = resp.headers.get("x-vqd-hash-1", "")
             return {"vqd_hash_1": vqd, "error": ""}
     except urllib.error.HTTPError as exc:
@@ -54,9 +62,8 @@ def fetch_status(user_agent: str = "") -> dict:
     except Exception as exc:
         return {"vqd_hash_1": "", "error": str(exc)}
 
-
 def _parse_sse(raw: str) -> str:
-    """Parse DuckDuckGo streaming response."""
+    """Parse Duck.ai streaming response."""
     out = []
     for line in raw.splitlines():
         line = line.strip()
@@ -70,71 +77,36 @@ def _parse_sse(raw: str) -> str:
         except: continue
     return "".join(out)
 
-
-import os
-
-_BYPASS_FILE = os.path.join("data", "duck_bypass.json")
-
-def _load_bypass() -> dict:
-    if os.path.exists(_BYPASS_FILE):
-        try:
-            with open(_BYPASS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except: pass
-    return {}
-
-def save_bypass(data: dict):
-    """Save a fresh browser proof harvested from the frontend."""
-    os.makedirs("data", exist_ok=True)
-    with open(_BYPASS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-# Fallback headers if no bypass is harvested yet
-_DEFAULT_HEADERS = {
-    "Accept": "text/event-stream",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Cache-Control": "no-store",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-}
-
 def send_chat(vqd_4: str, messages: list, model: str = "gpt-5-mini", **kwargs) -> dict:
-    """POST request to /chat using harvested or default proofs."""
+    """POST request to /chat using the latest harvested proof."""
     if not vqd_4:
         return {"ok": False, "error": "missing x-vqd-4 token"}
 
     bypass = _load_bypass()
-    
-    # Use harvested headers/proofs if available, else use best-effort defaults
     headers = bypass.get("headers", dict(_DEFAULT_HEADERS))
+    
     headers["x-vqd-4"] = vqd_4
-    headers["x-vqd-hash-1"] = bypass.get("vqd_hash_1", _STATIC_VQD_HASH_1)
-    headers["x-fe-signals"] = bypass.get("x_fe_signals", _STATIC_FE_SIGNALS)
-    headers["x-fe-version"] = bypass.get("x_fe_version", _STATIC_FE_VERSION)
+    headers["x-vqd-hash-1"] = bypass.get("vqd_hash_1", "")
+    headers["x-fe-signals"] = bypass.get("x_fe_signals", "")
+    headers["x-fe-version"] = bypass.get("x_fe_version", "")
     headers["Content-Type"] = "application/json"
     headers["Accept"] = "text/event-stream"
 
-    payload = json.dumps({
-        "model": model,
-        "messages": messages
-    }).encode("utf-8")
-
+    payload = json.dumps({"model": model, "messages": messages}).encode("utf-8")
     req = urllib.request.Request(_CHAT_URL, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8", "replace")
-            # The next token for turn-based chat is returned in the x-vqd-4 header
-            next_token = resp.headers.get("x-vqd-4", "")
+            next_vqd = resp.headers.get("x-vqd-4", "")
             return {
                 "ok": True,
                 "text": _parse_sse(raw),
-                "vqd_hash_1": next_token, # Keep naming consistent for frontend
+                "vqd_hash_1": next_vqd,
                 "status": 200,
                 "error": ""
             }
     except urllib.error.HTTPError as exc:
-        body = ""
-        try: body = exc.read().decode("utf-8", "replace")[:500]
-        except: pass
+        body = exc.read().decode("utf-8", "replace")[:600]
         return {
             "ok": False,
             "status": exc.code,
