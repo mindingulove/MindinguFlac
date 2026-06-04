@@ -88,6 +88,14 @@ def send_chat(token: str, messages: list, model: str = "gpt-5-mini") -> dict:
 
     payload = json.dumps({
         "model": model,
+        "metadata": {
+            "toolChoice": {
+                "NewsSearch": False,
+                "VideosSearch": False,
+                "LocalSearch": False,
+                "WeatherForecast": False
+            }
+        },
         "messages": messages,
         "canUseTools": True,
         "canUseApproxLocation": True
