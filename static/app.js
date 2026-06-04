@@ -392,6 +392,7 @@ window.testDuck = async function (query) {
     console.error("[Duck] ❌ error:", e);
   }
 };
+
 function dockRecentKey(entry) {
   const data = entry.data || {};
   if (entry.kind === "playlist") return `playlist:${data.id || entry.title}`;
