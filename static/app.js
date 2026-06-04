@@ -1842,7 +1842,8 @@ function progressLogText(events) {
     const matching = rows.filter(event => String(event.title || "").toLowerCase() === currentTitle);
     if (matching.length) rows = matching;
   }
-  rows = rows.slice(-14);
+  // Keep up to 50 lines so scrolling is actually useful
+  rows = rows.slice(-50);
   if (!rows.length) return state.playerStatus || "Waiting for progress...";
   return rows.map((event) => {
     const clock = new Date((event.timestamp || 0) * 1000).toLocaleTimeString();
@@ -1854,12 +1855,23 @@ function progressLogText(events) {
 async function refreshProgressLogPopover() {
   if (!state.progressLogOpen) return;
   const body = ensureProgressLogPopover();
+  
+  // Check if we are currently scrolled to the bottom (within a 15px tolerance)
+  // We do this BEFORE updating the content.
+  const isScrolledToBottom = Math.abs((body.scrollHeight - body.scrollTop) - body.clientHeight) <= 15;
+
   try {
     const data = await api("/api/cache/logs");
     body.textContent = progressLogText(data.events || []);
   } catch (error) {
     body.textContent = state.playerStatus || "Unable to read progress log.";
   }
+  
+  // If we were at the bottom before the update, stay at the bottom
+  if (isScrolledToBottom) {
+    body.scrollTop = body.scrollHeight;
+  }
+  
   positionProgressLogPopover();
 }
 
@@ -1891,7 +1903,12 @@ function toggleProgressLogPopover() {
   } else {
     popover.classList.add("open");
   }
-  refreshProgressLogPopover();
+  
+  // Await the first refresh so we can snap to bottom immediately
+  refreshProgressLogPopover().then(() => {
+    popover.scrollTop = popover.scrollHeight;
+  });
+  
   state.progressLogTimer = setInterval(refreshProgressLogPopover, 1000);
 }
 

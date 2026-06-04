@@ -1280,7 +1280,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
                 def start_ai_advisor_if_ready() -> None:
                     nonlocal ai_thread
-                    if ai_thread or is_prefetch or len(phase_results) < 3:
+                    if ai_thread or len(phase_results) < 3:
                         return
                     try:
                         import ai_reranker
