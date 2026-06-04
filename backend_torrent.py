@@ -461,9 +461,18 @@ def run(output_dir: Path, job: dict, manager) -> None:
         catalog = _load_catalog(manager)
         album_key = f"{primary_artist.lower()}||{album.lower()}"
         # RECOVERY attempt: use the persistent source from DB if available
+        album_key = f"{primary_artist.lower()}||{album.lower()}"
         cached_magnet = job.get("resolved_url")
         if not cached_magnet or not cached_magnet.startswith("magnet:"):
-            cached_magnet = catalog.get(album_key)
+            # 1. Try track-specific magnet
+            # 2. Try album-wide magnet (new SQLite source)
+            # 3. Try legacy JSON catalog
+            album_source = db.get_album_source(album_key)
+            if album_source:
+                cached_magnet = album_source.get("resolved_url")
+            
+            if not cached_magnet:
+                cached_magnet = catalog.get(album_key)
         
         handle = None
         torrent_save_path = output_dir
@@ -729,6 +738,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     if album != "Unknown":
                         catalog[f"{primary_artist.lower()}||{album.lower()}"] = magnet
                         _save_catalog(manager, catalog)
+                        db.save_album_source(
+                            album_key=f"{primary_artist.lower()}||{album.lower()}",
+                            engine="torrent",
+                            resolved_url=magnet
+                        )
                     
                     db.save_resolved_source(
                         track_key=job.get("track_key") or f"{primary_artist.lower()}||{title_clean.lower()}",
@@ -1172,9 +1186,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     if _scr is False:
                         db.add_to_blacklist(cached_magnet, "cached source failed")
                         db.delete_resolved_source(job.get("track_key") or "")
+                        db.delete_album_source(album_key)
                 else:
                     db.add_to_blacklist(cached_magnet, "cached source has no peers")
                     db.delete_resolved_source(job.get("track_key") or "")
+                    db.delete_album_source(album_key)
                 _unregister_job_from_torrent(current_magnet, job_id)
                 handle = None
                 current_magnet = None

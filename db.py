@@ -54,6 +54,14 @@ def _init_db(conn: sqlite3.Connection):
             last_updated REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS album_sources (
+            album_key TEXT PRIMARY KEY,
+            engine TEXT,
+            resolved_url TEXT,
+            last_updated REAL
+        )
+    """)
     conn.commit()
 
 
@@ -116,6 +124,27 @@ def get_track_metadata(track_key: str) -> dict | None:
         except Exception:
             pass
     return None
+
+
+def save_album_source(album_key: str, engine: str, resolved_url: str):
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO album_sources (album_key, engine, resolved_url, last_updated)
+        VALUES (?, ?, ?, ?)
+    """, (album_key, engine, resolved_url, time.time()))
+    conn.commit()
+
+
+def get_album_source(album_key: str) -> dict[str, Any] | None:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM album_sources WHERE album_key = ?", (album_key,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_album_source(album_key: str):
+    conn = _get_conn()
+    conn.execute("DELETE FROM album_sources WHERE album_key = ?", (album_key,))
+    conn.commit()
 
 
 def add_to_blacklist(url: str, reason: str = ""):
