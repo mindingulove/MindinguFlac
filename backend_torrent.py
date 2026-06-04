@@ -537,7 +537,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
             def score_torrent_result(r, target_artist, target_title, target_album, allow_album_miss=False):
                 torrent_title = r.get("title", "").lower()
-                if any(k in torrent_title for k in ["s01","s02","movie","1080p","x264","h264","mp4","mkv","dvdrip","brrip","videograffitti"]): return -1
+                # Hard rejection for video and adult content
+                if any(k in torrent_title for k in ["s01","s02","movie","1080p","x264","h264","brrip","dvdrip","videograffitti", "xxx", "porn", "cum", "sex", "adult"]): 
+                    return -1
+                
                 category = str(r.get("category") or "").lower()
                 if category and category != "unknown" and not any(k in category for k in ["audio", "music"]):
                     return -1
@@ -549,10 +552,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 
                 artist_verified = False
                 matches = meaningful_artist.intersection(title_tokens)
-                if len(meaningful_artist) <= 2:
-                    if len(matches) >= len(meaningful_artist): artist_verified = True
-                elif len(matches) >= (len(meaningful_artist) * 0.7): artist_verified = True
-                if not artist_verified and target_artist.replace("'", "") in torrent_title: artist_verified = True
+                
+                # Strict verification: multi-word artists need at least 2 matching tokens (or 70% if very long)
+                if len(meaningful_artist) >= 2:
+                    if len(matches) >= 2 and len(matches) >= (len(meaningful_artist) * 0.7):
+                        artist_verified = True
+                elif len(matches) >= len(meaningful_artist):
+                    artist_verified = True
+                    
+                if not artist_verified and target_artist.replace("'", "") in torrent_title: 
+                    artist_verified = True
 
                 album_verified = False
                 target_album = clean_term(target_album).lower()
