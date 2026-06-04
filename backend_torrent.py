@@ -330,7 +330,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     indexes.append(i)
             return indexes
 
-        def find_best_audio_file(torrent_info) -> tuple[int, int]:
+        def find_best_audio_file(torrent_info, is_artist_verified: bool = True) -> tuple[int, int]:
             best_f_idx = -1
             best_f_score = -1
             track_pats = [f"{track_num.zfill(2)}.", f" {track_num.zfill(2)} ", f"- {track_num.zfill(2)} "] if track_num else []
@@ -352,7 +352,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     )
                     
                     # If artist is not verified in the torrent title, we MUST have a strong filename match
-                    if not artist_verified and title_score < 75:
+                    if not is_artist_verified and title_score < 75:
                         continue
                     # Significant word check: 
                     # For short titles (1-2 words), we want a high match to avoid "Kill the King" vs "Temple of the King".
@@ -407,7 +407,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
             if require_track_list and len(audio_indexes) < 2:
                 return None, "Single-file album"
 
-            best_f_idx, best_f_score = find_best_audio_file(torrent_info)
+            is_artist_verified = result.get("_artist_verified", True)
+            best_f_idx, best_f_score = find_best_audio_file(torrent_info, is_artist_verified=is_artist_verified)
             if best_f_idx == -1 or best_f_score < 60:
                 return None, "Track not found"
 
@@ -622,6 +623,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     score += math.log10(health) * 20
                 else:
                     score -= 100
+                
+                # Store verification flags for later file-level selection
+                r["_artist_verified"] = artist_verified
+                r["_album_verified"] = album_verified
+                
                 return score
 
             trackers = _get_best_trackers()
@@ -675,7 +681,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         add(query, album_clean or "complete")
                 return queries
 
-            def stream_to_completion(handle, magnet, save_path: Path | None = None) -> bool:
+            def stream_to_completion(handle, magnet, save_path: Path | None = None, is_artist_verified: bool = True) -> bool:
                 # Download the best matching file to completion. Returns True on
                 # success (file placed in output_dir), False if the swarm stalls
                 # so the caller can fall back to the next candidate torrent.
@@ -688,7 +694,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 except Exception as exc:
                     manager._append_cache_event(job, "trying", f"Source metadata became unavailable, trying next: {exc}")
                     return False
-                best_f_idx, best_f_score = find_best_audio_file(torrent_info)
+                best_f_idx, best_f_score = find_best_audio_file(torrent_info, is_artist_verified=is_artist_verified)
                 if best_f_idx == -1 or best_f_score < 60:
                     return False
 
@@ -939,7 +945,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     current_magnet = None
                     return None
 
-                best_f_idx, best_f_score = find_best_audio_file(torrent_info)
+                best_f_idx, best_f_score = find_best_audio_file(torrent_info, is_artist_verified=r.get("_artist_verified", True))
                 if best_f_idx == -1 or best_f_score < 60:
                     manager._append_cache_event(job, "trying", "Track not in source, trying next...")
                     _unregister_job_from_torrent(current_magnet, job_id)
@@ -947,7 +953,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     return None
                 # Actually download it now. False = dead/wrong -> blacklist;
                 # None = stalled with real progress -> keep retryable (resume).
-                _scr = stream_to_completion(candidate_handle, current_magnet, torrent_save_path)
+                _scr = stream_to_completion(candidate_handle, current_magnet, torrent_save_path, is_artist_verified=r.get("_artist_verified", True))
                 if _scr:
                     return candidate_handle
                 if _scr is False:
@@ -1155,7 +1161,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                         _unregister_job_from_torrent(m_other, job_id)
                                 current_magnet = m
                                 torrent_save_path = save_path
-                                _scr = stream_to_completion(h, m, save_path)
+                                _scr = stream_to_completion(h, m, save_path, is_artist_verified=selected_result.get("_artist_verified", True))
                                 if _scr:
                                     if apply_search_album:
                                         resolved_album_from_search = selected_result.get("_search_album") or target_album
@@ -1188,7 +1194,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 time.sleep(0.5)
                 if handle.status().num_peers > 0:
                     manager._append_cache_event(job, "trying", f"Step 0: Reusing swarm for: {album}")
-                    _scr = stream_to_completion(handle, current_magnet, torrent_save_path)
+                    _scr = stream_to_completion(handle, current_magnet, torrent_save_path, is_artist_verified=True)
                     if _scr:
                         return
                     # Only blacklist on a hard failure; a stalled-with-progress
