@@ -912,7 +912,11 @@ def build_music_indexers(config: AppConfig) -> list[BaseMusicIndexer]:
     return [SpotifyIndexer()] if _get_spotify_client() else []
 
 
+@functools.lru_cache(maxsize=128)
 def search_music(config: AppConfig, query: str) -> list[dict]:
+    # We strip and lower-case the query for the cache key to be effective
+    query = query.strip().lower()
+    if not query: return []
     results, seen = [], set()
     for idx in build_music_indexers(config):
         try:
