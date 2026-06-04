@@ -36,6 +36,7 @@ const state = {
   playbackRequestId: 0,
   currentStreamUrl: "",
   currentLibraryPath: "",
+  pendingNativeStartAt: 0,
   nativeAudio: { active: false, playing: false, position: 0, duration: 0, path: "", ended: false },
   nativeAudioPollTimer: null,
   prefetchedForRequestId: -1,
@@ -191,6 +192,12 @@ function updateEngineControls(engine, currentService, currentQuality) {
   // Show/hide service row
   serviceRow.style.display = providers.length > 0 ? "" : "none";
 
+  // Show/hide duckModel row (Torrent AI advisor only)
+  const duckModelRow = $("duckModelRow");
+  if (duckModelRow) {
+    duckModelRow.style.display = engine === "torrent" ? "" : "none";
+  }
+
   // Show/hide retries row (Tor is SpotiFLAC-only)
   if (retriesRow) retriesRow.style.display = engine === "spotiflac" ? "" : "none";
 
@@ -253,6 +260,65 @@ async function api(path, options = {}) {
 }
 
 function $(id) { return document.getElementById(id); }
+
+// ---------------------------------------------------------------------------
+// DuckDuckGo duck.ai client (free, no API key). DDG gates every request behind
+// `x-vqd-hash-1`, a per-request anti-bot token produced by EXECUTING an
+// obfuscated JS challenge in a real browser DOM. This frontend IS a real browser
+// (WKWebView on macOS, Edge WebView2 on Windows), so we solve the challenge here;
+// the Python backend only relays the solved request to DDG (CORS forbids the
+// browser calling duckduckgo.com directly).
+// ---------------------------------------------------------------------------
+async function _sha256Base64(text) {
+  const data = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  let bin = "";
+  for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+async function duckChatAsk(messages, model = "gpt-4o-mini") {
+  // The backend now completely handles the anti-bot bypass.
+  // We just fetch the VQD token and pass it to the chat endpoint.
+  const status = await api("/api/ddg/status");
+  if (!status || !status.vqd_hash_1) throw new Error("DDG token unavailable: " + ((status && status.error) || "no token"));
+
+  return api("/api/ddg/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      vqd_hash_1: status.vqd_hash_1,
+      model,
+      messages
+    }),
+  });
+}
+
+window.testDuck = async function (query) {
+  query = query || "Reply with exactly one word: pong";
+  console.log("%c[Duck] Running Hardcoded Bypass...", "color: #00ffff; font-weight: bold;");
+  try {
+    const st = await api("/api/ddg/status");
+    if (!st || !st.vqd_hash_1) {
+      console.error("[Duck] ❌ Failed to get token:", st.error);
+      return;
+    }
+    console.log("[Duck] Token obtained:", st.vqd_hash_1.substring(0, 15) + "...");
+
+    const res = await api("/api/ddg/chat", {
+      method: "POST",
+      body: JSON.stringify({ vqd_hash_1: st.vqd_hash_1, model: "gpt-4o-mini", messages: [{ role: "user", content: query }] }),
+    });
+
+    if (res && res.ok) {
+      console.log("%c[Duck] ✅ SUCCESS! -> " + res.text, "color: #00ff00; font-weight: bold;");
+    } else {
+      console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`, "color: #ff0000;");
+      console.log("[Duck] Error Body:", res.body);
+    }
+  } catch (e) {
+    console.error("[Duck] ❌ error:", e);
+  }
+};
 
 function dockRecentKey(entry) {
   const data = entry.data || {};
@@ -1529,6 +1595,10 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
     if (existing) {
       if (existing.status === "running" || existing.status === "starting") {
         state.activeJobId = existing.id;
+        // This may be a prefetch job we're now adopting as the active track.
+        // Promote it so the backend torrent prefetch gate stops throttling it;
+        // otherwise it could sit queued behind the prefetch limit and never play.
+        api("/api/service/promote", { method: "POST", body: JSON.stringify({ job_id: existing.id }) }).catch(() => {});
         await startServiceDownload(item, mode, requestId, existing.id);
         return;
       }
@@ -1540,6 +1610,15 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
 
 function isActiveJobStreamUrl(url) {
   return !!url && url.includes("/api/library/stream_active_job");
+}
+
+function isLibraryStreamUrl(url) {
+  if (!url || isActiveJobStreamUrl(url)) return false;
+  try {
+    return new URL(url, window.location.origin).pathname === "/api/library/stream";
+  } catch (e) {
+    return url.includes("/api/library/stream?") && !url.includes("/api/library/stream_active_job");
+  }
 }
 
 function seekAfterMetadata(audio, position) {
@@ -1564,6 +1643,7 @@ function seekAfterMetadata(audio, position) {
 async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library", startAt = 0) {
   if (requestId !== state.playbackRequestId) return;
   state.currentLibraryPath = filePath;
+  state.pendingNativeStartAt = 0;
   const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}`;
   state.currentStreamUrl = streamUrl;
   const audio = $("audioPlayer");
@@ -1718,6 +1798,10 @@ function playerStatusForJob(job, fallback = "Loading...") {
   if (isTorrentSearch) return "Searching...";
   if (/^Streaming:/i.test(last)) return "Buffering...";
   return fallback;
+}
+
+function activeJobHasPlayableAudio(job) {
+  return Number(job?.active_audio_ready_bytes || 0) > 512 * 1024;
 }
 
 function updateDetailsPanel(track) {
@@ -2035,16 +2119,22 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
         setPlayerStatusIcon("downloading", job.progress || 0);
         setPlayerStatus(state.activeJobPhase, track);
       } else {
-        const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
-        state.currentStreamUrl = streamUrl;
         const audio = $("audioPlayer");
-        audio.src = streamUrl;
-        state.currentPlayableReady = true;
         state.activeJobPhase = playerStatusForJob(job);
-        state.autoplayWanted = true;
-        audio.load();
+        state.autoplayWanted = !state.manualPauseRequested;
+        if (activeJobHasPlayableAudio(job)) {
+          const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
+          state.currentStreamUrl = streamUrl;
+          audio.src = streamUrl;
+          state.currentPlayableReady = true;
+          audio.load();
+        } else {
+          state.currentPlayableReady = false;
+          setPlayerStatusIcon("downloading", job.progress || 0);
+          setPlayerStatus(state.activeJobPhase, track);
+        }
         syncPlayPauseButton();
-        tryStartAudio(audio, track, requestId, job.id);
+        if (state.currentPlayableReady) tryStartAudio(audio, track, requestId, job.id);
       }
     }
     watchServiceDownload(job.id, track, mode, requestId);
@@ -2089,11 +2179,15 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         if (!switchedToFinal && mode === "stream" && job.library_path) {
           switchedToFinal = true;
           const audio = $("audioPlayer");
-          // Don't interrupt active stream playback; the finished file is used on resume.
-          // Only switch if playback hasn't meaningfully started yet.
-          if (!state.manualPauseRequested && (!audio || audio.paused || audio.currentTime < 2)) {
+          const shouldSwitchToNative = isNativeAudioSelected() && !state.manualPauseRequested;
+          // Don't interrupt active browser stream playback unless the user
+          // explicitly selected native app-only output, where no browser route exists.
+          const shouldSwitchActiveJobToCache = isActiveJobStreamUrl(state.currentStreamUrl);
+          if (shouldSwitchToNative || (!state.manualPauseRequested && (shouldSwitchActiveJobToCache || !audio || audio.paused || audio.currentTime < 2))) {
             try {
-              const resumeAt = audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+              const resumeAt = shouldSwitchToNative && state.pendingNativeStartAt
+                ? state.pendingNativeStartAt
+                : (audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
               await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache", resumeAt);
             } catch (error) {
               setPlayerStatusIcon("error");
@@ -2103,6 +2197,18 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         }
         state.activeJobId = null;
         return;
+      }
+      if (mode === "stream" && !state.currentPlayableReady && activeJobHasPlayableAudio(job) && !isNativeAudioSelected()) {
+        const audio = $("audioPlayer");
+        const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
+        state.currentStreamUrl = streamUrl;
+        audio.src = streamUrl;
+        state.currentPlayableReady = true;
+        if (!state.manualPauseRequested) {
+          state.autoplayWanted = true;
+          audio.load();
+          tryStartAudio(audio, track, requestId, job.id);
+        }
       }
       updatePlayerPie(pct);
       state.activeJobPhase = playerStatusForJob(job);
@@ -2365,6 +2471,11 @@ async function renderSettings() {
     const newEngine = $("downloadEngine").value;
     updateEngineControls(newEngine, $("downloadService").value, $("defaultQuality").value);
   };
+
+  if ($("duckModel")) {
+    $("duckModel").value = state.settings.duck_model || "1";
+  }
+
   $("trackMaxRetries").value = (state.settings.track_max_retries !== undefined) ? state.settings.track_max_retries : 1;
 
   $("cacheCleanupFrequency").value = state.settings.cache_cleanup_frequency || "never";
@@ -2391,6 +2502,7 @@ async function saveSettings(e) {
     cache_dir: $("cacheDir").value,
     music_dir: $("musicDir").value,
     download_engine: $("downloadEngine").value,
+    duck_model: $("duckModel") ? $("duckModel").value : "1",
     download_service: $("downloadService").value,
     default_quality: $("defaultQuality").value,
     track_max_retries: parseInt($("trackMaxRetries").value),
@@ -2464,8 +2576,54 @@ async function startNativeAudio(filePath, track, requestId, position = 0) {
   return true;
 }
 
+async function fallbackToDefaultOutputAndResume(requestId, position) {
+  // The selected app-audio output device (e.g. EDIFIER over Bluetooth) dropped.
+  // Hand playback back to the default output ("This computer") and resume from
+  // where native left off, instead of leaving the track silently paused.
+  if (requestId !== state.playbackRequestId) return;
+  const track = state.currentTrack;
+  const libraryPath = state.currentLibraryPath;
+  await stopNativeAudio();
+  _activeSinkId = "";
+  _nativeAudioDeviceUid = "";
+  const audio = $("audioPlayer");
+  if (typeof audio.setSinkId === "function") {
+    try { await audio.setSinkId(""); } catch (e) {}
+  }
+  $("btnConnectDevice").classList.toggle("active", false);
+  _refreshConnectPanel().catch(() => {});
+  if (libraryPath && track) {
+    await playFromLibraryPath(
+      libraryPath, track, requestId, state.activeJobId,
+      "Output disconnected — playing on this computer", position
+    ).catch(() => {});
+  } else if (track) {
+    setPlayerStatus("Output device disconnected", track);
+  }
+}
+
+let _deviceChangeListenerAdded = false;
+function ensureOutputDisconnectListener() {
+  // Event-driven (no polling): the browser fires `devicechange` the moment an
+  // audio device connects or disconnects. When routing app audio to a native
+  // output device, verify via the backend CoreAudio list whether our device is
+  // gone and, if so, fall back to the default output and keep playing.
+  if (_deviceChangeListenerAdded) return;
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.addEventListener !== "function") return;
+  _deviceChangeListenerAdded = true;
+  navigator.mediaDevices.addEventListener("devicechange", async () => {
+    if (!state.nativeAudio.active || !_nativeAudioDeviceUid) return;
+    const devs = await api("/api/audio/devices").catch(() => null);
+    if (devs && Array.isArray(devs.devices) &&
+        !devs.devices.some(d => d.uid === _nativeAudioDeviceUid)) {
+      await fallbackToDefaultOutputAndResume(state.playbackRequestId, state.nativeAudio.position || 0);
+    }
+  });
+}
+
 function startNativeAudioPolling(requestId) {
   if (state.nativeAudioPollTimer) clearInterval(state.nativeAudioPollTimer);
+  ensureOutputDisconnectListener();
   state.nativeAudioPollTimer = setInterval(async () => {
     if (requestId !== state.playbackRequestId || !state.nativeAudio.active) {
       clearInterval(state.nativeAudioPollTimer);
@@ -2889,6 +3047,7 @@ function bindPlayer() {
   };
   audio.ontimeupdate = () => {
     if (!audio.duration) return;
+    if (state.streamRetryCount) state.streamRetryCount = 0; // playback recovered
     $("seekBar").value = (audio.currentTime / audio.duration) * 1000;
     $("currentTime").textContent = formatTime(audio.currentTime);
     $("durationTime").textContent = formatTime(audio.duration);
@@ -2925,7 +3084,7 @@ function bindPlayer() {
     state.autoplayWanted = false;
     state.activeJobPhase = "";
     if (state.currentTrack) {
-        const isCache = state.currentStreamUrl && state.currentStreamUrl.includes("/api/library/stream");
+        const isCache = isLibraryStreamUrl(state.currentStreamUrl);
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
     }
   };
@@ -2945,14 +3104,32 @@ function bindPlayer() {
           "Playing from cache",
           resumeAt
         ).catch(() => {});
-    } else if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {        console.log("[Player] Media error 4 (Safari/Transient). Retrying stream...");
+    } else if (error && error.code === 4 && state.currentStreamUrl && state.currentTrack) {
+        // Media error 4 on an active-job stream is often just a transient Safari
+        // hiccup — but if the job has errored the server returns 409 forever, and
+        // retrying the same URL immediately spins into an infinite loop. Cap the
+        // retries, back off, and give up cleanly once the source is clearly dead.
+        state.streamRetryCount = (state.streamRetryCount || 0) + 1;
+        if (state.streamRetryCount > 4) {
+            console.warn("[Player] Stream keeps failing (job likely errored); stopping retries.");
+            state.streamRetryCount = 0;
+            state.autoplayWanted = false;
+            setPlayerStatusIcon("error");
+            setPlayerStatus("Source unavailable — press play to try another", state.currentTrack);
+            return;
+        }
+        console.log(`[Player] Media error 4 (Safari/Transient). Retry ${state.streamRetryCount}/4...`);
         const pos = audio.currentTime;
-        const url = new URL(state.currentStreamUrl, window.location.origin);
-        url.searchParams.set("t", Date.now()); // Bust cache on retry
-        audio.src = url.toString();
-        audio.load();
-        audio.currentTime = pos;
-        audio.play().catch(() => {});
+        const requestId = state.playbackRequestId;
+        setTimeout(() => {
+            if (requestId !== state.playbackRequestId || state.manualPauseRequested) return;
+            const url = new URL(state.currentStreamUrl, window.location.origin);
+            url.searchParams.set("t", Date.now()); // Bust cache on retry
+            audio.src = url.toString();
+            audio.load();
+            audio.currentTime = pos;
+            audio.play().catch(() => {});
+        }, 800);
     } else if (error && state.currentTrack) {
         console.error("[Player] Media error:", error.code, error.message);
         // Error codes: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED
@@ -3522,8 +3699,17 @@ async function setAudioOutputDevice(deviceId) {
         setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
       }
     } else if (state.currentTrack) {
-      // No completed/cache file exists yet. Keep browser playback alive; the
-      // finished-file path will switch to native output once the job completes.
+      // No completed/cache file exists yet. Native app-only output cannot play
+      // the live active-job URL, so stop default-output browser playback and
+      // resume native at the same position once the cache file is ready.
+      state.pendingNativeStartAt = audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+      if (audio) {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      }
+      state.currentPlayableReady = false;
+      state.autoplayWanted = false;
       setPlayerStatus("Native output will start when cache is ready", state.currentTrack);
     }
     syncPlayPauseButton();

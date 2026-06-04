@@ -702,7 +702,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE, PUT")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Duck-UA")
         self.send_header("Access-Control-Allow-Credentials", "true")
         self.send_header("Access-Control-Max-Age", "86400")
 
@@ -848,6 +848,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/audio/devices":
                 self.send_json({"devices": _list_audio_output_devices(), "native_available": native_audio.available()})
+                return
+            if path == "/api/ddg/status":
+                import duck_proxy
+                self.send_json(duck_proxy.fetch_status())
                 return
             if path == "/api/native_audio/status":
                 self.send_json(native_audio.status())
@@ -1122,6 +1126,18 @@ class Handler(BaseHTTPRequestHandler):
                 job = service_downloader.start_job(enrich_download_payload(body))
                 self.send_json(job, 201)
                 return
+            if path == "/api/service/promote":
+                ok = service_downloader.promote_job(body.get("job_id"))
+                self.send_json({"ok": ok})
+                return
+            if path == "/api/ddg/chat":
+                import duck_proxy
+                self.send_json(duck_proxy.send_chat(
+                    token=body.get("vqd_hash_1", ""),
+                    messages=body.get("messages", []),
+                    model=body.get("model", "gpt-4o-mini"),
+                ))
+                return
             if path == "/api/library/status":
                 self.send_json(service_downloader.library_status(body))
                 return
@@ -1247,17 +1263,51 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 return
 
-            self.send_response(200)
+            start = 0
+            end = max(0, size - 1)
+            status = 200
+            range_header = self.headers.get("Range", "").strip()
+            if range_header.startswith("bytes="):
+                spec = range_header.split("=", 1)[1].split(",", 1)[0].strip()
+                try:
+                    left, right = spec.split("-", 1)
+                    if left:
+                        start = int(left)
+                        end = int(right) if right else size - 1
+                    elif right:
+                        suffix_len = int(right)
+                        start = max(0, size - suffix_len)
+                        end = size - 1
+                    if start < 0 or start >= size or end < start:
+                        self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                        self.send_cors_headers()
+                        self.send_header("Content-Range", f"bytes */{size}")
+                        self.end_headers()
+                        return
+                    end = min(end, size - 1)
+                    status = 206
+                except Exception:
+                    start = 0
+                    end = max(0, size - 1)
+                    status = 200
+
+            content_length = max(0, end - start + 1)
+            self.send_response(status)
             self.send_cors_headers()
             self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Length", str(content_length))
             self.send_header("Accept-Ranges", "bytes")
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
             with path.open("rb") as f:
-                while True:
-                    chunk = f.read(256 * 1024)
+                f.seek(start)
+                remaining = content_length
+                while remaining > 0:
+                    chunk = f.read(min(256 * 1024, remaining))
                     if not chunk:
                         break
+                    remaining -= len(chunk)
                     try:
                         self.wfile.write(chunk)
                         self.wfile.flush()

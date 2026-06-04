@@ -149,6 +149,43 @@ class TestBackendYtpDl(unittest.TestCase):
         self.assertEqual(url, "https://www.youtube.com/watch?v=clear")
         self.assertFalse(details["drm"])
 
+    @patch("ai_reranker.rank_candidates", return_value=[2, 1])
+    @patch("ai_reranker.is_enabled", return_value=True)
+    @patch("backend_ytpdl._youtube_ai_race_timeout", return_value=1)
+    def test_youtube_ai_advisor_reorders_when_it_wins(self, race_timeout, is_enabled, rank_candidates):
+        manager = MagicMock()
+        manager.config.duck_model = "1"
+        manager._append_cache_event = MagicMock()
+        job = {"id": "job-1", "artist": "Artist", "title": "Song", "album": "Album"}
+        candidates = [
+            ("https://www.youtube.com/watch?v=local", {"title": "Artist - Song", "uploader": "Artist", "score": 90}),
+            ("https://www.youtube.com/watch?v=ai", {"title": "Artist - Song Official Audio", "uploader": "Artist", "score": 80}),
+            ("https://www.youtube.com/watch?v=third", {"title": "Artist - Song live", "uploader": "Artist", "score": 70}),
+        ]
+
+        ordered = backend_ytpdl._ranked_youtube_matches_with_ai(candidates, job, manager)
+
+        self.assertEqual(ordered[0][0], "https://www.youtube.com/watch?v=ai")
+        self.assertEqual(ordered[1][0], "https://www.youtube.com/watch?v=local")
+
+    @patch("ai_reranker.rank_candidates", return_value=[2, 1])
+    @patch("ai_reranker.is_enabled", return_value=True)
+    @patch("backend_ytpdl._youtube_ai_race_timeout", return_value=0)
+    def test_youtube_local_selector_wins_when_ai_is_late(self, race_timeout, is_enabled, rank_candidates):
+        manager = MagicMock()
+        manager.config.duck_model = "1"
+        manager._append_cache_event = MagicMock()
+        job = {"id": "job-1", "artist": "Artist", "title": "Song", "album": "Album"}
+        candidates = [
+            ("https://www.youtube.com/watch?v=local", {"title": "Artist - Song", "uploader": "Artist", "score": 90}),
+            ("https://www.youtube.com/watch?v=ai", {"title": "Artist - Song Official Audio", "uploader": "Artist", "score": 80}),
+            ("https://www.youtube.com/watch?v=third", {"title": "Artist - Song live", "uploader": "Artist", "score": 70}),
+        ]
+
+        ordered = backend_ytpdl._ranked_youtube_matches_with_ai(candidates, job, manager)
+
+        self.assertEqual(ordered, candidates)
+
     @patch("backend_ytpdl._get_yt_dlp")
     @patch("backend_ytpdl._resolved_youtube_url", return_value="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     @patch("service_downloader._find_audio_files", return_value=[Path("/tmp/out/song.m4a")])

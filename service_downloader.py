@@ -41,13 +41,12 @@ def is_valid_audio_file(path: Path) -> bool:
         return b"RIFF" in header and b"WAVE" in header
     return any(byte != 0 for byte in header)
 
+
 AUDIO_SUFFIXES = {
     ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".alac", ".webm",
     ".wma", ".wv", ".ape", ".mpc", ".m4b", ".m4p", ".m4r",
     ".mp2", ".mp1", ".mpa", ".m2a", ".m3a",
     ".aiff", ".aif", ".aifc",
-}
-
     ".au", ".snd",
     ".ra", ".ram", ".rm", ".rmvb",
     ".spx", ".oga", ".ogv",
@@ -311,7 +310,14 @@ def downloaded_track_matches_request(path: Path, job: dict) -> tuple[bool, str]:
         return True, ""
 
     diff_s = abs(expected_ms - actual_ms) / 1000
-    # Tolerância de 15 segundos (comum para remasters, intros extras, etc.)
+    # Tolerância de 10 segundos (cobre remasters/intros extras, mas rejeita
+    # uma faixa diferente). Sem esta checagem, um torrent de álbum/discografia
+    # (vários arquivos numa pasta) podia ligar o library_path de uma faixa ao
+    # arquivo de uma faixa IRMÃ — fazendo a saída nativa tocar a música errada
+    # (a saída do navegador usa o job-id e não passa por aqui, por isso só a
+    # nativa era afetada).
+    if diff_s > 10:
+        return False, f"duration mismatch: expected {expected_ms / 1000:.0f}s, got {actual_ms / 1000:.0f}s ({diff_s:.0f}s off)"
     return True, ""
 
 
@@ -622,6 +628,18 @@ class ServiceDownloadManager:
 
         for kind, message in changes:
             self._append_cache_event(job, kind, message)
+
+    def promote_job(self, job_id: str) -> bool:
+        """Clear a job's prefetch flag so the torrent prefetch gate stops
+        throttling it. Called when a still-downloading prefetch job becomes the
+        track the user is actively waiting to hear, so it must not stay queued
+        behind the prefetch concurrency limit."""
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return False
+            job["prefetch"] = False
+            return True
 
     def cancel_job(self, job_id: str) -> bool:
         with self._lock:
@@ -1256,12 +1274,17 @@ class ServiceDownloadManager:
         engine = (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower()
         service = (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower()
         resolved_url = ""
+        fallback_resolved_url = ""
 
         if resolved_data:
             # If the engine matches or we have a direct URL, we can reuse it
             if resolved_data.get("engine") == engine:
                 resolved_url = resolved_data.get("resolved_url", "")
                 service = resolved_data.get("service") or service
+            elif engine == "torrent" and resolved_data.get("engine") == "ytp-dl":
+                # Keep torrent as the primary path, but pass the known-good
+                # YouTube URL to the torrent backend's fallback worker.
+                fallback_resolved_url = resolved_data.get("resolved_url", "")
                 # We can even adopt the old engine if it worked before and we don't have a strong preference
             elif not payload.get("engine") and resolved_data.get("resolved_url"):
                 # Use what worked last time if the user didn't explicitly pick an engine for this request
@@ -1290,6 +1313,7 @@ class ServiceDownloadManager:
             "created_at": time.time(),
             "error": "",
             "resolved_url": resolved_url,
+            "fallback_resolved_url": fallback_resolved_url,
             "output_dir": "",
             "library_path": "",
         }
@@ -1395,7 +1419,10 @@ class ServiceDownloadManager:
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
                 import backend_torrent
-                backend_torrent.run(output_dir, job, self)
+                # Throttle concurrent prefetch torrent jobs so they can't flood
+                # the shared libtorrent session and starve the playing track.
+                with backend_torrent.prefetch_torrent_gate(job):
+                    backend_torrent.run(output_dir, job, self)
 
             elif engine == "tidal_hifi":
                 # Use the specific service selected in the UI (amazon, apple, etc.)
@@ -1474,10 +1501,23 @@ class ServiceDownloadManager:
                 audio_files = _find_audio_files(output_dir)
                 if not audio_files:
                     raise RuntimeError("Download finished but no playable audio file was found")
-                matches, message = downloaded_track_matches_request(audio_files[0], job)
-                if not matches:
-                    raise RuntimeError(message)
-                audio_path = self._normalize_downloaded_audio(audio_files[0], job)
+                # A multi-file album/discography torrent drops several tracks in
+                # one folder. Bind the job to the file whose duration matches the
+                # requested track instead of audio_files[0] blindly, or native
+                # output (which resolves files by track identity) plays the wrong
+                # sibling. When duration is unknown the matcher returns True, so
+                # this collapses to the previous audio_files[0] behaviour.
+                chosen = None
+                last_message = ""
+                for candidate in audio_files:
+                    matches, message = downloaded_track_matches_request(candidate, job)
+                    if matches:
+                        chosen = candidate
+                        break
+                    last_message = message
+                if chosen is None:
+                    raise RuntimeError(last_message or "Downloaded file did not match the requested track")
+                audio_path = self._normalize_downloaded_audio(chosen, job)
                 with self._lock:
                     job["library_path"] = str(audio_path)
                     job["progress"] = 100

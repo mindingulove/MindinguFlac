@@ -29,6 +29,8 @@ hiddenimports = [
     'backend_ytpdl',
     'catalog',
     'service_downloader',
+    'ai_reranker',
+    'duck_proxy',
     'db'
 ]
 tmp_ret = collect_all('SpotiFLAC')
@@ -49,6 +51,7 @@ try:
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 except Exception:
     pass
+
 
 helper = Path('build/macos/MindinguflacNowPlayingHelper')
 if helper.is_file():

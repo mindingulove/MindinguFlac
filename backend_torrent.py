@@ -4,8 +4,10 @@ import logging
 import os
 import time
 import threading
+import contextlib
 import shutil
 import re
+import hashlib
 import concurrent.futures
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -49,10 +51,136 @@ _SERVICE_ALIASES = {
     "tpb": "piratebay",
 }
 
+_ADULT_CONTENT_TERMS = {
+    "adult",
+    "anal",
+    "bangbros",
+    "bbc",
+    "blowjob",
+    "brazzers",
+    "bukkake",
+    "cock",
+    "creampie",
+    "cum",
+    "cumming",
+    "deepthroat",
+    "dick",
+    "facial",
+    "fuck",
+    "fucking",
+    "handjob",
+    "hardcore",
+    "hentai",
+    "hotandmean",
+    "incest",
+    "jizz",
+    "milf",
+    "mofos",
+    "nude",
+    "onlybbc",
+    "onlyfans",
+    "orgy",
+    "porn",
+    "pornhub",
+    "porno",
+    "pussy",
+    "realitykings",
+    "sex",
+    "sexcapade",
+    "slut",
+    "slutinspection",
+    "squirting",
+    "stepmom",
+    "stepsis",
+    "teen",
+    "threesome",
+    "xhamster",
+    "xnxx",
+    "xvideos",
+    "xxx",
+    "youporn",
+}
+
+_ADULT_COMPOUND_TERMS = {
+    "bangbros",
+    "deepthroat",
+    "hotandmean",
+    "onlybbc",
+    "onlyfans",
+    "pornhub",
+    "realitykings",
+    "sexcapade",
+    "slutinspection",
+    "xhamster",
+    "xvideos",
+    "youporn",
+}
+
+_VIDEO_TORRENT_MARKERS = {
+    "1080p",
+    "2160p",
+    "480p",
+    "720p",
+    "avi",
+    "bdrip",
+    "bluray",
+    "brrip",
+    "dvdrip",
+    "h264",
+    "h265",
+    "hdrip",
+    "hevc",
+    "mkv",
+    "movie",
+    "mp4",
+    "webdl",
+    "webrip",
+    "x264",
+    "x265",
+    "xvid",
+}
+
 
 def _normalize_service(value: str) -> str:
     service = (value or "all").strip().lower()
     return _SERVICE_ALIASES.get(service, service)
+
+def _content_words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+def _adult_terms_in_text(text: str, terms: set[str] | None = None) -> set[str]:
+    terms = terms or _ADULT_CONTENT_TERMS
+    words = _content_words(text)
+    compact = re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+    normalized_terms = {
+        re.sub(r"[^a-z0-9]+", " ", str(term).lower()).strip()
+        for term in terms
+        if str(term).strip()
+    }
+    found = {term for term in normalized_terms if term in words}
+    found.update(
+        term for term in normalized_terms
+        if term in _ADULT_COMPOUND_TERMS or (" " not in term and len(term) >= 6)
+        if term.replace(" ", "") in compact
+    )
+    return found
+
+def _has_disallowed_adult_content(
+    text: str,
+    allowed_terms: set[str] | None = None,
+    terms: set[str] | None = None,
+) -> bool:
+    allowed_terms = allowed_terms or set()
+    return bool(_adult_terms_in_text(text, terms) - allowed_terms)
+
+def _has_video_torrent_marker(text: str) -> bool:
+    words = _content_words(text)
+    compact = re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+    if words.intersection(_VIDEO_TORRENT_MARKERS):
+        return True
+    if compact and any(marker in compact for marker in ("s01e", "s02e", "s03e", "x264", "x265", "h264", "h265")):
+        return True
+    return bool(re.search(r"\.(avi|mkv|mp4)\b", (text or "").lower()))
 
 def _get_best_trackers() -> list[str]:
     global _TRACKERS_CACHE, _TRACKERS_LAST_FETCH
@@ -75,6 +203,47 @@ def _get_best_trackers() -> list[str]:
 
 _ACTIVE_SESSIONS: dict[str, dict] = {}
 _SESSIONS_LOCK = threading.Lock()
+
+# All torrent jobs share one libtorrent session. 5-track parallel prefetch plus
+# the active track would otherwise pile 40+ magnets into that single session at
+# once; metadata acquisition then slows for everything (a clean session resolves
+# ~6 magnets in <25s, but ~40 only resolves ~half in the same window), so the
+# actively-playing track's sources time out as "unresponsive during metadata
+# probe". This gate caps how many *prefetch* jobs probe torrents concurrently.
+# The actively-playing (non-prefetch) job is NEVER gated, so it can never be
+# starved by prefetch.
+try:
+    _PREFETCH_TORRENT_SLOTS = max(1, int(os.environ.get("MINDINGUFLAC_PREFETCH_TORRENT_SLOTS", "2")))
+except Exception:
+    _PREFETCH_TORRENT_SLOTS = 2
+_PREFETCH_TORRENT_GATE = threading.BoundedSemaphore(_PREFETCH_TORRENT_SLOTS)
+
+
+@contextlib.contextmanager
+def prefetch_torrent_gate(job: dict):
+    """Throttle concurrent prefetch torrent jobs against the shared session.
+    Active playback jobs pass through untouched.
+
+    A prefetch job can be adopted as the actively-playing track *while it is still
+    waiting here* (the frontend reuses the running job and calls promote_job, which
+    clears job['prefetch']). We therefore poll the live flag instead of capturing
+    it once: a job promoted mid-wait stops waiting and proceeds immediately, so the
+    throttle can never strand the track the user is waiting to hear. Degrades to
+    running anyway after a long wait so a wedged slot can't permanently block."""
+    if not job.get("prefetch"):
+        yield
+        return
+    acquired = False
+    deadline = time.time() + 180
+    while job.get("prefetch") and time.time() < deadline:
+        if _PREFETCH_TORRENT_GATE.acquire(timeout=0.25):
+            acquired = True
+            break
+    try:
+        yield
+    finally:
+        if acquired:
+            _PREFETCH_TORRENT_GATE.release()
 
 def _create_optimized_session():
     s = lt.session()
@@ -196,10 +365,14 @@ def _register_job_to_torrent(magnet: str, job_id: str, output_dir: Path, manager
         _ACTIVE_SESSIONS[key] = {"handle": handle, "refs": {job_id}, "save_path": str(output_dir)}
         return handle, output_dir
 
-def _unregister_job_from_torrent(magnet: str, job_id: str):
+def _unregister_job_from_torrent(magnet: str, job_id: str) -> bool:
+    """Drop this job's reference to the shared torrent. Returns True only when no
+    other job still references it (i.e. the handle was actually removed and the
+    on-disk files are now safe to delete). Returns False when other jobs are still
+    downloading the same magnet, so the caller must NOT delete the shared files."""
     key = _torrent_key(magnet)
     with _SESSIONS_LOCK:
-        if key not in _ACTIVE_SESSIONS: return
+        if key not in _ACTIVE_SESSIONS: return True
         entry = _ACTIVE_SESSIONS[key]
         entry["refs"].discard(job_id)
         if not entry["refs"]:
@@ -207,6 +380,8 @@ def _unregister_job_from_torrent(magnet: str, job_id: str):
             if handle.is_valid():
                 _GLOBAL_SES.remove_torrent(handle)
             del _ACTIVE_SESSIONS[key]
+            return True
+        return False
 
 def _get_catalog_path(manager) -> Path:
     return Path(manager.config.cache_dir) / "torrent_catalog.json"
@@ -242,6 +417,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
     # 0. Setup
     job_id = job["id"]
     is_prefetch = bool(job.get("prefetch"))
+    import db
+    db.seed_adult_filter_terms(_ADULT_CONTENT_TERMS, source="builtin")
+    adult_filter_terms = db.get_adult_filter_terms() or set(_ADULT_CONTENT_TERMS)
     raw_title = job.get("title") or "Unknown"
     title_clean = re.sub(r'\s*[\(\[].*?[\)\]]', '', raw_title).strip()
     title_clean = title_clean.split(' - ')[0].strip()
@@ -268,6 +446,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
     # the track's actual album (e.g. "Silent Lucidity" -> "Empire").
     if album_clean and title_clean and album_clean.lower() == title_clean.lower():
         album_clean = ""
+    allowed_adult_terms = _adult_terms_in_text(
+        f"{raw_title} {title_clean} {album} {album_clean}",
+        adult_filter_terms,
+    )
 
     quality_str = str(job.get("quality") or "LOSSLESS").upper()
     service = _normalize_service(job.get("service") or "all")
@@ -300,7 +482,6 @@ def run(output_dir: Path, job: dict, manager) -> None:
         return not any(marker in album_norm for marker in compilation_markers)
 
     discovery_timeout = 120
-    import db
     current_magnet = None
     # magnets that stalled but had real progress on the correct file: counted
     # so they get a bounded number of resume attempts before being blacklisted.
@@ -344,6 +525,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
             for i in range(_torrent_num_files(torrent_info)):
                 f_path = Path(torrent_info.file_at(i).path)
+                path_text = str(f_path)
+                if _has_video_torrent_marker(path_text) or _has_disallowed_adult_content(path_text, allowed_adult_terms, adult_filter_terms):
+                    continue
                 if f_path.suffix.lower() in AUDIO_SUFFIXES:
                     f_name_lower = f_path.name.lower()
                     title_score = max(
@@ -403,6 +587,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
             return best_f_idx, best_f_score
 
         def score_metadata_candidate(torrent_info, result: dict, target_album: str, require_track_list: bool, live_peers: int = 0):
+            try:
+                torrent_name = str(torrent_info.name())
+            except Exception:
+                torrent_name = str(result.get("title") or "")
+            if _has_video_torrent_marker(torrent_name) or _has_disallowed_adult_content(torrent_name, allowed_adult_terms, adult_filter_terms):
+                return None, "Adult/video content"
+
             audio_indexes = audio_file_indexes(torrent_info)
             if require_track_list and len(audio_indexes) < 2:
                 return None, "Single-file album"
@@ -537,8 +728,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
             def score_torrent_result(r, target_artist, target_title, target_album, allow_album_miss=False):
                 torrent_title = r.get("title", "").lower()
-                # Hard rejection for video and adult content
-                if any(k in torrent_title for k in ["s01","s02","movie","1080p","x264","h264","brrip","dvdrip","videograffitti", "xxx", "porn", "cum", "sex", "adult"]): 
+                if _has_video_torrent_marker(torrent_title) or _has_disallowed_adult_content(torrent_title, allowed_adult_terms, adult_filter_terms):
                     return -1
                 
                 category = str(r.get("category") or "").lower()
@@ -640,6 +830,29 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 return score
 
             trackers = _get_best_trackers()
+
+            def race_save_path(magnet: str) -> Path:
+                digest = hashlib.sha1(_torrent_key(magnet).encode("utf-8", errors="ignore")).hexdigest()[:12]
+                return output_dir / "_race" / digest
+
+            def cleanup_candidate(magnet: str, save_path: Path | None, delete_files: bool = False) -> None:
+                fully_removed = _unregister_job_from_torrent(magnet, job_id)
+                # When another job (e.g. a same-album prefetch) still shares this
+                # magnet, its handle keeps downloading into the same _race dir.
+                # Deleting those files here would stall that live download
+                # ("no byte progress"/"stalled during streaming"), so only remove
+                # them once we were the last reference.
+                if not delete_files or not save_path or not fully_removed:
+                    return
+                try:
+                    save_path = Path(save_path)
+                    race_root = (output_dir / "_race").resolve()
+                    resolved = save_path.resolve()
+                    if resolved == race_root or not resolved.is_relative_to(race_root):
+                        return
+                    shutil.rmtree(resolved, ignore_errors=True)
+                except Exception:
+                    pass
 
             def candidate_queries_for_album(album_name: str) -> list[str]:
                 album_name = clean_term(album_name)
@@ -759,6 +972,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             try: final_dest.unlink()
                             except Exception: pass
                         shutil.copy2(target_abs, final_dest)
+                    with manager._lock:
+                        job["active_audio_path"] = str(final_dest)
+                        job["active_audio_size"] = target_size
+                        job["active_audio_ready_bytes"] = target_size
                     manager._append_cache_event(job, "provider", f"Torrent engine produced {final_dest.name}")
                     if album != "Unknown":
                         catalog[f"{primary_artist.lower()}||{album.lower()}"] = magnet
@@ -794,7 +1011,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if reacquire_attempts < 3:
                             reacquire_attempts += 1
                             manager._append_cache_event(job, "trying", f"Source handle expired; re-acquiring same source (attempt {reacquire_attempts}/3)...")
-                            handle, _ = _register_job_to_torrent(magnet, job_id, output_dir, manager)
+                            handle, _ = _register_job_to_torrent(magnet, job_id, save_path, manager)
                             meta_wait = time.time()
                             while time.time() - meta_wait < 20:
                                 if job_id in manager._cancel_flags: raise RuntimeError("Cancelled")
@@ -843,11 +1060,12 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         job["active_audio_ready_bytes"] = done
                     if done >= total and total > 0:
                         return finalize_selected_file()
-                    # Stall handling. Don't abandon a source the instant bytes
-                    # pause: first re-announce to wake a quiet swarm, and stay
-                    # patient. Only give up after the extended budget.
+                    # Stall handling. Reported seed counts are often stale; a
+                    # selected torrent with zero connected peers and zero bytes
+                    # should not hold the player for a long stall window.
                     since_progress = time.time() - last_progress_time
-                    if since_progress > 25 and not reannounced_once:
+                    reannounce_after = 12 if s.num_peers == 0 and last_done == 0 else 30
+                    if since_progress > reannounce_after and not reannounced_once:
                         try:
                             for tr in trackers:
                                 handle.add_tracker(lt.announce_entry(tr))
@@ -859,8 +1077,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             pass
                         reannounced_once = True
                         manager._append_cache_event(job, "trying", f"Streaming stalled {int(since_progress)}s ({s.num_peers}p); re-announcing once to wake swarm...")
-                    max_stall = 75
-                    no_peer_stall = 45
+
+                    max_stall = 75 if last_done > 0 else 45
+                    no_peer_stall = 45 if last_done > 0 else 24
                     stalled = since_progress > max_stall
                     if not stalled and s.num_peers == 0 and since_progress > no_peer_stall:
                         stalled = True
@@ -868,11 +1087,31 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if last_done > 0:
                             key = _torrent_key(magnet)
                             stall_retry_counts[key] = stall_retry_counts.get(key, 0) + 1
-                            limit = 1
+                            limit = 4
                             if stall_retry_counts[key] <= limit:
-                                manager._append_cache_event(job, "trying", "Source stalled but had progress; keeping it as a fallback to resume later...")
-                                return None
-                        manager._append_cache_event(job, "trying", f"Source stalled after {int(since_progress)}s; moving to next candidate.")
+                                # A winning source that already produced real bytes is
+                                # worth keeping: a slow FLAC swarm delivers in bursts.
+                                # Re-announce to wake peers, reset the stall window and
+                                # KEEP downloading the same handle from its partial,
+                                # instead of returning None — which every caller deletes
+                                # (delete_files=True), the reason a winning download
+                                # "didn't continue".
+                                try:
+                                    for tr in trackers:
+                                        handle.add_tracker(lt.announce_entry(tr))
+                                    handle.force_reannounce()
+                                    handle.force_dht_announce()
+                                except Exception:
+                                    pass
+                                last_progress_time = time.time()
+                                reannounced_once = False
+                                manager._append_cache_event(job, "trying", f"Source stalled at {int(prog)}% but had progress ({s.num_peers}p); re-announcing and resuming ({stall_retry_counts[key]}/{limit})...")
+                                time.sleep(2)
+                                continue
+                        if s.num_peers == 0 and last_done == 0:
+                            manager._append_cache_event(job, "trying", f"Source has metadata but no connected peers after {int(since_progress)}s; moving to next candidate.")
+                        else:
+                            manager._append_cache_event(job, "trying", f"Source stalled after {int(since_progress)}s; moving to next candidate.")
                         return False
                     if time.time() - start_time > 1800: return False
                     time.sleep(2)
@@ -975,6 +1214,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 return None
 
             resolved_album_from_search = None
+            zero_byte_race_failures = 0
+            dead_race_keys = set()
 
             def run_search_phase(
                 phase_label: str,
@@ -985,7 +1226,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 require_track_list: bool = True,
                 apply_search_album: bool = False,
             ):
-                nonlocal current_magnet, resolved_album_from_search
+                nonlocal current_magnet, resolved_album_from_search, zero_byte_race_failures
                 def phase_status(message: str) -> None:
                     with manager._lock:
                         job["last_status"] = message
@@ -1010,6 +1251,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 attempted_keys = set()
                 pending_search_futures = {}
                 search_executor = None
+                ai_thread = None
+                ai_ranked_keys: list[str] = []
+                ai_lock = threading.Lock()
 
                 def collect_search_results(wait_seconds: float) -> None:
                     if not pending_search_futures:
@@ -1034,16 +1278,73 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                 item["_query"] = query_text
                                 phase_results.append(item)
 
-                def ordered_untried_results() -> list[dict]:
-                    ordered = sorted(
+                def start_ai_advisor_if_ready() -> None:
+                    nonlocal ai_thread
+                    if ai_thread or is_prefetch or len(phase_results) < 3:
+                        return
+                    try:
+                        import ai_reranker
+                    except Exception:
+                        return
+                    if not ai_reranker.is_enabled():
+                        return
+                    snapshot = sorted(
                         _dedupe_results(phase_results),
                         key=lambda x: (int(x.get("seeders") or 0) > 0, x.get("_score", 0), int(x.get("seeders") or 0)),
+                        reverse=True,
+                    )[:20]
+                    if len(snapshot) < 3:
+                        return
+                    def run_ai_advisor():
+                        try:
+                            import ai_reranker
+                            target = {"artist": primary_artist, "title": title_clean, "album": target_album}
+                            candidates = []
+                            id_to_key = {}
+                            for idx, item in enumerate(snapshot, start=1):
+                                m_link = str(item.get("magnet") or "")
+                                if not m_link:
+                                    continue
+                                id_to_key[idx] = _torrent_key(m_link)
+                                candidates.append({
+                                    "id": idx,
+                                    "title": item.get("title") or "",
+                                    "source": item.get("source") or "",
+                                    "seeders": item.get("seeders") or 0,
+                                    "score": item.get("_score") or 0,
+                                    "query": item.get("_query") or "",
+                                })
+                            duck_model = manager.app_config.duck_model if hasattr(manager, "app_config") else "1"
+                            ranked_ids = ai_reranker.rank_candidates(target, candidates, duck_model)
+                            ranked_keys = [id_to_key[i] for i in ranked_ids if i in id_to_key]
+                            if ranked_keys:
+                                with ai_lock:
+                                    ai_ranked_keys[:] = ranked_keys
+                                manager._append_cache_event(job, "trying", f"{phase_label}: AI advisor ranked {len(ranked_keys)} clean candidates")
+                        except Exception as exc:
+                            manager._append_cache_event(job, "trying", f"{phase_label}: AI advisor unavailable ({exc})")
+
+                    ai_thread = threading.Thread(target=run_ai_advisor, daemon=True, name=f"ai-rerank-{job_id}")
+                    ai_thread.start()
+                    manager._append_cache_event(job, "trying", f"{phase_label}: AI advisor running in parallel")
+
+                def ordered_untried_results() -> list[dict]:
+                    with ai_lock:
+                        ai_positions = {key: pos for pos, key in enumerate(ai_ranked_keys)}
+                    ordered = sorted(
+                        _dedupe_results(phase_results),
+                        key=lambda x: (
+                            -ai_positions.get(_torrent_key(str(x.get("magnet") or "")), 10_000),
+                            int(x.get("seeders") or 0) > 0,
+                            x.get("_score", 0),
+                            int(x.get("seeders") or 0),
+                        ),
                         reverse=True,
                     )
                     out = []
                     for result in ordered:
                         m_link = result.get("magnet") or ""
-                        if m_link and _torrent_key(m_link) not in attempted_keys:
+                        if m_link and _torrent_key(m_link) not in attempted_keys and _torrent_key(m_link) not in dead_race_keys:
                             out.append(result)
                     return out[:max_sources]
 
@@ -1057,9 +1358,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
                     search_deadline = time.time() + (55 if phase_label in {"First pass", "Track fallback"} else 40)
                     collect_search_results(5 if phase_label == "First pass" else 7)
+                    start_ai_advisor_if_ready()
 
                     while True:
                         collect_search_results(0.1)
+                        start_ai_advisor_if_ready()
                         results_to_try = ordered_untried_results()
                         if not results_to_try:
                             if pending_search_futures and time.time() < search_deadline:
@@ -1095,11 +1398,12 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                     for tr in trackers:
                                         m_link += f"&tr={urllib.parse.quote(tr)}"
                                 m_key = _torrent_key(m_link)
-                                if m_key in active_window_keys:
+                                if m_key in active_window_keys or m_key in dead_race_keys:
                                     continue
                                 active_window_keys.add(m_key)
                                 attempted_keys.add(m_key)
-                                h, save_path = _register_job_to_torrent(m_link, job_id, output_dir, manager, str(r.get("torrent_url") or ""))
+                                save_path = race_save_path(m_link)
+                                h, save_path = _register_job_to_torrent(m_link, job_id, save_path, manager, str(r.get("torrent_url") or ""))
                                 for tr in trackers:
                                     try: h.add_tracker(lt.announce_entry(tr))
                                     except: pass
@@ -1120,17 +1424,12 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                         torrent_info = h.get_torrent_info()
                                         if not torrent_info:
                                             manager._append_cache_event(job, "trying", f"Source #{r_idx+1} metadata unavailable, trying next...")
-                                            _unregister_job_from_torrent(m, job_id)
+                                            cleanup_candidate(m, save_path, delete_files=True)
                                             active_window_handles = [x for x in active_window_handles if x[1] != m]
                                             break
                                         s = h.status()
                                         live_peers = s.num_peers
-                                        try:
-                                            file_count = _torrent_num_files(torrent_info)
-                                            if file_count > 0:
-                                                h.prioritize_files([0] * file_count)
-                                        except Exception:
-                                            pass
+                                        file_count = _torrent_num_files(torrent_info)
                                         candidate_score, skip_reason = score_metadata_candidate(
                                             torrent_info,
                                             r,
@@ -1140,18 +1439,37 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                         )
                                         scored_magnets.add(m)
                                         if candidate_score:
+                                            # Keep peers warm by downloading ONLY the matched file during
+                                            # the probe, instead of zeroing every file. Telling libtorrent
+                                            # it wants zero bytes makes it drop all peers (rate-based choker
+                                            # + 45s inactivity timeout), so the later race starts cold at
+                                            # 0 peers / 0 bytes ("Race has no byte progress yet (0p)") and a
+                                            # perfectly live FLAC never downloads. Verified A/B: zero-then-
+                                            # race stalls where an immediate target-priority download works.
+                                            try:
+                                                fidx = int(candidate_score.get("file_index", -1))
+                                                if 0 <= fidx < file_count:
+                                                    pr = [0] * file_count
+                                                    pr[fidx] = 1
+                                                    h.set_sequential_download(True)
+                                                    h.prioritize_files(pr)
+                                                elif file_count > 0:
+                                                    h.prioritize_files([0] * file_count)
+                                            except Exception:
+                                                pass
+                                            candidate_score["live_peers"] = live_peers
                                             metadata_candidates.append((candidate_score["score"], h, m, r, r_idx, save_path, candidate_score))
                                             disp_song = min(100, int(candidate_score["file_score"]))
                                             disp_album = min(100, int(candidate_score["album_score"]))
                                             manager._append_cache_event(job, "trying", f"Source #{r_idx+1} match: {disp_song}% (song), {disp_album}% (album). Swarm: {live_peers}p. Score: {int(candidate_score['score'])}")
                                         else:
                                             manager._append_cache_event(job, "trying", f"Source #{r_idx+1} rejected: {skip_reason}")
-                                            _unregister_job_from_torrent(m, job_id)
+                                            cleanup_candidate(m, save_path, delete_files=True)
                                             active_window_handles = [x for x in active_window_handles if x[1] != m]
                                             break
                                     except Exception as exc:
                                         manager._append_cache_event(job, "trying", f"Source #{r_idx+1} probe failed: {exc}")
-                                        _unregister_job_from_torrent(m, job_id)
+                                        cleanup_candidate(m, save_path, delete_files=True)
                                         active_window_handles = [x for x in active_window_handles if x[1] != m]
                                         break
                                 if metadata_candidates and len(scored_magnets) >= len(active_window_handles):
@@ -1161,23 +1479,129 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                 time.sleep(1.0)
 
                             if metadata_candidates:
-                                metadata_candidates.sort(key=lambda item: item[0], reverse=True)
-                                _score, h, m, selected_result, selected_idx, save_path, selected_meta = metadata_candidates[0]
-                                manager._append_cache_event(job, "trying", f"Selected source #{selected_idx+1}: {selected_result.get('title','')[:45]} (album {min(100, int(selected_meta['album_score']))}%, file {min(100, int(selected_meta['file_score']))}%)")
-                                selected_key = _torrent_key(m)
+                                metadata_candidates.sort(key=lambda item: (item[6].get("live_peers", 0) > 0, item[0]), reverse=True)
+                                race_limit = 3 if is_prefetch else 5
+                                race_candidates = metadata_candidates[:race_limit]
+                                race_keys = {_torrent_key(item[2]) for item in race_candidates}
                                 for _h_other, m_other, _r_other, _r_idx_other, _save_path_other in active_window_handles:
-                                    if _torrent_key(m_other) != selected_key:
-                                        _unregister_job_from_torrent(m_other, job_id)
+                                    if _torrent_key(m_other) not in race_keys:
+                                        cleanup_candidate(m_other, _save_path_other, delete_files=True)
+
+                                manager._append_cache_event(job, "trying", f"Racing {len(race_candidates)} matched sources; first real byte progress wins...")
+                                race_state = []
+                                for _score, h, m, selected_result, selected_idx, save_path, selected_meta in race_candidates:
+                                    try:
+                                        torrent_info = h.get_torrent_info()
+                                        file_count = _torrent_num_files(torrent_info)
+                                        file_idx = int(selected_meta.get("file_index", -1))
+                                        if file_count <= 0 or file_idx < 0 or file_idx >= file_count:
+                                            cleanup_candidate(m, save_path, delete_files=True)
+                                            continue
+                                        h.set_sequential_download(True)
+                                        priorities = [0] * file_count
+                                        priorities[file_idx] = 7
+                                        h.prioritize_files(priorities)
+                                        try:
+                                            start_done = h.file_progress()[file_idx]
+                                        except Exception:
+                                            start_done = 0
+                                        race_state.append({
+                                            "score": _score,
+                                            "handle": h,
+                                            "magnet": m,
+                                            "result": selected_result,
+                                            "idx": selected_idx,
+                                            "save_path": save_path,
+                                            "meta": selected_meta,
+                                            "file_idx": file_idx,
+                                            "start_done": start_done,
+                                        })
+                                    except Exception:
+                                        cleanup_candidate(m, save_path, delete_files=True)
+
+                                race_winner = None
+                                race_start = time.time()
+                                race_reannounced = False
+                                while race_state and time.time() - race_start < 24:
+                                    if job_id in manager._cancel_flags:
+                                        raise RuntimeError("Cancelled")
+                                    best_state = None
+                                    best_delta = 0
+                                    total_peers = 0
+                                    for state in list(race_state):
+                                        h = state["handle"]
+                                        if not h.is_valid():
+                                            cleanup_candidate(state["magnet"], state["save_path"], delete_files=True)
+                                            race_state.remove(state)
+                                            continue
+                                        try:
+                                            status = h.status()
+                                            done = h.file_progress()[state["file_idx"]]
+                                        except Exception:
+                                            cleanup_candidate(state["magnet"], state["save_path"], delete_files=True)
+                                            race_state.remove(state)
+                                            continue
+                                        delta = max(0, int(done) - int(state["start_done"]))
+                                        total_peers += int(getattr(status, "num_peers", 0) or 0)
+                                        if delta > best_delta or (delta == best_delta and best_state is None):
+                                            best_delta = delta
+                                            best_state = state
+                                        if delta >= 16 * 1024 or (delta > 0 and time.time() - race_start >= 4):
+                                            race_winner = state
+                                            break
+                                    if race_winner:
+                                        break
+                                    if not race_reannounced and time.time() - race_start > 8:
+                                        for state in race_state:
+                                            try:
+                                                state["handle"].force_reannounce()
+                                            except Exception:
+                                                pass
+                                        race_reannounced = True
+                                        manager._append_cache_event(job, "trying", f"Race has no byte progress yet ({total_peers}p); re-announcing candidates...")
+                                    with manager._lock:
+                                        job["last_status"] = f"Racing sources: {best_delta} bytes, {total_peers}p"
+                                    time.sleep(1.0)
+
+                                if not race_winner:
+                                    zero_byte_race_failures += 1
+                                    ensure_yt_fallback_started("Torrent race has no byte progress; starting YouTube fallback in parallel...")
+                                    for state in race_state:
+                                        dead_race_keys.add(_torrent_key(state["magnet"]))
+                                        cleanup_candidate(state["magnet"], state["save_path"], delete_files=True)
+                                    manager._append_cache_event(job, "trying", "Race found no downloading source, trying next candidates...")
+                                    if zero_byte_race_failures >= 2 and use_ready_fallback(
+                                        "Repeated zero-byte torrent races; checking fallback before more torrent candidates...",
+                                        wait_seconds=10,
+                                    ):
+                                        return True
+                                    continue
+
+                                h = race_winner["handle"]
+                                m = race_winner["magnet"]
+                                selected_result = race_winner["result"]
+                                selected_idx = race_winner["idx"]
+                                save_path = race_winner["save_path"]
+                                selected_meta = race_winner["meta"]
+                                selected_key = _torrent_key(m)
+                                for state in race_state:
+                                    if _torrent_key(state["magnet"]) != selected_key:
+                                        cleanup_candidate(state["magnet"], state["save_path"], delete_files=True)
+
+                                live_peer_note = f", {int(selected_meta.get('live_peers') or 0)}p"
+                                manager._append_cache_event(job, "trying", f"Race winner source #{selected_idx+1}: {selected_result.get('title','')[:45]} (album {min(100, int(selected_meta['album_score']))}%, file {min(100, int(selected_meta['file_score']))}{live_peer_note})")
                                 current_magnet = m
                                 torrent_save_path = save_path
                                 _scr = stream_to_completion(h, m, save_path, is_artist_verified=selected_result.get("_artist_verified", True))
                                 if _scr:
                                     if apply_search_album:
                                         resolved_album_from_search = selected_result.get("_search_album") or target_album
+                                    cleanup_candidate(m, save_path, delete_files=True)
+                                    current_magnet = None
                                     return h
                                 if _scr is False:
                                     db.add_to_blacklist(m, "stalled during streaming")
-                                _unregister_job_from_torrent(m, job_id)
+                                cleanup_candidate(m, save_path, delete_files=True)
                                 current_magnet = None
                                 active_window_handles = [x for x in active_window_handles if x[1] != m]
                                 continue
@@ -1185,7 +1609,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             for h, m, r, r_idx, save_path in active_window_handles:
                                 if m not in scored_magnets:
                                     manager._append_cache_event(job, "trying", f"Source #{r_idx+1} unresponsive during metadata probe, trying next...")
-                                _unregister_job_from_torrent(m, job_id)
+                                cleanup_candidate(m, save_path, delete_files=True)
 
                         if pending_search_futures and time.time() < search_deadline:
                             phase_status(f"{phase_label}: checking late provider results...")
@@ -1220,6 +1644,59 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 handle = None
                 current_magnet = None
 
+            yt_fallback_thread = None
+            yt_fallback_done = threading.Event()
+            yt_fallback_produced = False
+
+            def run_yt_fallback():
+                nonlocal yt_fallback_produced
+                try:
+                    import backend_ytpdl
+                    # Use a shadow job to avoid clobbering torrent status/progress
+                    # while torrent races keep searching.
+                    shadow_job = dict(job)
+                    shadow_job["progress"] = 0
+                    shadow_job["last_status"] = "YouTube Fallback started"
+                    if job.get("fallback_resolved_url"):
+                        shadow_job["resolved_url"] = job["fallback_resolved_url"]
+
+                    class ShadowManager:
+                        def __getattr__(self, name): return getattr(manager, name)
+                        def _append_cache_event(self, _j, type, msg):
+                            manager._append_cache_event(job, type, f"[YT Fallback] {msg}")
+
+                    backend_ytpdl.run(output_dir, shadow_job, ShadowManager())
+                    if any(
+                        p for p in output_dir.rglob("*")
+                        if p.is_file()
+                        and "_race" not in p.relative_to(output_dir).parts
+                        and is_download_audio_candidate(p)
+                    ):
+                        yt_fallback_produced = True
+                except Exception as e:
+                    manager._append_cache_event(job, "trying", f"YouTube fallback failed: {e}")
+                finally:
+                    yt_fallback_done.set()
+
+            def ensure_yt_fallback_started(reason: str) -> None:
+                nonlocal yt_fallback_thread
+                if yt_fallback_thread:
+                    return
+                manager._append_cache_event(job, "trying", reason)
+                yt_fallback_thread = threading.Thread(target=run_yt_fallback, daemon=True, name=f"yt-fallback-{job_id}")
+                yt_fallback_thread.start()
+
+            def use_ready_fallback(reason: str, wait_seconds: float = 0) -> bool:
+                if not yt_fallback_thread:
+                    return False
+                if wait_seconds > 0:
+                    manager._append_cache_event(job, "trying", reason)
+                    yt_fallback_done.wait(timeout=wait_seconds)
+                if yt_fallback_done.is_set() and yt_fallback_produced:
+                    manager._append_cache_event(job, "provider", "Torrent races stayed at zero bytes, using YouTube fallback")
+                    return True
+                return False
+
             # 1. Race direct track, clicked-album, and artist inventory searches.
             first_pass_queries = candidate_first_pass_queries()
             if first_pass_queries:
@@ -1232,43 +1709,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     require_track_list=False,
                 )
 
-            # Parallel YouTube Fallback: if the first pass failed to find a working torrent,
-            # kick in YouTube in the background so it's ready if all other torrent phases fail.
-            yt_fallback_thread = None
-            yt_fallback_done = threading.Event()
-            yt_fallback_produced = False
-
             if not handle:
-                manager._append_cache_event(job, "trying", "First pass failed; kicking in background YouTube fallback...")
-                def run_yt_fallback():
-                    nonlocal yt_fallback_produced
-                    try:
-                        import backend_ytpdl
-                        # We use a shadow job to avoid clobbering the main job's status/progress
-                        # while torrent is still searching.
-                        shadow_job = dict(job)
-                        shadow_job["progress"] = 0
-                        shadow_job["last_status"] = "YouTube Fallback started"
-                        
-                        # Custom manager proxy to intercept logs
-                        class ShadowManager:
-                            def __getattr__(self, name): return getattr(manager, name)
-                            def _append_cache_event(self, _j, type, msg):
-                                manager._append_cache_event(job, type, f"[YT Fallback] {msg}")
+                ensure_yt_fallback_started("First pass failed; keeping YouTube fallback running in parallel...")
 
-                        backend_ytpdl.run(output_dir, shadow_job, ShadowManager())
-                        # Check if it actually produced a file
-                        if any(p for p in output_dir.rglob("*") if p.is_file() and is_download_audio_candidate(p)):
-                            yt_fallback_produced = True
-                    except Exception as e:
-                        manager._append_cache_event(job, "trying", f"YouTube fallback failed: {e}")
-                    finally:
-                        yt_fallback_done.set()
-
-                yt_fallback_thread = threading.Thread(target=run_yt_fallback, daemon=True, name=f"yt-fallback-{job_id}")
-                yt_fallback_thread.start()
-
-            # 2. Search the selected artist's inventory first...
+                # 2. Search the selected artist's inventory first...
                 handle = run_search_phase(
                     "Artist inventory",
                     album_clean or "complete",
@@ -1276,6 +1720,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     max_sources=40,
                     allow_album_miss=True,
                 )
+                if not handle and zero_byte_race_failures >= 2 and use_ready_fallback(
+                    "Repeated zero-byte torrent races; waiting briefly for YouTube fallback...",
+                    wait_seconds=45,
+                ):
+                    return
 
             # 3. If inventory did not expose a usable album/track match, try the
             #    clicked album directly.
@@ -1285,6 +1734,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     album_clean,
                     candidate_queries_for_album(album_clean),
                 )
+                if not handle and yt_fallback_thread and zero_byte_race_failures >= 2 and use_ready_fallback(
+                    "Torrent candidates are still not transferring bytes; checking fallback...",
+                    wait_seconds=20,
+                ):
+                    return
 
             # 4. If the album searches only found wrong albums or dead swarms, try
             #    direct single-track sources before the much wider MusicBrainz
@@ -1298,6 +1752,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     max_sources=60,
                     require_track_list=False,
                 )
+                if not handle and yt_fallback_thread and zero_byte_race_failures >= 2 and use_ready_fallback(
+                    "Track torrent fallback also has no byte progress; checking fallback...",
+                    wait_seconds=20,
+                ):
+                    return
 
             # 5. Artist inventory, clicked-album, and direct-track search failed:
             #    resolve the track's real album(s) via

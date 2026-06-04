@@ -26,6 +26,8 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - **High-Quality Trackers**: Integrated real-time health monitoring for public metadata swarms to ensure the most reliable connection.
 - **Smart Parallel Prefetching**: Automatically downloads the next 5 tracks in your queue in parallel, ensuring instant transitions between songs.
 - **Persistent SQLite Engine**: All successfully resolved Torrent magnets, YouTube URLs, and enriched metadata (Spotify IDs, ISRCs, MusicBrainz IDs) are now saved in a local SQLite database for instant offline access and to prevent redundant searches.
+- **Torrent Safety Filters**: Adult/video vocabulary is stored in the local SQLite database and checked before fuzzy scoring and again after torrent metadata exposes internal file paths. Terms found in the requested track title or album are allowed only for that request; unrelated adult/video terms are still blocked.
+- **Optional AI Torrent Advisor**: Clean torrent candidates can be ranked in parallel by an optional AI advisor. AI never sees candidates blocked by the local adult/video filter and cannot override metadata checks or the "first real byte progress wins" torrent race.
 - **Improved YouTube Engine**: Smart quality-scoring and automatic skipping of age-restricted or blocked videos with persistent blacklisting.
 - **Visual Quality Indicators**: Real-time **HI-RES** and **HQ** badges in the player sidebar indicating the actual audio fidelity being streamed.
 
@@ -139,12 +141,38 @@ library can exist on disk but is not usable for the Windows build.
 
 Open your browser to `http://127.0.0.1:8888`.
 
+### Optional Duck.ai advisor
+
+The torrent engine runs an AI advisor in parallel with normal torrent probing by default (powered by DuckDuckGo's free Duck.ai chat API). It is advisory only: the deterministic filters, metadata checks, and libtorrent byte-progress race still decide what downloads.
+
+The AI receives the top 20 search results based on the local scoring algorithm. It evaluates their titles and metadata and returns a sorted list of the IDs it considers to be clean music matches. The torrent engine then attempts to download the AI's ranked candidates in the order provided (up to however many the AI selected), before falling back to the remaining unscored candidates.
+
+> **Note on DuckDuckGo Anti-Bot:** The built-in proxy implements a reverse-engineered bypass of DuckDuckGo's `x-vqd-hash-1` and `x-fe-signals` challenges by utilizing statically spoofed, known-good headers from a real browser session. This completely removes the need for headless Chrome or frontend JavaScript evaluation. Credit to the research and implementation details found in [benoitpetit/duckduckgo-chat-cli](https://github.com/benoitpetit/duckduckgo-chat-cli/tree/master/reverse).
+
+To disable the advisor, explicitly set `MINDINGUFLAC_AI_RERANK_PROVIDER` to `none`:
+
+```bash
+export MINDINGUFLAC_AI_RERANK_PROVIDER=none
+./run.sh
+```
+
+Alternative OpenAI-compatible local/provider endpoint:
+
+```bash
+export MINDINGUFLAC_AI_RERANK_URL="http://127.0.0.1:1234/v1/chat/completions"
+export MINDINGUFLAC_AI_RERANK_MODEL="your-model"
+./run.sh
+```
+
+If the endpoint, network, or service limit is unavailable, the torrent job continues with the local scoring and fallback path.
+
 ## Technical Implementation
 
 - **Backend**: Python (BaseHTTPServer/Threading) optimized for low-latency API responses.
 - **Frontend**: Single Page Application (SPA) using Vanilla JavaScript and CSS variables for theme management.
 - **Desktop Wrapper**: Powered by `pywebview`, providing a native app feel while maintaining web-standard flexibility.
 - **Audio Engine**: Custom native audio manager for Windows and macOS, bypassing browser limitations for high-bitrate playback.
+- **Native Output Handoff**: On macOS app-only output devices, active browser streaming is paused when a native device is selected and no completed cache file exists. The player remembers the current position and starts native output from that position when the cache file finishes.
 
 ---
 

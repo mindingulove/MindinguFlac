@@ -12,8 +12,23 @@ hiddenimports = [
     'torrfetch',
     'libtorrent',
     'torrent_sources',
+    'music_metadata',
+    'isrc_resolver',
+    'discogs_metadata',
+    'spotify_web_metadata',
+    'backend_torrent',
+    'backend_spotiflac',
+    'backend_tidal_hifi',
+    'backend_monochrome',
+    'backend_other',
     'vcredist',
     'backend_ytpdl',
+    'catalog',
+    'service_downloader',
+    'ai_reranker',
+    'duck_proxy',
+    'native_audio',
+    'db',
 ]
 
 tmp_ret = collect_all('SpotiFLAC')

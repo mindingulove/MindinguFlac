@@ -62,6 +62,16 @@ def _init_db(conn: sqlite3.Connection):
             last_updated REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS adult_filter_terms (
+            term TEXT PRIMARY KEY,
+            kind TEXT DEFAULT 'adult',
+            match_mode TEXT DEFAULT 'word',
+            enabled INTEGER DEFAULT 1,
+            source TEXT,
+            last_updated REAL
+        )
+    """)
     conn.commit()
 
 
@@ -167,4 +177,48 @@ def is_blacklisted(url: str) -> bool:
 def remove_from_blacklist(url: str):
     conn = _get_conn()
     conn.execute("DELETE FROM blacklist WHERE url = ?", (url,))
+    conn.commit()
+
+
+def seed_adult_filter_terms(terms: list[str] | set[str], source: str = "builtin"):
+    normalized = sorted({
+        str(term).strip().lower()
+        for term in terms
+        if str(term).strip()
+    })
+    if not normalized:
+        return
+    conn = _get_conn()
+    now = time.time()
+    conn.executemany("""
+        INSERT OR IGNORE INTO adult_filter_terms
+            (term, kind, match_mode, enabled, source, last_updated)
+        VALUES (?, 'adult', 'word', 1, ?, ?)
+    """, [(term, source, now) for term in normalized])
+    conn.commit()
+
+
+def get_adult_filter_terms() -> set[str]:
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT term FROM adult_filter_terms
+        WHERE kind = 'adult' AND enabled = 1
+    """).fetchall()
+    return {
+        str(row["term"]).strip().lower()
+        for row in rows
+        if str(row["term"]).strip()
+    }
+
+
+def save_adult_filter_term(term: str, enabled: bool = True, source: str = "manual"):
+    term = (term or "").strip().lower()
+    if not term:
+        return
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO adult_filter_terms
+            (term, kind, match_mode, enabled, source, last_updated)
+        VALUES (?, 'adult', 'word', ?, ?, ?)
+    """, (term, 1 if enabled else 0, source, time.time()))
     conn.commit()

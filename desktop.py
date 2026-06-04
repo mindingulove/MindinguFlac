@@ -467,7 +467,7 @@ def main() -> None:
 
         log_step("starting pywebview event loop")
         start_kwargs = {
-            "debug": False,
+            "debug": bool(os.environ.get("MINDINGUFLAC_DEBUG")) or True,  # TODO: revert to False once DDG advisor is validated
             "private_mode": False,  # Required for WebView2 in many bundled environments
         }
         if sys.platform == "win32":

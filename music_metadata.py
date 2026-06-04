@@ -912,13 +912,21 @@ def build_music_indexers(config: AppConfig) -> list[BaseMusicIndexer]:
     return [SpotifyIndexer()] if _get_spotify_client() else []
 
 
-@functools.lru_cache(maxsize=128)
 def search_music(config: AppConfig, query: str) -> list[dict]:
-    # We strip and lower-case the query for the cache key to be effective
+    # `config` is accepted for API symmetry but is NOT part of the cache key:
+    # AppConfig is an unhashable dataclass, so caching search_music on it crashed
+    # every text search with "unhashable type: 'AppConfig'". build_music_indexers
+    # ignores config anyway, so the results depend only on the query. Cache on the
+    # lower-cased query alone and hand callers fresh dicts.
     query = query.strip().lower()
     if not query: return []
+    return [dict(r) for r in _search_music_cached(query)]
+
+
+@functools.lru_cache(maxsize=128)
+def _search_music_cached(query: str) -> tuple[dict, ...]:
     results, seen = [], set()
-    for idx in build_music_indexers(config):
+    for idx in build_music_indexers(None):
         try:
             for res in idx.search(query):
                 sid = res.get("spotify_id")
@@ -934,7 +942,7 @@ def search_music(config: AppConfig, query: str) -> list[dict]:
         except Exception: pass
     results.sort(key=lambda x: x.get("_relevance", (0, 0, 0, 0)), reverse=True)
     for r in results: r.pop("_relevance", None)
-    return results
+    return tuple(results)
 
 
 def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:

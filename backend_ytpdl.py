@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -213,6 +214,7 @@ _BAD_MATCH_TERMS = {
     "loop",
     "1 hour",
     "10 hours",
+    "archive",
     "extended",
 }
 
@@ -386,6 +388,8 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     for term in _BAD_MATCH_TERMS:
         if f" {term} " in candidate_text and f" {term} " not in requested_tokens:
             penalty += 35
+    if "archive" in uploader and "official" not in candidate_text:
+        penalty += 45
 
     if title_coverage < 70:
         penalty += 35
@@ -477,6 +481,98 @@ def _ranked_youtube_matches(search_info: dict, job: dict) -> list[tuple[str, dic
     raise RuntimeError(f"ytp-dl could not find any plausible YouTube match; best was {best_score}%: {title}")
 
 
+def _youtube_ai_race_timeout() -> float:
+    try:
+        return max(0.0, min(5.0, float(os.environ.get("MINDINGUFLAC_YOUTUBE_AI_RACE_TIMEOUT", "1.25"))))
+    except Exception:
+        return 1.25
+
+
+def _ranked_youtube_matches_with_ai(
+    candidates: list[tuple[str, dict]],
+    job: dict,
+    manager,
+) -> list[tuple[str, dict]]:
+    if len(candidates) < 3:
+        return candidates
+    try:
+        import ai_reranker
+        if not ai_reranker.is_enabled():
+            return candidates
+    except Exception as exc:
+        manager._append_cache_event(job, "trying", f"YouTube AI advisor unavailable ({exc})")
+        return candidates
+    ai_timeout = _youtube_ai_race_timeout()
+    if ai_timeout <= 0:
+        return candidates
+
+    done = threading.Event()
+    result: dict[str, object] = {}
+    id_to_candidate: dict[int, tuple[str, dict]] = {}
+    target = _expected_track(job)
+    ai_candidates = []
+    for idx, (url, details) in enumerate(candidates[:20], start=1):
+        details = details or {}
+        id_to_candidate[idx] = (url, details)
+        ai_candidates.append({
+            "id": idx,
+            "title": details.get("title") or url,
+            "source": details.get("uploader") or "YouTube",
+            "seeders": 0,
+            "score": details.get("score") or 0,
+            "query": "youtube",
+        })
+
+    def run_ai_advisor() -> None:
+        try:
+            import ai_reranker
+            duck_model = getattr(getattr(manager, "app_config", None), "duck_model", "1")
+            ranked_ids = ai_reranker.rank_candidates(target, ai_candidates, duck_model)
+            if ranked_ids:
+                result["ranked_ids"] = ranked_ids
+        except Exception as exc:
+            result["error"] = str(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=run_ai_advisor, daemon=True, name=f"youtube-ai-rerank-{job.get('id', '')}").start()
+    manager._append_cache_event(job, "trying", "YouTube AI advisor running in parallel")
+
+    if not done.wait(ai_timeout):
+        manager._append_cache_event(job, "trying", "YouTube local selector won before AI advisor responded")
+        return candidates
+    if result.get("error"):
+        manager._append_cache_event(job, "trying", f"YouTube AI advisor unavailable ({result['error']})")
+        return candidates
+
+    ranked_ids = result.get("ranked_ids")
+    if not isinstance(ranked_ids, list):
+        return candidates
+
+    ordered: list[tuple[str, dict]] = []
+    seen_urls: set[str] = set()
+    for value in ranked_ids:
+        try:
+            item = id_to_candidate.get(int(value))
+        except Exception:
+            item = None
+        if not item:
+            continue
+        url = item[0]
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        ordered.append(item)
+    for item in candidates:
+        if item[0] not in seen_urls:
+            ordered.append(item)
+
+    if ordered:
+        manager._append_cache_event(job, "trying", f"YouTube AI advisor ranked {len(ordered)} candidates first")
+        return ordered
+    return candidates
+
+
 def run(output_dir: Path, job: dict, manager) -> None:
     from service_downloader import _find_audio_files
 
@@ -551,6 +647,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if not isinstance(search_info, dict):
                             return None
                         candidates = _ranked_youtube_matches(search_info, job)
+                        candidates = _ranked_youtube_matches_with_ai(candidates, job, manager)
                     except Exception as exc:
                         manager._append_cache_event(job, "trying", f"YouTube search failed: {exc}")
                         return None
@@ -581,7 +678,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         
                         # Verify that a file was actually produced. 
                         # With ignoreerrors: True, ydl.download might return success-ish codes even if it skipped.
-                        if result_code == 0 and any(output_dir.iterdir()):
+                        if result_code == 0 or _find_audio_files(output_dir):
                             return download_url
                         
                         # If we get here, it failed to produce a file
@@ -636,13 +733,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
     
     # Persistence: save the successful URL
     if worked_url:
-        db.save_resolved_source(
-            track_key=job.get("track_key") or f"{job.get('artist','').lower()}||{job.get('title','').lower()}",
-            engine="ytp-dl",
-            service="youtube",
-            quality=job.get("quality") or "best",
-            resolved_url=worked_url
-        )
+        track_key = job.get("track_key") or f"{job.get('artist','').lower()}||{job.get('title','').lower()}"
+        existing = db.get_resolved_source(track_key)
+        if not (job.get("engine") == "torrent" and existing and existing.get("engine") == "torrent"):
+            db.save_resolved_source(
+                track_key=track_key,
+                engine="ytp-dl",
+                service="youtube",
+                quality=job.get("quality") or "best",
+                resolved_url=worked_url
+            )
 
     with manager._lock:
         job["library_path"] = str(final)

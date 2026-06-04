@@ -90,6 +90,7 @@ class AppConfig:
     volume: float = 1.0
     track_max_retries: int = 1
     download_engine: str = "ytp-dl"
+    duck_model: str = "1"
     discogs_token: str = ""
     qobuz_token: str = ""
 
@@ -107,6 +108,7 @@ class AppConfig:
             "default_quality": self.default_quality,
             "download_service": self.download_service,
             "download_engine": self.download_engine,
+            "duck_model": self.duck_model,
             "cache_cleanup_frequency": self.cache_cleanup_frequency,
             "last_cache_cleanup": self.last_cache_cleanup,
             "strict_title_match": self.strict_title_match,
@@ -153,6 +155,7 @@ class AppConfig:
             volume=float(value.get("volume", 1.0)),
             track_max_retries=rt,
             download_engine=value.get("download_engine", cls.download_engine),
+            duck_model=str(value.get("duck_model", "1") or "1"),
             discogs_token=str(value.get("discogs_token", "") or "").strip(),
             qobuz_token=str(value.get("qobuz_token", "") or "").strip(),
         )

@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Torrent engine
+
+- Added local SQLite-backed adult/video vocabulary filtering for torrent results and internal torrent file paths.
+- Added torrent source racing where clean matched candidates compete and the first real byte progress wins.
+- Added an optional parallel AI advisor for clean torrent candidate reranking. The advisor is non-blocking and cannot override adult/video filters, metadata checks, or libtorrent byte-progress validation.
+- Added optional Duck.ai advisor support through `duck-chat` with `duckduckgo-ai-chat` available as a CLI fallback when installed.
+- Fixed the AI advisor opt-in gate: installing Duck.ai packages no longer auto-enables Duck requests unless `MINDINGUFLAC_AI_RERANK_PROVIDER` is explicitly configured.
+- Fixed cross-job file deletion: when a same-album prefetch and the active track share one magnet/handle, cleaning up one job no longer deletes the shared `_race` files out from under the other's live download (was surfacing as false "no byte progress" / "stalled during streaming").
+- Throttled concurrent prefetch torrent jobs (`MINDINGUFLAC_PREFETCH_TORRENT_SLOTS`, default 2) so 5-track parallel prefetch can no longer flood the shared libtorrent session and starve the actively-playing track's metadata probe (was surfacing as every source going "unresponsive during metadata probe"). Active playback jobs are never gated.
+- Fixed the metadata probe dropping the whole swarm: it set every file's priority to 0 while scoring, which makes libtorrent disconnect all peers (rate-based choker + inactivity timeout), so the race then started at 0 peers and a live FLAC never downloaded ("Race has no byte progress yet (0p)"). The probe now keeps the matched file at low priority to hold the swarm warm; the race resumes from there. A/B verified: zero-then-race stalled where target-priority-during-probe downloads.
+- Fixed a winning download being deleted instead of finishing: when a race winner that had already downloaded real bytes hit a transient stall, `stream_to_completion` returned `None` ("keep as fallback to resume later") but every caller then deleted the partial (`delete_files=True`) and abandoned it. A winning source with progress now re-announces to wake the swarm and resumes from its partial in place (up to 4 cycles) before giving up, so slow/bursty FLAC swarms download to completion.
+
+### Search & metadata
+
+- Fixed text search crashing with "Search failed: unhashable type: 'AppConfig'": `search_music` was decorated with `@lru_cache` and took the unhashable `AppConfig` dataclass as its first argument, so every typed search raised before returning. The config does not affect search results, so the cache now keys on the query alone.
+
+### Playback and native audio
+
+- Fixed native app-only output handoff while a torrent is still caching: selecting a native device now stops default-output browser playback, remembers the current position, and starts native playback from that position when the cache file is ready.
+- Fixed playback dying when the selected app-audio output device disconnects (e.g. EDIFIER over Bluetooth dropping): instead of sitting silently paused, the app now listens for the browser `devicechange` event, detects the device leaving the CoreAudio list, and falls back to the default output ("This computer"), resuming from the same position.
+- Restored the downloaded-file duration check (`downloaded_track_matches_request`), which had become dead code that always returned a match. A multi-file album/discography torrent could bind a job's `library_path` to the wrong sibling track; native output (which resolves files by track identity, unlike the browser which streams by job-id) then played the wrong song. Job finalization now picks the audio file whose duration matches the requested track (±10s) instead of the first file in the folder.
+
+### Packaging
+
+- Added Duck.ai advisor packages to requirements so macOS and Windows venv setup can install them for builds.
+
 ## Mindinguflac v0.8.0
 
 ### Highlight: smarter fallbacks and safer downloads
