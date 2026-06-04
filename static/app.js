@@ -268,32 +268,50 @@ async function api(path, options = {}) {
 function $(id) { return document.getElementById(id); }
 
 // ---------------------------------------------------------------------------
-// DuckDuckGo duck.ai client (free, no API key). DDG gates every request behind
-// `x-vqd-hash-1`, a per-request anti-bot token produced by EXECUTING an
-// obfuscated JS challenge in a real browser DOM. This frontend IS a real browser
-// (WKWebView on macOS, Edge WebView2 on Windows), so we solve the challenge here;
-// the Python backend only relays the solved request to DDG (CORS forbids the
-// browser calling duckduckgo.com directly).
+// DuckDuckGo duck.ai client (free, no API key). The backend handles the 
+// anti-bot bypass using static proofs derived from real browser traffic.
 // ---------------------------------------------------------------------------
-async function _sha256Base64(text) {
-  const data = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  let bin = "";
-  for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
-  return btoa(bin);
+async function harvestDuckBypass() {
+  console.log("%c[Duck] Harvesting fresh browser proof...", "color: #00ffff; font-weight: bold;");
+  try {
+    const ua = navigator.userAgent;
+    const status = await api("/api/ddg/status", { headers: { "X-Duck-UA": ua } });
+    if (!status || !status.vqd_hash_1) return;
+
+    const result = await solveDuckChallenge(status.vqd_hash_1, ua);
+    const solvedToken = await _duckToken(result, false);
+    const signals = await _duckSignals();
+
+    await api("/api/ddg/bypass", {
+      method: "POST",
+      body: JSON.stringify({
+        vqd_hash_1: solvedToken,
+        x_fe_signals: signals,
+        x_fe_version: "serp_20250710_090702_ET-70eaca6aea2948b0bb60",
+        headers: {
+            "User-Agent": ua,
+            "Accept": "text/event-stream",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Referer": "https://duckduckgo.com/",
+            "Origin": "https://duckduckgo.com"
+        }
+      })
+    });
+    console.log("%c[Duck] ✅ Browser proof harvested and saved to backend.", "color: #00ff00;");
+  } catch (e) {
+    console.error("[Duck] ❌ Harvesting failed:", e);
+  }
 }
 
-async function duckChatAsk(messages, model = "gpt-4o-mini") {
-  // The backend now completely handles the anti-bot bypass.
-  // We just fetch the VQD token and pass it to the chat endpoint.
+async function duckChatAsk(messages, model = "gpt-5-mini") {
   const status = await api("/api/ddg/status");
-  if (!status || !status.vqd_hash_1) throw new Error("DDG token unavailable: " + ((status && status.error) || "no token"));
+  if (!status || !status.vqd_hash_1) throw new Error("DDG token unavailable");
 
   return api("/api/ddg/chat", {
     method: "POST",
-    body: JSON.stringify({
-      vqd_hash_1: status.vqd_hash_1,
-      model,
+    body: JSON.stringify({ 
+      vqd_hash_1: status.vqd_hash_1, 
+      model, 
       messages
     }),
   });
@@ -301,31 +319,19 @@ async function duckChatAsk(messages, model = "gpt-4o-mini") {
 
 window.testDuck = async function (query) {
   query = query || "Reply with exactly one word: pong";
-  console.log("%c[Duck] Running Hardcoded Bypass...", "color: #00ffff; font-weight: bold;");
+  console.log("%c[Duck] Running Reverse Engineering Bypass...", "color: #00ffff; font-weight: bold;");
   try {
-    const st = await api("/api/ddg/status");
-    if (!st || !st.vqd_hash_1) {
-      console.error("[Duck] ❌ Failed to get token:", st.error);
-      return;
-    }
-    console.log("[Duck] Token obtained:", st.vqd_hash_1.substring(0, 15) + "...");
-
-    const res = await api("/api/ddg/chat", {
-      method: "POST",
-      body: JSON.stringify({ vqd_hash_1: st.vqd_hash_1, model: "gpt-4o-mini", messages: [{ role: "user", content: query }] }),
-    });
-
+    const res = await duckChatAsk([{ role: "user", content: query }], "gpt-5-mini");
     if (res && res.ok) {
       console.log("%c[Duck] ✅ SUCCESS! -> " + res.text, "color: #00ff00; font-weight: bold;");
     } else {
       console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`, "color: #ff0000;");
-      console.log("[Duck] Error Body:", res.body);
+      console.log("[Duck] Body:", res.body);
     }
   } catch (e) {
     console.error("[Duck] ❌ error:", e);
   }
 };
-
 function dockRecentKey(entry) {
   const data = entry.data || {};
   if (entry.kind === "playlist") return `playlist:${data.id || entry.title}`;
@@ -3802,6 +3808,7 @@ async function boot() {
   $("clearCache").onclick = async () => { await api("/api/cache", { method: "DELETE" }); renderSettings(); };
 
   await Promise.all([loadCatalog(), loadPlaylists()]);
+  harvestDuckBypass();
   seedDockRecentTracks();
   
   // Try to restore playback state before showing home page

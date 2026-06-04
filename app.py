@@ -851,7 +851,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/ddg/status":
                 import duck_proxy
-                self.send_json(duck_proxy.fetch_status())
+                ua = self.headers.get("X-Duck-UA", "")
+                self.send_json(duck_proxy.fetch_status(ua))
                 return
             if path == "/api/native_audio/status":
                 self.send_json(native_audio.status())
@@ -1134,12 +1135,19 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/ddg/chat":
                 import duck_proxy
                 self.send_json(duck_proxy.send_chat(
-                    token=body.get("vqd_hash_1", ""),
+                    vqd_4=body.get("vqd_4", ""),
+                    vqd_hash_1=body.get("vqd_hash_1", ""),
                     messages=body.get("messages", []),
-                    model=body.get("model", "gpt-4o-mini"),
+                    model=body.get("model", "gpt-5-mini"),
                 ))
                 return
+            if path == "/api/ddg/bypass":
+                import duck_proxy
+                duck_proxy.save_bypass(body)
+                self.send_json({"ok": True})
+                return
             if path == "/api/library/status":
+
                 self.send_json(service_downloader.library_status(body))
                 return
             if path == "/api/library/status/batch":

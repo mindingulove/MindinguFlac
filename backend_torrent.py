@@ -1593,19 +1593,25 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                 current_magnet = m
                                 torrent_save_path = save_path
                                 _scr = stream_to_completion(h, m, save_path, is_artist_verified=selected_result.get("_artist_verified", True))
+
                                 if _scr:
+                                    # Winner finished! (stream_to_completion already called finalize_selected_file)
                                     if apply_search_album:
                                         resolved_album_from_search = selected_result.get("_search_album") or target_album
+
+                                    # GEMINI: Only delete if this was the last reference; 
+                                    # finalization already COPIED the file out of _race.
                                     cleanup_candidate(m, save_path, delete_files=True)
                                     current_magnet = None
                                     return h
                                 if _scr is False:
                                     db.add_to_blacklist(m, "stalled during streaming")
+
+                                # If we got here, this specific winner failed or couldn't finalize.
                                 cleanup_candidate(m, save_path, delete_files=True)
                                 current_magnet = None
                                 active_window_handles = [x for x in active_window_handles if x[1] != m]
                                 continue
-
                             for h, m, r, r_idx, save_path in active_window_handles:
                                 if m not in scored_magnets:
                                     manager._append_cache_event(job, "trying", f"Source #{r_idx+1} unresponsive during metadata probe, trying next...")

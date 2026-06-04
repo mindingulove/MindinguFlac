@@ -126,15 +126,15 @@ def _duck_request(prompt: str, duck_model: str) -> dict[str, Any]:
     if not vqd:
         return {}
 
-    # Map the environment variable model to the actual model strings
+    # Map the environment variable model to the actual model strings (June 2026)
     model_key = _duck_model_key(duck_model)
     models = {
-        "1": "gpt-4o-mini",
-        "2": "claude-3-haiku-20240307",
-        "3": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-        "4": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        "1": "gpt-5-mini",
+        "2": "claude-4.5-haiku",
+        "3": "meta-llama/Llama-4-Scout",
+        "4": "mistralai/Mistral-Small-4",
     }
-    model = models.get(model_key, "gpt-4o-mini")
+    model = models.get(model_key, "gpt-5-mini")
 
     res = duck_proxy.send_chat(token=vqd, messages=messages, model=model)
     if res.get("ok"):
@@ -151,24 +151,68 @@ def _request(prompt: str, duck_model: str) -> dict[str, Any]:
     return {}
 
 
+import urllib.parse
+
+
+def _parse_magnet(uri: str) -> dict[str, Any]:
+    """Extract useful signals from a magnet URI for the AI to analyze."""
+    if not uri or not uri.startswith("magnet:?"):
+        return {}
+    try:
+        parsed = urllib.parse.parse_qs(uri[8:])
+        return {
+            "dn": (parsed.get("dn") or [""])[0],
+            "trackers": [urllib.parse.urlparse(t).netloc for t in parsed.get("tr", []) if t],
+            "is_multipass": len(parsed.get("tr", [])) > 5
+        }
+    except Exception:
+        return {}
+
+
 def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], duck_model: str = "1") -> list[int]:
     if not is_enabled() or not candidates:
         return []
+    
+    is_youtube = any("youtube" in str(c.get("query", "")).lower() or "youtube" in str(c.get("source", "")).lower() for c in candidates)
+    
     compact_candidates = []
     for item in candidates[:20]:
-        compact_candidates.append({
-            "id": int(item.get("id", 0)),
-            "title": str(item.get("title") or "")[:160],
-            "source": str(item.get("source") or "")[:40],
-            "seeders": int(item.get("seeders") or 0),
-            "local_score": int(float(item.get("score") or 0)),
-            "query": str(item.get("query") or "")[:120],
-        })
-    prompt = json.dumps({
-        "task": (
-            "Rank candidate IDs for the requested music track. "
+        if is_youtube:
+            compact_candidates.append({
+                "id": int(item.get("id", 0)),
+                "title": str(item.get("title") or "")[:160],
+                "channel": str(item.get("source") or "YouTube")[:60],
+                "local_score": int(float(item.get("score") or 0)),
+            })
+        else:
+            magnet_data = _parse_magnet(item.get("magnet") or "")
+            compact_candidates.append({
+                "id": int(item.get("id", 0)),
+                "title": str(item.get("title") or "")[:160],
+                "seeders": int(item.get("seeders") or 0),
+                "local_score": int(float(item.get("score") or 0)),
+                "magnet_dn": magnet_data.get("dn", "")[:120],
+                "trackers": magnet_data.get("trackers", [])[:6],
+            })
+
+    if is_youtube:
+        task_desc = (
+            "Rank YouTube candidate IDs for the requested music. "
+            "PRIORITIZE: Official Artist Channels and '- Topic' channels. "
+            "IDENTIFY: High-fidelity metadata (Remastered, Official Audio). "
+            "AVOID: Music videos with long intros/outros, live performances (unless requested), and covers. "
+            "Return {\"ranked_ids\":[...]} in order of highest confidence audio match."
+        )
+    else:
+        task_desc = (
+            "Rank candidate IDs for the requested music. Use metadata AND technical signals "
+            "(Trackers/DN) to prioritize high-fidelity, healthy music swarms. "
+            "Prioritize specialized trackers and FLAC/Lossless release group tags. "
             "Return {\"ranked_ids\":[...]} using only IDs that are plausible music matches."
-        ),
+        )
+
+    prompt = json.dumps({
+        "task": task_desc,
         "target": {
             "artist": target.get("artist", ""),
             "title": target.get("title", ""),

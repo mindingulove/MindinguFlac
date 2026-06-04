@@ -34,10 +34,27 @@ def _init_db(conn: sqlite3.Connection):
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS source_aliases (
+            alias_key TEXT PRIMARY KEY,
+            track_key TEXT NOT NULL,
+            alias_type TEXT,
+            last_updated REAL
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS blacklist (
             url TEXT PRIMARY KEY,
             reason TEXT,
             last_failed REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS blacklist_aliases (
+            alias_key TEXT NOT NULL,
+            url TEXT NOT NULL,
+            reason TEXT,
+            last_failed REAL,
+            PRIMARY KEY (alias_key, url)
         )
     """)
     conn.execute("""
@@ -84,10 +101,59 @@ def save_resolved_source(track_key: str, engine: str, service: str, quality: str
     conn.commit()
 
 
+def save_source_alias(alias_key: str, track_key: str, alias_type: str = ""):
+    alias_key = (alias_key or "").strip()
+    track_key = (track_key or "").strip()
+    if not alias_key or not track_key:
+        return
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO source_aliases (alias_key, track_key, alias_type, last_updated)
+        VALUES (?, ?, ?, ?)
+    """, (alias_key, track_key, alias_type, time.time()))
+    conn.commit()
+
+
+def _resolve_source_track_key(conn: sqlite3.Connection, lookup_key: str) -> str:
+    lookup_key = (lookup_key or "").strip()
+    if not lookup_key:
+        return ""
+    row = conn.execute("SELECT track_key FROM sources WHERE track_key = ?", (lookup_key,)).fetchone()
+    if row:
+        return str(row["track_key"])
+    alias = conn.execute("SELECT track_key FROM source_aliases WHERE alias_key = ?", (lookup_key,)).fetchone()
+    if alias:
+        return str(alias["track_key"])
+    return ""
+
+
 def get_resolved_source(track_key: str) -> dict[str, Any] | None:
     conn = _get_conn()
-    row = conn.execute("SELECT * FROM sources WHERE track_key = ?", (track_key,)).fetchone()
-    return dict(row) if row else None
+    resolved_key = _resolve_source_track_key(conn, track_key)
+    row = conn.execute("SELECT * FROM sources WHERE track_key = ?", (resolved_key or track_key,)).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    if data.get("resolved_url") and is_blacklisted(data["resolved_url"]):
+        return None
+    if data.get("resolved_url") and is_blacklisted_for_alias(track_key, data["resolved_url"]):
+        return None
+    return data
+
+
+def get_resolved_source_for_keys(track_keys: list[str]) -> dict[str, Any] | None:
+    conn = _get_conn()
+    for track_key in track_keys:
+        resolved_key = _resolve_source_track_key(conn, track_key)
+        row = conn.execute("SELECT * FROM sources WHERE track_key = ?", (resolved_key or track_key,)).fetchone()
+        if row:
+            data = dict(row)
+            if data.get("resolved_url") and is_blacklisted(data["resolved_url"]):
+                continue
+            if data.get("resolved_url") and is_blacklisted_for_alias(track_key, data["resolved_url"]):
+                continue
+            return data
+    return None
 
 
 def delete_resolved_source(track_key: str):
@@ -122,6 +188,10 @@ def save_track_metadata(track_key: str, data: dict):
         INSERT OR REPLACE INTO tracks (track_key, metadata_json, last_updated)
         VALUES (?, ?, ?)
     """, (track_key, json.dumps(data), time.time()))
+    for key in ("spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "musicbrainz_artist_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            save_source_alias(f"{key}:{value}", track_key, key)
     conn.commit()
 
 
@@ -157,13 +227,22 @@ def delete_album_source(album_key: str):
     conn.commit()
 
 
-def add_to_blacklist(url: str, reason: str = ""):
+def add_to_blacklist(url: str, reason: str = "", alias_keys: list[str] | None = None):
     if not url: return
     conn = _get_conn()
     conn.execute("""
         INSERT OR REPLACE INTO blacklist (url, reason, last_failed)
         VALUES (?, ?, ?)
     """, (url, reason, time.time()))
+    if alias_keys:
+        conn.executemany("""
+            INSERT OR REPLACE INTO blacklist_aliases (alias_key, url, reason, last_failed)
+            VALUES (?, ?, ?, ?)
+        """, [
+            ((alias_key or "").strip(), url, reason, time.time())
+            for alias_key in alias_keys
+            if (alias_key or "").strip()
+        ])
     conn.commit()
 
 
@@ -171,6 +250,21 @@ def is_blacklisted(url: str) -> bool:
     if not url: return False
     conn = _get_conn()
     row = conn.execute("SELECT 1 FROM blacklist WHERE url = ?", (url,)).fetchone()
+    return bool(row)
+
+
+def is_blacklisted_for_alias(alias_key: str, url: str = "") -> bool:
+    alias_key = (alias_key or "").strip()
+    if not alias_key:
+        return False
+    conn = _get_conn()
+    if url:
+        row = conn.execute(
+            "SELECT 1 FROM blacklist_aliases WHERE alias_key = ? AND url = ?",
+            (alias_key, url),
+        ).fetchone()
+        return bool(row)
+    row = conn.execute("SELECT 1 FROM blacklist_aliases WHERE alias_key = ?", (alias_key,)).fetchone()
     return bool(row)
 
 

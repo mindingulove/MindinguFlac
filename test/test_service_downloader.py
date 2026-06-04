@@ -1,8 +1,9 @@
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import service_downloader
 
@@ -117,6 +118,78 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertEqual(services, ["tidal", "qobuz", "amazon", "deezer"])
         self.assertEqual(service_downloader.spotiflac_provider_quality("DOLBY_ATMOS", "qobuz"), "27")
         self.assertEqual(service_downloader.spotiflac_provider_quality("DOLBY_ATMOS", "deezer"), "LOSSLESS")
+
+    def test_spotiflac_does_not_consult_sqlite_source_recovery(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="tidal",
+                default_quality="LOSSLESS",
+                download_engine="spotiflac",
+            )
+            fake_db = SimpleNamespace(
+                get_resolved_source=Mock(side_effect=AssertionError("spotiflac should not consult sqlite sources")),
+            )
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                with patch.object(service_downloader.threading, "Thread") as thread:
+                    with patch.dict(sys.modules, {"db": fake_db}):
+                        manager = service_downloader.ServiceDownloadManager(config)
+                        job = manager.start_job({
+                            "mode": "stream",
+                            "title": "Song",
+                            "artist": "Artist",
+                            "metadata": {"spotify_id": "spotify-id"},
+                        })
+
+        self.assertEqual(job["engine"], "spotiflac")
+        self.assertEqual(job["resolved_url"], "")
+        thread.assert_called_once()
+
+    def test_ytpdl_source_lookup_prefers_identifier_keys_before_title_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="tidal",
+                default_quality="LOSSLESS",
+                download_engine="ytp-dl",
+            )
+            calls = []
+
+            def fake_get_resolved_source_for_keys(keys):
+                calls.extend(keys)
+                if "isrc:ISRC-123" in keys:
+                    return {
+                        "track_key": "isrc:ISRC-123",
+                        "engine": "ytp-dl",
+                        "service": "youtube",
+                        "resolved_url": "https://www.youtube.com/watch?v=abc123",
+                    }
+                return None
+
+            fake_db = SimpleNamespace(get_resolved_source_for_keys=fake_get_resolved_source_for_keys)
+
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                with patch.object(service_downloader.threading, "Thread") as thread:
+                    with patch.dict(sys.modules, {"db": fake_db}):
+                        manager = service_downloader.ServiceDownloadManager(config)
+                        job = manager.start_job({
+                            "mode": "stream",
+                            "engine": "ytp-dl",
+                            "title": "Song",
+                            "artist": "Artist",
+                            "metadata": {
+                                "spotify_id": "spotify-123",
+                                "isrc": "ISRC-123",
+                            },
+                        })
+
+        self.assertEqual(calls[:2], ["spotify_id:spotify-123", "isrc:ISRC-123"])
+        self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=abc123")
+        thread.assert_called_once()
 
     def test_ignores_deleted_finished_cache_job(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -642,6 +642,9 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   border: 1px solid #333333;
   box-shadow: 0 8px 24px rgba(0,0,0,0.5);
   border-radius: 6px;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  pointer-events: auto !important;
 }
 
 .tippy-box[data-theme~='mindingu-status'] {
@@ -671,6 +674,9 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  pointer-events: auto !important;
 }
 
 .progress-popover {

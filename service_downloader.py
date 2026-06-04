@@ -449,6 +449,20 @@ def _track_identity_from_payload(payload: dict) -> dict:
     }
 
 
+def _source_lookup_keys_from_payload(payload: dict) -> list[str]:
+    meta = _payload_metadata(payload)
+    keys = []
+    for field in IDENTIFIER_FIELDS:
+        value = str(meta.get(field) or payload.get(field) or "").strip()
+        if value:
+            keys.append(f"{field}:{value}")
+
+    fallback_key = _track_identity_from_payload(payload)["track_key"]
+    if fallback_key and fallback_key not in keys:
+        keys.append(fallback_key)
+    return keys
+
+
 def _job_matches_identity(job: dict, identity: dict) -> bool:
     meta = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
     if identity["isrc"] and str(job.get("isrc") or meta.get("isrc") or "").strip().casefold() == identity["isrc"]:
@@ -1271,30 +1285,31 @@ class ServiceDownloadManager:
         identity = _track_identity_from_payload(payload)
         track_key = identity["track_key"]
 
-        # Persistent source recovery
-        resolved_data = db.get_resolved_source(track_key)
-        
-        # Determine engine/service with persistence fallback
         engine = (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower()
         service = (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower()
         resolved_url = ""
         fallback_resolved_url = ""
 
-        if resolved_data:
-            # If the engine matches or we have a direct URL, we can reuse it
-            if resolved_data.get("engine") == engine:
-                resolved_url = resolved_data.get("resolved_url", "")
-                service = resolved_data.get("service") or service
-            elif engine == "torrent" and resolved_data.get("engine") == "ytp-dl":
-                # Keep torrent as the primary path, but pass the known-good
-                # YouTube URL to the torrent backend's fallback worker.
-                fallback_resolved_url = resolved_data.get("resolved_url", "")
-                # We can even adopt the old engine if it worked before and we don't have a strong preference
-            elif not payload.get("engine") and resolved_data.get("resolved_url"):
-                # Use what worked last time if the user didn't explicitly pick an engine for this request
-                engine = resolved_data.get("engine") or engine
-                service = resolved_data.get("service") or service
-                resolved_url = resolved_data.get("resolved_url", "")
+        # Persistent source recovery is only for engines that actually store
+        # reusable source URLs in SQLite. SpotiFLAC should not consult it.
+        if engine in {"torrent", "ytp-dl"}:
+            resolved_keys = _source_lookup_keys_from_payload(payload)
+            resolved_data = db.get_resolved_source_for_keys(resolved_keys)
+            if resolved_data:
+                # If the engine matches or we have a direct URL, we can reuse it
+                if resolved_data.get("engine") == engine:
+                    resolved_url = resolved_data.get("resolved_url", "")
+                    service = resolved_data.get("service") or service
+                elif engine == "torrent" and resolved_data.get("engine") == "ytp-dl":
+                    # Keep torrent as the primary path, but pass the known-good
+                    # YouTube URL to the torrent backend's fallback worker.
+                    fallback_resolved_url = resolved_data.get("resolved_url", "")
+                    # We can even adopt the old engine if it worked before and we don't have a strong preference
+                elif not payload.get("engine") and resolved_data.get("resolved_url"):
+                    # Use what worked last time if the user didn't explicitly pick an engine for this request
+                    engine = resolved_data.get("engine") or engine
+                    service = resolved_data.get("service") or service
+                    resolved_url = resolved_data.get("resolved_url", "")
 
         job = {
             "id": job_id,
