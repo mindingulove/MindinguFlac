@@ -268,6 +268,7 @@ async function api(path, options = {}) {
 function $(id) { return document.getElementById(id); }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // DuckDuckGo duck.ai client (free, no API key).
 // ---------------------------------------------------------------------------
 async function _sha256Base64(text) {
@@ -319,7 +320,6 @@ async function _duckToken(result, hashClient) {
 }
 
 async function _duckSignals() {
-  // DDG June 2026 format: {start, events:[], end}
   const start = Date.now();
   return _utf8Base64(JSON.stringify({
     start: start,
@@ -379,13 +379,13 @@ async function duckChatAsk(messages, model = "gpt-5-mini") {
 
 window.testDuck = async function (query) {
   query = query || "Reply with exactly one word: pong";
-  console.log("%c[Duck] Running Automated Bypass...", "color: #00ffff; font-weight: bold;");
+  console.log("%c[Duck] Running Breakthrough Bypass...", "color: #00ffff; font-weight: bold;");
   try {
     const res = await duckChatAsk([{ role: "user", content: query }], "gpt-5-mini");
     if (res && res.ok) {
       console.log("%c[Duck] ✅ SUCCESS! -> " + res.text, "color: #00ff00; font-weight: bold;");
     } else {
-      console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`);
+      console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`, "color: #ff0000;");
       console.log("[Duck] Body:", res.body);
     }
   } catch (e) {
@@ -3869,7 +3869,6 @@ async function boot() {
   $("clearCache").onclick = async () => { await api("/api/cache", { method: "DELETE" }); renderSettings(); };
 
   await Promise.all([loadCatalog(), loadPlaylists()]);
-  harvestDuckBypass();
   seedDockRecentTracks();
   
   // Try to restore playback state before showing home page

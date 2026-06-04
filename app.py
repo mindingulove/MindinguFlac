@@ -1136,15 +1136,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(duck_proxy.send_chat(
                     token=body.get("vqd_hash_1", ""),
                     messages=body.get("messages", []),
-                    model=body.get("model", "gpt-5-mini"),
+                    model=body.get("model", "gpt-4o-mini"),
                 ))
                 return
-            if path == "/api/ddg/bypass":
-                import duck_proxy
-                duck_proxy.save_bypass(body)
-                self.send_json({"ok": True})
-                return
-
             if path == "/api/library/status":
                 self.send_json(service_downloader.library_status(body))
                 return
