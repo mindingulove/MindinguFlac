@@ -77,6 +77,11 @@ def _parse_sse(raw: str) -> str:
         except: continue
     return "".join(out)
 
+# The "Breakthrough" Static Proofs (Fallbacks)
+_FALLBACK_HASH_1 = "eyJzZXJ2ZXJfaGFzaGVzIjpbImRQSlJJTWczZnFYQXIvaStaa3c2cEpFVzEwckdTdmxJVlVkNlFsOVRGWXc9IiwiMUN3Qzg3N0Q3WXE1dzlEeTc4UjhBVi9qZVZWaUlYbmV0Q0xvckx3c01QZz0iLCJQSzc3TGc2L25weDdWQ2J2UWxsTEhBR3cyenJIVmEvQUFBRFBhQTl1ekVRPSJdLCJjbGllbnRfaGFzaGVzIjpbImxWblI0MStCMVFWZ0o4d0hhMUdBNmdxR0JoSjlWdjN5K0dISkdGekJmTGM9IiwiVS9RRUc2RE1qdEU4V2hHU1FxOUU1Z0VGNmw1SWJrNk9NVlBuY01DU1licz0iLCJ6SURsYUNvZG9JUjNwbTNSVTlWOUJXaUJkZDJqenRMODAyN0VYTHhkWll3PSJdLCJzaWduYWxzIjp7fSwibWV0YSI6eyJ2IjoiNCIsImNoYWxsZW5nZV9pZCI6ImM4M2Q0ZTc5NTU2MjJmZjU3Mzc0ZDUzOTk2ZjliMmJhZGE2ZDQxZTMzNDM1ZjVlNzMyYjFmNmZjNmQ0ZTE1NzVoOGpidCIsInRpbWVzdGFtcCI6IjE3NTIxNTU3Nzc4NjYiLCJvcmlnaW4iOiJodHRwczovL2R1Y2tkdWNrZ28uY29tIiwic3RhY2siOiJFcnJvclxuYXQgRSAoaHR0cHM6Ly9kdWNrZHVja2dvLmNvbS9kaXN0L3dwbS5jaGF0LjcwZWFjYTZhZWEyOTQ4YjBiYjYwLmpzOjE6MTQ4MjUpXG5hdCBhc3luYyBodHRwczovL2R1Y2tkdWNrZ28uY29tIiwic3RhY2siOiJvdGhlcnMvY29yZS9sb2dvLnBuZyIsImR1cmF0aW9uIjoiNTgifX0="
+_FALLBACK_SIGNALS = "eyJzdGFydCI6MTc1MjE1NTc3NzQ4MCwiZXZlbnRzIjpbeyJuYW1lIjoic3RhcnROZXdDaGF0IiwiZGVsdGEiOjc1fSx7Im5hbWUiOiJyZWNlbnRDaGF0c0xpc3RJbXByZXNzaW9uIiwiZGVsdGEiOjEyNH1dLCJlbmQiOjQzNDN9"
+_FALLBACK_VERSION = "serp_20250710_090702_ET-70eaca6aea2948b0bb60"
+
 def send_chat(vqd_4: str, messages: list, model: str = "gpt-5-mini", **kwargs) -> dict:
     """POST request to /chat using the latest harvested proof."""
     if not vqd_4:
@@ -85,10 +90,11 @@ def send_chat(vqd_4: str, messages: list, model: str = "gpt-5-mini", **kwargs) -
     bypass = _load_bypass()
     headers = bypass.get("headers", dict(_DEFAULT_HEADERS))
     
+    # Static prove headers (Capitalized as in successful requests)
     headers["x-vqd-4"] = vqd_4
-    headers["x-vqd-hash-1"] = bypass.get("vqd_hash_1", "")
-    headers["x-fe-signals"] = bypass.get("x_fe_signals", "")
-    headers["x-fe-version"] = bypass.get("x_fe_version", "")
+    headers["X-Vqd-Hash-1"] = bypass.get("vqd_hash_1") or _FALLBACK_HASH_1
+    headers["x-fe-signals"] = bypass.get("x_fe_signals") or _FALLBACK_SIGNALS
+    headers["x-fe-version"] = bypass.get("x_fe_version") or _FALLBACK_VERSION
     headers["Content-Type"] = "application/json"
     headers["Accept"] = "text/event-stream"
 

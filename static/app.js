@@ -320,11 +320,12 @@ async function _duckToken(result, hashClient) {
 }
 
 async function _duckSignals() {
+  // DDG June 2026 format: {start, events:[], end}
+  const start = Date.now();
   const signals = {
-    s: `${window.screen.width}x${window.screen.height}`,
-    p: navigator.platform,
-    c: navigator.hardwareConcurrency || 4,
-    v: "serp_20260604"
+    start: start,
+    events: [],
+    end: start + Math.floor(Math.random() * 1000) + 500 
   };
   return _utf8Base64(JSON.stringify(signals));
 }
@@ -349,9 +350,11 @@ async function harvestDuckBypass() {
         headers: {
             "User-Agent": ua,
             "Accept": "text/event-stream",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": "en-GB,en;q=0.9",
-            "Referer": "https://duckduckgo.com/",
-            "Origin": "https://duckduckgo.com"
+            "Referer": "https://duck.ai/",
+            "Origin": "https://duck.ai",
+            "x-ddg-journey-id": Math.random().toString(16).substring(2, 34)
         }
       })
     });
