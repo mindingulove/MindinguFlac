@@ -69,6 +69,21 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/queue.png" width="800" alt="Queue Screen">
+  <br><i>Queue - Upcoming tracks and 5-track prefetch visualization</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/recently_played_queue.png" width="800" alt="Recently Played Queue">
+  <br><i>Recently Played - History accessible inside the queue panel</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/context_menu.png" width="800" alt="Context Menu">
+  <br><i>Context Menu - Advanced track actions (Queue, Playlist, Exact Native Links)</i>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/settings_discogs.png" width="800" alt="Discogs Settings">
   <br><i>Settings - Integration with Qobuz and Discogs for enhanced metadata</i>
 </p>
