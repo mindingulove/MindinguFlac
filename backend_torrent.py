@@ -1313,6 +1313,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                     "seeders": item.get("seeders") or 0,
                                     "score": item.get("_score") or 0,
                                     "query": item.get("_query") or "",
+                                    "magnet": m_link,  # lets the reranker read DN + trackers
                                 })
                             duck_model = manager.app_config.duck_model if hasattr(manager, "app_config") else "1"
                             ranked_ids = ai_reranker.rank_candidates(target, candidates, duck_model)
@@ -1479,7 +1480,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                 time.sleep(1.0)
 
                             if metadata_candidates:
-                                metadata_candidates.sort(key=lambda item: (item[6].get("live_peers", 0) > 0, item[0]), reverse=True)
+                                # Bias toward healthier swarms: rank by the *measured* live
+                                # peer COUNT (not just >0), then score. A 5-peer source should
+                                # be raced ahead of a 1-peer one.
+                                metadata_candidates.sort(key=lambda item: (int(item[6].get("live_peers", 0) or 0), item[0]), reverse=True)
                                 race_limit = 3 if is_prefetch else 5
                                 race_candidates = metadata_candidates[:race_limit]
                                 race_keys = {_torrent_key(item[2]) for item in race_candidates}
@@ -1546,10 +1550,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                         if delta > best_delta or (delta == best_delta and best_state is None):
                                             best_delta = delta
                                             best_state = state
-                                        if delta >= 16 * 1024 or (delta > 0 and time.time() - race_start >= 4):
-                                            race_winner = state
-                                            break
-                                    if race_winner:
+                                    # Winner = the FASTEST source (most bytes pulled so far),
+                                    # not the first in list order. Decide once any source has
+                                    # clearly started (16 KB) or after a short grace window so
+                                    # the quicker swarm has a chance to pull ahead.
+                                    if best_state is not None and (
+                                        best_delta >= 16 * 1024
+                                        or (best_delta > 0 and time.time() - race_start >= 4)
+                                    ):
+                                        race_winner = best_state
                                         break
                                     if not race_reannounced and time.time() - race_start > 8:
                                         for state in race_state:

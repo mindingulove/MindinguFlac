@@ -3713,6 +3713,14 @@ function bindPlaylistDialogs() {
   $("playerStatusIcon").addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    // Green check (ready) -> add the current track to a playlist.
+    // Pie (downloading) or error -> show the progress log.
+    const icon = $("playerStatusIcon");
+    if (icon.classList.contains("ready")) {
+      if (state.progressLogOpen) hideProgressLogPopover();
+      if (state.currentTrack) openPlaylistPicker(state.currentTrack);
+      return;
+    }
     toggleProgressLogPopover();
   });
 
