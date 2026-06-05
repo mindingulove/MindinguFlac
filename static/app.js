@@ -1934,7 +1934,7 @@ function prepareSelectedTrackUi(track, status = "Opening stream...") {
   syncActiveTrackRows();
 }
 
-function setPlayerStatus(msg, track) {
+function setPlayerStatus(msg, track, job = null) {
   state.playerStatus = msg;
   const meta = $("playerMeta");
   if (meta && meta.textContent !== msg) {
@@ -1947,7 +1947,7 @@ function setPlayerStatus(msg, track) {
   if (track) {
     $("playerTitle").innerHTML = albumLinkHtml(track, track.title || "Unknown");
     $("playerArtist").innerHTML = artistLinkHtml(track);
-    updateDetailsPanel(track);
+    updateDetailsPanel(track, job);
     updateMediaSession(track);
     bindEntityLinks($("playerTitle").parentElement);
   }
@@ -1971,7 +1971,7 @@ function activeJobHasPlayableAudio(job) {
   return Number(job?.active_audio_ready_bytes || 0) > 512 * 1024;
 }
 
-function updateDetailsPanel(track) {
+function updateDetailsPanel(track, job = null) {
   const url = track.artwork_url || "";
   const containers = [document.querySelector(".player-cover"), $("sideCover")];
   containers.forEach(c => {
@@ -1984,20 +1984,23 @@ function updateDetailsPanel(track) {
 
   let qualityHtml = "";
   let qualityLabel = "";
-  
-  // 1. Check actual playing path
-  const currentPath = state.currentLibraryPath || "";
+
+  // 1. Check actual playing path or active audio path
+  const currentPath = state.currentLibraryPath || job?.active_audio_path || "";
   if (currentPath) {
-    const ext = currentPath.split(".").pop().toUpperCase();
+    const ext = currentPath.split(".").pop().split("?")[0].toUpperCase();
     if (["FLAC", "ALAC", "WAV"].includes(ext)) qualityLabel = "HI-RES";
-    else if (["MP3", "M4A", "AAC"].includes(ext)) qualityLabel = "HQ";
+    else if (["MP3", "M4A", "AAC", "WEBM", "OPUS", "OGG"].includes(ext)) qualityLabel = "HQ";
   }
-  
-  // 2. Fallback to track metadata or global settings if not yet playing
+
+  // 2. Fallback to track metadata, job metadata, or global settings if not yet playing
   if (!qualityLabel) {
-    const metaQual = (track.quality || state.settings.default_quality || "").toUpperCase();
-    if (metaQual === "LOSSLESS" || metaQual === "FLAC") qualityLabel = "HI-RES";
-    else if (metaQual === "MP3" || metaQual === "HQ") qualityLabel = "HQ";
+    const metaQual = String(track.quality || job?.quality || state.settings.default_quality || "").toUpperCase();
+    if (["LOSSLESS", "FLAC", "HI_RES", "HIRES", "HI_RES_LOSSLESS", "SQ"].some(q => metaQual.includes(q))) {
+      qualityLabel = "HI-RES";
+    } else if (["MP3", "HQ", "HIGH", "320", "256", "M4A", "AAC"].some(q => metaQual.includes(q))) {
+      qualityLabel = "HQ";
+    }
   }
 
   if (qualityLabel) {
@@ -2284,7 +2287,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
         state.activeJobPhase = playerStatusForJob(job);
         state.autoplayWanted = false;
         setPlayerStatusIcon("downloading", job.progress || 0);
-        setPlayerStatus(state.activeJobPhase, track);
+        setPlayerStatus(state.activeJobPhase, track, job);
       } else {
         const audio = $("audioPlayer");
         state.activeJobPhase = playerStatusForJob(job);
@@ -2298,7 +2301,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
         } else {
           state.currentPlayableReady = false;
           setPlayerStatusIcon("downloading", job.progress || 0);
-          setPlayerStatus(state.activeJobPhase, track);
+          setPlayerStatus(state.activeJobPhase, track, job);
         }
         syncPlayPauseButton();
         if (state.currentPlayableReady) tryStartAudio(audio, track, requestId, job.id);
@@ -2332,7 +2335,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
           }
         }
         setPlayerStatusIcon("error");
-        setPlayerStatus(job.error || "Service download failed", track);
+        setPlayerStatus(job.error || "Service download failed", track, job);
         return;
       }
       const pct = job.progress ? Math.max(0, Math.min(99, Math.round(job.progress))) : 0;
@@ -2342,7 +2345,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
           state.currentPlayableReady = true;
         }
         setPlayerStatusIcon("ready");
-        setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track);
+        setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track, job);
         if (!switchedToFinal && mode === "stream" && job.library_path) {
           switchedToFinal = true;
           const audio = $("audioPlayer");
@@ -2382,7 +2385,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       }
       updatePlayerPie(pct);
       state.activeJobPhase = playerStatusForJob(job);
-      setPlayerStatus(state.activeJobPhase, track);
+      setPlayerStatus(state.activeJobPhase, track, job);
     } catch (error) {}
   }
 }

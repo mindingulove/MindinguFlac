@@ -359,7 +359,7 @@ Invoke-Checked { & $python scripts\make_desktop_icons.py }
 Invoke-Checked { & $python -m PyInstaller --clean --noconfirm Mindinguflac-windows.spec }
 
 Write-Host "--- Packaging ---"
-$zipPath = Join-Path $root "Mindinguflac-windows.zip"
+$zipPath = Join-Path $root "/dist/Mindinguflac-windows.zip"
 if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
 }
