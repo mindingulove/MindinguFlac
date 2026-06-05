@@ -792,18 +792,18 @@ function renderHomePage() {
   $("pageContent").innerHTML = html;
 
   if (recentTracks.length) {
-    renderCards("recentTracksGrid", recentTracks, "track");
+    renderCards("recentTracksGrid", recentTracks, "track", state.catalog.recent_tracks);
     $("seeMoreRecent").onclick = () => pushPage(renderRecentTracksPage);
     enrichBatch(recentTracks, "recentTracksGrid");
   }
 
   if (personalTracks.length) {
-    renderCards("personalTracksGrid", personalTracks, "track");
+    renderCards("personalTracksGrid", personalTracks, "track", state.catalog.personal_tracks);
     $("seeMorePersonal").onclick = () => pushPage(renderPersonalTracksPage);
     enrichBatch(personalTracks, "personalTracksGrid");
   }
 
-  renderCards("topTracksGrid", globalTracks, "track");
+  renderCards("topTracksGrid", globalTracks, "track", state.catalog.top_tracks);
   renderCards("topArtistsGrid", topArtists, "artist");
   renderCards("topAlbumsGrid", topAlbums, "album");
 
@@ -818,11 +818,11 @@ function renderHomePage() {
   syncActiveTrackRows();
 }
 
-function renderCards(containerId, items, kind) {
+function renderCards(containerId, items, kind, contextItems = null) {
   const container = $(containerId);
   if (!container) return;
   container.innerHTML = cardsHtml(items, kind, 0);
-  bindCardClicks(container, items);
+  bindCardClicks(container, items, contextItems || items);
 }
 
 function cardsHtml(items, kind, offset = 0) {
@@ -851,14 +851,14 @@ function cardsHtml(items, kind, offset = 0) {
   }).join("");
 }
 
-function bindCardClicks(container, items) {
+function bindCardClicks(container, items, contextItems) {
   container.querySelectorAll("[data-card]").forEach((button) => {
     const item = items[Number(button.dataset.card)];
-    button.onclick = () => selectMusicItem(item, "stream", items);
+    button.onclick = () => selectMusicItem(item, "stream", contextItems);
     button.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        selectMusicItem(item, "stream", items);
+        selectMusicItem(item, "stream", contextItems);
       }
     };
     if (playableQueueItem(item)) {
@@ -1591,7 +1591,16 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   }
 
   if (contextList && contextList.length) {
-    state.originalQueue = [...contextList].filter(playableQueueItem);
+    const playable = [...contextList].filter(playableQueueItem);
+    const seen = new Set();
+    state.originalQueue = [];
+    for (const t of playable) {
+      const k = trackKey(t);
+      if (!seen.has(k)) {
+        seen.add(k);
+        state.originalQueue.push(t);
+      }
+    }
     state.queueContext = playbackContext;
     if (state.isShuffle) {
         state.queue = [...state.originalQueue].sort(() => Math.random() - 0.5);
