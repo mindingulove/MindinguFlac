@@ -1563,7 +1563,15 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   
   prepareSelectedTrackUi(item, "Loading...");
   syncActiveTrackRows();
-  
+
+  // Optimistically update recent tracks
+  if (state.catalog && state.catalog.recent_tracks) {
+    state.catalog.recent_tracks = [
+      { ...item, source: "Recently Played" },
+      ...state.catalog.recent_tracks.filter(t => trackKey(t) !== trackKey(item))
+    ].slice(0, 100);
+  }
+
   if (contextList && contextList.length) {
     state.originalQueue = [...contextList].filter(playableQueueItem);
     state.queueContext = playbackContext;
@@ -1575,7 +1583,11 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
     state.queueIndex = state.queue.findIndex(t => trackKey(t) === trackKey(item));
   }
   cancelPrefetchJobs("outside current queue window", currentPrefetchWindowKeys(), currentQueueOrderKey());
-  
+
+  if (!$("queuePanel").hidden) {
+    refreshQueuePanel();
+  }
+
   try {
     const source = await api("/api/playback/source", { method: "POST", body: JSON.stringify(serviceDownloadPayload(item, "stream")) });
     if (requestId !== state.playbackRequestId) return;
@@ -3382,6 +3394,11 @@ function bindPlayer() {
           state.queue = [...state.originalQueue];
           state.queueIndex = state.queue.findIndex(t => trackKey(t) === trackKey(current));
         }
+        
+        if (!$("queuePanel").hidden) {
+          refreshQueuePanel();
+        }
+
         prefetchNextTracks().catch(() => {});
       }
     };
@@ -4260,3 +4277,104 @@ $("btnConnectDevice").onclick = () => {
   else closeConnectPanel();
 };
 $("connectPanelClose").onclick = closeConnectPanel;
+
+// ---------------------------------------------------------------------------
+// Queue Panel UI
+// ---------------------------------------------------------------------------
+function renderQueueTracks(containerId, tracks, isRecent) {
+  const container = $(containerId);
+  if (!container) return;
+  if (!tracks || !tracks.length) {
+    container.innerHTML = `<div style="color:var(--muted); font-size:13px;">No tracks.</div>`;
+    return;
+  }
+  container.innerHTML = tracks.map((track, i) => {
+    const art = track.artwork_url ? `background-image: url('${track.artwork_url}');` : "";
+    return `
+      <div class="queue-track-item" data-q-index="${i}" data-q-recent="${isRecent}">
+        <div class="queue-track-art" style="${art}"></div>
+        <div class="queue-track-info">
+          <div class="queue-track-title">${esc(track.title || track.name)}</div>
+          <div class="queue-track-artist">${esc(track.artist)}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  container.querySelectorAll(".queue-track-item").forEach(el => {
+    el.onclick = () => {
+      const idx = parseInt(el.dataset.qIndex, 10);
+      if (el.dataset.qRecent === "true") {
+        selectMusicItem(tracks[idx], "stream", tracks, { title: "Recently Played" });
+      } else {
+        const offset = idx + 1; // Since next tracks starts from queueIndex + 1
+        playQueueOffset(offset);
+      }
+    };
+  });
+}
+
+function refreshQueuePanel() {
+  // Now Playing
+  const nowPlayingContainer = $("queueNowPlaying");
+  if (state.currentTrack) {
+    const art = state.currentTrack.artwork_url ? `background-image: url('${state.currentTrack.artwork_url}');` : "";
+    nowPlayingContainer.innerHTML = `
+      <div class="queue-track-item active" style="pointer-events:none">
+        <div class="queue-track-art" style="${art}"></div>
+        <div class="queue-track-info">
+          <div class="queue-track-title" style="color:var(--accent)">${esc(state.currentTrack.title || state.currentTrack.name)}</div>
+          <div class="queue-track-artist">${esc(state.currentTrack.artist)}</div>
+        </div>
+      </div>
+    `;
+  } else {
+    nowPlayingContainer.innerHTML = `<div style="color:var(--muted); font-size:13px;">Nothing playing</div>`;
+  }
+
+  // Next tracks (up to 100)
+  let nextTracks = [];
+  if (state.queue && state.queue.length && state.queueIndex >= 0) {
+    const startIdx = state.queueIndex + 1;
+    nextTracks = state.queue.slice(startIdx, startIdx + 100);
+  }
+  
+  if (state.queueContext) {
+    $("queueNextTitle").innerText = `Next from: ${state.queueContext.title || "Queue"}`;
+  } else {
+    $("queueNextTitle").innerText = "Next";
+  }
+
+  renderQueueTracks("queueNextList", nextTracks, false);
+
+  // Recent tracks
+  const recentTracks = (state.catalog && state.catalog.recent_tracks) ? state.catalog.recent_tracks : [];
+  renderQueueTracks("queueRecentList", recentTracks, true);
+}
+
+function openQueuePanel() {
+  $("queuePanel").hidden = false;
+  $("btnQueue").classList.add("active");
+  refreshQueuePanel();
+}
+
+function closeQueuePanel() {
+  $("queuePanel").hidden = true;
+  $("btnQueue").classList.remove("active");
+}
+
+$("btnQueue").onclick = () => {
+  if ($("queuePanel").hidden) openQueuePanel();
+  else closeQueuePanel();
+};
+$("queuePanelClose").onclick = closeQueuePanel;
+
+document.querySelectorAll(".queue-tab").forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll(".queue-tab").forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    const target = tab.dataset.target;
+    $("queueContentQueue").hidden = target !== "queue";
+    $("queueContentRecent").hidden = target !== "recent";
+  };
+});

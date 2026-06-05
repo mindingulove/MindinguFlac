@@ -863,7 +863,101 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   margin: 0;
   border-top: 1px solid var(--line);
 }
-#btnConnectDevice.active { color: var(--accent); }
+
+/* Queue Panel Specifics */
+.queue-panel-head {
+  padding: 12px 18px 0;
+}
+.queue-tabs {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+.queue-tab {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+  padding: 8px 4px;
+  cursor: pointer;
+  position: relative;
+}
+.queue-tab.active {
+  color: var(--text);
+}
+.queue-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+}
+.queue-content-area {
+  padding: 16px 18px;
+}
+.queue-section-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 12px 0;
+}
+.queue-track-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.queue-track-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.queue-track-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.queue-track-item.active {
+  background: rgba(255, 255, 255, 0.05);
+}
+.queue-track-item.active .queue-track-title {
+  color: var(--accent);
+}
+.queue-track-art {
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  background-size: cover;
+  background-position: center;
+  background-color: var(--surface-3);
+  flex-shrink: 0;
+}
+.queue-track-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.queue-track-title {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.queue-track-artist {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#btnConnectDevice.active, #btnQueue.active { color: var(--accent); }
 .connect-section-header {
   display: flex;
   align-items: center;
