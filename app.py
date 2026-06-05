@@ -503,7 +503,7 @@ def cache_stats() -> dict:
 
 def cache_cleanup_due() -> bool:
     frequency = app_config.cache_cleanup_frequency
-    if frequency == "startup":
+    if frequency in {"startup", "close_restart"}:
         return True
     intervals = {
         "daily": 24 * 60 * 60,
@@ -525,6 +525,23 @@ def apply_scheduled_cache_cleanup() -> None:
             shutil.rmtree(cache_dir)
         except Exception: pass
     cache_dir.mkdir(parents=True, exist_ok=True)
+    app_config.last_cache_cleanup = time.time()
+    save_config(CONFIG_PATH, app_config)
+
+
+def apply_shutdown_cache_cleanup() -> None:
+    if app_config.cache_cleanup_frequency != "close_restart":
+        return
+    try:
+        service_downloader.clear_cache()
+    except Exception:
+        cache_dir = app_config.cache_dir
+        if cache_dir.exists():
+            try:
+                shutil.rmtree(cache_dir)
+            except Exception:
+                pass
+        cache_dir.mkdir(parents=True, exist_ok=True)
     app_config.last_cache_cleanup = time.time()
     save_config(CONFIG_PATH, app_config)
 
@@ -1347,7 +1364,10 @@ def main() -> None:
     port = int(os.environ.get("PORT", "8888"))
     server = create_server(host, port)
     print(f"Serving on http://{host}:{port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        apply_shutdown_cache_cleanup()
 
 
 if __name__ == "__main__":

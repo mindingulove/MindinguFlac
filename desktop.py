@@ -497,6 +497,10 @@ def main() -> None:
     finally:
         log_step("shutting down desktop server")
         _stop_macos_now_playing_helper()
+        try:
+            app.apply_shutdown_cache_cleanup()
+        except Exception as exc:
+            log_step(f"cache shutdown cleanup failed: {exc}")
         server.shutdown()
         server.server_close()
 

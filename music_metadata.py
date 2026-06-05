@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html
 import time
 import functools
 import urllib.parse
@@ -554,15 +555,13 @@ def enrich_track_identifiers(track: dict) -> dict:
     import db
     track_key = f"{str(track.get('artist') or '').strip().lower()}||{str(track.get('title') or '').strip().lower()}"
     cached = db.get_track_metadata(track_key)
+    enriched = dict(track)
     if cached:
         # Merge cached IDs into current track
-        enriched = dict(track)
         for key in ["spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"]:
             if cached.get(key) and not enriched.get(key):
                 enriched[key] = cached[key]
-        return enriched
 
-    enriched = dict(track)
     if not enriched.get("spotify_id") and enriched.get("title"):
         for key, value in spotify_search_track(
             enriched.get("artist", ""),
@@ -571,6 +570,14 @@ def enrich_track_identifiers(track: dict) -> dict:
             if value and not enriched.get(key):
                 enriched[key] = value
     spotify_id = enriched.get("spotify_id", "")
+    if spotify_id:
+        for key, value in spotify_track_metadata(spotify_id).items():
+            if not value:
+                continue
+            if key in {"title", "artist", "artist_id", "album", "duration_ms", "isrc", "artwork_url", "spotify_url"}:
+                enriched[key] = value
+            elif not enriched.get(key):
+                enriched[key] = value
     spotify_url = enriched.get("spotify_url", "") or (
         f"https://open.spotify.com/track/{spotify_id}" if spotify_id else ""
     )
@@ -641,6 +648,95 @@ def spotify_search_track(artist: str, title: str) -> dict:
             "spotify_popularity": item.get("popularity", 0),
         }
     return {}
+
+
+def _spotify_embed_track_metadata(spotify_id: str) -> dict:
+    try:
+        embed_url = "https://open.spotify.com/embed/track/" + urllib.parse.quote(spotify_id, safe="")
+        req = urllib.request.Request(
+            embed_url,
+            headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            text = response.read().decode("utf-8", "replace")
+    except Exception:
+        return {}
+    match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text)
+    if not match:
+        return {}
+    try:
+        data = json.loads(html.unescape(match.group(1)))
+    except Exception:
+        return {}
+    entity = (
+        data.get("props", {})
+        .get("pageProps", {})
+        .get("state", {})
+        .get("data", {})
+        .get("entity", {})
+    )
+    if not isinstance(entity, dict) or entity.get("type") != "track":
+        return {}
+    artists = entity.get("artists") or []
+    artist_names = ", ".join(
+        a.get("name", "") for a in artists
+        if isinstance(a, dict) and a.get("name")
+    )
+    artist_id = ""
+    if artists and isinstance(artists[0], dict):
+        artist_id = str(artists[0].get("uri") or "").rsplit(":", 1)[-1]
+    artwork = ""
+    cover_art = entity.get("coverArt") or entity.get("visualIdentity", {}).get("image")
+    if isinstance(cover_art, dict):
+        sources = cover_art.get("sources") or []
+        if sources and isinstance(sources[0], dict):
+            artwork = sources[0].get("url", "")
+        else:
+            artwork = cover_art.get("url", "")
+    return {
+        "spotify_url": f"https://open.spotify.com/track/{spotify_id}",
+        "spotify_id": entity.get("id", spotify_id),
+        "title": entity.get("title") or entity.get("name", ""),
+        "artist": artist_names,
+        "artist_id": artist_id,
+        "artwork_url": proxy_artwork_url(artwork) if artwork else "",
+        "duration_ms": entity.get("duration") or 0,
+    }
+
+
+@functools.lru_cache(maxsize=2048)
+def spotify_track_metadata(spotify_id: str) -> dict:
+    spotify_id = str(spotify_id or "").strip()
+    if not spotify_id:
+        return {}
+    try:
+        item = _sp(f"tracks/{spotify_id}", market="US")
+    except Exception:
+        item = {}
+    if not isinstance(item, dict) or not item.get("id"):
+        return _spotify_embed_track_metadata(spotify_id)
+    images = (item.get("album") or {}).get("images") or []
+    ext_ids = item.get("external_ids") or {}
+    artists = item.get("artists") or []
+    artist_names = ", ".join(
+        a.get("name", "") for a in artists
+        if isinstance(a, dict) and a.get("name")
+    )
+    artist_id = artists[0].get("id", "") if artists and isinstance(artists[0], dict) else ""
+    return {
+        "spotify_url": (item.get("external_urls") or {}).get("spotify", "") or f"https://open.spotify.com/track/{spotify_id}",
+        "spotify_id": item.get("id", spotify_id),
+        "title": item.get("name", ""),
+        "artist": artist_names,
+        "artist_id": artist_id,
+        "album": (item.get("album") or {}).get("name", ""),
+        "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
+        "duration_ms": item.get("duration_ms", 0),
+        "isrc": ext_ids.get("isrc", ""),
+        "ean": ext_ids.get("ean", ""),
+        "upc": ext_ids.get("upc", ""),
+        "spotify_popularity": item.get("popularity", 0),
+    }
 
 
 @functools.lru_cache(maxsize=1024)

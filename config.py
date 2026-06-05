@@ -147,7 +147,7 @@ class AppConfig:
             music_dir=_to_path(music_dir_str, default_music_dir),
             default_quality=value.get("default_quality", "LOSSLESS"),
             download_service=value.get("download_service", cls.download_service),
-            cache_cleanup_frequency=value.get("cache_cleanup_frequency", "never"),
+            cache_cleanup_frequency=str(value.get("cache_cleanup_frequency", "never") or "never"),
             last_cache_cleanup=float(value.get("last_cache_cleanup", 0) or 0),
             strict_title_match=bool(value.get("strict_title_match", False)),
             demo_music_indexer=bool(value.get("demo_music_indexer", True)),

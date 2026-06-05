@@ -501,7 +501,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         manager._append_cache_event(job, "provider", f"Using MusicBrainz album: {new_album}")
 
     try:
-        from service_downloader import AUDIO_SUFFIXES, is_download_audio_candidate
+        from service_downloader import AUDIO_SUFFIXES, is_download_audio_candidate, is_valid_audio_file
 
         def audio_file_indexes(torrent_info) -> list[int]:
             indexes = []
@@ -945,14 +945,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 def finalize_selected_file() -> bool:
                     if not target_abs.exists():
                         return False
-                    # Completeness MUST be judged by bytes actually downloaded,
-                    # not file size: sparse storage (storage_mode_t(2)) allocates
-                    # the full size up front, so st_size == target_size even when
-                    # pieces are still missing. Without this, a handle that dies
-                    # mid-download would "finalize" a sparse, hole-riddled file
-                    # (no FLAC header, unplayable) into the library.
-                    if last_done < target_size:
-                        return False
+                    # Prefer libtorrent's file_progress(), but do not get stuck
+                    # forever if it underreports a file that is already fully
+                    # materialized on disk. Sparse files can have target_size
+                    # before pieces are real, so a stale-progress fallback still
+                    # requires size + a valid audio header.
                     try:
                         if target_abs.stat().st_size < target_size:
                             return False
@@ -962,6 +959,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         with open(target_abs, "rb") as fh:
                             head = fh.read(16)
                         if not head or head == b"\x00" * len(head):
+                            return False
+                        if last_done < target_size and not is_valid_audio_file(target_abs):
                             return False
                     except OSError:
                         return False
