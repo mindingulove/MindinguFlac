@@ -603,6 +603,10 @@ function syncActiveTrackRows() {
       el.classList.toggle("active-track", match);
     }
   });
+
+  if (!$("queuePanel").hidden && typeof refreshQueuePanel === "function") {
+    refreshQueuePanel();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4317,11 +4321,12 @@ function renderQueueTracks(containerId, tracks, isRecent) {
   }
   container.innerHTML = tracks.map((track, i) => {
     const art = track.artwork_url ? `background-image: url('${track.artwork_url}');` : "";
+    const isActive = isRecent && state.currentTrack && trackKey(track) === trackKey(state.currentTrack);
     return `
-      <div class="queue-track-item" data-q-index="${i}" data-q-recent="${isRecent}">
+      <div class="queue-track-item ${isActive ? "active" : ""}" data-q-index="${i}" data-q-recent="${isRecent}">
         <div class="queue-track-art" style="${art}"></div>
         <div class="queue-track-info">
-          <div class="queue-track-title">${esc(track.title || track.name)}</div>
+          <div class="queue-track-title" ${isActive ? 'style="color:var(--accent)"' : ""}>${esc(track.title || track.name)}</div>
           <div class="queue-track-artist">${esc(track.artist)}</div>
         </div>
       </div>
@@ -4343,7 +4348,8 @@ function renderQueueTracks(containerId, tracks, isRecent) {
       el.oncontextmenu = (event) => {
         event.preventDefault();
         if (typeof showTrackContextMenu === "function") {
-          showTrackContextMenu(event, track);
+          const cinfo = el.dataset.qRecent === "true" ? {} : { queueIndex: idx + state.queueIndex + 1 };
+          showTrackContextMenu(event, track, cinfo);
         }
       };
     }
@@ -4420,7 +4426,7 @@ document.querySelectorAll(".queue-tab").forEach(tab => {
 // ---------------------------------------------------------------------------
 let contextMenuTargetTrack = null;
 
-function showTrackContextMenu(event, track) {
+function showTrackContextMenu(event, track, contextInfo = {}) {
   contextMenuTargetTrack = track;
   const menu = $("trackContextMenu");
   if (!menu) return;
@@ -4431,7 +4437,7 @@ function showTrackContextMenu(event, track) {
   if (track.artist) {
     const artists = track.artist.split(/,\s*|\s+&\s+/).map(a => a.trim()).filter(Boolean);
     if (artists.length === 1) {
-      artistContainer.innerHTML = `<button id="ctxGoArtist" class="context-menu-item">Go to artist</button>`;
+      artistContainer.innerHTML = `<button id="ctxGoArtist" class="context-menu-item"><i class="bi bi-person" style="margin-right:8px; color:var(--muted);"></i> Go to artist</button>`;
       $("ctxGoArtist").onclick = () => {
         menu.hidden = true;
         pushPage(() => renderArtistPage(artistTarget({ ...track, artist: artists[0] })));
@@ -4440,7 +4446,7 @@ function showTrackContextMenu(event, track) {
       const submenuItems = artists.map((a, i) => `<button id="ctxGoArtistSub_${i}" class="context-menu-item">${esc(a)}</button>`).join("");
       artistContainer.innerHTML = `
         <div class="context-menu-item has-submenu">
-          Go to artist
+          <div><i class="bi bi-person" style="margin-right:8px; color:var(--muted);"></i> Go to artist</div>
           <i class="bi bi-caret-right-fill context-submenu-icon"></i>
           <div class="context-submenu">${submenuItems}</div>
         </div>
@@ -4456,10 +4462,60 @@ function showTrackContextMenu(event, track) {
 
   $("ctxGoAlbum").style.display = track.album ? "flex" : "none";
   
-  // Show or hide Spotify copy button depending on if we have a spotify_id
+  // Queue logic
+  $("ctxAddQueue").style.display = contextInfo.queueIndex !== undefined ? "none" : "flex";
+  
+  const btnRemoveQueue = $("ctxRemoveQueue");
+  if (btnRemoveQueue) {
+    if (contextInfo.queueIndex !== undefined) {
+      btnRemoveQueue.style.display = "flex";
+      btnRemoveQueue.onclick = () => {
+        state.queue.splice(contextInfo.queueIndex, 1);
+        if (state.originalQueue) {
+            // Need to remove exactly the matched item if we want accurate removal, 
+            // but for simplicity, we just rebuild it if the index is strictly linear.
+            // Or we just remove it from originalQueue by reference:
+            const toRemove = state.queue[contextInfo.queueIndex];
+            const origIdx = state.originalQueue.findIndex(t => t === toRemove);
+            if (origIdx >= 0) state.originalQueue.splice(origIdx, 1);
+        }
+        if (contextInfo.queueIndex < state.queueIndex) state.queueIndex--;
+        refreshQueuePanel();
+        menu.hidden = true;
+      };
+    } else {
+      btnRemoveQueue.style.display = "none";
+    }
+  }
+
+  // Share buttons
   const btnCopySpotify = $("ctxCopySpotify");
   if (btnCopySpotify) {
     btnCopySpotify.style.display = track.spotify_id ? "flex" : "none";
+    btnCopySpotify.onclick = () => {
+      navigator.clipboard.writeText(`https://open.spotify.com/track/${track.spotify_id}`);
+      menu.hidden = true;
+    };
+  }
+
+  const btnCopyMusicBrainz = $("ctxCopyMusicBrainz");
+  if (btnCopyMusicBrainz) {
+    const mbId = track.musicbrainz_recording_id || track.musicbrainz_track_id;
+    btnCopyMusicBrainz.style.display = mbId ? "flex" : "none";
+    btnCopyMusicBrainz.onclick = () => {
+      navigator.clipboard.writeText(`https://musicbrainz.org/recording/${mbId}`);
+      menu.hidden = true;
+    };
+  }
+
+  const btnCopyYouTube = $("ctxCopyYouTube");
+  if (btnCopyYouTube) {
+    const ytUrl = track.youtube_url || (track.metadata && track.metadata.youtube_url);
+    btnCopyYouTube.style.display = ytUrl ? "flex" : "none";
+    btnCopyYouTube.onclick = () => {
+      navigator.clipboard.writeText(ytUrl);
+      menu.hidden = true;
+    };
   }
 
   menu.hidden = false;
@@ -4501,24 +4557,6 @@ $("ctxAddPlaylist")?.addEventListener("click", () => {
 $("ctxGoAlbum")?.addEventListener("click", () => {
   if (contextMenuTargetTrack) {
     pushPage(() => renderAlbumPage(albumTarget(contextMenuTargetTrack)));
-  }
-  $("trackContextMenu").hidden = true;
-});
-
-$("ctxCopyLink")?.addEventListener("click", () => {
-  if (contextMenuTargetTrack) {
-    const title = encodeURIComponent(contextMenuTargetTrack.title || contextMenuTargetTrack.name || "");
-    const artist = encodeURIComponent(contextMenuTargetTrack.artist || "");
-    const url = `${window.location.origin}/?q=${title}+${artist}`;
-    navigator.clipboard.writeText(url);
-  }
-  $("trackContextMenu").hidden = true;
-});
-
-$("ctxCopySpotify")?.addEventListener("click", () => {
-  if (contextMenuTargetTrack && contextMenuTargetTrack.spotify_id) {
-    const uri = `https://open.spotify.com/track/${contextMenuTargetTrack.spotify_id}`;
-    navigator.clipboard.writeText(uri);
   }
   $("trackContextMenu").hidden = true;
 });
