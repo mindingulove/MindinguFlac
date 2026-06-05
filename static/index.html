@@ -350,6 +350,7 @@
     <button id="ctxAddQueue" class="context-menu-item"><i class="bi bi-music-note-list" style="color:var(--muted);"></i> Add to queue</button>
     <button id="ctxRemoveQueue" class="context-menu-item"><i class="bi bi-trash" style="color:var(--muted);"></i> Remove from queue</button>
     <button id="ctxAddPlaylist" class="context-menu-item"><i class="bi bi-plus-circle" style="color:var(--muted);"></i> Add to playlist</button>
+    <button id="ctxDownload" class="context-menu-item"><i class="bi bi-download" style="color:var(--muted);"></i> Download</button>
     <div class="context-menu-separator"></div>
     <div id="ctxGoArtistContainer"></div>
     <button id="ctxGoAlbum" class="context-menu-item"><i class="bi bi-disc" style="color:var(--muted);"></i> Go to album</button>
@@ -363,6 +364,20 @@
         <button id="ctxCopyMusicBrainz" class="context-menu-item"><i class="bi bi-globe" style="color:var(--muted);"></i> Copy MusicBrainz URL</button>
       </div>
     </div>
+  </div>
+
+  <!-- Album Context Menu -->
+  <div id="albumContextMenu" class="context-menu" hidden>
+    <div id="ctxAlbumHeader" class="context-menu-header">
+      <div id="ctxAlbumHeaderArt" class="context-menu-header-art"></div>
+      <div class="context-menu-header-info">
+        <strong id="ctxAlbumHeaderTitle">Album Title</strong>
+        <span id="ctxAlbumHeaderArtist">Artist</span>
+      </div>
+    </div>
+    <div class="context-menu-separator"></div>
+    <button id="ctxAlbumAddPlaylist" class="context-menu-item"><i class="bi bi-plus-circle" style="color:var(--muted);"></i> Add to playlist</button>
+    <button id="ctxAlbumGoArtist" class="context-menu-item"><i class="bi bi-person" style="color:var(--muted);"></i> Go to artist</button>
   </div>
 
   <script src="assets/vendor/tippy/popper.min.js"></script>

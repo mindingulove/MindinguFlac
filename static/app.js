@@ -858,21 +858,27 @@ function cardsHtml(items, kind, offset = 0) {
 function bindCardClicks(container, items, contextItems) {
   container.querySelectorAll("[data-card]").forEach((button) => {
     const item = items[Number(button.dataset.card)];
-    button.onclick = () => selectMusicItem(item, "stream", contextItems);
+    button.onclick = () => {
+        if (item.type === "album") pushPage(() => renderAlbumPage(albumTarget(item)));
+        else if (item.type === "artist") pushPage(() => renderArtistPage(artistTarget(item)));
+        else selectMusicItem(item, "stream", contextItems);
+    };
     button.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        selectMusicItem(item, "stream", contextItems);
+        if (item.type === "album") pushPage(() => renderAlbumPage(albumTarget(item)));
+        else if (item.type === "artist") pushPage(() => renderArtistPage(artistTarget(item)));
+        else selectMusicItem(item, "stream", contextItems);
       }
     };
-    if (playableQueueItem(item)) {
-      button.oncontextmenu = (event) => {
-        event.preventDefault();
-        if (typeof showTrackContextMenu === "function") {
-          showTrackContextMenu(event, item);
-        }
-      };
-    }
+    button.oncontextmenu = (event) => {
+      event.preventDefault();
+      if (playableQueueItem(item)) {
+        showTrackContextMenu(event, item);
+      } else if (item.type === "album") {
+        showAlbumContextMenu(event, item);
+      }
+    };
   });
   bindEntityLinks(container);
 }
@@ -4433,6 +4439,19 @@ document.querySelectorAll(".queue-tab").forEach(tab => {
 // ---------------------------------------------------------------------------
 let contextMenuTargetTrack = null;
 
+$("ctxDownload")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack) {
+    // Simulate a click on a library button if we can find one, or just trigger toggleTrackLibrary
+    // We create a dummy button for the toggle function
+    const dummyBtn = document.createElement("button");
+    toggleTrackLibrary(contextMenuTargetTrack, dummyBtn, () => {
+        // Refresh views if needed
+        syncActiveTrackRows();
+    });
+  }
+  $("trackContextMenu").hidden = true;
+});
+
 function showTrackContextMenu(event, track, contextInfo = {}) {
   contextMenuTargetTrack = track;
   const menu = $("trackContextMenu");
@@ -4499,6 +4518,12 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   const btnAddQueue = $("ctxAddQueue");
   if (btnAddQueue) btnAddQueue.style.display = upcomingIdx !== -1 ? "none" : "flex";
+
+  const btnDownload = $("ctxDownload");
+  if (btnDownload) {
+    const inLibrary = track.in_library || (track.metadata && track.metadata.in_library);
+    btnDownload.style.display = inLibrary ? "none" : "flex";
+  }
   
   const btnRemoveQueue = $("ctxRemoveQueue");
   if (btnRemoveQueue) {
@@ -4574,18 +4599,19 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   let x = event.clientX;
   let y = event.clientY;
 
+  // Flip horizontally if near right boundary
+  if (x + menuWidth > window.innerWidth) {
+    x = x - menuWidth;
+  }
+  // Clamp to right if still too far
+  if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
+
   // Open upwards if near the bottom boundary
   if (y + menuHeight > window.innerHeight) {
-    y = window.innerHeight - menuHeight - 10;
-    // If it's still below the click, flip it completely
-    if (y < event.clientY) {
-        y = event.clientY - menuHeight;
-    }
+    y = y - menuHeight;
   }
-  // Clamp X to right boundary
-  if (x + menuWidth > window.innerWidth) {
-    x = window.innerWidth - menuWidth - 10;
-  }
+  // Clamp to bottom if still too far
+  if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 10;
 
   // Final safety clamp so it doesn't go off top/left
   x = Math.max(10, x);
@@ -4621,4 +4647,90 @@ $("ctxGoAlbum")?.addEventListener("click", () => {
     pushPage(() => renderAlbumPage(albumTarget(contextMenuTargetTrack)));
   }
   $("trackContextMenu").hidden = true;
+});
+
+// ---------------------------------------------------------------------------
+// Album Context Menu
+// ---------------------------------------------------------------------------
+let contextMenuTargetAlbum = null;
+
+function showAlbumContextMenu(event, album) {
+  contextMenuTargetAlbum = album;
+  const menu = $("albumContextMenu");
+  if (!menu) return;
+
+  // Header
+  const headerArt = $("ctxAlbumHeaderArt");
+  if (headerArt) {
+    headerArt.style.backgroundImage = album.artwork_url ? `url('${album.artwork_url}')` : "";
+    headerArt.style.display = album.artwork_url ? "block" : "none";
+  }
+  const headerTitle = $("ctxAlbumHeaderTitle");
+  if (headerTitle) headerTitle.textContent = album.title || album.name || "Unknown Album";
+  
+  const headerArtist = $("ctxAlbumHeaderArtist");
+  if (headerArtist) headerArtist.textContent = album.artist || "";
+
+  menu.hidden = false;
+
+  // Position menu (fixed position)
+  const menuWidth = menu.offsetWidth || 220;
+  const menuHeight = menu.offsetHeight || 150;
+  let x = event.clientX;
+  let y = event.clientY;
+
+  if (x + menuWidth > window.innerWidth) x = x - menuWidth;
+  if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
+  if (y + menuHeight > window.innerHeight) y = y - menuHeight;
+  if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 10;
+
+  x = Math.max(10, x);
+  y = Math.max(10, y);
+
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+}
+
+$("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
+  if (contextMenuTargetAlbum) {
+    // 1. Fetch tracks if not present
+    let tracks = contextMenuTargetAlbum.tracks || [];
+    if (!tracks.length) {
+      try {
+        const full = await api("/api/album/tracks", { method: "POST", body: JSON.stringify(albumTarget(contextMenuTargetAlbum)) });
+        tracks = full.tracks || [];
+      } catch (e) {
+        console.error("Failed to fetch album tracks:", e);
+      }
+    }
+    if (!tracks.length) {
+        $("albumContextMenu").hidden = true;
+        return;
+    }
+
+    // 2. Create playlist
+    try {
+        const pl = await api("/api/playlists/create", { method: "POST", body: JSON.stringify({ name: contextMenuTargetAlbum.title || contextMenuTargetAlbum.name }) });
+        // 3. Add tracks
+        await api("/api/playlists/tracks/add", { method: "POST", body: JSON.stringify({ id: pl.id, tracks: tracks.map(t => ({ ...t, kind: "track" })) }) });
+        await refreshSidebar();
+    } catch (e) {
+        alert("Failed to add album to playlist: " + e.message);
+    }
+  }
+  $("albumContextMenu").hidden = true;
+});
+
+$("ctxAlbumGoArtist")?.addEventListener("click", () => {
+  if (contextMenuTargetAlbum) {
+    pushPage(() => renderArtistPage(artistTarget(contextMenuTargetAlbum)));
+  }
+  $("albumContextMenu").hidden = true;
+});
+
+document.addEventListener("click", (e) => {
+    const aMenu = $("albumContextMenu");
+    if (aMenu && !aMenu.hidden && !aMenu.contains(e.target)) {
+        aMenu.hidden = true;
+    }
 });
