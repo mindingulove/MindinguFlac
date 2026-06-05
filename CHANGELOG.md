@@ -1,5 +1,37 @@
 # Changelog
 
+## Mindinguflac v0.9.2
+
+### Highlight: Automatic Playwright browser setup and real-time quality badges
+
+This release automates the Chromium browser installation for the Duck.ai advisor and introduces real-time HI-RES/HQ badges in the player sidebar.
+
+### Duck.ai Advisor
+- **Automatic Browser Setup**: The app now automatically detects missing Chromium binaries and installs them via Playwright on the first run, removing the need for manual setup.
+
+### UI and UX Improvements
+- **Visual Quality Indicators**: Real-time **HI-RES** and **HQ** badges in the player sidebar now indicate the actual audio fidelity being streamed, based on the resolved audio source and metadata.
+- **Enhanced Detection**: Improved quality detection to support a wider range of file extensions (including YouTube's `.webm` and `.opus`) and metadata keywords (`SQ`, `320`, `LOSSLESS`, etc.).
+
+## Mindinguflac v0.9.1
+
+### Metadata and Matching
+- Fixed Spotify track payloads that could keep a stale artist from the previous playback context.
+- Added Spotify ID canonicalization before download matching, so collaborative tracks use the actual artist list from Spotify metadata.
+- Added a Spotify embed fallback for track metadata when the normal Spotify client does not return a full track object.
+- Verified the Rod Stewart / Amy Belle track case now enriches from a poisoned `Michael Jackson` payload to `Rod Stewart, Amy Belle` before torrent and AI candidate scoring.
+
+### Torrent Engine
+- Fixed a torrent finalization edge case where libtorrent could underreport `file_progress()` even after the target audio file was fully materialized on disk.
+- Keeps sparse-file protection by requiring a valid audio header before accepting an underreported completed file.
+
+### Cache Maintenance
+- Added a new cache cleanup option: `On every close or restart`.
+- Desktop shutdown now applies the close/restart cache cleanup mode before the local server exits.
+
+### Playback and macOS Audio
+- Keeps the macOS auto-unmute helper from v0.9.0 work so muted selected output devices are unmuted before native playback starts.
+
 ## Mindinguflac v0.9.0
 
 ### Highlight: app-only output fixes and stronger AI-assisted torrent selection
