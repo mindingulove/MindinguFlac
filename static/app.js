@@ -4437,7 +4437,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   if (track.artist) {
     const artists = track.artist.split(/,\s*|\s+&\s+/).map(a => a.trim()).filter(Boolean);
     if (artists.length === 1) {
-      artistContainer.innerHTML = `<button id="ctxGoArtist" class="context-menu-item"><i class="bi bi-person" style="margin-right:8px; color:var(--muted);"></i> Go to artist</button>`;
+      artistContainer.innerHTML = `<button id="ctxGoArtist" class="context-menu-item"><i class="bi bi-person" style="color:var(--muted);"></i> Go to artist</button>`;
       $("ctxGoArtist").onclick = () => {
         menu.hidden = true;
         pushPage(() => renderArtistPage(artistTarget({ ...track, artist: artists[0] })));
@@ -4446,7 +4446,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
       const submenuItems = artists.map((a, i) => `<button id="ctxGoArtistSub_${i}" class="context-menu-item">${esc(a)}</button>`).join("");
       artistContainer.innerHTML = `
         <div class="context-menu-item has-submenu">
-          <div><i class="bi bi-person" style="margin-right:8px; color:var(--muted);"></i> Go to artist</div>
+          <i class="bi bi-person" style="color:var(--muted);"></i> Go to artist
           <i class="bi bi-caret-right-fill context-submenu-icon"></i>
           <div class="context-submenu">${submenuItems}</div>
         </div>
