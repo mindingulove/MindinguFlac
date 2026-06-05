@@ -4532,7 +4532,10 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   const btnCopyMusicBrainz = $("ctxCopyMusicBrainz");
   if (btnCopyMusicBrainz) {
-    const mbId = trackIdentityValue(track, "musicbrainz_recording_id") || trackIdentityValue(track, "musicbrainz_track_id");
+    const mbId = trackIdentityValue(track, "musicbrainz_recording_id") || 
+                 trackIdentityValue(track, "musicbrainz_track_id") ||
+                 trackIdentityValue(track, "musicbrainz_id") ||
+                 trackIdentityValue(track, "musicbrainz_trackid");
     btnCopyMusicBrainz.style.display = mbId ? "flex" : "none";
     btnCopyMusicBrainz.onclick = () => {
       navigator.clipboard.writeText(`https://musicbrainz.org/recording/${mbId}`);
@@ -4542,7 +4545,11 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   const btnCopyYouTube = $("ctxCopyYouTube");
   if (btnCopyYouTube) {
-    const ytUrl = trackIdentityValue(track, "youtube_url");
+    let ytUrl = trackIdentityValue(track, "youtube_url");
+    if (!ytUrl) {
+      const ytId = trackIdentityValue(track, "youtube_id");
+      if (ytId) ytUrl = `https://www.youtube.com/watch?v=${ytId}`;
+    }
     btnCopyYouTube.style.display = ytUrl ? "flex" : "none";
     btnCopyYouTube.onclick = () => {
       navigator.clipboard.writeText(ytUrl);
@@ -4552,11 +4559,11 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   menu.hidden = false;
 
-  // Position menu
+  // Position menu (fixed position)
   const menuWidth = menu.offsetWidth;
   const menuHeight = menu.offsetHeight;
-  let x = event.pageX;
-  let y = event.pageY;
+  let x = event.clientX;
+  let y = event.clientY;
 
   // Open upwards if near the bottom boundary
   if (y + menuHeight > window.innerHeight) {
