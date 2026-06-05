@@ -147,7 +147,7 @@ The torrent engine runs an AI advisor in parallel with normal torrent probing by
 
 The AI receives the top 20 search results based on the local scoring algorithm. It evaluates their titles and metadata and returns a sorted list of the IDs it considers to be clean music matches. The torrent engine then attempts to download the AI's ranked candidates in the order provided (up to however many the AI selected), before falling back to the remaining unscored candidates.
 
-> **Note on DuckDuckGo Anti-Bot:** The built-in proxy bypasses DuckDuckGo's anti-bot challenges by using a long-running Playwright browser worker. This worker uses a real Chromium instance (headless) to handle the Duck.ai frontend and challenge flow, ensuring more reliable access than static header spoofing. On first run, the app requires `python -m playwright install chromium` to fetch the necessary browser binaries.
+> **Note on DuckDuckGo Anti-Bot:** The built-in proxy bypasses DuckDuckGo's anti-bot challenges by using a long-running Playwright browser worker. This worker uses a real Chromium instance (headless) to handle the Duck.ai frontend and challenge flow, ensuring more reliable access than static header spoofing. On first run, the app automatically attempts to fetch the necessary browser binaries if they are missing.
 
 To disable the advisor, explicitly set `MINDINGUFLAC_AI_RERANK_PROVIDER` to `none`:
 

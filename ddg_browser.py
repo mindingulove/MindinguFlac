@@ -181,7 +181,30 @@ class _Worker:
         from playwright_stealth import Stealth
         from playwright.sync_api import sync_playwright
 
-        self._stealth_cm = Stealth().use_sync(sync_playwright())
+        try:
+            self._start_with_retry()
+        except Exception as e:
+            if "Executable doesn't exist" in str(e) or "Please run" in str(e):
+                _log("Chromium not found. Attempting automatic installation...")
+                try:
+                    import subprocess
+                    # Run the playwright install command using the current python interpreter
+                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                    _log("Chromium installed successfully. Retrying start...")
+                    self._start_with_retry()
+                except Exception as install_exc:
+                    _log(f"Automatic Chromium installation failed: {install_exc}")
+                    raise install_exc from e
+            else:
+                raise e
+
+    def _start_with_retry(self):
+        from playwright_stealth import Stealth
+        from playwright.sync_api import sync_playwright
+
+        if not hasattr(self, "_stealth_cm"):
+            self._stealth_cm = Stealth().use_sync(sync_playwright())
+        
         p = self._stealth_cm.__enter__()
         args = [
             "--disable-blink-features=AutomationControlled",
