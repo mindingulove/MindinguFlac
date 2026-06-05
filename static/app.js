@@ -4522,7 +4522,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   // Share buttons
   const btnCopySpotify = $("ctxCopySpotify");
   if (btnCopySpotify) {
-    const spId = track.spotify_id || (track.metadata && track.metadata.spotify_id);
+    const spId = trackIdentityValue(track, "spotify_id");
     btnCopySpotify.style.display = spId ? "flex" : "none";
     btnCopySpotify.onclick = () => {
       navigator.clipboard.writeText(`https://open.spotify.com/track/${spId}`);
@@ -4532,7 +4532,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   const btnCopyMusicBrainz = $("ctxCopyMusicBrainz");
   if (btnCopyMusicBrainz) {
-    const mbId = track.musicbrainz_recording_id || track.musicbrainz_track_id || (track.metadata && (track.metadata.musicbrainz_recording_id || track.metadata.musicbrainz_track_id));
+    const mbId = trackIdentityValue(track, "musicbrainz_recording_id") || trackIdentityValue(track, "musicbrainz_track_id");
     btnCopyMusicBrainz.style.display = mbId ? "flex" : "none";
     btnCopyMusicBrainz.onclick = () => {
       navigator.clipboard.writeText(`https://musicbrainz.org/recording/${mbId}`);
@@ -4542,7 +4542,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   const btnCopyYouTube = $("ctxCopyYouTube");
   if (btnCopyYouTube) {
-    const ytUrl = track.youtube_url || (track.metadata && track.metadata.youtube_url);
+    const ytUrl = trackIdentityValue(track, "youtube_url");
     btnCopyYouTube.style.display = ytUrl ? "flex" : "none";
     btnCopyYouTube.onclick = () => {
       navigator.clipboard.writeText(ytUrl);
