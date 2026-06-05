@@ -4320,7 +4320,7 @@ $("connectPanelClose").onclick = closeConnectPanel;
 // ---------------------------------------------------------------------------
 // Queue Panel UI
 // ---------------------------------------------------------------------------
-function renderQueueTracks(containerId, tracks, isRecent) {
+function renderQueueTracks(containerId, tracks, isRecent, baseIndex = -1) {
   const container = $(containerId);
   if (!container) return;
   if (!tracks || !tracks.length) {
@@ -4348,7 +4348,8 @@ function renderQueueTracks(containerId, tracks, isRecent) {
       if (el.dataset.qRecent === "true") {
         selectMusicItem(track, "stream", tracks, { title: "Recently Played" });
       } else {
-        const absoluteIndex = idx + state.queueIndex + 1;
+        // Use the baseIndex captured at render time to avoid double-click jumping bugs
+        const absoluteIndex = idx + baseIndex + 1;
         if (absoluteIndex < state.queue.length) {
           state.queueIndex = absoluteIndex;
           selectMusicItem(state.queue[state.queueIndex], "stream", null, state.queueContext);
@@ -4359,7 +4360,7 @@ function renderQueueTracks(containerId, tracks, isRecent) {
       el.oncontextmenu = (event) => {
         event.preventDefault();
         if (typeof showTrackContextMenu === "function") {
-          const cinfo = el.dataset.qRecent === "true" ? {} : { queueIndex: idx + state.queueIndex + 1 };
+          const cinfo = el.dataset.qRecent === "true" ? {} : { queueIndex: idx + baseIndex + 1 };
           showTrackContextMenu(event, track, cinfo);
         }
       };
@@ -4385,9 +4386,12 @@ function refreshQueuePanel() {
     nowPlayingContainer.innerHTML = `<div style="color:var(--muted); font-size:13px;">Nothing playing</div>`;
   }
 
+  // Capture the current index for stable click handling in the list
+  const baseIdx = state.queueIndex;
+
   // Next tracks (up to 100)
   let nextTracks = [];
-  if (state.queue && state.queue.length && state.queueIndex >= 0) {
+  if (state.queue && state.queue.length && state.queueIndex >= -1) {
     const startIdx = state.queueIndex + 1;
     nextTracks = state.queue.slice(startIdx, startIdx + 100);
   }
@@ -4398,7 +4402,7 @@ function refreshQueuePanel() {
     $("queueNextTitle").innerText = "Next";
   }
 
-  renderQueueTracks("queueNextList", nextTracks, false);
+  renderQueueTracks("queueNextList", nextTracks, false, baseIdx);
 
   // Recent tracks
   const recentTracks = (state.catalog && state.catalog.recent_tracks) ? state.catalog.recent_tracks : [];
@@ -4593,32 +4597,32 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   menu.hidden = false;
 
   // Position menu (fixed position)
-  // We measure after making it visible
-  const menuWidth = menu.offsetWidth || 220;
-  const menuHeight = menu.offsetHeight || 300;
-  let x = event.clientX;
-  let y = event.clientY;
+  // We use a small delay or two frames to ensure the browser has rendered the menu and header text wrap
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const menuWidth = menu.offsetWidth || 220;
+      const menuHeight = menu.offsetHeight || 300;
+      let x = event.clientX;
+      let y = event.clientY;
 
-  // Flip horizontally if near right boundary
-  if (x + menuWidth > window.innerWidth) {
-    x = x - menuWidth;
-  }
-  // Clamp to right if still too far
-  if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
+      // Flip horizontally if near right boundary
+      if (x + menuWidth > window.innerWidth) {
+        x = x - menuWidth;
+      }
+      // Clamp X to window boundaries
+      x = Math.max(10, Math.min(x, window.innerWidth - menuWidth - 10));
 
-  // Open upwards if near the bottom boundary
-  if (y + menuHeight > window.innerHeight) {
-    y = y - menuHeight;
-  }
-  // Clamp to bottom if still too far
-  if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 10;
+      // Flip vertically if near bottom boundary
+      if (y + menuHeight > window.innerHeight) {
+        y = y - menuHeight;
+      }
+      // Clamp Y to window boundaries
+      y = Math.max(10, Math.min(y, window.innerHeight - menuHeight - 10));
 
-  // Final safety clamp so it doesn't go off top/left
-  x = Math.max(10, x);
-  y = Math.max(10, y);
-
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+    });
+  });
 }
 
 document.addEventListener("click", (e) => {
@@ -4674,21 +4678,23 @@ function showAlbumContextMenu(event, album) {
   menu.hidden = false;
 
   // Position menu (fixed position)
-  const menuWidth = menu.offsetWidth || 220;
-  const menuHeight = menu.offsetHeight || 150;
-  let x = event.clientX;
-  let y = event.clientY;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const menuWidth = menu.offsetWidth || 220;
+      const menuHeight = menu.offsetHeight || 150;
+      let x = event.clientX;
+      let y = event.clientY;
 
-  if (x + menuWidth > window.innerWidth) x = x - menuWidth;
-  if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
-  if (y + menuHeight > window.innerHeight) y = y - menuHeight;
-  if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 10;
+      if (x + menuWidth > window.innerWidth) x = x - menuWidth;
+      x = Math.max(10, Math.min(x, window.innerWidth - menuWidth - 10));
 
-  x = Math.max(10, x);
-  y = Math.max(10, y);
+      if (y + menuHeight > window.innerHeight) y = y - menuHeight;
+      y = Math.max(10, Math.min(y, window.innerHeight - menuHeight - 10));
 
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+    });
+  });
 }
 
 $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
@@ -4713,7 +4719,7 @@ $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
         const pl = await api("/api/playlists/create", { method: "POST", body: JSON.stringify({ name: contextMenuTargetAlbum.title || contextMenuTargetAlbum.name }) });
         // 3. Add tracks
         await api("/api/playlists/tracks/add", { method: "POST", body: JSON.stringify({ id: pl.id, tracks: tracks.map(t => ({ ...t, kind: "track" })) }) });
-        await refreshSidebar();
+        await loadPlaylists();
     } catch (e) {
         alert("Failed to add album to playlist: " + e.message);
     }

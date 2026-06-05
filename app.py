@@ -1035,7 +1035,46 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/music/enrich":
                 tracks = body.get("tracks") or []
-                self.send_json({"tracks": enrich_artwork_batch(tracks)})
+                enriched = enrich_artwork_batch(tracks)
+                # Also enrich identifiers for the batch if it's small (to avoid timeout)
+                if len(enriched) <= 20:
+                    for i in range(len(enriched)):
+                        enriched[i] = enrich_track_identifiers(enriched[i])
+                self.send_json({"tracks": enriched})
+                return
+
+            if path == "/api/playlists/tracks/add":
+                playlist_id = body.get("id", "")
+                tracks_to_add = body.get("tracks") or []
+                if not playlist_id or not tracks_to_add:
+                    self.send_error_json("Missing ID or tracks", HTTPStatus.BAD_REQUEST)
+                    return
+                with playlists_lock:
+                    data = load_playlists()
+                    pl = next((p for p in data if p["id"] == playlist_id), None)
+                    if not pl:
+                        self.send_error_json("Playlist not found", HTTPStatus.NOT_FOUND)
+                        return
+                    
+                    seen_keys = set()
+                    def track_key(t):
+                        return f"{str(t.get('artist') or '').strip().lower()}||{str(t.get('title') or '').strip().lower()}"
+                    
+                    for t in pl.get("tracks", []):
+                        seen_keys.add(track_key(t))
+                    
+                    added_count = 0
+                    for t in tracks_to_add:
+                        if track_key(t) not in seen_keys:
+                            pl["tracks"].append(t)
+                            seen_keys.add(track_key(t))
+                            added_count += 1
+                    
+                    if added_count > 0:
+                        save_playlists(data)
+                        start_playlist_identifier_enrichment(playlist_id)
+                
+                self.send_json({"ok": True, "added": added_count})
                 return
             if path == "/api/settings":
                 updated = AppConfig.from_public_dict(body)
