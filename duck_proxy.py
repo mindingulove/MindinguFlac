@@ -1,132 +1,189 @@
-"""Thin CORS-bypass proxy for DuckDuckGo's duck.ai chat endpoints.
+"""Duck.ai chat access via a real, headed Chromium driven by the genuine frontend.
 
-This module implements the exact breakthrough bypass discovered by benoitpetit/duckduckgo-chat-cli
-which uses a static browser-derived JSON VQD hash and header mapping to eliminate 418 errors.
+Background: DuckDuckGo gates the chat endpoint behind "RoboShield"
+(`418 / ERR_CHALLENGE / type:"brs"`). That challenge is solved by Duck.ai's own
+bundled frontend JavaScript, not by any header we can forge — a static
+`x-vqd-hash-1`, a hand-solved challenge, or a headless-shell browser are all
+fingerprinted and rejected. The only reliable path is to let a real headed
+browser run the actual frontend and send the chat itself.
+
+This module manages a single long-running browser worker subprocess
+(`ddg_browser.py`) and speaks line-delimited JSON to it. Playwright's sync API
+is single-threaded, so all access is serialized behind a lock; the threaded HTTP
+server in app.py can call these functions from any thread safely.
+
+Public API (unchanged for callers like ai_reranker.py):
+  - fetch_status() -> {"vqd_hash_1": <sentinel|"">, "error": str}
+  - send_chat(token, messages, model) -> {"ok": bool, "text": str, ...}
 """
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 import os
-import config
+import subprocess
+import sys
+import threading
+import time
 
-_STATUS_URL = "https://duckduckgo.com/duckchat/v1/status"
-_CHAT_URL = "https://duckduckgo.com/duckchat/v1/chat"
+_WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ddg_browser.py")
+_READY_TIMEOUT_S = float(os.environ.get("MINDINGUFLAC_DDG_READY_TIMEOUT", "90"))
+_REPLY_TIMEOUT_S = float(os.environ.get("MINDINGUFLAC_DDG_REPLY_TIMEOUT", "75")) + 20
 
-# Breakthrough Headers - 100% Match with benoitpetit repo breakthrough (internal/chat/chat.go)
-_HEADERS = {
-    "Accept": "*/*",
-    "Accept-Language": "fr-FR,fr;q=0.6",
-    "Cache-Control": "no-store",
-    "DNT": "1",
-    "Priority": "u=1, i",
-    "Referer": "https://duckduckgo.com/",
-    "Sec-CH-UA": '"Not)A;Brand";v="8", "Chromium";v="138", "Brave";v="138"',
-    "Sec-CH-UA-Mobile": "?0",
-    "Sec-CH-UA-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-GPC": "1",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-    "Cookie": "5=1; dcm=3; dcs=1",
-}
+_lock = threading.Lock()
+_proc: subprocess.Popen | None = None
+_req_id = 0
+_last_error = ""
 
-# The Breakthrough Static Proofs (Hardcoded as per repo commit 3fa5c14 / chat.go line 203)
-_STATIC_VQD_HASH_1 = "eyJzZXJ2ZXJfaGFzaGVzIjpbImRQSlJJTWczZnFYQXIvaStaa3c2cEpFVzEwckdTdmxJVlVkNlFsOVRGWXc9IiwiMUN3Qzg3N0Q3WXE1dzlEeTc4UjhBVi9qZVZWaUlYbmV0Q0xvckx3c01QZz0iLCJQSzc3TGc2L25weDdWQ2J2UWxsTEhBR3cyenJIVmEvQUFBRFBhQTl1ekVRPSJdLCJjbGllbnRfaGFzaGVzIjpbImxWblI0MStCMVFWZ0o4d0hhMUdBNmdxR0JoSjlWdjN5K0dISkdGekJmTGM9IiwiVS9RRUc2RE1qdEU4V2hHU1FxOUU1Z0VGNmw1SWJrNk9NVlBuY01DU1licz0iLCJ6SURsYUNvZG9JUjNwbTNSVTlWOUJXaUJkZDJqenRMODAyN0VYTHhkWll3PSJdLCJzaWduYWxzIjp7fSwibWV0YSI6eyJ2IjoiNCIsImNoYWxsZW5nZV9pZCI6ImM4M2Q0ZTc5NTU2MjJmZjU3Mzc0ZDUzOTk2ZjliMmJhZGE2ZDQxZTMzNDM1ZjVlNzMyYjFmNmZjNmQ0ZTE1NzVoOGpidCIsInRpbWVzdGFtcCI6IjE3ODA2MDM2Mjc2NjEiLCJvcmlnaW4iOiJodHRwczovL2R1Y2tkdWNrZ28uY29tIiwic3RhY2siOiJFcnJvclxuYXQgRSAoaHR0cHM6Ly9kdWNrZHVja2dvLmNvbS9kaXN0L3dwbS5jaGF0LjcwZWFjYTZhZWEyOTQ4YjBiYjYwLmpzOjE6MTQ4MjUpXG5hdCBhc3luYyBodHRwczovL2R1Y2tkdWNrZ28uY29tIiwic3RhY2siOiJvdGhlcnMvY29yZS9sb2dvLnBuZyIsImR1cmF0aW9uIjoiNTgifX0="
-_STATIC_FE_SIGNALS = "eyJzdGFydCI6MTc1MjE1NTc3NzQ4MCwiZXZlbnRzIjpbeyJuYW1lIjoic3RhcnROZXdDaGF0IiwiZGVsdGEiOjc1fSx7Im5hbWUiOiJyZWNlbnRDaGF0c0xpc3RJbXByZXNzaW9uIiwiZGVsdGEiOjEyNH1dLCJlbmQiOjQzNDN9"
-_STATIC_FE_VERSION = "serp_20250710_090702_ET-70eaca6aea2948b0bb60"
+
+def _worker_alive() -> bool:
+    return _proc is not None and _proc.poll() is None
+
+
+def _start_worker() -> bool:
+    """Spawn the browser subprocess and block until it reports readiness."""
+    global _proc, _last_error
+    _stop_worker()
+    # In a frozen app (PyInstaller) sys.executable is the app binary, not python,
+    # so re-enter via a flag the app handles; in dev, run the worker script.
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "--ddg-worker"]
+    else:
+        cmd = [sys.executable, _WORKER_SCRIPT]
+    try:
+        _proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,  # inherit -> worker logs land in the server console
+            text=True,
+            bufsize=1,  # line-buffered
+            cwd=os.path.dirname(_WORKER_SCRIPT),
+            env=dict(os.environ),
+        )
+    except Exception as exc:
+        _last_error = f"spawn failed: {exc}"
+        _proc = None
+        return False
+
+    deadline = time.time() + _READY_TIMEOUT_S
+    while time.time() < deadline:
+        if _proc.poll() is not None:
+            _last_error = "worker exited during startup"
+            _proc = None
+            return False
+        line = _proc.stdout.readline()
+        if not line:
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            banner = json.loads(line)
+        except Exception:
+            continue
+        if banner.get("ready"):
+            _last_error = ""
+            return True
+        _last_error = banner.get("error", "worker not ready")
+        _stop_worker()
+        return False
+    _last_error = "worker readiness timed out"
+    _stop_worker()
+    return False
+
+
+def _stop_worker():
+    global _proc
+    if _proc is not None:
+        try:
+            if _proc.poll() is None:
+                try:
+                    _proc.stdin.write(json.dumps({"cmd": "shutdown"}) + "\n")
+                    _proc.stdin.flush()
+                except Exception:
+                    pass
+                try:
+                    _proc.wait(timeout=5)
+                except Exception:
+                    _proc.kill()
+        except Exception:
+            pass
+    _proc = None
+
+
+def _ensure_worker() -> bool:
+    if _worker_alive():
+        return True
+    return _start_worker()
+
+
+def _exchange(payload: dict) -> dict:
+    """Send one request and read its matching reply (caller holds _lock)."""
+    global _req_id, _last_error
+    _req_id += 1
+    rid = _req_id
+    payload["id"] = rid
+    try:
+        _proc.stdin.write(json.dumps(payload) + "\n")
+        _proc.stdin.flush()
+    except Exception as exc:
+        _last_error = f"write failed: {exc}"
+        _stop_worker()
+        return {"ok": False, "error": _last_error}
+
+    deadline = time.time() + _REPLY_TIMEOUT_S
+    while time.time() < deadline:
+        if _proc.poll() is not None:
+            _last_error = "worker died while awaiting reply"
+            _stop_worker()
+            return {"ok": False, "error": _last_error}
+        line = _proc.stdout.readline()
+        if not line:
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            reply = json.loads(line)
+        except Exception:
+            continue
+        if reply.get("id") == rid:
+            return reply
+        # Ignore stray/non-matching lines (shouldn't normally happen).
+    _last_error = "reply timed out"
+    _stop_worker()
+    return {"ok": False, "error": _last_error}
+
 
 def fetch_status(user_agent: str = "") -> dict:
-    """Step 1: GET /status to obtain the dynamic x-vqd-4 header."""
-    headers = dict(_HEADERS)
-    headers["x-vqd-accept"] = "1"
-    headers["Accept"] = "*/*"
-    
-    req = urllib.request.Request(_STATUS_URL, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            # The dynamic token needed for chat is in the x-vqd-hash-1 header in status
-            vqd = resp.headers.get("x-vqd-hash-1", "")
-            return {"vqd_hash_1": vqd, "error": ""}
-    except urllib.error.HTTPError as exc:
-        return {"vqd_hash_1": "", "error": f"HTTP {exc.code}"}
-    except Exception as exc:
-        return {"vqd_hash_1": "", "error": str(exc)}
+    """Compatibility gate. Ensures the browser worker is up.
 
-def _parse_sse(raw: str) -> str:
-    """Parse DuckDuckGo streaming response."""
-    out = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"): continue
-        data = line[5:].strip()
-        if data == "[DONE]": break
-        try:
-            obj = json.loads(data)
-            if isinstance(obj, dict) and obj.get("message"):
-                out.append(obj["message"])
-        except: continue
-    return "".join(out)
+    Returns a sentinel token so existing callers proceed; the real anti-bot
+    handling happens inside the browser, not here.
+    """
+    with _lock:
+        ok = _ensure_worker()
+    if ok:
+        return {"vqd_hash_1": "browser", "error": ""}
+    return {"vqd_hash_1": "", "error": _last_error or "browser worker unavailable"}
+
 
 def send_chat(token: str, messages: list, model: str = "gpt-5-mini", **kwargs) -> dict:
-    """Step 2: POST /chat with static breakthrough proofs and dynamic rotation."""
-    if not token:
-        return {"ok": False, "error": "missing x-vqd-4 token"}
+    """Run one chat turn through the real Duck.ai frontend in the browser worker.
 
-    # Map internally to the real model string if needed
-    real_model = "gpt-4o-mini" if "gpt-5" in model.lower() else model
+    `token` is ignored (legacy x-vqd-4 placeholder). `model` is best-effort: the
+    browser uses Duck.ai's currently selected model. Returns {"ok", "text", ...}.
+    """
+    with _lock:
+        if not _ensure_worker():
+            return {"ok": False, "error": _last_error or "browser worker unavailable"}
+        res = _exchange({"messages": messages, "model": model})
+        # One automatic restart+retry if the worker dropped mid-exchange.
+        if not res.get("ok") and not _worker_alive():
+            if _start_worker():
+                res = _exchange({"messages": messages, "model": model})
+    return res
 
-    headers = dict(_HEADERS)
-    headers["x-vqd-4"] = token
-    headers["x-vqd-hash-1"] = _STATIC_VQD_HASH_1
-    headers["x-fe-signals"] = _STATIC_FE_SIGNALS
-    headers["x-fe-version"] = _STATIC_FE_VERSION
-    headers["Content-Type"] = "application/json"
-    headers["Accept"] = "text/event-stream"
 
-    payload = json.dumps({
-        "model": real_model,
-        "metadata": {
-            "toolChoice": {
-                "NewsSearch": False,
-                "VideosSearch": False,
-                "LocalSearch": False,
-                "WeatherForecast": False
-            }
-        },
-        "messages": messages,
-        "canUseTools": True,
-        "canUseApproxLocation": True
-    }).encode("utf-8")
-
-    req = urllib.request.Request(_CHAT_URL, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-            # Step 7: Next VQD for rotation is in the x-vqd-4 header
-            next_token = resp.headers.get("x-vqd-4", "") or ""
-            return {
-                "ok": True,
-                "text": _parse_sse(raw),
-                "vqd_hash_1": next_token,
-                "status": 200,
-                "error": ""
-            }
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try: body = exc.read().decode("utf-8", "replace")[:600]
-        except: pass
-        return {
-            "ok": False,
-            "status": exc.code,
-            "error": f"HTTP {exc.code}",
-            "body": body,
-            "vqd_hash_1": exc.headers.get("x-vqd-4", "") or ""
-        }
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
-
-def save_bypass(data: dict):
+def save_bypass(data):  # retained for backward compatibility
     pass

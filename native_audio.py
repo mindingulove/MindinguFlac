@@ -70,6 +70,132 @@ def _native_playable_path(audio_path: Path) -> str:
     return converted or str(audio_path.resolve())
 
 
+def _macos_unmute_device(device_uid: str) -> None:
+    """Best-effort: clear mute and lift zeroed volume on a CoreAudio output."""
+    if not device_uid or sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+
+        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        try:
+            ahs = ctypes.CDLL("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")
+        except Exception:
+            ahs = None
+
+        def _fcc(s: str) -> int:
+            return int.from_bytes(s.encode(), "big")
+
+        class _PA(ctypes.Structure):
+            _fields_ = [("mSel", ctypes.c_uint32), ("mScope", ctypes.c_uint32), ("mEl", ctypes.c_uint32)]
+
+        kSys, kGlob, kOutp = ctypes.c_uint32(1), _fcc("glob"), _fcc("outp")
+        kDev, kUID, kMute = _fcc("dev#"), _fcc("uid "), _fcc("mute")
+        kVol, kVMV, kUTF8 = _fcc("volm"), _fcc("vmvc"), 0x08000100
+
+        ca.AudioObjectGetPropertyDataSize.restype = ctypes.c_int32
+        ca.AudioObjectGetPropertyData.restype = ctypes.c_int32
+        ca.AudioObjectHasProperty.restype = ctypes.c_bool
+        ca.AudioObjectSetPropertyData.restype = ctypes.c_int32
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFRelease.restype = None
+        if ahs is not None:
+            try:
+                ahs.AudioHardwareServiceHasProperty.restype = ctypes.c_bool
+                ahs.AudioHardwareServiceGetPropertyData.restype = ctypes.c_int32
+                ahs.AudioHardwareServiceSetPropertyData.restype = ctypes.c_int32
+            except Exception:
+                ahs = None
+
+        def _data_ptr(value):
+            return ctypes.cast(value, ctypes.c_void_p)
+
+        def _get_cfstr(dev: int, selector: int) -> str:
+            pa_uid = _PA(selector, kGlob, 0)
+            value = ctypes.c_void_p(0)
+            size = ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
+            if ca.AudioObjectGetPropertyData(dev, ctypes.byref(pa_uid), 0, None, ctypes.byref(size), ctypes.byref(value)):
+                return ""
+            if not value.value:
+                return ""
+            try:
+                buf = ctypes.create_string_buffer(512)
+                if not cf.CFStringGetCString(value, _data_ptr(buf), len(buf), kUTF8):
+                    return ""
+                return buf.value.decode("utf-8", "replace")
+            finally:
+                try:
+                    cf.CFRelease(value)
+                except Exception:
+                    pass
+
+        def _set_uint32(dev: int, selector: int, element: int, value: int) -> None:
+            pa = _PA(selector, kOutp, element)
+            if ca.AudioObjectHasProperty(dev, ctypes.byref(pa)):
+                data = ctypes.c_uint32(value)
+                ca.AudioObjectSetPropertyData(
+                    dev,
+                    ctypes.byref(pa),
+                    0,
+                    None,
+                    ctypes.c_uint32(ctypes.sizeof(data)),
+                    ctypes.byref(data),
+                )
+
+        def _raise_zero_float(dev: int, selector: int, element: int, use_service: bool = False) -> None:
+            pa = _PA(selector, kOutp, element)
+            has_prop = ahs.AudioHardwareServiceHasProperty if use_service and ahs is not None else ca.AudioObjectHasProperty
+            get_prop = ahs.AudioHardwareServiceGetPropertyData if use_service and ahs is not None else ca.AudioObjectGetPropertyData
+            set_prop = ahs.AudioHardwareServiceSetPropertyData if use_service and ahs is not None else ca.AudioObjectSetPropertyData
+            if not has_prop(dev, ctypes.byref(pa)):
+                return
+            current = ctypes.c_float(0.0)
+            size = ctypes.c_uint32(ctypes.sizeof(current))
+            if get_prop(dev, ctypes.byref(pa), 0, None, ctypes.byref(size), ctypes.byref(current)):
+                return
+            if current.value > 0.001:
+                return
+            new_value = ctypes.c_float(0.5)
+            set_prop(
+                dev,
+                ctypes.byref(pa),
+                0,
+                None,
+                ctypes.c_uint32(ctypes.sizeof(new_value)),
+                ctypes.byref(new_value),
+            )
+
+        # Enumerate output devices and locate the one matching this UID.
+        pa = _PA(kDev, kGlob, 0)
+        sz = ctypes.c_uint32(0)
+        if ca.AudioObjectGetPropertyDataSize(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz)):
+            return
+        ids = (ctypes.c_uint32 * (sz.value // ctypes.sizeof(ctypes.c_uint32)))()
+        if ca.AudioObjectGetPropertyData(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz), ids):
+            return
+
+        target = None
+        for dev in ids:
+            dev_id = int(dev)
+            if _get_cfstr(dev_id, kUID) == device_uid:
+                target = dev_id
+                break
+        if target is None:
+            return
+
+        # Clear mute on the master + per-channel output elements.
+        for el in (0, 1, 2):
+            _set_uint32(target, kMute, el, 0)
+
+        # Zero device volume is effectively silent even when the mute flag is off.
+        _raise_zero_float(target, kVMV, 0, use_service=True)
+        for el in (0, 1, 2):
+            _raise_zero_float(target, kVol, el)
+    except Exception:
+        pass
+
+
 class NativeAudioManager:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -150,6 +276,8 @@ class NativeAudioManager:
 
             if device_uid:
                 sound.setPlaybackDeviceIdentifier_(device_uid)
+                # Unmute the target device first, so a left-muted output isn't silent.
+                _macos_unmute_device(device_uid)
             sound.setVolume_(max(0.0, min(1.0, float(volume))))
             if position > 0:
                 sound.setCurrentTime_(max(0.0, float(position)))

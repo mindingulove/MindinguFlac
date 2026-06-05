@@ -31,6 +31,7 @@ hiddenimports = [
     'service_downloader',
     'ai_reranker',
     'duck_proxy',
+    'ddg_browser',
     'db'
 ]
 tmp_ret = collect_all('SpotiFLAC')
@@ -51,6 +52,19 @@ try:
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 except Exception:
     pass
+
+# Playwright (Duck.ai AI-reranker browser worker). collect_all bundles the node
+# driver + package data; playwright_stealth bundles its JS evasion files. NOTE:
+# the actual Chromium browser is NOT bundled — it lives in the per-user
+# ms-playwright cache, so the app still needs a one-time
+# `python -m playwright install chromium`. The reranker degrades gracefully if
+# the browser is unavailable.
+for _pkg in ('playwright', 'playwright_stealth'):
+    try:
+        tmp_ret = collect_all(_pkg)
+        datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    except Exception:
+        pass
 
 
 helper = Path('build/macos/MindinguflacNowPlayingHelper')

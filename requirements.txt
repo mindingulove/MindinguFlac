@@ -30,3 +30,8 @@ soundfile>=0.12.1; sys_platform == "win32"
 numpy>=1.26.0; sys_platform == "win32"
 torrfetch
 libtorrent; sys_platform != "win32"
+
+# Duck.ai AI-reranker browser worker (ddg_browser.py). Requires a one-time
+# browser download per venv:  python -m playwright install chromium
+playwright>=1.49
+playwright-stealth>=2.0.0

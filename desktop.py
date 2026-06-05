@@ -503,6 +503,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    # Re-entry point for the Duck.ai browser worker. In a frozen app sys.executable
+    # is this binary (not python), so duck_proxy spawns us with --ddg-worker and we
+    # run the worker instead of the GUI (prevents recursively launching the app).
+    if "--ddg-worker" in sys.argv:
+        import ddg_browser
+        ddg_browser.main()
+        sys.exit(0)
     try:
         main()
     except Exception:
