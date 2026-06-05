@@ -4522,7 +4522,8 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   // Share buttons
   const btnCopySpotify = $("ctxCopySpotify");
   if (btnCopySpotify) {
-    const spId = trackIdentityValue(track, "spotify_id");
+    let spId = trackIdentityValue(track, "spotify_id");
+    if (spId && spId.includes(":")) spId = spId.split(":").pop();
     btnCopySpotify.style.display = spId ? "flex" : "none";
     btnCopySpotify.onclick = () => {
       navigator.clipboard.writeText(`https://open.spotify.com/track/${spId}`);
@@ -4532,10 +4533,12 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   const btnCopyMusicBrainz = $("ctxCopyMusicBrainz");
   if (btnCopyMusicBrainz) {
-    const mbId = trackIdentityValue(track, "musicbrainz_recording_id") || 
+    let mbId = trackIdentityValue(track, "musicbrainz_recording_id") || 
                  trackIdentityValue(track, "musicbrainz_track_id") ||
                  trackIdentityValue(track, "musicbrainz_id") ||
-                 trackIdentityValue(track, "musicbrainz_trackid");
+                 trackIdentityValue(track, "musicbrainz_trackid") ||
+                 trackIdentityValue(track, "musicbrainz_recordingid");
+    if (mbId && mbId.includes("/")) mbId = mbId.split("/").pop();
     btnCopyMusicBrainz.style.display = mbId ? "flex" : "none";
     btnCopyMusicBrainz.onclick = () => {
       navigator.clipboard.writeText(`https://musicbrainz.org/recording/${mbId}`);
