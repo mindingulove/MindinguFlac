@@ -1,13 +1,19 @@
 # Changelog
 
-## Unreleased
+## Mindinguflac v0.9.0
+
+### Highlight: app-only output fixes and stronger AI-assisted torrent selection
+
+Mindinguflac now handles selected output devices more reliably on macOS, improves how torrent candidates are ranked and raced, and replaces the fragile Duck.ai direct-request bypass with a persistent browser worker that lets Duck.ai's own frontend handle its challenge flow.
 
 ### Torrent engine
 
+- Passes magnet metadata into the AI reranker so candidate display names and trackers can be considered.
 - Added local SQLite-backed adult/video vocabulary filtering for torrent results and internal torrent file paths.
 - Added torrent source racing where clean matched candidates compete and the first real byte progress wins.
+- Improved torrent racing so candidates are sorted by measured live peer count and the fastest source by real byte progress wins, instead of whichever candidate happens to appear first.
 - Added an optional parallel AI advisor for clean torrent candidate reranking. The advisor is non-blocking and cannot override adult/video filters, metadata checks, or libtorrent byte-progress validation.
-- Added optional Duck.ai advisor support through `duck-chat` with `duckduckgo-ai-chat` available as a CLI fallback when installed.
+- Replaced the brittle Duck.ai direct-request bypass with a long-running Playwright browser worker that uses Duck.ai's real frontend for AI advisor requests.
 - Fixed the AI advisor opt-in gate: installing Duck.ai packages no longer auto-enables Duck requests unless `MINDINGUFLAC_AI_RERANK_PROVIDER` is explicitly configured.
 - Fixed cross-job file deletion: when a same-album prefetch and the active track share one magnet/handle, cleaning up one job no longer deletes the shared `_race` files out from under the other's live download (was surfacing as false "no byte progress" / "stalled during streaming").
 - Throttled concurrent prefetch torrent jobs (`MINDINGUFLAC_PREFETCH_TORRENT_SLOTS`, default 2) so 5-track parallel prefetch can no longer flood the shared libtorrent session and starve the actively-playing track's metadata probe (was surfacing as every source going "unresponsive during metadata probe"). Active playback jobs are never gated.
@@ -21,12 +27,21 @@
 ### Playback and native audio
 
 - Fixed native app-only output handoff while a torrent is still caching: selecting a native device now stops default-output browser playback, remembers the current position, and starts native playback from that position when the cache file is ready.
+- Added a macOS best-effort auto-unmute helper for selected native output devices, including zero-volume recovery, so app-only playback is not silent just because the target device was left muted.
 - Fixed playback dying when the selected app-audio output device disconnects (e.g. EDIFIER over Bluetooth dropping): instead of sitting silently paused, the app now listens for the browser `devicechange` event, detects the device leaving the CoreAudio list, and falls back to the default output ("This computer"), resuming from the same position.
 - Restored the downloaded-file duration check (`downloaded_track_matches_request`), which had become dead code that always returned a match. A multi-file album/discography torrent could bind a job's `library_path` to the wrong sibling track; native output (which resolves files by track identity, unlike the browser which streams by job-id) then played the wrong song. Job finalization now picks the audio file whose duration matches the requested track (±10s) instead of the first file in the folder.
+- Changed the player status icon behavior so a ready track opens the playlist picker, while download/error states still open the progress log.
 
 ### Packaging
 
-- Added Duck.ai advisor packages to requirements so macOS and Windows venv setup can install them for builds.
+- Added Playwright and `playwright-stealth` requirements for the Duck.ai browser worker.
+- Updated macOS and Windows PyInstaller specs so packaged apps include the Duck.ai worker and Playwright Python package data.
+- Added a frozen-app `--ddg-worker` entry point so the packaged desktop app can launch the Duck.ai browser worker without recursively opening the GUI.
+
+### Assets
+
+- `Mindinguflac-macos-arm64.zip` — macOS Apple Silicon desktop build.
+- `Mindinguflac-windows.zip` — Windows x64 desktop build.
 
 ## Mindinguflac v0.8.0
 
