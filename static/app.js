@@ -4537,7 +4537,8 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
                  trackIdentityValue(track, "musicbrainz_track_id") ||
                  trackIdentityValue(track, "musicbrainz_id") ||
                  trackIdentityValue(track, "musicbrainz_trackid") ||
-                 trackIdentityValue(track, "musicbrainz_recordingid");
+                 trackIdentityValue(track, "musicbrainz_recordingid") ||
+                 trackIdentityValue(track, "mbid");
     if (mbId && mbId.includes("/")) mbId = mbId.split("/").pop();
     btnCopyMusicBrainz.style.display = mbId ? "flex" : "none";
     btnCopyMusicBrainz.onclick = () => {
@@ -4548,9 +4549,13 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   const btnCopyYouTube = $("ctxCopyYouTube");
   if (btnCopyYouTube) {
-    let ytUrl = trackIdentityValue(track, "youtube_url");
+    let ytUrl = trackIdentityValue(track, "youtube_url") || trackIdentityValue(track, "url") || "";
+    // If it's just an ID, format it
+    if (ytUrl && !ytUrl.startsWith("http") && ytUrl.length < 15) {
+        ytUrl = `https://www.youtube.com/watch?v=${ytUrl}`;
+    }
     if (!ytUrl) {
-      const ytId = trackIdentityValue(track, "youtube_id");
+      const ytId = trackIdentityValue(track, "youtube_id") || trackIdentityValue(track, "yt_id");
       if (ytId) ytUrl = `https://www.youtube.com/watch?v=${ytId}`;
     }
     btnCopyYouTube.style.display = ytUrl ? "flex" : "none";
@@ -4563,14 +4568,19 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   menu.hidden = false;
 
   // Position menu (fixed position)
-  const menuWidth = menu.offsetWidth;
-  const menuHeight = menu.offsetHeight;
+  // We measure after making it visible
+  const menuWidth = menu.offsetWidth || 220;
+  const menuHeight = menu.offsetHeight || 300;
   let x = event.clientX;
   let y = event.clientY;
 
   // Open upwards if near the bottom boundary
   if (y + menuHeight > window.innerHeight) {
-    y = y - menuHeight;
+    y = window.innerHeight - menuHeight - 10;
+    // If it's still below the click, flip it completely
+    if (y < event.clientY) {
+        y = event.clientY - menuHeight;
+    }
   }
   // Clamp X to right boundary
   if (x + menuWidth > window.innerWidth) {
