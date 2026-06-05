@@ -4291,6 +4291,8 @@ async function _refreshConnectPanel(btState) {
 async function openConnectPanel() {
   $("connectPanel").hidden = false;
   $("btnConnectDevice").classList.add("active");
+  $("connectPanel").style.zIndex = "1000";
+  $("queuePanel").style.zIndex = "900";
   const list = $("connectDeviceList");
   list.innerHTML = `<li style="padding:18px;color:var(--muted);font-size:13px">Loading...</li>`;
   await _refreshConnectPanel();
@@ -4400,6 +4402,8 @@ function refreshQueuePanel() {
 function openQueuePanel() {
   $("queuePanel").hidden = false;
   $("btnQueue").classList.add("active");
+  $("queuePanel").style.zIndex = "1000";
+  $("connectPanel").style.zIndex = "900";
   refreshQueuePanel();
 }
 
@@ -4518,16 +4522,17 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   // Share buttons
   const btnCopySpotify = $("ctxCopySpotify");
   if (btnCopySpotify) {
-    btnCopySpotify.style.display = track.spotify_id ? "flex" : "none";
+    const spId = track.spotify_id || (track.metadata && track.metadata.spotify_id);
+    btnCopySpotify.style.display = spId ? "flex" : "none";
     btnCopySpotify.onclick = () => {
-      navigator.clipboard.writeText(`https://open.spotify.com/track/${track.spotify_id}`);
+      navigator.clipboard.writeText(`https://open.spotify.com/track/${spId}`);
       menu.hidden = true;
     };
   }
 
   const btnCopyMusicBrainz = $("ctxCopyMusicBrainz");
   if (btnCopyMusicBrainz) {
-    const mbId = track.musicbrainz_recording_id || track.musicbrainz_track_id;
+    const mbId = track.musicbrainz_recording_id || track.musicbrainz_track_id || (track.metadata && (track.metadata.musicbrainz_recording_id || track.metadata.musicbrainz_track_id));
     btnCopyMusicBrainz.style.display = mbId ? "flex" : "none";
     btnCopyMusicBrainz.onclick = () => {
       navigator.clipboard.writeText(`https://musicbrainz.org/recording/${mbId}`);
@@ -4553,8 +4558,18 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   let x = event.pageX;
   let y = event.pageY;
 
-  if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
-  if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 10;
+  // Open upwards if near the bottom boundary
+  if (y + menuHeight > window.innerHeight) {
+    y = y - menuHeight;
+  }
+  // Clamp X to right boundary
+  if (x + menuWidth > window.innerWidth) {
+    x = window.innerWidth - menuWidth - 10;
+  }
+
+  // Final safety clamp so it doesn't go off top/left
+  x = Math.max(10, x);
+  y = Math.max(10, y);
 
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
