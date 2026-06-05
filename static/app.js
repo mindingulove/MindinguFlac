@@ -4320,7 +4320,7 @@ $("connectPanelClose").onclick = closeConnectPanel;
 // ---------------------------------------------------------------------------
 // Queue Panel UI
 // ---------------------------------------------------------------------------
-function renderQueueTracks(containerId, tracks, isRecent, baseIndex = -1) {
+function renderQueueTracks(containerId, tracks, isRecent) {
   const container = $(containerId);
   if (!container) return;
   if (!tracks || !tracks.length) {
@@ -4348,10 +4348,9 @@ function renderQueueTracks(containerId, tracks, isRecent, baseIndex = -1) {
       if (el.dataset.qRecent === "true") {
         selectMusicItem(track, "stream", tracks, { title: "Recently Played" });
       } else {
-        // Use the baseIndex captured at render time to avoid double-click jumping bugs
-        const absoluteIndex = idx + baseIndex + 1;
-        if (absoluteIndex < state.queue.length) {
-          state.queueIndex = absoluteIndex;
+        // Use the absolute stable index stored on the track object
+        if (track._qIdx !== undefined && track._qIdx >= 0) {
+          state.queueIndex = track._qIdx;
           selectMusicItem(state.queue[state.queueIndex], "stream", null, state.queueContext);
         }
       }
@@ -4360,7 +4359,7 @@ function renderQueueTracks(containerId, tracks, isRecent, baseIndex = -1) {
       el.oncontextmenu = (event) => {
         event.preventDefault();
         if (typeof showTrackContextMenu === "function") {
-          const cinfo = el.dataset.qRecent === "true" ? {} : { queueIndex: idx + baseIndex + 1 };
+          const cinfo = el.dataset.qRecent === "true" ? {} : { queueIndex: track._qIdx };
           showTrackContextMenu(event, track, cinfo);
         }
       };
@@ -4386,14 +4385,18 @@ function refreshQueuePanel() {
     nowPlayingContainer.innerHTML = `<div style="color:var(--muted); font-size:13px;">Nothing playing</div>`;
   }
 
-  // Capture the current index for stable click handling in the list
-  const baseIdx = state.queueIndex;
-
-  // Next tracks (up to 100)
+  // Next tracks (up to 100, wrapping around if not shuffling)
   let nextTracks = [];
-  if (state.queue && state.queue.length && state.queueIndex >= -1) {
+  if (state.queue && state.queue.length) {
+    const qLen = state.queue.length;
     const startIdx = state.queueIndex + 1;
-    nextTracks = state.queue.slice(startIdx, startIdx + 100);
+    
+    for (let i = 0; i < Math.min(100, qLen - 1); i++) {
+        const targetIdx = (startIdx + i) % qLen;
+        // Don't include the currently playing track in the 'Next' list
+        if (targetIdx === state.queueIndex) break; 
+        nextTracks.push({ ...state.queue[targetIdx], _qIdx: targetIdx });
+    }
   }
   
   if (state.queueContext) {
@@ -4402,7 +4405,7 @@ function refreshQueuePanel() {
     $("queueNextTitle").innerText = "Next";
   }
 
-  renderQueueTracks("queueNextList", nextTracks, false, baseIdx);
+  renderQueueTracks("queueNextList", nextTracks, false);
 
   // Recent tracks
   const recentTracks = (state.catalog && state.catalog.recent_tracks) ? state.catalog.recent_tracks : [];
@@ -4597,27 +4600,30 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   menu.hidden = false;
 
   // Position menu (fixed position)
-  // We use a small delay or two frames to ensure the browser has rendered the menu and header text wrap
+  // We use two requestAnimationFrames to ensure layout is fully calculated
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      const menuWidth = menu.offsetWidth || 220;
-      const menuHeight = menu.offsetHeight || 300;
+      const menuWidth = menu.offsetWidth;
+      const menuHeight = menu.offsetHeight;
+      const winW = window.innerWidth;
+      const winH = window.innerHeight;
+      
       let x = event.clientX;
       let y = event.clientY;
 
-      // Flip horizontally if near right boundary
-      if (x + menuWidth > window.innerWidth) {
+      // Flip horizontal if too close to right edge
+      if (x + menuWidth > winW - 10) {
         x = x - menuWidth;
       }
-      // Clamp X to window boundaries
-      x = Math.max(10, Math.min(x, window.innerWidth - menuWidth - 10));
-
-      // Flip vertically if near bottom boundary
-      if (y + menuHeight > window.innerHeight) {
+      
+      // Flip vertical if too close to bottom edge
+      if (y + menuHeight > winH - 10) {
         y = y - menuHeight;
       }
-      // Clamp Y to window boundaries
-      y = Math.max(10, Math.min(y, window.innerHeight - menuHeight - 10));
+
+      // Final clamping
+      x = Math.max(10, Math.min(x, winW - menuWidth - 10));
+      y = Math.max(10, Math.min(y, winH - menuHeight - 10));
 
       menu.style.left = `${x}px`;
       menu.style.top = `${y}px`;
@@ -4680,25 +4686,66 @@ function showAlbumContextMenu(event, album) {
   // Position menu (fixed position)
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      const menuWidth = menu.offsetWidth || 220;
-      const menuHeight = menu.offsetHeight || 150;
+      const menuWidth = menu.offsetWidth;
+      const menuHeight = menu.offsetHeight;
+      const winW = window.innerWidth;
+      const winH = window.innerHeight;
+      
       let x = event.clientX;
       let y = event.clientY;
 
-      if (x + menuWidth > window.innerWidth) x = x - menuWidth;
-      x = Math.max(10, Math.min(x, window.innerWidth - menuWidth - 10));
+      if (x + menuWidth > winW - 10) {
+        x = x - menuWidth;
+      }
+      
+      if (y + menuHeight > winH - 10) {
+        y = y - menuHeight;
+      }
 
-      if (y + menuHeight > window.innerHeight) y = y - menuHeight;
-      y = Math.max(10, Math.min(y, window.innerHeight - menuHeight - 10));
+      x = Math.max(10, Math.min(x, winW - menuWidth - 10));
+      y = Math.max(10, Math.min(y, winH - menuHeight - 10));
 
       menu.style.left = `${x}px`;
       menu.style.top = `${y}px`;
     });
   });
 }
+$("ctxAlbumAddQueue")?.addEventListener("click", async () => {
+  if (contextMenuTargetAlbum) {
+    let tracks = contextMenuTargetAlbum.tracks || [];
+    if (!tracks.length) {
+      try {
+        const full = await api("/api/album/tracks", { method: "POST", body: JSON.stringify(albumTarget(contextMenuTargetAlbum)) });
+        tracks = full.tracks || [];
+      } catch (e) {
+        console.error("Failed to fetch album tracks:", e);
+      }
+    }
+    if (tracks.length) {
+        tracks.forEach(t => {
+            const trackItem = { ...t, kind: "track" };
+            state.queue.push(trackItem);
+            if (state.originalQueue) state.originalQueue.push(trackItem);
+        });
+        if (!$("queuePanel").hidden) refreshQueuePanel();
+    }
+  }
+  $("albumContextMenu").hidden = true;
+});
+
+$("ctxAlbumCopySpotify")?.addEventListener("click", () => {
+  if (contextMenuTargetAlbum) {
+    const spId = contextMenuTargetAlbum.spotify_id || (contextMenuTargetAlbum.metadata && contextMenuTargetAlbum.metadata.spotify_id);
+    if (spId) {
+      navigator.clipboard.writeText(`https://open.spotify.com/album/${spId}`);
+    }
+  }
+  $("albumContextMenu").hidden = true;
+});
 
 $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
   if (contextMenuTargetAlbum) {
+...
     // 1. Fetch tracks if not present
     let tracks = contextMenuTargetAlbum.tracks || [];
     if (!tracks.length) {

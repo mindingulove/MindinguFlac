@@ -376,8 +376,17 @@
       </div>
     </div>
     <div class="context-menu-separator"></div>
+    <button id="ctxAlbumAddQueue" class="context-menu-item"><i class="bi bi-music-note-list" style="color:var(--muted);"></i> Add to queue</button>
     <button id="ctxAlbumAddPlaylist" class="context-menu-item"><i class="bi bi-plus-circle" style="color:var(--muted);"></i> Add to playlist</button>
     <button id="ctxAlbumGoArtist" class="context-menu-item"><i class="bi bi-person" style="color:var(--muted);"></i> Go to artist</button>
+    <div class="context-menu-separator"></div>
+    <div class="context-menu-item has-submenu" id="ctxAlbumShareMenuItem">
+      <i class="bi bi-share" style="color:var(--muted);"></i> Share
+      <i class="bi bi-caret-right-fill context-submenu-icon"></i>
+      <div class="context-submenu" id="ctxAlbumShareSubmenu">
+        <button id="ctxAlbumCopySpotify" class="context-menu-item"><i class="bi bi-spotify" style="color:var(--muted);"></i> Copy Spotify URL</button>
+      </div>
+    </div>
   </div>
 
   <script src="assets/vendor/tippy/popper.min.js"></script>
