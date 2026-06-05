@@ -853,13 +853,22 @@ function cardsHtml(items, kind, offset = 0) {
 
 function bindCardClicks(container, items) {
   container.querySelectorAll("[data-card]").forEach((button) => {
-    button.onclick = () => selectMusicItem(items[Number(button.dataset.card)], "stream", items);
+    const item = items[Number(button.dataset.card)];
+    button.onclick = () => selectMusicItem(item, "stream", items);
     button.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        selectMusicItem(items[Number(button.dataset.card)], "stream", items);
+        selectMusicItem(item, "stream", items);
       }
     };
+    if (playableQueueItem(item)) {
+      button.oncontextmenu = (event) => {
+        event.preventDefault();
+        if (typeof showTrackContextMenu === "function") {
+          showTrackContextMenu(event, item);
+        }
+      };
+    }
   });
   bindEntityLinks(container);
 }
@@ -1029,10 +1038,19 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
   syncActiveTrackRows();
   container.querySelectorAll(".track-row").forEach(el => {
+    const item = items[Number(el.dataset.itemIdx)];
     el.onclick = (event) => {
       if (event.target.closest("[data-library-action]")) return;
-      selectMusicItem(items[Number(el.dataset.itemIdx)], "stream", items, playbackContext);
+      selectMusicItem(item, "stream", items, playbackContext);
     };
+    if (playableQueueItem(item)) {
+      el.oncontextmenu = (event) => {
+        event.preventDefault();
+        if (typeof showTrackContextMenu === "function") {
+          showTrackContextMenu(event, item);
+        }
+      };
+    }
   });
   bindLibraryButtons();
   bindEntityLinks(container);
@@ -4302,15 +4320,24 @@ function renderQueueTracks(containerId, tracks, isRecent) {
   }).join("");
 
   container.querySelectorAll(".queue-track-item").forEach(el => {
+    const idx = parseInt(el.dataset.qIndex, 10);
+    const track = tracks[idx];
     el.onclick = () => {
-      const idx = parseInt(el.dataset.qIndex, 10);
       if (el.dataset.qRecent === "true") {
-        selectMusicItem(tracks[idx], "stream", tracks, { title: "Recently Played" });
+        selectMusicItem(track, "stream", tracks, { title: "Recently Played" });
       } else {
         const offset = idx + 1; // Since next tracks starts from queueIndex + 1
         playQueueOffset(offset);
       }
     };
+    if (playableQueueItem(track)) {
+      el.oncontextmenu = (event) => {
+        event.preventDefault();
+        if (typeof showTrackContextMenu === "function") {
+          showTrackContextMenu(event, track);
+        }
+      };
+    }
   });
 }
 
@@ -4377,4 +4404,112 @@ document.querySelectorAll(".queue-tab").forEach(tab => {
     $("queueContentQueue").hidden = target !== "queue";
     $("queueContentRecent").hidden = target !== "recent";
   };
+});
+
+// ---------------------------------------------------------------------------
+// Context Menu
+// ---------------------------------------------------------------------------
+let contextMenuTargetTrack = null;
+
+function showTrackContextMenu(event, track) {
+  contextMenuTargetTrack = track;
+  const menu = $("trackContextMenu");
+  if (!menu) return;
+
+  // Build the artist links
+  const artistContainer = $("ctxGoArtistContainer");
+  artistContainer.innerHTML = "";
+  if (track.artist) {
+    const artists = track.artist.split(/,\s*|\s+&\s+/).map(a => a.trim()).filter(Boolean);
+    if (artists.length === 1) {
+      artistContainer.innerHTML = `<button id="ctxGoArtist" class="context-menu-item">Go to artist</button>`;
+      $("ctxGoArtist").onclick = () => {
+        menu.hidden = true;
+        pushPage(() => renderArtistPage(artistTarget({ ...track, artist: artists[0] })));
+      };
+    } else if (artists.length > 1) {
+      const submenuItems = artists.map((a, i) => `<button id="ctxGoArtistSub_${i}" class="context-menu-item">${esc(a)}</button>`).join("");
+      artistContainer.innerHTML = `
+        <div class="context-menu-item has-submenu">
+          Go to artist
+          <i class="bi bi-caret-right-fill context-submenu-icon"></i>
+          <div class="context-submenu">${submenuItems}</div>
+        </div>
+      `;
+      artists.forEach((a, i) => {
+        $(`ctxGoArtistSub_${i}`).onclick = () => {
+          menu.hidden = true;
+          pushPage(() => renderArtistPage(artistTarget({ ...track, artist: a })));
+        };
+      });
+    }
+  }
+
+  $("ctxGoAlbum").style.display = track.album ? "flex" : "none";
+  
+  // Show or hide Spotify copy button depending on if we have a spotify_id
+  const btnCopySpotify = $("ctxCopySpotify");
+  if (btnCopySpotify) {
+    btnCopySpotify.style.display = track.spotify_id ? "flex" : "none";
+  }
+
+  menu.hidden = false;
+
+  // Position menu
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
+  let x = event.pageX;
+  let y = event.pageY;
+
+  if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
+  if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 10;
+
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+}
+
+document.addEventListener("click", (e) => {
+  const menu = $("trackContextMenu");
+  if (menu && !menu.hidden && !menu.contains(e.target)) {
+    menu.hidden = true;
+  }
+});
+
+$("ctxAddQueue")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack) {
+    state.queue.push(contextMenuTargetTrack);
+    if (state.originalQueue) state.originalQueue.push(contextMenuTargetTrack);
+    if (!$("queuePanel").hidden) refreshQueuePanel();
+  }
+  $("trackContextMenu").hidden = true;
+});
+
+$("ctxAddPlaylist")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack) openPlaylistPicker(contextMenuTargetTrack);
+  $("trackContextMenu").hidden = true;
+});
+
+$("ctxGoAlbum")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack) {
+    pushPage(() => renderAlbumPage(albumTarget(contextMenuTargetTrack)));
+  }
+  $("trackContextMenu").hidden = true;
+});
+
+$("ctxCopyLink")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack) {
+    const title = encodeURIComponent(contextMenuTargetTrack.title || contextMenuTargetTrack.name || "");
+    const artist = encodeURIComponent(contextMenuTargetTrack.artist || "");
+    const url = `${window.location.origin}/?q=${title}+${artist}`;
+    navigator.clipboard.writeText(url);
+  }
+  $("trackContextMenu").hidden = true;
+});
+
+$("ctxCopySpotify")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack && contextMenuTargetTrack.spotify_id) {
+    const uri = `https://open.spotify.com/track/${contextMenuTargetTrack.spotify_id}`;
+    navigator.clipboard.writeText(uri);
+  }
+  $("trackContextMenu").hidden = true;
 });
