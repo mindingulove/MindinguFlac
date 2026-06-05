@@ -339,6 +339,14 @@
 
   <!-- Track Context Menu -->
   <div id="trackContextMenu" class="context-menu" hidden>
+    <div id="ctxHeader" class="context-menu-header">
+      <div id="ctxHeaderArt" class="context-menu-header-art"></div>
+      <div class="context-menu-header-info">
+        <strong id="ctxHeaderTitle">Title</strong>
+        <span id="ctxHeaderArtist">Artist</span>
+      </div>
+    </div>
+    <div class="context-menu-separator"></div>
     <button id="ctxAddQueue" class="context-menu-item"><i class="bi bi-music-note-list" style="color:var(--muted);"></i> Add to queue</button>
     <button id="ctxRemoveQueue" class="context-menu-item"><i class="bi bi-trash" style="color:var(--muted);"></i> Remove from queue</button>
     <button id="ctxAddPlaylist" class="context-menu-item"><i class="bi bi-plus-circle" style="color:var(--muted);"></i> Add to playlist</button>

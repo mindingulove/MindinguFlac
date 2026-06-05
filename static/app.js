@@ -4340,8 +4340,11 @@ function renderQueueTracks(containerId, tracks, isRecent) {
       if (el.dataset.qRecent === "true") {
         selectMusicItem(track, "stream", tracks, { title: "Recently Played" });
       } else {
-        const offset = idx + 1; // Since next tracks starts from queueIndex + 1
-        playQueueOffset(offset);
+        const absoluteIndex = idx + state.queueIndex + 1;
+        if (absoluteIndex < state.queue.length) {
+          state.queueIndex = absoluteIndex;
+          selectMusicItem(state.queue[state.queueIndex], "stream", null, state.queueContext);
+        }
       }
     };
     if (playableQueueItem(track)) {
@@ -4431,6 +4434,22 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   const menu = $("trackContextMenu");
   if (!menu) return;
 
+  // Header
+  const headerArt = $("ctxHeaderArt");
+  if (headerArt) {
+    headerArt.style.backgroundImage = track.artwork_url ? `url('${track.artwork_url}')` : "";
+    headerArt.style.display = track.artwork_url ? "block" : "none";
+  }
+  const headerTitle = $("ctxHeaderTitle");
+  if (headerTitle) headerTitle.textContent = track.title || track.name || "Unknown Track";
+  
+  const headerArtist = $("ctxHeaderArtist");
+  if (headerArtist) {
+    let sub = track.artist || "";
+    if (track.album) sub += ` • ${track.album}`;
+    headerArtist.textContent = sub;
+  }
+
   // Build the artist links
   const artistContainer = $("ctxGoArtistContainer");
   artistContainer.innerHTML = "";
@@ -4462,25 +4481,33 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
 
   $("ctxGoAlbum").style.display = track.album ? "flex" : "none";
   
-  // Queue logic
-  $("ctxAddQueue").style.display = contextInfo.queueIndex !== undefined ? "none" : "flex";
+  // Dynamic Queue logic
+  let upcomingIdx = -1;
+  if (state.queue && state.queue.length && state.queueIndex >= 0) {
+    const targetKey = trackKey(track);
+    for (let i = state.queueIndex + 1; i < state.queue.length; i++) {
+      if (trackKey(state.queue[i]) === targetKey) {
+        upcomingIdx = i;
+        break;
+      }
+    }
+  }
+
+  const btnAddQueue = $("ctxAddQueue");
+  if (btnAddQueue) btnAddQueue.style.display = upcomingIdx !== -1 ? "none" : "flex";
   
   const btnRemoveQueue = $("ctxRemoveQueue");
   if (btnRemoveQueue) {
-    if (contextInfo.queueIndex !== undefined) {
+    if (upcomingIdx !== -1) {
       btnRemoveQueue.style.display = "flex";
       btnRemoveQueue.onclick = () => {
-        state.queue.splice(contextInfo.queueIndex, 1);
+        const removed = state.queue.splice(upcomingIdx, 1)[0];
         if (state.originalQueue) {
-            // Need to remove exactly the matched item if we want accurate removal, 
-            // but for simplicity, we just rebuild it if the index is strictly linear.
-            // Or we just remove it from originalQueue by reference:
-            const toRemove = state.queue[contextInfo.queueIndex];
-            const origIdx = state.originalQueue.findIndex(t => t === toRemove);
+            const origIdx = state.originalQueue.findIndex(t => t === removed);
             if (origIdx >= 0) state.originalQueue.splice(origIdx, 1);
         }
-        if (contextInfo.queueIndex < state.queueIndex) state.queueIndex--;
-        refreshQueuePanel();
+        if (upcomingIdx <= state.queueIndex) state.queueIndex--;
+        if (!$("queuePanel").hidden) refreshQueuePanel();
         menu.hidden = true;
       };
     } else {
