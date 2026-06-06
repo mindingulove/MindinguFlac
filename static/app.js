@@ -35,6 +35,7 @@ const state = {
   activeJobPhase: "",
   playbackRequestId: 0,
   sidebarRequestId: 0,
+  sidebarTrackKey: null,
   currentStreamUrl: "",
   currentLibraryPath: "",
   pendingNativeStartAt: 0,
@@ -247,11 +248,12 @@ const STORAGE_KEYS = {
 };
 
 async function api(path, options = {}) {
+  const { timeout = 15000, ...fetchOptions } = options;
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 15000);
+  const id = setTimeout(() => controller.abort(), timeout);
   try {
     const resp = await fetch(`${API_BASE}${path}`, {
-      ...options,
+      ...fetchOptions,
       signal: controller.signal,
     });
     clearTimeout(id);
@@ -2066,7 +2068,6 @@ function updateDetailsPanel(track, job = null) {
       c.innerHTML = url ? "" : `<i class="bi bi-music-note"></i>`;
     }
   });
-  const requestId = ++state.sidebarRequestId;
   $("sideTitle").innerHTML = albumLinkHtml(track, track.title || "No track selected");
   const qualityLabel = qualityLabelForTrack(track, job);
   const qualityHtml = qualityLabel ? `<span class="quality-pill">${qualityLabel}</span>` : "";
@@ -2078,7 +2079,17 @@ function updateDetailsPanel(track, job = null) {
     </div>
   `;
   bindEntityLinks(document.querySelector(".details-head"));
-  renderDetailsSidebar(track, job, requestId, qualityLabel);
+
+  // Only rebuild the rich sidebar content (related/artist/credits/tour) when the
+  // track actually changes. setPlayerStatus() fires on every status tick while a
+  // song loads ("Opening stream..." -> "Searching..." -> "Buffering..."), and
+  // wiping sideRichContent each time was resetting the user's scroll to the top.
+  const key = trackKey(track);
+  if (key !== state.sidebarTrackKey) {
+    state.sidebarTrackKey = key;
+    const requestId = ++state.sidebarRequestId;
+    renderDetailsSidebar(track, job, requestId, qualityLabel);
+  }
 }
 
 function qualityLabelForTrack(track, job = null) {
@@ -2370,6 +2381,8 @@ async function loadSidebarArtistInfo(track, requestId, qualityLabel) {
   const card = $("sideArtistCard");
   if (!card) return;
   const image = (about.gallery && about.gallery[0] && about.gallery[0].url) || about.avatar || track.artist_artwork_url || track.artwork_url || "";
+  // Remember the resolved artist image so the full tour page can use it as a hero.
+  state.sidebarArtist = { name: artistName || track.artist || "", image, id: artistId };
   const bio = stripHtml(about.biography || "");
   card.innerHTML = `
     <button class="side-artist-trigger" id="sideArtistTrigger" type="button">
@@ -2412,34 +2425,52 @@ async function loadSidebarCredits(track, requestId) {
 async function loadSidebarTour(track, requestId) {
   const artistName = primaryArtistName(track);
   const artistId = primaryArtistId(track);
+  // Cache-only: never trigger the slow Duck.ai worker from the sidebar.
   const tour = await api("/api/artist/tour", {
     method: "POST",
-    body: JSON.stringify({ artist_id: artistId, name: artistName }),
+    body: JSON.stringify({ artist_id: artistId, name: artistName, live: false }),
   });
   if (requestId !== state.sidebarRequestId) return;
   const card = $("sideTourCard");
   if (!card) return;
   const events = tour.events || [];
+  const fullName = track.artist || artistName;
   card.querySelector(".side-card-loading")?.remove();
-  card.insertAdjacentHTML("beforeend", `
-    <div class="side-tour-list">
-      ${events.slice(0, 2).map(event => tourEventHtml(event)).join("") || '<div class="side-empty">No upcoming events.</div>'}
-    </div>
-  `);
+  if (events.length) {
+    card.insertAdjacentHTML("beforeend", `
+      <div class="side-tour-list">
+        ${events.slice(0, 3).map(event => tourEventHtml(event)).join("")}
+      </div>
+    `);
+  } else {
+    card.insertAdjacentHTML("beforeend", `
+      <button class="side-tour-find" id="sideTourFind" type="button">
+        <i class="bi bi-globe2"></i> Find tour dates
+      </button>
+    `);
+    $("sideTourFind")?.addEventListener("click", () => openTourPage(fullName));
+  }
   bindExternalUrlButtons(card);
-  $("sideTourShowAll")?.addEventListener("click", () => pushPage(() => renderArtistTourPage(artistName, events)));
+  $("sideTourShowAll")?.addEventListener("click", () => openTourPage(fullName));
+}
+
+function openTourPage(artistName) {
+  const ctx = state.sidebarArtist || {};
+  const image = (ctx.name && ctx.name.toLowerCase() === String(artistName).toLowerCase()) ? ctx.image : "";
+  pushPage(() => renderArtistTourPage(artistName, image));
 }
 
 function tourEventHtml(event = {}) {
   const date = event.date || event.datetime || "";
   const month = event.month || (date ? new Date(date).toLocaleString(undefined, { month: "short" }) : "");
   const day = event.day || (date ? String(new Date(date).getDate()) : "");
+  const sub = event.location || event.venue || event.info || event.artist || "";
   return `
     <button class="side-tour-row" type="button" ${event.url ? `data-open-url="${esc(event.url)}"` : ""}>
       <span class="side-tour-date"><b>${esc(month || "--")}</b><strong>${esc(day || "--")}</strong></span>
       <span class="side-tour-copy">
-        <strong>${esc(event.city || event.location || event.name || "Event")}</strong>
-        <span>${esc(event.venue || event.artist || event.description || "")}</span>
+        <strong>${esc(event.place || event.city || event.location || event.name || "Event")}</strong>
+        <span>${esc(sub)}</span>
       </span>
     </button>
   `;
@@ -2545,39 +2576,86 @@ function showCreditsModal(credits = {}) {
   dialog.showModal();
 }
 
-function renderArtistTourPage(artistName = "Artist", events = []) {
+async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
   setActiveView("home");
   document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
+  const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || "");
+  const localCity = (tz.split("/").pop() || "").replace(/_/g, " ") || "you";
+  const browseUrl = `https://www.songkick.com/search?query=${encodeURIComponent(artistName)}`;
+
   $("pageContent").innerHTML = `
-    <div class="scroll-area">
-      <div class="tour-page">
-        <h1>${esc(artistName)} Tour Dates</h1>
-        <div class="tour-page-empty">
-          ${events.length ? "" : `
-            <p>No upcoming events.</p>
-            <button type="button">Browse all events</button>
-          `}
+    <div class="scroll-area tour-scroll">
+      <div class="tour-events-page">
+        <div class="tour-hero">
+          ${artistImage ? `<div class="tour-hero-art" style="background-image:url('${esc(artistImage)}')"></div>` : ""}
+          <div class="tour-hero-overlay">
+            <span class="tour-eyebrow">All events</span>
+            <h1 class="tour-hero-name">${esc(artistName)}</h1>
+          </div>
         </div>
-        <h2>Other locations</h2>
-        <div class="tour-page-list">
-          ${events.map(event => `
-            <div class="tour-page-row" ${event.url ? `data-open-url="${esc(event.url)}"` : ""}>
-              <div class="tour-page-date">
-                <span>${esc(event.month || "")}</span>
-                <strong>${esc(event.day || "")}</strong>
-              </div>
-              <div>
-                <strong>${esc(event.city || event.location || event.name || "Event")}</strong>
-                <span>${esc(event.venue || event.description || artistName)}</span>
-              </div>
-              <time>${esc(event.time || "")}</time>
-            </div>
-          `).join("") || ""}
+        <div class="tour-hero-actions">
+          <span class="tour-loc-pill"><i class="bi bi-geo-alt-fill"></i> ${esc(localCity)}</span>
+          <a class="tour-share" href="${esc(browseUrl)}" target="_blank" rel="noopener" aria-label="Browse all events"><i class="bi bi-box-arrow-up"></i></a>
+        </div>
+        <div class="tour-body" id="tourBody">
+          <div class="tour-loading"><div class="spinner"></div><span>Finding tour dates…</span></div>
         </div>
       </div>
     </div>
   `;
-  bindExternalUrlButtons($("pageContent"));
+
+  let tour = {};
+  try {
+    tour = await api("/api/artist/tour", {
+      method: "POST",
+      body: JSON.stringify({ name: artistName, live: true }),
+      timeout: 200000,
+    });
+  } catch (e) {
+    tour = { events: [], error: String((e && e.message) || e) };
+  }
+  const body = $("tourBody");
+  if (!body) return;
+  const events = tour.events || [];
+
+  const rowHtml = (event) => {
+    const sub = [event.location || event.venue, event.info].filter(Boolean).join(" · ") || artistName;
+    return `
+      <div class="tour-event-row" ${event.url ? `data-open-url="${esc(event.url)}"` : ""}>
+        <div class="tour-event-date">
+          <span>${esc(event.month || "")}</span>
+          <strong>${esc(event.day || "")}</strong>
+        </div>
+        <div class="tour-event-copy">
+          <strong>${esc(event.place || event.city || "Event")}</strong>
+          <span>${esc(sub)}</span>
+          ${event.price ? `<span class="tour-event-price"><i class="bi bi-tag"></i> ${esc(event.price)}</span>` : ""}
+        </div>
+        <time class="tour-event-time">${esc(event.time || "")}</time>
+      </div>`;
+  };
+
+  body.innerHTML = `
+    <section class="tour-near">
+      <h2>Near ${esc(localCity)}</h2>
+      <div class="tour-near-empty">
+        <p>No upcoming events.</p>
+        <a class="tour-browse-btn" href="${esc(browseUrl)}" target="_blank" rel="noopener">Browse all events</a>
+      </div>
+    </section>
+    ${events.length ? `
+      <section class="tour-other">
+        <h2>Other locations</h2>
+        <div class="tour-event-list">${events.map(rowHtml).join("")}</div>
+        ${tour.source ? `<div class="tour-source">Sourced live via ${esc(tour.source)}</div>` : ""}
+      </section>
+    ` : `
+      <section class="tour-other">
+        <div class="tour-empty-state">${tour.error ? "Couldn't load tour dates right now. Please try again." : "No tour dates found for this artist."}</div>
+      </section>
+    `}
+  `;
+  bindExternalUrlButtons(body);
 }
 
 function serviceDownloadPayload(track, mode = "stream", prefetch = false) {

@@ -236,21 +236,97 @@ class _Worker:
         except Exception:
             pass
 
-    def ask(self, prompt: str) -> dict:
+    def _ensure_model(self, model: str):
+        """Best-effort select a specific Duck.ai model (e.g. "GPT-5").
+
+        The selected model is sticky in the persistent profile, so this is
+        usually a no-op verification. Failures are non-fatal: the chat still
+        works with whatever model is currently active.
+        """
+        if not model:
+            return
+        page = self.page
+        want = model.lower().replace("-", "").replace(" ", "").replace(".", "")
+        try:
+            current = page.evaluate(
+                "() => { const ta=document.querySelector('textarea[name=\"user-prompt\"]');"
+                " const f=ta?ta.closest('form'):document.body;"
+                " const b=[...f.querySelectorAll('button')].find(x=>/gpt|claude|llama|mistral|o[34]/i.test(x.innerText||''));"
+                " return b?b.innerText.trim():''; }"
+            ) or ""
+            if want and want in current.lower().replace("-", "").replace(" ", "").replace(".", ""):
+                return
+            # Open the model picker (the composer button showing the model name) and choose.
+            page.locator('textarea[name="user-prompt"]').wait_for(timeout=4000)
+            picker = page.locator('button', has_text=__import__("re").compile(r"gpt|claude|llama|mistral", __import__("re").I)).last
+            picker.click(timeout=3000)
+            page.wait_for_timeout(350)
+            page.get_by_text(model, exact=False).first.click(timeout=3000)
+            page.wait_for_timeout(300)
+            _log(f"model set to {model}")
+        except Exception as exc:
+            _log(f"model select best-effort failed ({model}): {exc}")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+    def _enable_web_search(self) -> bool:
+        """Turn on Duck.ai's per-conversation "Web Search" tool (idempotent).
+
+        Web Search is a `menuitemradio` under the composer "Tools" menu and
+        resets to off on every new chat, so we enable it on each request that
+        needs live data. Only clicks when currently off (clicking when on would
+        disable it).
+        """
+        page = self.page
+        try:
+            page.get_by_role("button", name="Tools").first.click(timeout=4000)
+            page.wait_for_timeout(350)
+            radio = page.locator('button[role="menuitemradio"]').filter(has_text="Web Search").first
+            checked = None
+            try:
+                checked = radio.get_attribute("aria-checked")
+            except Exception:
+                checked = None
+            if checked != "true":
+                radio.click(timeout=4000)
+                page.wait_for_timeout(300)
+            else:
+                page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+            return True
+        except Exception as exc:
+            _log(f"web search enable failed: {exc}")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+
+    def ask(self, prompt: str, web_search: bool = False, ensure_model: str = "", timeout_s: float = 0.0) -> dict:
         page = self.page
         # Reset capture + start a fresh conversation each call (no context bleed).
         page.evaluate("() => { window.__ddgChat = {}; window.__ddgLatest = null; }")
         self._new_chat()
+        if ensure_model:
+            self._ensure_model(ensure_model)
+        if web_search:
+            self._enable_web_search()
         ta = page.locator('textarea[name="user-prompt"]')
         ta.click()
         ta.fill(prompt)
         page.wait_for_timeout(120)
-        try:
-            page.get_by_role("button", name="Ask").click(timeout=4000)
-        except Exception:
+        for _btn in ("Send", "Ask"):
+            try:
+                page.get_by_role("button", name=_btn).first.click(timeout=3000)
+                break
+            except Exception:
+                continue
+        else:
             ta.press("Enter")
 
-        deadline = time.time() + _REPLY_TIMEOUT_S
+        deadline = time.time() + (timeout_s if timeout_s and timeout_s > 0 else _REPLY_TIMEOUT_S)
         rec = None
         while time.time() < deadline:
             page.wait_for_timeout(300)
@@ -305,7 +381,12 @@ def main():
             _emit({"id": rid, "ok": False, "error": "empty prompt"})
             continue
         try:
-            res = worker.ask(prompt)
+            res = worker.ask(
+                prompt,
+                web_search=bool(req.get("web_search")),
+                ensure_model=req.get("ensure_model", "") or "",
+                timeout_s=float(req.get("timeout_s") or 0),
+            )
         except Exception as exc:
             res = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         res["id"] = rid

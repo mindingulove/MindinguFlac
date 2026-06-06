@@ -1034,7 +1034,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(artist_about(body.get("artist_id"), body.get("name")))
                 return
             if path == "/api/artist/tour":
-                self.send_json(artist_tour(body.get("artist_id", ""), body.get("name", "")))
+                self.send_json(artist_tour(
+                    body.get("artist_id", ""),
+                    body.get("name", ""),
+                    live=bool(body.get("live")),
+                    refresh=bool(body.get("refresh")),
+                ))
                 return
             if path == "/api/track/credits":
                 self.send_json(track_credits(body.get("track") or body))

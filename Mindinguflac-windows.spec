@@ -27,6 +27,7 @@ hiddenimports = [
     'ai_reranker',
     'duck_proxy',
     'ddg_browser',
+    'tour_ai',
     'native_audio',
     'db',
 ]

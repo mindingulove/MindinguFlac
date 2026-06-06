@@ -2844,6 +2844,164 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   font-size: 22px;
 }
 
+/* --- Spotify-style "All events" tour page --- */
+.tour-scroll { padding: 0; }
+.tour-events-page { padding-bottom: 60px; }
+.tour-hero {
+  position: relative;
+  height: clamp(220px, 30vw, 360px);
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+  background: linear-gradient(105deg, #c9ccd1 0%, #e9ebee 45%, #b9bcc2 100%);
+}
+.tour-hero-art {
+  position: absolute;
+  inset: 0 0 0 38%;
+  background-size: cover;
+  background-position: center top;
+  filter: grayscale(0.15);
+}
+.tour-hero-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(201,204,209,1) 0%, rgba(201,204,209,0.15) 38%, rgba(0,0,0,0) 100%);
+}
+.tour-hero-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: clamp(24px, 4vw, 48px);
+}
+.tour-eyebrow {
+  color: #111;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.tour-hero-name {
+  margin: 0;
+  color: #0a0a0a;
+  font-size: clamp(48px, 8vw, 116px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 0.92;
+}
+.tour-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 22px clamp(24px, 4vw, 48px) 6px;
+}
+.tour-loc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(255,255,255,0.35);
+  border-radius: 999px;
+  padding: 9px 18px;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+}
+.tour-share {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted);
+  border: 1px solid rgba(255,255,255,0.18);
+  text-decoration: none;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tour-share:hover { color: var(--text); border-color: rgba(255,255,255,0.4); }
+.tour-body { padding: 18px clamp(24px, 4vw, 48px) 0; }
+.tour-loading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  justify-content: center;
+  padding: 70px 0;
+  color: var(--muted);
+}
+.tour-near h2,
+.tour-other h2 {
+  margin: 40px 0 22px;
+  font-size: clamp(26px, 3vw, 34px);
+  font-weight: 800;
+}
+.tour-near-empty {
+  display: grid;
+  place-items: center;
+  gap: 22px;
+  padding: 28px 0 12px;
+  color: var(--muted);
+}
+.tour-browse-btn {
+  border: 0;
+  border-radius: 999px;
+  padding: 13px 30px;
+  background: var(--text);
+  color: #111;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: none;
+}
+.tour-browse-btn:hover { transform: scale(1.03); }
+.tour-event-list { display: grid; }
+.tour-event-row {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) auto;
+  gap: 26px;
+  align-items: start;
+  padding: 18px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.tour-event-row[data-open-url]:hover { background: rgba(255,255,255,0.07); }
+.tour-event-date {
+  display: grid;
+  justify-items: start;
+  line-height: 1.1;
+}
+.tour-event-date span { color: var(--muted); font-size: 13px; }
+.tour-event-date strong { font-size: 26px; font-weight: 800; }
+.tour-event-copy { min-width: 0; display: grid; gap: 5px; }
+.tour-event-copy > strong { font-size: 20px; font-weight: 700; }
+.tour-event-copy > span { color: var(--muted); font-size: 14px; line-height: 1.4; }
+.tour-event-price {
+  color: #1ed760 !important;
+  font-size: 13px !important;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tour-event-time { color: var(--muted); font-size: 15px; white-space: nowrap; padding-top: 2px; }
+.tour-source { margin: 26px 0 0; color: var(--muted); font-size: 12px; }
+.tour-empty-state { padding: 50px 0; color: var(--muted); text-align: center; }
+
+.side-tour-find {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  border-radius: 999px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.side-tour-find:hover { background: rgba(255,255,255,0.08); }
+
 .artist-link-inline,
 .album-link-inline {
   color: #fff;

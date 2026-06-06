@@ -31,6 +31,7 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - **Improved YouTube Engine**: Smart quality-scoring and automatic skipping of age-restricted or blocked videos with persistent blacklisting.
 - **Visual Quality Indicators**: Real-time **HI-RES** and **HQ** badges in the player sidebar indicating the actual audio fidelity being streamed.
 - **Rich Now Playing Sidebar**: Spotify-style right rail with artwork, quality badges, related music, artist information, credits, tour dates, and the next queue item.
+- **Live Tour Dates**: A dedicated Spotify-style "All events" page lists an artist's upcoming concerts (venue, city, date, time, price), fetched on-demand via AI web search and cached locally.
 
 ## Screenshots
 
@@ -70,8 +71,8 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/queue.png" width="800" alt="Queue Screen">
-  <br><i>Queue - Upcoming tracks and 5-track prefetch visualization</i>
+  <img src="docs/screenshots/sidebar_queue.png" width="800" alt="Queue Panel">
+  <br><i>Queue - Now playing and upcoming tracks with drag-to-reorder</i>
 </p>
 
 <p align="center">
@@ -90,8 +91,18 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/recently_played_queue.png" width="800" alt="Recently Played Queue">
-  <br><i>Recently Played - History accessible inside the queue panel</i>
+  <img src="docs/screenshots/sidebar_recently_played.png" width="800" alt="Recently Played Queue">
+  <br><i>Recently Played - Full playback history inside the queue panel</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/sidebar_related.png" width="800" alt="Now Playing Sidebar">
+  <br><i>Now Playing Sidebar - Cover art, HI-RES/HQ badge, and related music</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/sidebar_about_tour.png" width="800" alt="Sidebar About and Tour">
+  <br><i>Sidebar - About the artist, credits, and live tour dates (sourced on-demand via AI web search)</i>
 </p>
 
 <p align="center">

@@ -89,6 +89,13 @@ def _init_db(conn: sqlite3.Connection):
             last_updated REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS artist_tours (
+            artist_key TEXT PRIMARY KEY,
+            metadata_json TEXT,
+            last_updated REAL
+        )
+    """)
     conn.commit()
 
 
@@ -180,6 +187,32 @@ def get_album_metadata(album_key: str) -> dict | None:
         except Exception:
             pass
     return None
+
+
+def save_artist_tour(artist_key: str, data: dict):
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO artist_tours (artist_key, metadata_json, last_updated)
+        VALUES (?, ?, ?)
+    """, (artist_key, json.dumps(data), time.time()))
+    conn.commit()
+
+
+def get_artist_tour(artist_key: str, max_age: float | None = None) -> dict | None:
+    """Return cached tour data, or None if missing or older than max_age seconds."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT metadata_json, last_updated FROM artist_tours WHERE artist_key = ?",
+        (artist_key,),
+    ).fetchone()
+    if not row:
+        return None
+    if max_age is not None and (time.time() - (row["last_updated"] or 0)) > max_age:
+        return None
+    try:
+        return json.loads(row["metadata_json"])
+    except Exception:
+        return None
 
 
 def save_track_metadata(track_key: str, data: dict):

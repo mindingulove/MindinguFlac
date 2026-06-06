@@ -1507,13 +1507,83 @@ def _bandsintown_events(artist_name: str) -> list[dict]:
     return events
 
 
-def artist_tour(artist_id: str, artist_name: str) -> dict:
-    bit_events = _bandsintown_events(artist_name)
-    if bit_events:
-        return {"artist": artist_name, "events": bit_events, "source": "Bandsintown"}
-    about = spotify_artist_about(artist_id)
-    events = about.get("events") or about.get("concerts") or []
-    return {"artist": artist_name or about.get("name") or "", "events": events, "source": "Spotify"}
+_TOUR_CACHE_TTL = 12 * 3600  # real listings: refresh roughly twice a day
+_TOUR_EMPTY_TTL = 3600       # empty results may be a flaky miss; recheck within an hour
+
+
+def _tour_cache_fresh(cached: dict) -> bool:
+    age = time.time() - (cached.get("cached_at") or 0)
+    ttl = _TOUR_CACHE_TTL if (cached.get("events")) else _TOUR_EMPTY_TTL
+    return age <= ttl
+
+
+def artist_tour(artist_id: str, artist_name: str, live: bool = False, refresh: bool = False) -> dict:
+    """Resolve concert/tour dates for an artist.
+
+    Data comes from Duck.ai (GPT-5 + Web Search) via `tour_ai`, which is slow
+    (a real headed-browser query, serialized with the torrent reranker), so
+    results are cached in SQLite. The sidebar calls with live=False (cache-only,
+    instant); the full tour page calls live=True to trigger a fresh fetch.
+    """
+    artist_name = (artist_name or "").strip()
+    key = norm_name(artist_name)
+
+    if key and not refresh:
+        cached = get_artist_tour_cache(key, None)
+        if cached is not None and _tour_cache_fresh(cached):
+            return cached
+
+    if not live:
+        # Cache-only request (sidebar): don't trigger the slow Duck.ai worker.
+        # Show any cached preview, even if slightly stale.
+        stale = get_artist_tour_cache(key, None) if key else None
+        if stale is not None:
+            return stale
+        return {"artist": artist_name, "events": [], "source": "", "pending": bool(artist_name)}
+
+    # Live request (tour page): fetch via Duck.ai web search, then cache.
+    result = {}
+    try:
+        import tour_ai
+        result = tour_ai.fetch_tour(artist_name)
+    except Exception as exc:
+        result = {"artist": artist_name, "events": [], "source": "", "error": str(exc)}
+
+    events = (result or {}).get("events") or []
+    error = (result or {}).get("error")
+    # Cache any successful query (even an empty result) so a non-touring artist
+    # doesn't keep re-triggering the slow worker. Errors are never cached, so
+    # they retry on the next open.
+    if not error:
+        payload = {
+            "artist": artist_name,
+            "events": events,
+            "source": result.get("source") or "Duck.ai",
+            "cached_at": time.time(),
+        }
+        if key:
+            try:
+                import db
+                db.save_artist_tour(key, payload)
+            except Exception:
+                pass
+        return payload
+
+    # Errored fetch: fall back to any stale cache, else surface the error.
+    stale = get_artist_tour_cache(key, None) if key else None
+    if stale is not None:
+        return stale
+    return {"artist": artist_name, "events": [], "source": result.get("source", ""), "error": error}
+
+
+def get_artist_tour_cache(key: str, max_age):
+    if not key:
+        return None
+    try:
+        import db
+        return db.get_artist_tour(key, max_age)
+    except Exception:
+        return None
 
 
 def enrich_artwork_batch(results: list[dict]) -> list[dict]:

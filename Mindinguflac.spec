@@ -32,6 +32,7 @@ hiddenimports = [
     'ai_reranker',
     'duck_proxy',
     'ddg_browser',
+    'tour_ai',
     'db'
 ]
 tmp_ret = collect_all('SpotiFLAC')

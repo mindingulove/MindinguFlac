@@ -117,7 +117,7 @@ def _ensure_worker() -> bool:
     return _start_worker()
 
 
-def _exchange(payload: dict) -> dict:
+def _exchange(payload: dict, reply_timeout: float | None = None) -> dict:
     """Send one request and read its matching reply (caller holds _lock)."""
     global _req_id, _last_error
     _req_id += 1
@@ -131,7 +131,10 @@ def _exchange(payload: dict) -> dict:
         _stop_worker()
         return {"ok": False, "error": _last_error}
 
-    deadline = time.time() + _REPLY_TIMEOUT_S
+    # Web-search / GPT-5 turns can run well past the default reply window; let
+    # callers extend it. Pad past the worker's own deadline so it answers first.
+    wait_s = (reply_timeout + 20) if reply_timeout else _REPLY_TIMEOUT_S
+    deadline = time.time() + wait_s
     while time.time() < deadline:
         if _proc.poll() is not None:
             _last_error = "worker died while awaiting reply"
@@ -168,20 +171,38 @@ def fetch_status(user_agent: str = "") -> dict:
     return {"vqd_hash_1": "", "error": _last_error or "browser worker unavailable"}
 
 
-def send_chat(token: str, messages: list, model: str = "gpt-5-mini", **kwargs) -> dict:
+def send_chat(
+    token: str,
+    messages: list,
+    model: str = "gpt-5-mini",
+    web_search: bool = False,
+    ensure_model: str = "",
+    reply_timeout: float | None = None,
+    **kwargs,
+) -> dict:
     """Run one chat turn through the real Duck.ai frontend in the browser worker.
 
     `token` is ignored (legacy x-vqd-4 placeholder). `model` is best-effort: the
-    browser uses Duck.ai's currently selected model. Returns {"ok", "text", ...}.
+    browser uses Duck.ai's currently selected model. Set `web_search=True` to
+    turn on Duck.ai's Web Search tool for the turn (live, sourced answers) and
+    `ensure_model` (e.g. "GPT-5") to force a specific model. `reply_timeout`
+    extends the wait for slow web-search turns. Returns {"ok", "text", ...}.
     """
+    payload = {"messages": messages, "model": model}
+    if web_search:
+        payload["web_search"] = True
+    if ensure_model:
+        payload["ensure_model"] = ensure_model
+    if reply_timeout:
+        payload["timeout_s"] = reply_timeout
     with _lock:
         if not _ensure_worker():
             return {"ok": False, "error": _last_error or "browser worker unavailable"}
-        res = _exchange({"messages": messages, "model": model})
+        res = _exchange(dict(payload), reply_timeout=reply_timeout)
         # One automatic restart+retry if the worker dropped mid-exchange.
         if not res.get("ok") and not _worker_alive():
             if _start_worker():
-                res = _exchange({"messages": messages, "model": model})
+                res = _exchange(dict(payload), reply_timeout=reply_timeout)
     return res
 
 
