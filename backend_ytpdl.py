@@ -181,6 +181,42 @@ def _resolved_youtube_url(job: dict) -> str:
     return _youtube_search_query(job)
 
 
+def _current_track_youtube_url(job: dict) -> str:
+    """Return an explicit YouTube URL already attached to the selected track.
+
+    This is different from _resolved_youtube_url(): it never falls back to a
+    search query. The AI race should see this user/current-track URL as the
+    first candidate when present, but search still supplies alternatives.
+    """
+    merged = _job_metadata(job)
+    for key in ("youtube_url", "youtube", "url", "source_url", "external_url"):
+        value = merged.get(key)
+        if _is_youtube_url(value):
+            return str(value)
+    return ""
+
+
+def _prepend_current_youtube_candidate(
+    candidates: list[tuple[str, dict]],
+    job: dict,
+) -> list[tuple[str, dict]]:
+    current_url = _current_track_youtube_url(job)
+    if not current_url:
+        return candidates
+    if any(url == current_url for url, _details in candidates):
+        return candidates
+    wanted = _expected_track(job)
+    details = {
+        "title": f"{wanted.get('artist', '')} - {wanted.get('title', '')}".strip(" -"),
+        "uploader": "Current track YouTube link",
+        "duration": wanted.get("duration") or 0,
+        "score": 100,
+        "url": current_url,
+        "source": "current_youtube_link",
+    }
+    return [(current_url, details), *candidates]
+
+
 def _norm_text(value: object) -> str:
     text = str(value or "").casefold()
     text = re.sub(r"https?://\S+", " ", text)
@@ -493,6 +529,7 @@ def _ranked_youtube_matches_with_ai(
     job: dict,
     manager,
 ) -> list[tuple[str, dict]]:
+    candidates = _prepend_current_youtube_candidate(candidates, job)
     if len(candidates) < 3:
         return candidates
     try:
@@ -647,6 +684,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if not isinstance(search_info, dict):
                             return None
                         candidates = _ranked_youtube_matches(search_info, job)
+                        candidates = _prepend_current_youtube_candidate(candidates, job)
                         candidates = _ranked_youtube_matches_with_ai(candidates, job, manager)
                     except Exception as exc:
                         manager._append_cache_event(job, "trying", f"YouTube search failed: {exc}")

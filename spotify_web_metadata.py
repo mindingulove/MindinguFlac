@@ -185,7 +185,15 @@ def _load_artist_about(artist_id: str) -> dict:
                 "height": top.get("height"),
             })
 
+    # Artist profile picture (distinct from gallery, which is often empty)
+    avatar_sources = (visuals.get("avatarImage") or {}).get("sources") or []
+    avatar = ""
+    if avatar_sources:
+        top_avatar = max(avatar_sources, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
+        avatar = top_avatar.get("url", "")
+
     return {
+        "name": profile.get("name", ""),
         "monthly_listeners": stats.get("monthlyListeners") or 0,
         "global_chart_position": stats.get("globalChartPosition") or 0,
         "followers": stats.get("followers") or 0,
@@ -195,6 +203,7 @@ def _load_artist_about(artist_id: str) -> dict:
             for c in (stats.get("topCities", {}).get("items") or [])
         ],
         "gallery": gallery,
+        "avatar": avatar,
         "verified": bool(profile.get("verified")),
     }
 

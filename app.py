@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, load_config, save_config
-from music_metadata import album_metadata, album_tracks, artist_page, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, search_music, search_relevance
+from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, search_music, search_relevance, track_credits
 from native_audio import native_audio
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
 
@@ -1032,6 +1032,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/artist/about":
                 from music_metadata import artist_about
                 self.send_json(artist_about(body.get("artist_id"), body.get("name")))
+                return
+            if path == "/api/artist/tour":
+                self.send_json(artist_tour(body.get("artist_id", ""), body.get("name", "")))
+                return
+            if path == "/api/track/credits":
+                self.send_json(track_credits(body.get("track") or body))
                 return
             if path == "/api/music/enrich":
                 tracks = body.get("tracks") or []

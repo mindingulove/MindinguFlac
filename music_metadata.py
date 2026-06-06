@@ -1211,8 +1211,27 @@ def album_metadata(config: AppConfig, artist: str, album: str, track: str = "") 
 
 
 def artist_about(artist_id: str, artist_name: str) -> dict:
+    # Tracks played from album pages carry no artist_id; resolve it from the
+    # (full, untruncated) artist name so the sidebar shows the right artist's
+    # listeners/photo instead of falling back to the album cover.
+    if not artist_id and artist_name:
+        try:
+            artist_id = spotify_artist_id(artist_name) or ""
+        except Exception:
+            artist_id = ""
+
     about = spotify_artist_about(artist_id)
-    
+
+    # Ensure a real artist image is always available as a fallback for the
+    # frontend (gallery is frequently empty even for the correct artist).
+    if artist_name and not about.get("avatar") and not (about.get("gallery") or []):
+        try:
+            art = spotify_artist_artwork(artist_name, artist_id)
+            if art:
+                about = {**about, "avatar": art}
+        except Exception:
+            pass
+
     # If we have monthly listeners or followers, we've found the real artist on Spotify.
     # In this case, we trust Spotify data and do NOT fallback to Wikipedia name-searching.
     has_spotify_stats = bool(about.get("monthly_listeners") or about.get("followers"))
@@ -1232,6 +1251,269 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
             about["bio_source"] = "Spotify"
         
     return about
+
+
+def _split_people(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = re.split(r",|;|/|\s+\&\s+", str(value))
+    people = []
+    seen = set()
+    for item in raw:
+        name = str(item).strip()
+        if not name:
+            continue
+        key = norm_name(name)
+        if key and key not in seen:
+            seen.add(key)
+            people.append(name)
+    return people
+
+
+def _credit_row(name: str, role: str, musicbrainz_id: str = "") -> dict:
+    row = {"name": name, "role": role}
+    if musicbrainz_id:
+        row["musicbrainz_id"] = musicbrainz_id
+    return row
+
+
+def _dedupe_credit_rows(rows: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        role = str(row.get("role") or "").strip()
+        if not name:
+            continue
+        key = (norm_name(name), role.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({**row, "name": name, "role": role})
+    return deduped
+
+
+def _recording_credit_sections(recording: dict, title: str, artist: str) -> dict:
+    artist_rows = []
+    composition_rows = []
+    production_rows = []
+    work_ids = []
+
+    for index, credit in enumerate(recording.get("artist-credit") or []):
+        artist_data = credit.get("artist") or {}
+        name = credit.get("name") or artist_data.get("name") or ""
+        if not name:
+            continue
+        artist_rows.append(_credit_row(
+            name,
+            "Main Artist" if index == 0 else "Featured Artist",
+            artist_data.get("id", ""),
+        ))
+
+    production_roles = {
+        "producer": "Producer",
+        "co-producer": "Co-Producer",
+        "executive producer": "Executive Producer",
+        "mix": "Mixer",
+        "mixer": "Mixer",
+        "engineer": "Engineer",
+        "recording engineer": "Recording Engineer",
+        "mastering": "Mastering Engineer",
+        "mastering engineer": "Mastering Engineer",
+        "arranger": "Arranger",
+        "instrument arranger": "Arranger",
+        "vocal arranger": "Vocal Arranger",
+    }
+    composition_roles = {
+        "composer": "Composer",
+        "lyricist": "Lyricist",
+        "writer": "Writer",
+        "songwriter": "Writer",
+        "librettist": "Librettist",
+    }
+
+    for relation in recording.get("relations") or []:
+        rel_type = str(relation.get("type") or "").lower()
+        artist_data = relation.get("artist") or {}
+        work_data = relation.get("work") or {}
+        if work_data.get("id"):
+            work_ids.append(work_data["id"])
+        if artist_data.get("name"):
+            if rel_type in production_roles:
+                production_rows.append(_credit_row(artist_data["name"], production_roles[rel_type], artist_data.get("id", "")))
+            elif rel_type in composition_roles:
+                composition_rows.append(_credit_row(artist_data["name"], composition_roles[rel_type], artist_data.get("id", "")))
+
+    for work_id in dict.fromkeys(work_ids):
+        try:
+            work = get_json(f"https://musicbrainz.org/ws/2/work/{urllib.parse.quote(work_id)}?inc=artist-rels&fmt=json")
+        except Exception:
+            continue
+        for relation in work.get("relations") or []:
+            rel_type = str(relation.get("type") or "").lower()
+            artist_data = relation.get("artist") or {}
+            if artist_data.get("name") and rel_type in composition_roles:
+                composition_rows.append(_credit_row(artist_data["name"], composition_roles[rel_type], artist_data.get("id", "")))
+
+    if not artist_rows and artist:
+        for index, name in enumerate(_split_people(artist)):
+            artist_rows.append(_credit_row(name, "Main Artist" if index == 0 else "Featured Artist"))
+
+    return {
+        "title": title or recording.get("title") or "Track",
+        "artist": artist,
+        "source": "MusicBrainz",
+        "musicbrainz_recording_id": recording.get("id", ""),
+        "sections": [
+            {"title": "Artist", "rows": _dedupe_credit_rows(artist_rows)},
+            {"title": "Composition and lyrics", "rows": _dedupe_credit_rows(composition_rows)},
+            {"title": "Production", "rows": _dedupe_credit_rows(production_rows)},
+        ],
+    }
+
+
+def _musicbrainz_recording_for_credits(track: dict, title: str, artist: str) -> dict:
+    recording_id = track.get("musicbrainz_recording_id") or (track.get("metadata") or {}).get("musicbrainz_recording_id") or ""
+    isrc = track.get("isrc") or (track.get("metadata") or {}).get("isrc") or ""
+    duration_ms = int(track.get("duration_ms") or track.get("length") or (track.get("metadata") or {}).get("duration_ms") or 0)
+
+    if not recording_id and isrc:
+        try:
+            data = get_json("https://musicbrainz.org/ws/2/recording/?" + urllib.parse.urlencode({
+                "query": f'isrc:"{isrc}"',
+                "limit": "10",
+                "fmt": "json",
+                "inc": "artist-credits+isrcs",
+            }))
+            candidates = data.get("recordings") or []
+            exact = [
+                item for item in candidates
+                if (not title or norm_name(item.get("title", "")) == norm_name(title))
+                and (not artist or any(norm_name(c.get("name", "")) == norm_name(artist) for c in item.get("artist-credit") or []))
+            ]
+            if exact:
+                recording_id = exact[0].get("id", "")
+            elif candidates:
+                recording_id = candidates[0].get("id", "")
+        except Exception:
+            pass
+
+    if not recording_id:
+        ids = musicbrainz_recording_identifiers(
+            artist,
+            title,
+            track.get("album") or (track.get("metadata") or {}).get("album") or "",
+            duration_ms,
+        )
+        recording_id = ids.get("musicbrainz_recording_id", "")
+
+    if not recording_id:
+        return {}
+
+    try:
+        return get_json(
+            f"https://musicbrainz.org/ws/2/recording/{urllib.parse.quote(recording_id)}?"
+            + urllib.parse.urlencode({"inc": "artist-credits+artist-rels+work-rels+isrcs", "fmt": "json"})
+        )
+    except Exception:
+        return {}
+
+
+def track_credits(track: dict) -> dict:
+    metadata = track.get("metadata") or {}
+    title = track.get("title") or metadata.get("title") or "Track"
+    artists = _split_people(track.get("artist") or metadata.get("artist"))
+    main = artists[:1]
+    featured = artists[1:]
+
+    mb_recording = _musicbrainz_recording_for_credits(track, title, main[0] if main else "")
+    if mb_recording:
+        return _recording_credit_sections(mb_recording, title, track.get("artist") or metadata.get("artist") or "")
+
+    artist_rows = [{"name": name, "role": "Main Artist"} for name in main]
+    artist_rows.extend({"name": name, "role": "Featured Artist"} for name in featured)
+
+    writer_names = []
+    for key in ("writer", "writers", "composer", "composers", "lyricist", "lyricists"):
+        writer_names.extend(_split_people(track.get(key) or metadata.get(key)))
+    producer_names = []
+    for key in ("producer", "producers", "mixer", "mixers"):
+        producer_names.extend(_split_people(track.get(key) or metadata.get(key)))
+
+    composition_rows = [{"name": name, "role": "Writer"} for name in _split_people(writer_names)]
+    production_rows = [{"name": name, "role": "Producer"} for name in _split_people(producer_names)]
+
+    return {
+        "title": title,
+        "artist": track.get("artist") or metadata.get("artist") or "",
+        "source": "Track metadata",
+        "sections": [
+            {"title": "Artist", "rows": artist_rows},
+            {"title": "Composition and lyrics", "rows": composition_rows},
+            {"title": "Production", "rows": production_rows},
+        ],
+    }
+
+
+def _bandsintown_events(artist_name: str) -> list[dict]:
+    if not artist_name:
+        return []
+    try:
+        url = (
+            "https://rest.bandsintown.com/artists/"
+            + urllib.parse.quote(artist_name, safe="")
+            + "/events?"
+            + urllib.parse.urlencode({"app_id": "mindinguflac"})
+        )
+        data = get_json(url, timeout=8)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    events = []
+    for event in data[:50]:
+        venue = event.get("venue") or {}
+        datetime_value = event.get("datetime") or ""
+        date_part = datetime_value.split("T", 1)[0]
+        time_part = datetime_value.split("T", 1)[1][:5] if "T" in datetime_value else ""
+        month = ""
+        day = ""
+        if date_part:
+            try:
+                parsed = time.strptime(date_part, "%Y-%m-%d")
+                month = time.strftime("%b", parsed)
+                day = str(parsed.tm_mday)
+            except Exception:
+                pass
+        location = ", ".join(part for part in [venue.get("city", ""), venue.get("region", "") or venue.get("country", "")] if part)
+        events.append({
+            "name": event.get("title") or venue.get("name") or "Event",
+            "artist": artist_name,
+            "date": date_part,
+            "datetime": datetime_value,
+            "time": time_part,
+            "month": month,
+            "day": day,
+            "city": venue.get("city") or location,
+            "location": location,
+            "venue": venue.get("name") or "",
+            "country": venue.get("country") or "",
+            "url": event.get("url") or "",
+            "source": "Bandsintown",
+        })
+    return events
+
+
+def artist_tour(artist_id: str, artist_name: str) -> dict:
+    bit_events = _bandsintown_events(artist_name)
+    if bit_events:
+        return {"artist": artist_name, "events": bit_events, "source": "Bandsintown"}
+    about = spotify_artist_about(artist_id)
+    events = about.get("events") or about.get("concerts") or []
+    return {"artist": artist_name or about.get("name") or "", "events": events, "source": "Spotify"}
 
 
 def enrich_artwork_batch(results: list[dict]) -> list[dict]:

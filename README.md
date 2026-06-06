@@ -30,6 +30,7 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - **Optional AI Torrent Advisor**: Clean torrent candidates can be ranked in parallel by an optional AI advisor. AI never sees candidates blocked by the local adult/video filter and cannot override metadata checks or the "first real byte progress wins" torrent race.
 - **Improved YouTube Engine**: Smart quality-scoring and automatic skipping of age-restricted or blocked videos with persistent blacklisting.
 - **Visual Quality Indicators**: Real-time **HI-RES** and **HQ** badges in the player sidebar indicating the actual audio fidelity being streamed.
+- **Rich Now Playing Sidebar**: Spotify-style right rail with artwork, quality badges, related music, artist information, credits, tour dates, and the next queue item.
 
 ## Screenshots
 
@@ -71,6 +72,21 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 <p align="center">
   <img src="docs/screenshots/queue.png" width="800" alt="Queue Screen">
   <br><i>Queue - Upcoming tracks and 5-track prefetch visualization</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/sidebar_now_playing.png" width="330" alt="Now Playing Sidebar">
+  <br><i>Now Playing Sidebar - Artwork, quality badge, and related music</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/sidebar_artist_info.png" width="330" alt="Sidebar Artist Details">
+  <br><i>Sidebar Details - Artist information, credits, tour dates, and queue preview</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/sidebar_next_queue.png" width="330" alt="Sidebar Next Queue">
+  <br><i>Sidebar Queue Preview - The next playable track stays visible at the end of the rail</i>
 </p>
 
 <p align="center">
@@ -193,7 +209,7 @@ If the endpoint, network, or service limit is unavailable, the torrent job conti
 
 ## Roadmap / TODO
 
-- [ ] **Queue Interface**: Dedicated UI for managing and reordering the playback queue.
+- [x] **Queue Interface**: Dedicated right-side queue panel with now-playing, upcoming tracks, recently played history, next-track preview in the sidebar, and drag-and-drop reordering with animated drop indicators.
 
 ---
 

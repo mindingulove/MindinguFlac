@@ -34,6 +34,7 @@ const state = {
   playerStatus: "Choose a track to stream",
   activeJobPhase: "",
   playbackRequestId: 0,
+  sidebarRequestId: 0,
   currentStreamUrl: "",
   currentLibraryPath: "",
   pendingNativeStartAt: 0,
@@ -1246,15 +1247,11 @@ async function renderArtistPage(artist) {
       const format = (n) => new Intl.NumberFormat().format(n);
       const firstGalleryImg = about.gallery && about.gallery[0] ? about.gallery[0].url : artistArtwork;
 
-      const formatBio = (text) => {
-        if (!text) return "";
-        // Convert <a href="spotify:artist:ID">Name</a> into clickable spans
-        return text.replace(/<a href="spotify:artist:([^"]+)">([^<]+)<\/a>/g, (match, id, name) => {
-          return `<span class="artist-link-inline" data-id="${id}" data-name="${name}">${name}</span>`;
-        });
-      };
-
-      const bioHtml = formatBio(about.biography || "No biography available.");
+      const bioHtml = formatBiographyHtml(about.biography || "No biography available.", {
+        name: artistName,
+        artist: artistName,
+        artist_id: resolvedArtistId,
+      });
 
       aboutSection.innerHTML = `
         <h2 style="margin: 48px 0 24px">About</h2>
@@ -1297,7 +1294,7 @@ async function renderArtistPage(artist) {
 
               <div class="posted-by-row">
                  <div class="mini-art" style="background-image: url('${artistArtwork}')"></div>
-                 <span>Posted By <b class="artist-link-inline" data-id="${resolvedArtistId}" data-name="${artistName}">${artistName}</b></span>
+                 <span>Posted By <b class="artist-link-inline" data-open-artist='${attrJson(artistTarget({ artist: artistName, name: artistName, artist_id: resolvedArtistId }))}'>${esc(artistName)}</b></span>
               </div>
 
               <div style="margin-top: 24px; font-size: 12px; color: var(--muted)">Source: ${about.bio_source || "Spotify"}</div>
@@ -1331,17 +1328,7 @@ async function renderArtistPage(artist) {
         }
       });
 
-      // Handle inline artist links
-      aboutSection.querySelectorAll(".artist-link-inline").forEach(el => {
-        el.onclick = (e) => {
-          e.preventDefault();
-          modal.close();
-          pushPage(() => renderArtistPage({
-            name: el.dataset.name,
-            artist_id: el.dataset.id
-          }));
-        };
-      });
+      bindArtistInlineLinks(aboutSection, modal);
 
     } catch (e) {
       console.error("Failed to load artist about:", e);
@@ -2079,32 +2066,10 @@ function updateDetailsPanel(track, job = null) {
       c.innerHTML = url ? "" : `<i class="bi bi-music-note"></i>`;
     }
   });
+  const requestId = ++state.sidebarRequestId;
   $("sideTitle").innerHTML = albumLinkHtml(track, track.title || "No track selected");
-
-  let qualityHtml = "";
-  let qualityLabel = "";
-
-  // 1. Check actual playing path or active audio path
-  const currentPath = state.currentLibraryPath || job?.active_audio_path || "";
-  if (currentPath) {
-    const ext = currentPath.split(".").pop().split("?")[0].toUpperCase();
-    if (["FLAC", "ALAC", "WAV"].includes(ext)) qualityLabel = "HI-RES";
-    else if (["MP3", "M4A", "AAC", "WEBM", "OPUS", "OGG"].includes(ext)) qualityLabel = "HQ";
-  }
-
-  // 2. Fallback to track metadata, job metadata, or global settings if not yet playing
-  if (!qualityLabel) {
-    const metaQual = String(track.quality || job?.quality || state.settings.default_quality || "").toUpperCase();
-    if (["LOSSLESS", "FLAC", "HI_RES", "HIRES", "HI_RES_LOSSLESS", "SQ"].some(q => metaQual.includes(q))) {
-      qualityLabel = "HI-RES";
-    } else if (["MP3", "HQ", "HIGH", "320", "256", "M4A", "AAC"].some(q => metaQual.includes(q))) {
-      qualityLabel = "HQ";
-    }
-  }
-
-  if (qualityLabel) {
-    qualityHtml = `<span class="quality-pill">${qualityLabel}</span>`;
-  }
+  const qualityLabel = qualityLabelForTrack(track, job);
+  const qualityHtml = qualityLabel ? `<span class="quality-pill">${qualityLabel}</span>` : "";
 
   $("sideMeta").innerHTML = `
     <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
@@ -2113,6 +2078,506 @@ function updateDetailsPanel(track, job = null) {
     </div>
   `;
   bindEntityLinks(document.querySelector(".details-head"));
+  renderDetailsSidebar(track, job, requestId, qualityLabel);
+}
+
+function qualityLabelForTrack(track, job = null) {
+  const currentPath = state.currentLibraryPath || job?.active_audio_path || "";
+  if (currentPath) {
+    const ext = currentPath.split(".").pop().split("?")[0].toUpperCase();
+    if (["FLAC", "ALAC", "WAV"].includes(ext)) return "HI-RES";
+    if (["MP3", "M4A", "AAC", "WEBM", "OPUS", "OGG"].includes(ext)) return "HQ";
+  }
+  const metaQual = String(track.quality || job?.quality || state.settings.default_quality || "").toUpperCase();
+  if (["LOSSLESS", "FLAC", "HI_RES", "HIRES", "HI_RES_LOSSLESS", "SQ"].some(q => metaQual.includes(q))) return "HI-RES";
+  if (["MP3", "HQ", "HIGH", "320", "256", "M4A", "AAC"].some(q => metaQual.includes(q))) return "HQ";
+  return "";
+}
+
+function formatCount(value) {
+  const number = Number(value || 0);
+  return number ? new Intl.NumberFormat().format(number) : "0";
+}
+
+function stripHtml(value = "") {
+  const div = document.createElement("div");
+  div.innerHTML = String(value || "");
+  return div.textContent || div.innerText || "";
+}
+
+function biographyLinkTargets() {
+  const artists = new Map();
+  const albums = new Map();
+
+  const addArtist = (name, data = {}) => {
+    const label = String(name || "").trim();
+    if (label.length < 3) return;
+    const key = label.toLowerCase();
+    if (!artists.has(key)) artists.set(key, { ...data, name: label, artist: label });
+  };
+  const addAlbum = (title, data = {}) => {
+    const label = String(title || "").trim();
+    if (label.length < 3) return;
+    const key = label.toLowerCase();
+    if (!albums.has(key)) albums.set(key, { ...data, title: label, album: label });
+  };
+
+  (state.catalog.artists || []).forEach(artist => addArtist(artist.name || artist.artist, artist));
+  (state.catalog.albums || []).forEach(album => {
+    addAlbum(album.title || album.name || album.album, album);
+    addArtist(album.artist, album);
+  });
+  ["top_tracks", "recent_tracks", "personal_tracks"].forEach(section => {
+    (state.catalog[section] || []).forEach(track => {
+      addArtist(track.artist, track);
+      addAlbum(track.album, track);
+    });
+  });
+
+  return {
+    artists: [...artists.values()].sort((a, b) => String(b.name || "").length - String(a.name || "").length),
+    albums: [...albums.values()].sort((a, b) => String(b.title || "").length - String(a.title || "").length),
+  };
+}
+
+function linkifyPlainBiographyText(text = "", currentArtist = {}) {
+  const container = document.createElement("span");
+  container.textContent = String(text || "");
+  const { artists, albums } = biographyLinkTargets();
+  const replacements = [];
+
+  const addReplacement = (label, html) => {
+    const clean = String(label || "").trim();
+    if (clean.length < 3 || !String(text || "").toLowerCase().includes(clean.toLowerCase())) return;
+    replacements.push({ label: clean, html });
+  };
+
+  const currentArtistName = String(currentArtist.name || currentArtist.artist || "").trim();
+  const currentArtistId = currentArtist.artist_id || currentArtist.id || "";
+  if (currentArtistName) {
+    addReplacement(currentArtistName, `<span class="artist-link-inline" data-open-artist='${attrJson(artistTarget({ artist: currentArtistName, name: currentArtistName, artist_id: currentArtistId }))}'>${esc(currentArtistName)}</span>`);
+  }
+  artists.forEach(artist => {
+    const name = artist.name || artist.artist;
+    addReplacement(name, `<span class="artist-link-inline" data-open-artist='${attrJson(artistTarget(artist))}'>${esc(name)}</span>`);
+  });
+  const candidateNames = [
+    ...(String(text || "").match(/\b[A-Z][A-Za-z]+(?:\s+[‘'"][A-Z][A-Za-z]+[’'"])?\s+[A-Z][A-Za-z]+\b/g) || []),
+    ...(String(text || "").match(/\b[A-Z][A-Za-z]+\s+[A-Z][A-Za-z]+\b/g) || []),
+  ];
+  const ignoredNames = new Set(["New York", "Los Angeles", "São Paulo", "Mexico City", "Monthly Listeners"]);
+  candidateNames.forEach(name => {
+    const clean = name.replace(/\s+/g, " ").trim();
+    if (ignoredNames.has(clean) || /^\d/.test(clean)) return;
+    addReplacement(clean, `<span class="artist-link-inline" data-open-artist='${attrJson(artistTarget({ artist: clean, name: clean }))}'>${esc(clean)}</span>`);
+  });
+  albums.forEach(album => {
+    const title = album.title || album.name || album.album;
+    addReplacement(title, `<span class="album-link-inline" data-open-album='${attrJson(albumTarget(album))}'>${esc(title)}</span>`);
+  });
+  const albumMentionPattern = /\b(?:album|record|single)\s+([A-Z][^,.]{2,80}?)(?=\s+(?:changed|became|was|is|won|sold|topped|reached|defined|arrived|followed)|[,.])/gi;
+  let albumMention;
+  while ((albumMention = albumMentionPattern.exec(String(text || ""))) !== null) {
+    const title = albumMention[1].replace(/\s+/g, " ").trim();
+    addReplacement(title, `<span class="album-link-inline" data-open-album='${attrJson(albumTarget({ title, album: title, artist: currentArtist.name || currentArtist.artist || "" }))}'>${esc(title)}</span>`);
+  }
+
+  const sorted = replacements.sort((a, b) => b.label.length - a.label.length);
+  const isBoundary = (value, index) => {
+    if (index <= 0 || index >= value.length) return true;
+    return !/[A-Za-z0-9_]/.test(value[index]);
+  };
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+  textNodes.forEach(node => {
+    const source = node.nodeValue || "";
+    const lower = source.toLowerCase();
+    let cursor = 0;
+    const fragment = document.createDocumentFragment();
+    while (cursor < source.length) {
+      let match = null;
+      for (const replacement of sorted) {
+        const needle = replacement.label.toLowerCase();
+        const idx = lower.indexOf(needle, cursor);
+        if (idx < 0 || !isBoundary(source, idx) || !isBoundary(source, idx + replacement.label.length)) continue;
+        if (!match || idx < match.idx || (idx === match.idx && replacement.label.length > match.label.length)) {
+          match = { ...replacement, idx };
+        }
+      }
+      if (!match) {
+        fragment.append(document.createTextNode(source.slice(cursor)));
+        break;
+      }
+      if (match.idx > cursor) fragment.append(document.createTextNode(source.slice(cursor, match.idx)));
+      const span = document.createElement("span");
+      span.innerHTML = match.html;
+      fragment.append(...Array.from(span.childNodes));
+      cursor = match.idx + match.label.length;
+    }
+    node.replaceWith(fragment);
+  });
+
+  return container.innerHTML;
+}
+
+function formatBiographyHtml(text = "", currentArtist = {}) {
+  const normalized = String(text || "No biography available.")
+    .replace(/<a href="spotify:artist:([^"]+)">([^<]+)<\/a>/g, (match, id, name) => {
+      return `<span class="artist-link-inline" data-open-artist='${attrJson(artistTarget({ artist: name, name, artist_id: id }))}'>${esc(name)}</span>`;
+    });
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = normalized;
+  const plain = wrapper.textContent || wrapper.innerText || "";
+  const hasExplicitLinks = normalized.includes("artist-link-inline");
+  const paragraphs = plain
+    .split(/\n{2,}/)
+    .map(part => part.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  if (!paragraphs.length) return "";
+  return paragraphs.map(paragraph => {
+    if (hasExplicitLinks && plain.trim() === paragraph) return `<p>${normalized}</p>`;
+    return `<p>${linkifyPlainBiographyText(paragraph, currentArtist)}</p>`;
+  }).join("");
+}
+
+function formatArtistBioLinks(text) {
+  return formatBiographyHtml(text);
+}
+
+function primaryArtistName(track = {}) {
+  return String(track.artist || track.metadata?.artist || "").split(/,\s*|\s+&\s+|\s+feat\.?\s+/i)[0].trim();
+}
+
+function primaryArtistId(track = {}) {
+  return track.spotify_artist_id || track.artist_id || track.metadata?.spotify_artist_id || track.metadata?.artist_id || "";
+}
+
+function relatedTracksFor(track, limit = 4) {
+  const artist = primaryArtistName(track).toLowerCase();
+  if (!artist) return [];
+  const pools = [
+    ...(state.catalog.personal_tracks || []),
+    ...(state.catalog.recent_tracks || []),
+    ...(state.catalog.top_tracks || []),
+  ];
+  const seen = new Set([trackKey(track)]);
+  const related = [];
+  for (const candidate of pools) {
+    if (!playableQueueItem(candidate)) continue;
+    if (trackKey(candidate) && seen.has(trackKey(candidate))) continue;
+    if (!String(candidate.artist || "").toLowerCase().includes(artist)) continue;
+    seen.add(trackKey(candidate));
+    related.push(candidate);
+    if (related.length >= limit) break;
+  }
+  return related;
+}
+
+function nextQueueTrack() {
+  restoreLinearOriginalQueue();
+  if (!state.queue.length) return null;
+  const idx = getQueueIndex();
+  if (idx < 0 || state.queue.length < 2) return null;
+  return state.queue[(idx + 1) % state.queue.length];
+}
+
+function sidebarTrackRow(track, cls = "") {
+  const art = track.artwork_url ? `style="background-image:url('${track.artwork_url}')"` : "";
+  return `
+    <button class="side-track-row ${cls}" type="button" data-side-track='${attrJson(track)}'>
+      <span class="side-track-art" ${art}>${track.artwork_url ? "" : '<i class="bi bi-music-note"></i>'}</span>
+      <span class="side-track-copy">
+        <strong>${esc(track.title || track.name || "Unknown")}</strong>
+        <span>${esc(track.artist || "")}</span>
+      </span>
+    </button>
+  `;
+}
+
+function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
+  const content = $("sideRichContent");
+  if (!content) return;
+  const related = relatedTracksFor(track);
+  const next = nextQueueTrack();
+  const artistName = primaryArtistName(track) || track.artist || "";
+
+  content.innerHTML = `
+    ${related.length ? `
+      <section class="side-card">
+        <div class="side-section-head"><h3>Related music</h3></div>
+        <div class="side-related-grid">
+          ${related.map(item => sidebarTrackRow(item)).join("")}
+        </div>
+      </section>
+    ` : ""}
+    <section class="side-card side-artist-card" id="sideArtistCard">
+      <div class="side-card-loading">Loading artist info...</div>
+    </section>
+    <section class="side-card" id="sideCreditsCard">
+      <div class="side-section-head">
+        <h3>Credits</h3>
+        <button class="side-text-btn" id="sideCreditsShowAll" type="button">Show all</button>
+      </div>
+      <div class="side-card-loading">Loading credits...</div>
+    </section>
+    <section class="side-card" id="sideTourCard">
+      <div class="side-section-head">
+        <h3>On tour</h3>
+        <button class="side-text-btn" id="sideTourShowAll" type="button">Show all</button>
+      </div>
+      <div class="side-card-loading">Loading tour dates...</div>
+    </section>
+    ${next ? `
+      <section class="side-card">
+        <div class="side-section-head">
+          <h3>Next in queue</h3>
+          <button class="side-text-btn" id="sideOpenQueue" type="button">Open queue</button>
+        </div>
+        ${sidebarTrackRow(next, "side-next-track")}
+      </section>
+    ` : ""}
+  `;
+
+  bindSidebarTrackRows(content);
+  $("sideOpenQueue")?.addEventListener("click", openQueuePanel);
+
+  loadSidebarArtistInfo(track, requestId, qualityLabel).catch(() => {});
+  loadSidebarCredits(track, requestId).catch(() => {});
+  loadSidebarTour(track, requestId).catch(() => {});
+}
+
+function bindSidebarTrackRows(root) {
+  root.querySelectorAll("[data-side-track]").forEach((button) => {
+    button.onclick = () => {
+      const track = JSON.parse(button.dataset.sideTrack || "{}");
+      selectMusicItem(track, "stream", null, state.queueContext);
+    };
+  });
+}
+
+async function loadSidebarArtistInfo(track, requestId, qualityLabel) {
+  const artistName = primaryArtistName(track);
+  const artistId = primaryArtistId(track);
+  const about = await api("/api/artist/about", {
+    method: "POST",
+    // Send the full (untruncated) artist name so the backend can resolve the
+    // correct artist when the track carries no spotify_artist_id.
+    body: JSON.stringify({ artist_id: artistId, name: track.artist || artistName }),
+  });
+  if (requestId !== state.sidebarRequestId) return;
+  const card = $("sideArtistCard");
+  if (!card) return;
+  const image = (about.gallery && about.gallery[0] && about.gallery[0].url) || about.avatar || track.artist_artwork_url || track.artwork_url || "";
+  const bio = stripHtml(about.biography || "");
+  card.innerHTML = `
+    <button class="side-artist-trigger" id="sideArtistTrigger" type="button">
+      <span class="side-artist-image" style="${image ? `background-image:url('${image}')` : ""}">
+        <span>About the artist</span>
+      </span>
+      <span class="side-artist-info">
+        <strong>${esc(artistName || track.artist || "Artist")}${about.verified ? ' <i class="bi bi-patch-check-fill"></i>' : ""}</strong>
+        ${about.monthly_listeners ? `<span>${formatCount(about.monthly_listeners)} monthly listeners</span>` : ""}
+        ${bio ? `<span class="side-artist-bio">${esc(bio)}</span>` : ""}
+      </span>
+    </button>
+  `;
+  $("sideArtistTrigger")?.addEventListener("click", () => showArtistAboutModal(about, artistName || track.artist, artistId, image));
+}
+
+async function loadSidebarCredits(track, requestId) {
+  const credits = await api("/api/track/credits", {
+    method: "POST",
+    body: JSON.stringify({ track }),
+  });
+  if (requestId !== state.sidebarRequestId) return;
+  const card = $("sideCreditsCard");
+  if (!card) return;
+  const rows = (credits.sections || []).flatMap(section => (section.rows || []).map(row => ({ ...row, section: section.title }))).slice(0, 3);
+  card.querySelector(".side-card-loading")?.remove();
+  card.insertAdjacentHTML("beforeend", `
+    <div class="side-credit-list">
+      ${rows.map(row => `
+        <div class="side-credit-row">
+          <span>${esc(row.name)}</span>
+          <small>${esc(row.role || row.section || "")}</small>
+        </div>
+      `).join("") || '<div class="side-empty">No credits available.</div>'}
+    </div>
+  `);
+  $("sideCreditsShowAll")?.addEventListener("click", () => showCreditsModal(credits));
+}
+
+async function loadSidebarTour(track, requestId) {
+  const artistName = primaryArtistName(track);
+  const artistId = primaryArtistId(track);
+  const tour = await api("/api/artist/tour", {
+    method: "POST",
+    body: JSON.stringify({ artist_id: artistId, name: artistName }),
+  });
+  if (requestId !== state.sidebarRequestId) return;
+  const card = $("sideTourCard");
+  if (!card) return;
+  const events = tour.events || [];
+  card.querySelector(".side-card-loading")?.remove();
+  card.insertAdjacentHTML("beforeend", `
+    <div class="side-tour-list">
+      ${events.slice(0, 2).map(event => tourEventHtml(event)).join("") || '<div class="side-empty">No upcoming events.</div>'}
+    </div>
+  `);
+  bindExternalUrlButtons(card);
+  $("sideTourShowAll")?.addEventListener("click", () => pushPage(() => renderArtistTourPage(artistName, events)));
+}
+
+function tourEventHtml(event = {}) {
+  const date = event.date || event.datetime || "";
+  const month = event.month || (date ? new Date(date).toLocaleString(undefined, { month: "short" }) : "");
+  const day = event.day || (date ? String(new Date(date).getDate()) : "");
+  return `
+    <button class="side-tour-row" type="button" ${event.url ? `data-open-url="${esc(event.url)}"` : ""}>
+      <span class="side-tour-date"><b>${esc(month || "--")}</b><strong>${esc(day || "--")}</strong></span>
+      <span class="side-tour-copy">
+        <strong>${esc(event.city || event.location || event.name || "Event")}</strong>
+        <span>${esc(event.venue || event.artist || event.description || "")}</span>
+      </span>
+    </button>
+  `;
+}
+
+function bindExternalUrlButtons(root = document) {
+  root.querySelectorAll("[data-open-url]").forEach(button => {
+    if (button.dataset.urlBound) return;
+    button.dataset.urlBound = "1";
+    button.addEventListener("click", () => {
+      const url = button.dataset.openUrl || "";
+      if (url) window.open(url, "_blank", "noopener");
+    });
+  });
+}
+
+function bindArtistInlineLinks(root, modal = null) {
+  root.querySelectorAll(".artist-link-inline, .album-link-inline").forEach(el => {
+    el.onclick = (event) => {
+      event.preventDefault();
+      if (modal) modal.close();
+      if (el.dataset.openArtist) {
+        pushPage(() => renderArtistPage(JSON.parse(el.dataset.openArtist || "{}")));
+      } else if (el.dataset.openAlbum) {
+        pushPage(() => renderAlbumPage(JSON.parse(el.dataset.openAlbum || "{}")));
+      }
+    };
+  });
+}
+
+function showArtistAboutModal(about = {}, artistName = "Artist", artistId = "", image = "") {
+  document.getElementById("sidebarArtistAboutModal")?.remove();
+  const bioHtml = formatBiographyHtml(about.biography || "No biography available.", {
+    name: artistName,
+    artist: artistName,
+    artist_id: artistId,
+  });
+  const gallery = about.gallery || [];
+  const heroImage = image || (gallery[0] && gallery[0].url) || "";
+  const dialog = document.createElement("dialog");
+  dialog.className = "about-modal sidebar-about-modal";
+  dialog.id = "sidebarArtistAboutModal";
+  dialog.innerHTML = `
+    <button class="about-close" type="button" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+    <div class="sidebar-about-modal-content">
+      ${heroImage ? `<div class="sidebar-about-hero" style="background-image:url('${heroImage}')"></div>` : ""}
+      <div class="sidebar-about-body">
+        <div class="about-stat-row">
+          <div class="about-stat-item"><b>${formatCount(about.followers)}</b><span>Followers</span></div>
+          <div class="about-stat-item"><b>${formatCount(about.monthly_listeners)}</b><span>Monthly Listeners</span></div>
+        </div>
+        <div class="about-bio-full">${bioHtml}</div>
+        ${about.top_cities && about.top_cities.length ? `
+          <h3>Where people listen</h3>
+          <ul class="top-cities-list">
+            ${about.top_cities.slice(0, 8).map(c => `
+              <li><b>${esc(c.city)}, ${esc(c.country)}</b><span>${formatCount(c.count)} listeners</span></li>
+            `).join("")}
+          </ul>
+        ` : ""}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(dialog);
+  dialog.querySelector(".about-close").onclick = () => dialog.close();
+  dialog.onclick = (event) => { if (event.target === dialog) dialog.close(); };
+  dialog.addEventListener("close", () => dialog.remove());
+  bindArtistInlineLinks(dialog, dialog);
+  dialog.showModal();
+}
+
+function showCreditsModal(credits = {}) {
+  document.getElementById("sidebarCreditsModal")?.remove();
+  const dialog = document.createElement("dialog");
+  dialog.className = "side-modal credits-modal";
+  dialog.id = "sidebarCreditsModal";
+  dialog.innerHTML = `
+    <div class="side-modal-head">
+      <div>
+        <h2>Credits</h2>
+        <strong>${esc(credits.title || "Track")}</strong>
+      </div>
+      <button class="side-modal-close" type="button" aria-label="Close"><i class="bi bi-x-lg"></i></button>
+    </div>
+    <div class="side-modal-body">
+      ${(credits.sections || []).map(section => `
+        <section class="credits-modal-section">
+          <h3>${esc(section.title)}</h3>
+          ${(section.rows || []).map(row => `
+            <div class="credits-modal-row">
+              <span>${esc(row.name)}</span>
+              <small>${esc(row.role || "")}</small>
+            </div>
+          `).join("") || '<div class="side-empty">No entries.</div>'}
+        </section>
+      `).join("")}
+    </div>
+  `;
+  document.body.appendChild(dialog);
+  dialog.querySelector(".side-modal-close").onclick = () => dialog.close();
+  dialog.onclick = (event) => { if (event.target === dialog) dialog.close(); };
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.showModal();
+}
+
+function renderArtistTourPage(artistName = "Artist", events = []) {
+  setActiveView("home");
+  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
+  $("pageContent").innerHTML = `
+    <div class="scroll-area">
+      <div class="tour-page">
+        <h1>${esc(artistName)} Tour Dates</h1>
+        <div class="tour-page-empty">
+          ${events.length ? "" : `
+            <p>No upcoming events.</p>
+            <button type="button">Browse all events</button>
+          `}
+        </div>
+        <h2>Other locations</h2>
+        <div class="tour-page-list">
+          ${events.map(event => `
+            <div class="tour-page-row" ${event.url ? `data-open-url="${esc(event.url)}"` : ""}>
+              <div class="tour-page-date">
+                <span>${esc(event.month || "")}</span>
+                <strong>${esc(event.day || "")}</strong>
+              </div>
+              <div>
+                <strong>${esc(event.city || event.location || event.name || "Event")}</strong>
+                <span>${esc(event.venue || event.description || artistName)}</span>
+              </div>
+              <time>${esc(event.time || "")}</time>
+            </div>
+          `).join("") || ""}
+        </div>
+      </div>
+    </div>
+  `;
+  bindExternalUrlButtons($("pageContent"));
 }
 
 function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
@@ -4353,7 +4818,26 @@ async function _refreshConnectPanel(btState) {
   } catch { await _renderConnectDevices([], btState, false); }
 }
 
+function positionDetailsOverlay() {
+  const detailsPanel = document.querySelector(".details-panel");
+  if (detailsPanel) {
+    const rect = detailsPanel.getBoundingClientRect();
+    document.documentElement.style.setProperty("--details-overlay-left", `${rect.left}px`);
+    document.documentElement.style.setProperty("--details-overlay-width", `${rect.width}px`);
+    detailsPanel.classList.add("details-overlay-open");
+  }
+}
+
+function releaseDetailsOverlay() {
+  if ($("queuePanel")?.hidden && $("connectPanel")?.hidden) {
+    document.querySelector(".details-panel")?.classList.remove("details-overlay-open");
+    document.documentElement.style.removeProperty("--details-overlay-left");
+    document.documentElement.style.removeProperty("--details-overlay-width");
+  }
+}
+
 async function openConnectPanel() {
+  positionDetailsOverlay();
   $("connectPanel").hidden = false;
   $("btnConnectDevice").classList.add("active");
   $("connectPanel").style.zIndex = "1000";
@@ -4365,6 +4849,7 @@ async function openConnectPanel() {
 
 function closeConnectPanel() {
   $("connectPanel").hidden = true;
+  releaseDetailsOverlay();
   if (_btScanInterval) { clearInterval(_btScanInterval); _btScanInterval = null; }
   api("/api/bluetooth/scan/stop", { method: "POST", body: "{}" }).catch(() => {});
   $("btnConnectDevice").classList.toggle("active", _activeSinkId !== "");
@@ -4389,8 +4874,10 @@ function renderQueueTracks(containerId, tracks, isRecent) {
   container.innerHTML = tracks.map((track, i) => {
     const art = track.artwork_url ? `background-image: url('${track.artwork_url}');` : "";
     const isActive = isRecent && state.currentTrack && trackKey(track) === trackKey(state.currentTrack);
+    const isReorderable = !isRecent && Number.isInteger(track._qIdx) && track._qIdx >= 0;
     return `
-      <div class="queue-track-item ${isActive ? "active" : ""}" data-q-index="${i}" data-q-recent="${isRecent}">
+      <div class="queue-track-item ${isActive ? "active" : ""} ${isReorderable ? "queue-track-reorderable" : ""}" data-q-index="${i}" data-q-abs-index="${track._qIdx ?? ""}" data-q-recent="${isRecent}" ${isReorderable ? 'draggable="true"' : ""}>
+        ${isReorderable ? '<i class="bi bi-grip-vertical queue-drag-handle" aria-hidden="true"></i>' : ""}
         <div class="queue-track-art" style="${art}"></div>
         <div class="queue-track-info">
           <div class="queue-track-title" ${isActive ? 'style="color:var(--accent)"' : ""}>${esc(track.title || track.name)}</div>
@@ -4423,6 +4910,81 @@ function renderQueueTracks(containerId, tracks, isRecent) {
         }
       };
     }
+  });
+  if (!isRecent) bindQueueReorder(container);
+}
+
+function reorderQueueTrack(fromIndex, toIndex) {
+  if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return false;
+  if (fromIndex < 0 || toIndex < 0 || fromIndex >= state.queue.length || toIndex >= state.queue.length) return false;
+  const currentKey = state.currentTrack ? trackKey(state.currentTrack) : "";
+  const moving = state.queue[fromIndex];
+  if (currentKey && trackKey(moving) === currentKey) return false;
+
+  const [item] = state.queue.splice(fromIndex, 1);
+  let insertIndex = toIndex;
+  if (fromIndex < toIndex) insertIndex -= 1;
+  insertIndex = Math.max(0, Math.min(state.queue.length, insertIndex));
+  state.queue.splice(insertIndex, 0, item);
+  state.queueIndex = state.queue.findIndex(track => trackKey(track) === currentKey);
+  if (state.queueIndex < 0 && currentKey) state.queueIndex = 0;
+  state.originalQueue = [...state.queue];
+  prefetchNextTracks();
+  refreshQueuePanel();
+  return true;
+}
+
+function bindQueueReorder(container) {
+  let draggedIndex = -1;
+  const clearDropTargets = () => {
+    container.querySelectorAll(".queue-drop-before, .queue-drop-after").forEach(el => {
+      el.classList.remove("queue-drop-before", "queue-drop-after");
+    });
+  };
+  container.querySelectorAll(".queue-track-reorderable").forEach(row => {
+    row.addEventListener("dragstart", (event) => {
+      draggedIndex = parseInt(row.dataset.qAbsIndex || "-1", 10);
+      row.classList.add("queue-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(draggedIndex));
+    });
+    row.addEventListener("dragend", () => {
+      row.classList.remove("queue-dragging");
+      draggedIndex = -1;
+      clearDropTargets();
+    });
+    row.addEventListener("dragover", (event) => {
+      const targetIndex = parseInt(row.dataset.qAbsIndex || "-1", 10);
+      if (draggedIndex < 0 || targetIndex < 0 || draggedIndex === targetIndex) return;
+      event.preventDefault();
+      clearDropTargets();
+      const rect = row.getBoundingClientRect();
+      const after = event.clientY > rect.top + rect.height / 2;
+      row.classList.add(after ? "queue-drop-after" : "queue-drop-before");
+      event.dataTransfer.dropEffect = "move";
+    });
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const targetIndex = parseInt(row.dataset.qAbsIndex || "-1", 10);
+      if (draggedIndex < 0 || targetIndex < 0 || draggedIndex === targetIndex) return;
+      const rect = row.getBoundingClientRect();
+      const after = event.clientY > rect.top + rect.height / 2;
+      reorderQueueTrack(draggedIndex, after ? targetIndex + 1 : targetIndex);
+    });
+  });
+  container.addEventListener("dragover", (event) => {
+    if (draggedIndex < 0) return;
+    const row = event.target.closest(".queue-track-reorderable");
+    if (row) return;
+    event.preventDefault();
+    clearDropTargets();
+    const last = container.querySelector(".queue-track-reorderable:last-child");
+    last?.classList.add("queue-drop-after");
+  });
+  container.addEventListener("drop", (event) => {
+    if (draggedIndex < 0 || event.target.closest(".queue-track-reorderable")) return;
+    event.preventDefault();
+    reorderQueueTrack(draggedIndex, state.queue.length);
   });
 }
 
@@ -4473,6 +5035,7 @@ function refreshQueuePanel() {
 }
 
 function openQueuePanel() {
+  positionDetailsOverlay();
   $("queuePanel").hidden = false;
   $("btnQueue").classList.add("active");
   $("queuePanel").style.zIndex = "1000";
@@ -4482,6 +5045,7 @@ function openQueuePanel() {
 
 function closeQueuePanel() {
   $("queuePanel").hidden = true;
+  releaseDetailsOverlay();
   $("btnQueue").classList.remove("active");
 }
 
@@ -4490,6 +5054,12 @@ $("btnQueue").onclick = () => {
   else closeQueuePanel();
 };
 $("queuePanelClose").onclick = closeQueuePanel;
+
+window.addEventListener("resize", () => {
+  if (!$("queuePanel")?.hidden || !$("connectPanel")?.hidden) {
+    positionDetailsOverlay();
+  }
+});
 
 document.querySelectorAll(".queue-tab").forEach(tab => {
   tab.onclick = () => {
