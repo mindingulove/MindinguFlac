@@ -441,9 +441,45 @@ function albumTarget(item = {}) {
     artist_artwork_url: item.artist_artwork_url || "",
     spotify_artist_id: item.spotify_artist_id || item.artist_id || "",
     year: item.year || "",
-    musicbrainz_release_id: item.musicbrainz_release_id || "",
-    spotify_id: item.album_spotify_id || item.spotify_album_id || "",
+    musicbrainz_release_id: item.musicbrainz_release_id || item.release_id || (item.metadata && (item.metadata.musicbrainz_release_id || item.metadata.release_id)) || "",
+    spotify_id: item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || (item.metadata && (item.metadata.album_spotify_id || item.metadata.spotify_album_id || item.metadata.spotify_id)) || "",
   };
+}
+
+function spotifyAlbumId(album = {}) {
+  const value = album.spotify_id || album.album_spotify_id || album.spotify_album_id || (album.metadata && (album.metadata.album_spotify_id || album.metadata.spotify_album_id || album.metadata.spotify_id)) || "";
+  const match = String(value).match(/(?:open\.spotify\.com\/album\/|spotify:album:)([A-Za-z0-9]+)/);
+  return match ? match[1] : String(value).trim();
+}
+
+function spotifyAlbumUrl(album = {}) {
+  const url = album.spotify_url || album.external_url || (album.external_urls && album.external_urls.spotify) || "";
+  if (url && /open\.spotify\.com\/album\//.test(url)) return url;
+  const id = spotifyAlbumId(albumTarget(album));
+  return id ? `https://open.spotify.com/album/${id}` : "";
+}
+
+function musicBrainzReleaseId(album = {}) {
+  const value = album.musicbrainz_release_id || album.release_id || (album.metadata && (album.metadata.musicbrainz_release_id || album.metadata.release_id)) || "";
+  const match = String(value).match(/musicbrainz\.org\/release\/([0-9a-f-]+)/i);
+  return match ? match[1] : String(value).trim();
+}
+
+function musicBrainzReleaseUrl(album = {}) {
+  const id = musicBrainzReleaseId(albumTarget(album));
+  return id ? `https://musicbrainz.org/release/${id}` : "";
+}
+
+async function fetchAlbumTracks(album = {}) {
+  const target = albumTarget(album);
+  const params = new URLSearchParams({
+    artist: target.artist || "",
+    album: target.album || target.title || "",
+    release_id: musicBrainzReleaseId(target),
+    spotify_id: spotifyAlbumId(target),
+  });
+  const full = await api(`/api/music/album_tracks?${params.toString()}`);
+  return full.tracks || [];
 }
 
 function artistLinkHtml(item, text = null, className = "") {
@@ -1150,6 +1186,15 @@ async function renderArtistPage(artist) {
   let tracksExpanded = false;
   let albumsExpanded = false;
 
+  function artistPlaybackContext() {
+    return {
+      kind: "artist",
+      title: artistName || "Artist",
+      name: artistName || "Artist",
+      id: resolvedArtistId || artistName || "",
+    };
+  }
+
   function updateSectionToggle(buttonId, expanded, hasMore, onClick) {
     const button = $(buttonId);
     if (!button) return;
@@ -1160,7 +1205,12 @@ async function renderArtistPage(artist) {
   }
 
   function redrawArtistTracks() {
-    renderTrackList("artistTopTracks", tracksExpanded ? artistTracks : artistTracks.slice(0, ARTIST_TRACK_PREVIEW_COUNT), "artist");
+    renderTrackList(
+      "artistTopTracks",
+      tracksExpanded ? artistTracks : artistTracks.slice(0, ARTIST_TRACK_PREVIEW_COUNT),
+      "artist",
+      artistPlaybackContext()
+    );
     updateSectionToggle("artistTracksToggle", tracksExpanded, artistTracks.length > ARTIST_TRACK_PREVIEW_COUNT, () => {
       tracksExpanded = !tracksExpanded;
       redrawArtistTracks();
@@ -2115,6 +2165,12 @@ function currentQueueOrderKey() {
   return `${state.isShuffle ? "shuffle" : "linear"}|${state.queue.map(trackKey).join(">")}`;
 }
 
+function restoreLinearOriginalQueue() {
+  if (state.isShuffle || !state.currentTrack || state.originalQueue.length <= state.queue.length) return;
+  state.queue = [...state.originalQueue];
+  state.queueIndex = state.queue.findIndex(t => trackKey(t) === trackKey(state.currentTrack));
+}
+
 function upcomingPrefetchTracks(limit = PREFETCH_AHEAD_COUNT) {
   if (state.isRepeat || !state.queue.length) return [];
   const idx = getQueueIndex();
@@ -2168,6 +2224,8 @@ function adoptPrefetchJobForTrack(track) {
 }
 
 function playQueueOffset(delta) {
+  if (!state.queue.length && !state.originalQueue.length) return;
+  restoreLinearOriginalQueue();
   if (!state.queue.length) return;
   const idx = getQueueIndex();
   state.queueIndex = ((idx < 0 ? 0 : idx) + delta + state.queue.length) % state.queue.length;
@@ -2202,12 +2260,13 @@ async function prefetchOneTrack(next, orderKey) {
 
 async function prefetchNextTracks() {
   if (state.isRepeat) { console.log("[Prefetch] skipped: repeat on"); return; }
+  restoreLinearOriginalQueue();
   if (!state.queue.length) { console.log("[Prefetch] skipped: empty queue"); return; }
   const targets = upcomingPrefetchTracks();
   if (!targets.length) { console.log("[Prefetch] skipped: no upcoming tracks"); return; }
   const orderKey = currentQueueOrderKey();
   cancelPrefetchJobs("outside current queue window", new Set(targets.map(trackKey)), orderKey);
-  console.log("[Prefetch] Starting window:", targets.map(track => track.title).join(", "));
+  console.log(`[Prefetch] Starting batch of ${targets.length}:`, targets.map(track => track.title).join(", "));
   await Promise.all(targets.map(track => prefetchOneTrack(track, orderKey)));
 }
 
@@ -4368,6 +4427,7 @@ function renderQueueTracks(containerId, tracks, isRecent) {
 }
 
 function refreshQueuePanel() {
+  restoreLinearOriginalQueue();
   // Now Playing
   const nowPlayingContainer = $("queueNowPlaying");
   if (state.currentTrack) {
@@ -4445,6 +4505,72 @@ document.querySelectorAll(".queue-tab").forEach(tab => {
 // Context Menu
 // ---------------------------------------------------------------------------
 let contextMenuTargetTrack = null;
+let contextMenuLibraryReady = false;
+
+function ensureContextMenuLibrary() {
+  if (contextMenuLibraryReady) return;
+  ["trackContextMenu", "albumContextMenu"].forEach((menuId) => {
+    if ($(menuId) && !$(`${menuId}ToggleProxy`)) {
+      const proxy = document.createElement("button");
+      proxy.id = `${menuId}ToggleProxy`;
+      proxy.type = "button";
+      proxy.className = "cm-toggle context-menu-toggle-proxy";
+      proxy.setAttribute("data-cm-target", `#${menuId}`);
+      proxy.tabIndex = -1;
+      proxy.setAttribute("aria-hidden", "true");
+      document.body.appendChild(proxy);
+    }
+  });
+  const contextMenuLib = window.ContextMenuLib || (typeof ContextMenuLib !== "undefined" ? ContextMenuLib : null);
+  if (contextMenuLib && typeof contextMenuLib.init === "function") {
+    contextMenuLib.init();
+    contextMenuLibraryReady = true;
+  }
+}
+
+function openContextMenu(event, menu) {
+  if (!menu) return;
+  event.preventDefault();
+  ensureContextMenuLibrary();
+  menu.hidden = false;
+  menu.style.display = "none";
+  const proxy = $(`${menu.id}ToggleProxy`);
+  if (!contextMenuLibraryReady || !proxy) {
+    menu.style.display = "block";
+    menu.style.left = `${Math.max(10, event.clientX)}px`;
+    menu.style.top = `${Math.max(10, event.clientY)}px`;
+    return;
+  }
+  proxy.dispatchEvent(new MouseEvent("contextmenu", {
+    bubbles: true,
+    cancelable: true,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    screenX: event.screenX,
+    screenY: event.screenY,
+  }));
+  requestAnimationFrame(() => positionContextSubmenus(menu));
+}
+
+function positionContextSubmenus(menu) {
+  if (!menu || menu.hidden) return;
+  menu.querySelectorAll(".context-menu-item.has-submenu").forEach((item) => {
+    const submenu = item.querySelector(".context-submenu");
+    const icon = item.querySelector(".context-submenu-icon");
+    if (!submenu) return;
+    item.classList.remove("submenu-left");
+    submenu.style.display = "block";
+    const itemRect = item.getBoundingClientRect();
+    const submenuWidth = submenu.offsetWidth || 180;
+    submenu.style.display = "";
+    const shouldOpenLeft = itemRect.right + submenuWidth > window.innerWidth - 10;
+    item.classList.toggle("submenu-left", shouldOpenLeft);
+    if (icon) {
+      icon.classList.toggle("bi-caret-left-fill", shouldOpenLeft);
+      icon.classList.toggle("bi-caret-right-fill", !shouldOpenLeft);
+    }
+  });
+}
 
 $("ctxDownload")?.addEventListener("click", () => {
   if (contextMenuTargetTrack) {
@@ -4597,38 +4723,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
     };
   }
 
-  menu.hidden = false;
-
-  // Position menu (fixed position)
-  // We use two requestAnimationFrames to ensure layout is fully calculated
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const menuWidth = menu.offsetWidth;
-      const menuHeight = menu.offsetHeight;
-      const winW = window.innerWidth;
-      const winH = window.innerHeight;
-      
-      let x = event.clientX;
-      let y = event.clientY;
-
-      // Flip horizontal if too close to right edge
-      if (x + menuWidth > winW - 10) {
-        x = x - menuWidth;
-      }
-      
-      // Flip vertical if too close to bottom edge
-      if (y + menuHeight > winH - 10) {
-        y = y - menuHeight;
-      }
-
-      // Final clamping
-      x = Math.max(10, Math.min(x, winW - menuWidth - 10));
-      y = Math.max(10, Math.min(y, winH - menuHeight - 10));
-
-      menu.style.left = `${x}px`;
-      menu.style.top = `${y}px`;
-    });
-  });
+  openContextMenu(event, menu);
 }
 
 document.addEventListener("click", (e) => {
@@ -4668,55 +4763,31 @@ function showAlbumContextMenu(event, album) {
   contextMenuTargetAlbum = album;
   const menu = $("albumContextMenu");
   if (!menu) return;
+  const target = albumTarget(album);
 
   // Header
   const headerArt = $("ctxAlbumHeaderArt");
   if (headerArt) {
-    headerArt.style.backgroundImage = album.artwork_url ? `url('${album.artwork_url}')` : "";
-    headerArt.style.display = album.artwork_url ? "block" : "none";
+    headerArt.style.backgroundImage = target.artwork_url ? `url('${target.artwork_url}')` : "";
+    headerArt.style.display = target.artwork_url ? "block" : "none";
   }
   const headerTitle = $("ctxAlbumHeaderTitle");
-  if (headerTitle) headerTitle.textContent = album.title || album.name || "Unknown Album";
+  if (headerTitle) headerTitle.textContent = target.title || album.name || "Unknown Album";
   
   const headerArtist = $("ctxAlbumHeaderArtist");
-  if (headerArtist) headerArtist.textContent = album.artist || "";
+  if (headerArtist) headerArtist.textContent = target.artist || "";
 
-  menu.hidden = false;
+  $("ctxAlbumCopySpotify")?.classList.toggle("hidden", !spotifyAlbumUrl(target));
+  $("ctxAlbumCopyMusicBrainz")?.classList.toggle("hidden", !musicBrainzReleaseUrl(target));
 
-  // Position menu (fixed position)
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const menuWidth = menu.offsetWidth;
-      const menuHeight = menu.offsetHeight;
-      const winW = window.innerWidth;
-      const winH = window.innerHeight;
-      
-      let x = event.clientX;
-      let y = event.clientY;
-
-      if (x + menuWidth > winW - 10) {
-        x = x - menuWidth;
-      }
-      
-      if (y + menuHeight > winH - 10) {
-        y = y - menuHeight;
-      }
-
-      x = Math.max(10, Math.min(x, winW - menuWidth - 10));
-      y = Math.max(10, Math.min(y, winH - menuHeight - 10));
-
-      menu.style.left = `${x}px`;
-      menu.style.top = `${y}px`;
-    });
-  });
+  openContextMenu(event, menu);
 }
 $("ctxAlbumAddQueue")?.addEventListener("click", async () => {
   if (contextMenuTargetAlbum) {
     let tracks = contextMenuTargetAlbum.tracks || [];
     if (!tracks.length) {
       try {
-        const full = await api("/api/album/tracks", { method: "POST", body: JSON.stringify(albumTarget(contextMenuTargetAlbum)) });
-        tracks = full.tracks || [];
+        tracks = await fetchAlbumTracks(contextMenuTargetAlbum);
       } catch (e) {
         console.error("Failed to fetch album tracks:", e);
       }
@@ -4735,23 +4806,27 @@ $("ctxAlbumAddQueue")?.addEventListener("click", async () => {
 
 $("ctxAlbumCopySpotify")?.addEventListener("click", () => {
   if (contextMenuTargetAlbum) {
-    const spId = contextMenuTargetAlbum.spotify_id || (contextMenuTargetAlbum.metadata && contextMenuTargetAlbum.metadata.spotify_id);
-    if (spId) {
-      navigator.clipboard.writeText(`https://open.spotify.com/album/${spId}`);
-    }
+    const url = spotifyAlbumUrl(contextMenuTargetAlbum);
+    if (url) navigator.clipboard.writeText(url);
+  }
+  $("albumContextMenu").hidden = true;
+});
+
+$("ctxAlbumCopyMusicBrainz")?.addEventListener("click", () => {
+  if (contextMenuTargetAlbum) {
+    const url = musicBrainzReleaseUrl(contextMenuTargetAlbum);
+    if (url) navigator.clipboard.writeText(url);
   }
   $("albumContextMenu").hidden = true;
 });
 
 $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
   if (contextMenuTargetAlbum) {
-...
     // 1. Fetch tracks if not present
     let tracks = contextMenuTargetAlbum.tracks || [];
     if (!tracks.length) {
       try {
-        const full = await api("/api/album/tracks", { method: "POST", body: JSON.stringify(albumTarget(contextMenuTargetAlbum)) });
-        tracks = full.tracks || [];
+        tracks = await fetchAlbumTracks(contextMenuTargetAlbum);
       } catch (e) {
         console.error("Failed to fetch album tracks:", e);
       }
@@ -4763,7 +4838,14 @@ $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
 
     // 2. Create playlist
     try {
-        const pl = await api("/api/playlists/create", { method: "POST", body: JSON.stringify({ name: contextMenuTargetAlbum.title || contextMenuTargetAlbum.name }) });
+        const target = albumTarget(contextMenuTargetAlbum);
+        const pl = await api("/api/playlists", {
+          method: "POST",
+          body: JSON.stringify({
+            name: target.title || contextMenuTargetAlbum.name || "New Playlist",
+            spotify_url: spotifyAlbumUrl(target),
+          }),
+        });
         // 3. Add tracks
         await api("/api/playlists/tracks/add", { method: "POST", body: JSON.stringify({ id: pl.id, tracks: tracks.map(t => ({ ...t, kind: "track" })) }) });
         await loadPlaylists();

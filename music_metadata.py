@@ -1102,9 +1102,11 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                 art = proxy_artwork_url(sp_album.get("images", [{}])[0].get("url", ""))
                 yr = release_year(sp_album.get("release_date", ""))
                 album_name = sp_album["name"]
+                albumartist = (sp_album.get("artists") or [{}])[0].get("name") or artist
                 for t in sp_album.get("tracks", {}).get("items") or []:
+                    track_artist = ((t.get("artists") or [{}])[0].get("name") or albumartist)
                     tracks.append({
-                        "type": "track", "title": t["name"], "artist": artist,
+                        "type": "track", "title": t["name"], "artist": track_artist,
                         "album": album_name, "year": yr, "track_number": t.get("track_number"),
                         "duration": format_duration_ms(t.get("duration_ms", 0)),
                         "artwork_url": art, "spotify_id": t["id"], "source": "Spotify",

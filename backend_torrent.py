@@ -204,18 +204,13 @@ def _get_best_trackers() -> list[str]:
 _ACTIVE_SESSIONS: dict[str, dict] = {}
 _SESSIONS_LOCK = threading.Lock()
 
-# All torrent jobs share one libtorrent session. 5-track parallel prefetch plus
-# the active track would otherwise pile 40+ magnets into that single session at
-# once; metadata acquisition then slows for everything (a clean session resolves
-# ~6 magnets in <25s, but ~40 only resolves ~half in the same window), so the
-# actively-playing track's sources time out as "unresponsive during metadata
-# probe". This gate caps how many *prefetch* jobs probe torrents concurrently.
-# The actively-playing (non-prefetch) job is NEVER gated, so it can never be
-# starved by prefetch.
+# All torrent jobs share one libtorrent session. Keep prefetch bounded to the
+# five-track window the player requests, while leaving active playback ungated so
+# it can always cut ahead of queued prefetch work.
 try:
-    _PREFETCH_TORRENT_SLOTS = max(1, int(os.environ.get("MINDINGUFLAC_PREFETCH_TORRENT_SLOTS", "2")))
+    _PREFETCH_TORRENT_SLOTS = max(1, int(os.environ.get("MINDINGUFLAC_PREFETCH_TORRENT_SLOTS", "5")))
 except Exception:
-    _PREFETCH_TORRENT_SLOTS = 2
+    _PREFETCH_TORRENT_SLOTS = 5
 _PREFETCH_TORRENT_GATE = threading.BoundedSemaphore(_PREFETCH_TORRENT_SLOTS)
 
 

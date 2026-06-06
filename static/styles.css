@@ -2527,6 +2527,15 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
 .context-menu[hidden] {
   display: none;
 }
+.context-menu-toggle-proxy {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  left: -100px;
+  top: -100px;
+}
 .context-menu-item {
   display: flex;
   align-items: center;
@@ -2572,6 +2581,10 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   min-width: 160px;
   display: none;
   z-index: 10001;
+}
+.context-menu-item.has-submenu.submenu-left > .context-submenu {
+  left: auto;
+  right: 100%;
 }
 .context-menu-item.has-submenu:hover > .context-submenu {
   display: block;
