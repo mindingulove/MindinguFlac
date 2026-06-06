@@ -94,6 +94,8 @@ class AppConfig:
     ai_provider: str = "duckai"
     gemini_model: str = "flash"
     tour_city: str = ""
+    tour_lat: str = ""
+    tour_lon: str = ""
     tour_state: str = ""
     tour_country: str = ""
     discogs_token: str = ""
@@ -117,6 +119,8 @@ class AppConfig:
             "ai_provider": self.ai_provider,
             "gemini_model": self.gemini_model,
             "tour_city": self.tour_city,
+            "tour_lat": self.tour_lat,
+            "tour_lon": self.tour_lon,
             "tour_state": self.tour_state,
             "tour_country": self.tour_country,
             "cache_cleanup_frequency": self.cache_cleanup_frequency,
@@ -169,6 +173,8 @@ class AppConfig:
             ai_provider=str(value.get("ai_provider", "duckai") or "duckai"),
             gemini_model=str(value.get("gemini_model", "gemini-1.5-flash") or "gemini-1.5-flash"),
             tour_city=str(value.get("tour_city", "") or "").strip(),
+            tour_lat=str(value.get("tour_lat", "") or "").strip(),
+            tour_lon=str(value.get("tour_lon", "") or "").strip(),
             tour_state=str(value.get("tour_state", "") or "").strip(),
             tour_country=str(value.get("tour_country", "") or "").strip(),
             discogs_token=str(value.get("discogs_token", "") or "").strip(),

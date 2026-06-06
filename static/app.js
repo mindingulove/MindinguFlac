@@ -52,6 +52,7 @@ const state = {
   statusHintTippy: null,
   statusHintRef: null,
   tourLocation: null,
+  tourLocationSearchTimer: null,
 };
 
 const SERVICE_LABELS = {
@@ -781,7 +782,7 @@ function renderHomePage() {
   setActiveView("home");
   
   const personalTracks = (state.catalog.personal_tracks || []).slice(0, 6);
-  const recentTracks = (state.catalog.recent_tracks || []).slice(0, 6);
+  const recentTracks = uniqueRecentTracks(state.catalog.recent_tracks || []).slice(0, 6);
   const globalTracks = (state.catalog.top_tracks || []).slice(0, 6);
   const topArtists = (state.catalog.artists || []).slice(0, 6);
   const topAlbums = (state.catalog.albums || []).slice(0, 6);
@@ -996,7 +997,7 @@ function renderRecentTracksPage() {
       <div id="fullRecentTracks" class="track-list"></div>
     </div>
   `;
-  const tracks = state.catalog.recent_tracks || [];
+  const tracks = uniqueRecentTracks(state.catalog.recent_tracks || []);
   renderTrackList("fullRecentTracks", tracks);
   enrichBatch(tracks, "fullRecentTracks");
 }
@@ -1638,9 +1639,10 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
 
   // Optimistically update recent tracks
   if (state.catalog && state.catalog.recent_tracks) {
+    const incomingKey = recentTrackKey(item);
     state.catalog.recent_tracks = [
       { ...item, source: "Recently Played" },
-      ...state.catalog.recent_tracks.filter(t => trackKey(t) !== trackKey(item))
+      ...state.catalog.recent_tracks.filter(t => recentTrackKey(t) !== incomingKey)
     ].slice(0, 100);
   }
 
@@ -2360,6 +2362,32 @@ function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
 
   bindSidebarTrackRows(content);
   $("sideOpenQueue")?.addEventListener("click", openQueuePanel);
+  $("sideTourShowAll")?.addEventListener("click", () => openTourPage(track.artist || primaryArtistName(track)));
+
+  const artistCard = $("sideArtistCard");
+  if (artistCard) {
+    const artistName = primaryArtistName(track) || track.artist || "Artist";
+    const image = state.sidebarArtist?.image || track.artist_artwork_url || track.artwork_url || "";
+    artistCard.innerHTML = `
+      <button class="side-artist-trigger" id="sideArtistTrigger" type="button">
+        <span class="side-artist-image" style="${image ? `background-image:url('${image}')` : ""}">
+          <span>About the artist</span>
+        </span>
+        <span class="side-artist-info">
+          <strong>${esc(artistName)}</strong>
+          <span>Loading artist info...</span>
+        </span>
+      </button>
+    `;
+    $("sideArtistTrigger")?.addEventListener("click", () => {
+      if (state.sidebarArtist?.name || state.sidebarArtist?.image) {
+        showArtistAboutModal({
+          biography: "",
+          monthly_listeners: 0,
+        }, state.sidebarArtist.name || artistName, state.sidebarArtist.id || "", state.sidebarArtist.image || image);
+      }
+    });
+  }
 
   loadSidebarArtistInfo(track, requestId, qualityLabel).catch(() => {});
   loadSidebarCredits(track, requestId).catch(() => {});
@@ -2378,55 +2406,81 @@ function bindSidebarTrackRows(root) {
 async function loadSidebarArtistInfo(track, requestId, qualityLabel) {
   const artistName = primaryArtistName(track);
   const artistId = primaryArtistId(track);
-  const about = await api("/api/artist/about", {
-    method: "POST",
-    // Send the full (untruncated) artist name so the backend can resolve the
-    // correct artist when the track carries no spotify_artist_id.
-    body: JSON.stringify({ artist_id: artistId, name: track.artist || artistName }),
-  });
-  if (requestId !== state.sidebarRequestId) return;
   const card = $("sideArtistCard");
   if (!card) return;
-  const image = (about.gallery && about.gallery[0] && about.gallery[0].url) || about.avatar || track.artist_artwork_url || track.artwork_url || "";
-  // Remember the resolved artist image so the full tour page can use it as a hero.
-  state.sidebarArtist = { name: artistName || track.artist || "", image, id: artistId };
-  const bio = stripHtml(about.biography || "");
-  card.innerHTML = `
-    <button class="side-artist-trigger" id="sideArtistTrigger" type="button">
-      <span class="side-artist-image" style="${image ? `background-image:url('${image}')` : ""}">
-        <span>About the artist</span>
-      </span>
-      <span class="side-artist-info">
-        <strong>${esc(artistName || track.artist || "Artist")}${about.verified ? ' <i class="bi bi-patch-check-fill"></i>' : ""}</strong>
-        ${about.monthly_listeners ? `<span>${formatCount(about.monthly_listeners)} monthly listeners</span>` : ""}
-        ${bio ? `<span class="side-artist-bio">${esc(bio)}</span>` : ""}
-      </span>
-    </button>
-  `;
-  $("sideArtistTrigger")?.addEventListener("click", () => showArtistAboutModal(about, artistName || track.artist, artistId, image));
+  try {
+    const about = await api("/api/artist/about", {
+      method: "POST",
+      timeout: 12000,
+      // Send the full (untruncated) artist name so the backend can resolve the
+      // correct artist when the track carries no spotify_artist_id.
+      body: JSON.stringify({ artist_id: artistId, name: track.artist || artistName }),
+    });
+    if (requestId !== state.sidebarRequestId) return;
+    const image = about.hero_image || about.avatar || (about.gallery && about.gallery[0] && about.gallery[0].url) || track.artist_artwork_url || track.artwork_url || "";
+    // Remember the resolved artist image so the full tour page can use it as a hero.
+    state.sidebarArtist = { name: artistName || track.artist || "", image, id: artistId };
+    const bio = stripHtml(about.biography || "");
+    card.innerHTML = `
+      <button class="side-artist-trigger" id="sideArtistTrigger" type="button">
+        <span class="side-artist-image" style="${image ? `background-image:url('${image}')` : ""}">
+          <span>About the artist</span>
+        </span>
+        <span class="side-artist-info">
+          <strong>${esc(artistName || track.artist || "Artist")}${about.verified ? ' <i class="bi bi-patch-check-fill"></i>' : ""}</strong>
+          ${about.monthly_listeners ? `<span>${formatCount(about.monthly_listeners)} monthly listeners</span>` : ""}
+          ${bio ? `<span class="side-artist-bio">${esc(bio)}</span>` : ""}
+        </span>
+      </button>
+    `;
+    $("sideArtistTrigger")?.addEventListener("click", () => showArtistAboutModal(about, artistName || track.artist, artistId, image));
+  } catch (error) {
+    if (requestId !== state.sidebarRequestId) return;
+    const image = track.artist_artwork_url || track.artwork_url || state.sidebarArtist?.image || "";
+    card.innerHTML = `
+      <button class="side-artist-trigger" id="sideArtistTrigger" type="button">
+        <span class="side-artist-image" style="${image ? `background-image:url('${image}')` : ""}">
+          <span>About the artist</span>
+        </span>
+        <span class="side-artist-info">
+          <strong>${esc(artistName || track.artist || "Artist")}</strong>
+          <span>${esc(String(error?.message || error || "Artist info unavailable"))}</span>
+        </span>
+      </button>
+    `;
+  }
 }
 
 async function loadSidebarCredits(track, requestId) {
-  const credits = await api("/api/track/credits", {
-    method: "POST",
-    body: JSON.stringify({ track }),
-  });
-  if (requestId !== state.sidebarRequestId) return;
   const card = $("sideCreditsCard");
   if (!card) return;
-  const rows = (credits.sections || []).flatMap(section => (section.rows || []).map(row => ({ ...row, section: section.title }))).slice(0, 3);
-  card.querySelector(".side-card-loading")?.remove();
-  card.insertAdjacentHTML("beforeend", `
-    <div class="side-credit-list">
-      ${rows.map(row => `
-        <div class="side-credit-row">
-          <span>${esc(row.name)}</span>
-          <small>${esc(row.role || row.section || "")}</small>
-        </div>
-      `).join("") || '<div class="side-empty">No credits available.</div>'}
-    </div>
-  `);
-  $("sideCreditsShowAll")?.addEventListener("click", () => showCreditsModal(credits));
+  try {
+    const credits = await api("/api/track/credits", {
+      method: "POST",
+      body: JSON.stringify({ track }),
+      timeout: 45000,
+    });
+    if (requestId !== state.sidebarRequestId) return;
+    const rows = (credits.sections || []).flatMap(section => (section.rows || []).map(row => ({ ...row, section: section.title }))).slice(0, 3);
+    card.querySelector(".side-card-loading")?.remove();
+    card.insertAdjacentHTML("beforeend", `
+      <div class="side-credit-list">
+        ${rows.map(row => `
+          <div class="side-credit-row">
+            <span>${esc(row.name)}</span>
+            <small>${esc(row.role || row.section || "")}</small>
+          </div>
+        `).join("") || '<div class="side-empty">No credits available.</div>'}
+      </div>
+    `);
+    $("sideCreditsShowAll")?.addEventListener("click", () => showCreditsModal(credits));
+  } catch (error) {
+    if (requestId !== state.sidebarRequestId) return;
+    card.querySelector(".side-card-loading")?.remove();
+    card.insertAdjacentHTML("beforeend", `
+      <div class="side-empty">${esc(String(error?.message || error || "Credits lookup failed"))}</div>
+    `);
+  }
 }
 
 async function loadSidebarTour(track, requestId) {
@@ -2479,6 +2533,7 @@ async function loadSidebarTour(track, requestId) {
   api("/api/artist/tour", {
     method: "POST",
     body: JSON.stringify({ artist_id: artistId, name: artistName, live: true }),
+    timeout: 45000,
   }).then((liveTour) => {
     if (requestId !== state.sidebarRequestId) return;
     const liveEvents = liveTour?.events || [];
@@ -2490,6 +2545,7 @@ async function loadSidebarTour(track, requestId) {
     }
   }).catch((error) => {
     if (requestId !== state.sidebarRequestId) return;
+    if (/abort/i.test(String(error?.message || error || ""))) return;
     renderSidebarTourCard(events, String(error?.message || error || "Tour lookup failed"), !events.length);
   });
 }
@@ -2549,7 +2605,7 @@ function showArtistAboutModal(about = {}, artistName = "Artist", artistId = "", 
     artist_id: artistId,
   });
   const gallery = about.gallery || [];
-  const heroImage = image || (gallery[0] && gallery[0].url) || "";
+  const heroImage = image || about.hero_image || (gallery[0] && gallery[0].url) || "";
   const dialog = document.createElement("dialog");
   dialog.className = "about-modal sidebar-about-modal";
   dialog.id = "sidebarArtistAboutModal";
@@ -2644,22 +2700,8 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
     </div>
   `;
 
-  let tour = {};
-  try {
-    tour = await api("/api/artist/tour", {
-      method: "POST",
-      body: JSON.stringify({ name: artistName, live: true }),
-      timeout: 200000,
-    });
-  } catch (e) {
-    tour = { events: [], error: String((e && e.message) || e) };
-  }
   const body = $("tourBody");
   if (!body) return;
-  const events = tour.events || [];
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const upcomingEvents = events.filter(event => !event.date || String(event.date).slice(0, 10) >= todayIso);
-  const groupedEvents = groupTourEvents(upcomingEvents, tourLocation);
 
   const rowHtml = (event) => {
     const sub = [event.location || event.venue, event.info].filter(Boolean).join(" · ") || artistName;
@@ -2678,43 +2720,74 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
       </div>`;
   };
 
-  body.innerHTML = `
-    <section class="tour-near">
-      <h2>Near ${esc(localLabel)}</h2>
-      ${groupedEvents.sameCity.length ? `
-        <div class="tour-event-list">${groupedEvents.sameCity.map(rowHtml).join("")}</div>
-      ` : `
-        <div class="tour-near-empty">
-          <p>No upcoming events.</p>
-          <a class="tour-browse-btn" href="${esc(browseUrl)}" target="_blank" rel="noopener">Browse all events</a>
-        </div>
-      `}
-    </section>
-    ${groupedEvents.sameState.length ? `
-      <section class="tour-other">
-        <h2>Same state</h2>
-        <div class="tour-event-list">${groupedEvents.sameState.map(rowHtml).join("")}</div>
+  const renderTourBody = (tour = {}) => {
+    const events = tour.events || [];
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const upcomingEvents = events.filter(event => !event.date || String(event.date).slice(0, 10) >= todayIso);
+    const groupedEvents = groupTourEvents(upcomingEvents, tourLocation);
+    body.innerHTML = `
+      <section class="tour-near">
+        <h2>Near ${esc(localLabel)}</h2>
+        ${groupedEvents.sameCity.length ? `
+          <div class="tour-event-list">${groupedEvents.sameCity.map(rowHtml).join("")}</div>
+        ` : `
+          <div class="tour-near-empty">
+            <p>No upcoming events.</p>
+            <a class="tour-browse-btn" href="${esc(browseUrl)}" target="_blank" rel="noopener">Browse all events</a>
+          </div>
+        `}
       </section>
-    ` : ""}
-    ${groupedEvents.sameCountry.length ? `
-      <section class="tour-other">
-        <h2>Same country</h2>
-        <div class="tour-event-list">${groupedEvents.sameCountry.map(rowHtml).join("")}</div>
-      </section>
-    ` : ""}
-    ${groupedEvents.otherCountries.length ? `
-      <section class="tour-other">
-        <h2>Other countries</h2>
-        <div class="tour-event-list">${groupedEvents.otherCountries.map(rowHtml).join("")}</div>
-        ${tour.source ? `<div class="tour-source">Sourced live via ${esc(tour.source)}</div>` : ""}
-      </section>
-    ` : `
-      <section class="tour-other">
-        <div class="tour-empty-state">${tour.error ? esc(tour.error) : "No upcoming tour dates found for this artist."}</div>
-      </section>
-    `}
-  `;
-  bindExternalUrlButtons(body);
+      ${groupedEvents.sameState.length ? `
+        <section class="tour-other">
+          <h2>Same state</h2>
+          <div class="tour-event-list">${groupedEvents.sameState.map(rowHtml).join("")}</div>
+        </section>
+      ` : ""}
+      ${groupedEvents.sameCountry.length ? `
+        <section class="tour-other">
+          <h2>Same country</h2>
+          <div class="tour-event-list">${groupedEvents.sameCountry.map(rowHtml).join("")}</div>
+        </section>
+      ` : ""}
+      ${groupedEvents.otherCountries.length ? `
+        <section class="tour-other">
+          <h2>Other countries</h2>
+          <div class="tour-event-list">${groupedEvents.otherCountries.map(rowHtml).join("")}</div>
+          ${tour.source ? `<div class="tour-source">Sourced live via ${esc(tour.source)}</div>` : ""}
+        </section>
+      ` : ""}
+      ${!upcomingEvents.length ? `
+        <section class="tour-other">
+          <div class="tour-empty-state">${tour.error ? esc(tour.error) : "No upcoming tour dates found for this artist."}</div>
+        </section>
+      ` : ""}
+    `;
+    bindExternalUrlButtons(body);
+  };
+
+  try {
+    const cachedTour = await api("/api/artist/tour", {
+      method: "POST",
+      body: JSON.stringify({ name: artistName, live: false }),
+      timeout: 12000,
+    });
+    renderTourBody(cachedTour || {});
+  } catch (e) {
+    renderTourBody({ events: [] });
+  }
+
+  api("/api/artist/tour", {
+      method: "POST",
+      body: JSON.stringify({ name: artistName, live: true }),
+      timeout: 45000,
+    }).then((tour) => {
+      if (!body.isConnected) return;
+      renderTourBody(tour || {});
+    }).catch((e) => {
+      if (!body.isConnected) return;
+      if (/abort/i.test(String(e?.message || e || ""))) return;
+      renderTourBody({ events: [], error: String((e && e.message) || e) });
+    });
   if (!artistImage) {
     const hero = $("tourHero");
     if (hero && !hero.querySelector(".tour-hero-art")) {
@@ -2722,7 +2795,7 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
         method: "POST",
         body: JSON.stringify({ name: artistName }),
       }).then((about) => {
-        const image = (about?.gallery && about.gallery[0] && about.gallery[0].url) || about?.avatar || "";
+        const image = about?.hero_image || about?.avatar || (about?.gallery && about.gallery[0] && about.gallery[0].url) || "";
         if (!image) return;
         if (!hero.isConnected) return;
         const art = document.createElement("div");
@@ -2744,26 +2817,66 @@ function normalizePlaceKey(value = "") {
 }
 
 function formatTourLocationLabel(location = {}) {
-  return [location.city, location.state, location.country].filter(Boolean).join(", ") || "you";
+  return location.label || [location.city, location.state, location.country].filter(Boolean).join(", ") || "you";
+}
+
+function tourLocationFromSettings() {
+  const settings = state.settings || {};
+  return {
+    label: String(settings.tour_city || "").trim(),
+    lat: String(settings.tour_lat || "").trim(),
+    lon: String(settings.tour_lon || "").trim(),
+    city: String(settings.tour_city || "").trim(),
+    state: String(settings.tour_state || "").trim(),
+    country: String(settings.tour_country || "").trim(),
+    country_code: String(settings.tour_country_code || "").trim().toUpperCase(),
+  };
 }
 
 async function resolveTourLocation() {
   if (state.tourLocation) return state.tourLocation;
-  const settings = state.settings || {};
-  const override = {
-    city: String(settings.tour_city || "").trim(),
-    state: String(settings.tour_state || "").trim(),
-    country: String(settings.tour_country || "").trim(),
-  };
-  if (override.city || override.state || override.country) {
-    state.tourLocation = override;
-    return override;
+  const override = tourLocationFromSettings();
+  if (override.lat && override.lon) {
+    try {
+      const resolved = await api(`/api/location/reverse?lat=${encodeURIComponent(override.lat)}&lon=${encodeURIComponent(override.lon)}`);
+      const location = {
+        label: override.label || resolved?.city || "",
+        city: String(resolved?.city || override.label || "").trim(),
+        state: String(resolved?.state || "").trim(),
+        country: String(resolved?.country || "").trim(),
+        country_code: String(resolved?.country_code || "").trim().toUpperCase(),
+        lat: override.lat,
+        lon: override.lon,
+      };
+      state.tourLocation = location;
+      return location;
+    } catch (e) {}
   }
-
+  if (override.label) {
+    try {
+      const geo = await api(`/api/location/search?term=${encodeURIComponent(override.label)}`);
+      const first = (geo?.results || [])[0];
+      if (first) {
+        const location = {
+          label: first.label || override.label,
+          city: String(first.city || override.label || "").trim(),
+          state: String(first.state || "").trim(),
+          country: String(first.country || "").trim(),
+          country_code: String(first.country_code || "").trim().toUpperCase(),
+          lat: String(first.lat || "").trim(),
+          lon: String(first.lon || "").trim(),
+        };
+        state.tourLocation = location;
+        return location;
+      }
+    } catch (e) {}
+  }
   const fallback = {
+    label: "",
     city: "",
     state: "",
     country: "",
+    country_code: "",
   };
 
   const geo = await new Promise((resolve) => {
@@ -2795,9 +2908,13 @@ async function resolveTourLocation() {
     try {
       const resolved = await api(`/api/location/reverse?lat=${encodeURIComponent(geo.lat)}&lon=${encodeURIComponent(geo.lon)}`);
       const location = {
+        label: resolved?.city || "",
         city: String(resolved?.city || "").trim(),
         state: String(resolved?.state || "").trim(),
         country: String(resolved?.country || "").trim(),
+        country_code: String(resolved?.country_code || "").trim().toUpperCase(),
+        lat: String(geo.lat),
+        lon: String(geo.lon),
       };
       state.tourLocation = location;
       return location;
@@ -2805,9 +2922,123 @@ async function resolveTourLocation() {
   }
 
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  fallback.city = (tz.split("/").pop() || "").replace(/_/g, " ") || "";
+  fallback.label = (tz.split("/").pop() || "").replace(/_/g, " ") || "";
+  fallback.city = fallback.label;
   state.tourLocation = fallback;
   return fallback;
+}
+
+async function hydrateTourLocationInputs() {
+  const cityInput = $("tourCity");
+  const latInput = $("tourLat");
+  const lonInput = $("tourLon");
+  if (!cityInput || !latInput || !lonInput) return;
+
+  const settings = state.settings || {};
+  latInput.value = String(settings.tour_lat || "").trim();
+  lonInput.value = String(settings.tour_lon || "").trim();
+  cityInput.value = String(settings.tour_city || "").trim();
+
+  if ((!cityInput.value || !cityInput.value.trim()) && latInput.value && lonInput.value) {
+    try {
+      const resolved = await api(`/api/location/reverse?lat=${encodeURIComponent(latInput.value)}&lon=${encodeURIComponent(lonInput.value)}`);
+      cityInput.value = String(resolved?.city || "").trim();
+    } catch (e) {}
+  }
+  if (cityInput.value.trim() && (!latInput.value || !lonInput.value)) {
+    try {
+      const data = await api(`/api/location/search?term=${encodeURIComponent(cityInput.value.trim())}`);
+      const first = (data?.results || [])[0];
+      if (first) {
+        latInput.value = String(first.lat || "").trim();
+        lonInput.value = String(first.lon || "").trim();
+      }
+    } catch (e) {}
+  }
+}
+
+function setTourLocationSelection(item = {}) {
+  const cityInput = $("tourCity");
+  const latInput = $("tourLat");
+  const lonInput = $("tourLon");
+  if (!cityInput || !latInput || !lonInput) return;
+  cityInput.value = String(item.label || item.city || "").trim();
+  latInput.value = String(item.lat || "").trim();
+  lonInput.value = String(item.lon || "").trim();
+  state.tourLocation = {
+    label: cityInput.value,
+    city: String(item.city || item.label || "").trim(),
+    state: String(item.state || "").trim(),
+    country: String(item.country || "").trim(),
+    country_code: String(item.country_code || "").trim().toUpperCase(),
+    lat: latInput.value,
+    lon: lonInput.value,
+  };
+  hideTourLocationSuggestions();
+}
+
+function showTourLocationSuggestions(items = []) {
+  const box = $("tourLocationSuggestions");
+  if (!box) return;
+  if (!items.length) {
+    box.innerHTML = "";
+    box.classList.add("hidden");
+    return;
+  }
+  box.innerHTML = items.map((item, index) => `
+    <button class="tour-location-suggestion" type="button" data-tour-location="${index}">
+      <strong>${esc(item.label || item.city || "Location")}</strong>
+      <span>${esc(item.subtitle || [item.state, item.country].filter(Boolean).join(", "))}</span>
+    </button>
+  `).join("");
+  box.classList.remove("hidden");
+  box.querySelectorAll("[data-tour-location]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = items[Number(button.dataset.tourLocation)];
+      if (item) setTourLocationSelection(item);
+    });
+  });
+}
+
+function hideTourLocationSuggestions() {
+  const box = $("tourLocationSuggestions");
+  if (!box) return;
+  box.classList.add("hidden");
+  box.innerHTML = "";
+}
+
+function setupTourLocationPicker() {
+  const input = $("tourCity");
+  const box = $("tourLocationSuggestions");
+  if (!input || !box) return;
+
+  const doSearch = async () => {
+    const term = input.value.trim();
+    if (!term) {
+      hideTourLocationSuggestions();
+      return;
+    }
+    const countryCode = String((state.tourLocation && state.tourLocation.country_code) || "").trim();
+    try {
+      const data = await api(`/api/location/search?term=${encodeURIComponent(term)}&country_code=${encodeURIComponent(countryCode)}`);
+      if (input.value.trim() !== term) return;
+      showTourLocationSuggestions(data.results || []);
+    } catch (e) {
+      hideTourLocationSuggestions();
+    }
+  };
+
+  input.oninput = () => {
+    clearTimeout(state.tourLocationSearchTimer);
+    state.tourLocationSearchTimer = setTimeout(doSearch, 200);
+  };
+  input.onfocus = () => {
+    if (input.value.trim()) input.oninput();
+  };
+  input.onblur = () => {
+    setTimeout(() => hideTourLocationSuggestions(), 120);
+  };
+  box.onmousedown = (event) => event.preventDefault();
 }
 
 function extractEventLocationParts(event = {}) {
@@ -2902,6 +3133,26 @@ function trackKey(item) {
     item?.artist || item?.metadata?.artist || "",
     item?.album || item?.metadata?.album || "",
   ].map(value => String(value).trim().toLowerCase()).join("||");
+}
+
+function recentTrackKey(item) {
+  return trackKey(item) || [
+    item?.title || item?.metadata?.title || "",
+    item?.artist || item?.metadata?.artist || "",
+    item?.album || item?.metadata?.album || "",
+  ].map(value => String(value).trim().toLowerCase()).join("||");
+}
+
+function uniqueRecentTracks(items = []) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const key = recentTrackKey(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
 }
 
 function playableQueueItem(item) {
@@ -3529,9 +3780,8 @@ async function renderSettings() {
   if ($("geminiModel")) {
     $("geminiModel").value = state.settings.gemini_model || "gemini-1.5-flash";
   }
-  if ($("tourCity")) $("tourCity").value = state.settings.tour_city || "";
-  if ($("tourState")) $("tourState").value = state.settings.tour_state || "";
-  if ($("tourCountry")) $("tourCountry").value = state.settings.tour_country || "";
+  await hydrateTourLocationInputs();
+  setupTourLocationPicker();
 
   $("trackMaxRetries").value = (state.settings.track_max_retries !== undefined) ? state.settings.track_max_retries : 1;
 
@@ -3563,8 +3813,8 @@ async function saveSettings(e) {
     duck_model: $("duckModel") ? $("duckModel").value : "1",
     gemini_model: $("geminiModel") ? $("geminiModel").value : "gemini-1.5-flash",
     tour_city: $("tourCity") ? $("tourCity").value.trim() : "",
-    tour_state: $("tourState") ? $("tourState").value.trim() : "",
-    tour_country: $("tourCountry") ? $("tourCountry").value.trim() : "",
+    tour_lat: $("tourLat") ? $("tourLat").value.trim() : "",
+    tour_lon: $("tourLon") ? $("tourLon").value.trim() : "",
     download_service: $("downloadService").value,
     default_quality: $("defaultQuality").value,
     track_max_retries: parseInt($("trackMaxRetries").value),

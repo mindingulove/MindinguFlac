@@ -197,6 +197,23 @@ def _load_artist_about(artist_id: str) -> dict:
         top_avatar = max(avatar_sources, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
         avatar = top_avatar.get("url", "")
 
+    def _pick_feature_image() -> str:
+        if not gallery:
+            return avatar
+        def score(item: dict) -> tuple[int, int, int]:
+            width = int(item.get("width") or 0)
+            height = int(item.get("height") or 0)
+            area = width * height
+            aspect = (width / height) if width and height else 0
+            # Prefer a real photo over a square logo/avatar tile.
+            photo_bias = 1 if aspect >= 1.2 or aspect <= 0.85 else 0
+            square_penalty = 1 if 0.9 <= aspect <= 1.1 else 0
+            return (photo_bias, area, -square_penalty)
+        picked = max(gallery, key=score)
+        return picked.get("url", "") or avatar
+
+    hero_image = _pick_feature_image()
+
     return {
         "name": profile.get("name", ""),
         "monthly_listeners": stats.get("monthlyListeners") or stats.get("monthly_listeners") or 0,
@@ -209,6 +226,7 @@ def _load_artist_about(artist_id: str) -> dict:
         ],
         "gallery": gallery,
         "avatar": avatar,
+        "hero_image": hero_image,
         "verified": bool(profile.get("verified")),
     }
 

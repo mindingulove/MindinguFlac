@@ -154,12 +154,13 @@
             <div class="settings-row">
               <div class="settings-info">
                 <strong>Tour location</strong>
-                <span>Used to group nearby events by city, state, and country. If blank, the browser GPS location is used.</span>
+                <span>Pick a city. The app stores hidden coordinates and uses GPS only when nothing is set.</span>
               </div>
-              <div class="settings-control" style="display:grid; gap:6px; min-width: 260px;">
-                <input id="tourCity" type="text" placeholder="City" />
-                <input id="tourState" type="text" placeholder="State / region" />
-                <input id="tourCountry" type="text" placeholder="Country" />
+              <div class="settings-control" style="position:relative; min-width: 320px;">
+                <input id="tourCity" type="text" placeholder="City" autocomplete="off" spellcheck="false" />
+                <input id="tourLat" type="hidden">
+                <input id="tourLon" type="hidden">
+                <div id="tourLocationSuggestions" class="tour-location-suggestions hidden"></div>
               </div>
             </div>
             <div class="settings-row" id="serviceRow">

@@ -231,7 +231,90 @@ def reverse_geocode_location(lat: float, lon: float) -> dict:
     city = address.get("city") or address.get("town") or address.get("village") or address.get("municipality") or address.get("hamlet") or ""
     state = address.get("state") or address.get("region") or address.get("province") or address.get("county") or ""
     country = address.get("country") or ""
-    return {"city": city, "state": state, "country": country}
+    return {
+        "city": city,
+        "state": state,
+        "country": country,
+        "country_code": str(address.get("country_code") or "").upper(),
+    }
+
+
+def search_location_suggestions(term: str, limit: int = 6, country_code: str = "", state_code: str = "") -> list[dict]:
+    term = str(term or "").strip()
+    if not term:
+        return []
+    code = str(country_code or "").strip().upper()
+    state = str(state_code or "").strip().upper()
+    if code:
+        try:
+            from countrystatecity_countries import get_country_by_code, get_state_by_code, search_cities
+            country = get_country_by_code(code)
+            if country:
+                cities = search_cities(code, state or None, term)
+                if cities:
+                    out: list[dict] = []
+                    for item in cities[: max(1, min(10, int(limit or 6)))]:
+                        state_obj = None
+                        if item.state_code:
+                            try:
+                                state_obj = get_state_by_code(code, item.state_code)
+                            except Exception:
+                                state_obj = None
+                        label = item.name
+                        subtitle_parts = [state_obj.name if state_obj else "", country.name if country else ""]
+                        subtitle = ", ".join(part for part in subtitle_parts if part)
+                        out.append({
+                            "label": label,
+                            "city": item.name,
+                            "state": state_obj.name if state_obj else "",
+                            "country": country.name if country else "",
+                            "country_code": code,
+                            "lat": str(item.latitude or ""),
+                            "lon": str(item.longitude or ""),
+                            "subtitle": subtitle,
+                        })
+                    return out
+        except Exception:
+            pass
+    url = "https://nominatim.openstreetmap.org/search?" + urlencode({
+        "format": "jsonv2",
+        "q": term,
+        "addressdetails": "1",
+        "limit": str(max(1, min(10, int(limit or 6)))),
+    })
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mindinguflac/1.0",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    if not isinstance(data, list):
+        return []
+    out: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        address = item.get("address") or {}
+        city = address.get("city") or address.get("town") or address.get("village") or address.get("municipality") or address.get("hamlet") or item.get("name") or ""
+        state = address.get("state") or address.get("region") or address.get("province") or address.get("county") or ""
+        country = address.get("country") or ""
+        country_code = str(address.get("country_code") or "").upper()
+        label = city or item.get("display_name") or ""
+        if state and state.lower() not in label.lower():
+            label = f"{label}, {state}"
+        if country and country.lower() not in label.lower():
+            label = f"{label}, {country}"
+        out.append({
+            "label": label,
+            "city": city,
+            "state": state,
+            "country": country,
+            "country_code": country_code,
+            "lat": item.get("lat") or "",
+            "lon": item.get("lon") or "",
+            "subtitle": ", ".join(part for part in [state, country] if part),
+        })
+    return out
 
 
 def load_playlists() -> list[dict]:
@@ -932,6 +1015,18 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 try:
                     self.send_json(reverse_geocode_location(lat, lon))
+                except Exception as exc:
+                    self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
+                return
+            if path == "/api/location/search":
+                term = query.get("term", [""])[0].strip()
+                country_code = query.get("country_code", [""])[0].strip()
+                state_code = query.get("state_code", [""])[0].strip()
+                if not term:
+                    self.send_json({"results": []})
+                    return
+                try:
+                    self.send_json({"results": search_location_suggestions(term, country_code=country_code, state_code=state_code)})
                 except Exception as exc:
                     self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
                 return
