@@ -167,7 +167,8 @@ def _load_artist_about(artist_id: str) -> dict:
         json.dumps(body).encode("utf-8"),
     ))
     
-    artist = response.get("data", {}).get("artistUnion", {})
+    data = response.get("data", {})
+    artist = data.get("artistUnion") or data.get("artist") or {}
     stats = artist.get("stats") or {}
     visuals = artist.get("visuals") or {}
     profile = artist.get("profile") or {}
@@ -187,6 +188,10 @@ def _load_artist_about(artist_id: str) -> dict:
 
     # Artist profile picture (distinct from gallery, which is often empty)
     avatar_sources = (visuals.get("avatarImage") or {}).get("sources") or []
+    if not avatar_sources:
+        # Fallback to visualIdentity if avatarImage is missing
+        avatar_sources = (visuals.get("visualIdentity", {}).get("avatarImage") or {}).get("sources") or []
+    
     avatar = ""
     if avatar_sources:
         top_avatar = max(avatar_sources, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
@@ -194,12 +199,12 @@ def _load_artist_about(artist_id: str) -> dict:
 
     return {
         "name": profile.get("name", ""),
-        "monthly_listeners": stats.get("monthlyListeners") or 0,
-        "global_chart_position": stats.get("globalChartPosition") or 0,
+        "monthly_listeners": stats.get("monthlyListeners") or stats.get("monthly_listeners") or 0,
+        "global_chart_position": stats.get("globalChartPosition") or stats.get("global_chart_position") or 0,
         "followers": stats.get("followers") or 0,
         "biography": profile.get("biography", {}).get("text", ""),
         "top_cities": [
-            {"city": c.get("city", ""), "country": c.get("country", ""), "count": c.get("numberOfListeners", 0)}
+            {"city": c.get("city", ""), "country": c.get("country", ""), "count": c.get("numberOfListeners", c.get("numberOf_listeners", 0))}
             for c in (stats.get("topCities", {}).get("items") or [])
         ],
         "gallery": gallery,

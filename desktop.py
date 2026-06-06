@@ -514,6 +514,10 @@ if __name__ == "__main__":
         import ddg_browser
         ddg_browser.main()
         sys.exit(0)
+    if "--gemini-worker" in sys.argv:
+        import gemini_browser
+        gemini_browser.main()
+        sys.exit(0)
     try:
         main()
     except Exception:

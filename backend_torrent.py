@@ -1310,7 +1310,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                     "magnet": m_link,  # lets the reranker read DN + trackers
                                 })
                             duck_model = manager.app_config.duck_model if hasattr(manager, "app_config") else "1"
-                            ranked_ids = ai_reranker.rank_candidates(target, candidates, duck_model)
+                            ai_provider = manager.app_config.ai_provider if hasattr(manager, "app_config") else "duckai"
+                            gemini_model = manager.app_config.gemini_model if hasattr(manager, "app_config") else "gemini-1.5-flash"
+                            ranked_ids = ai_reranker.rank_candidates(target, candidates, duck_model, ai_provider, gemini_model)
                             ranked_keys = [id_to_key[i] for i in ranked_ids if i in id_to_key]
                             if ranked_keys:
                                 with ai_lock:

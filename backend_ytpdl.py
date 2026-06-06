@@ -563,8 +563,11 @@ def _ranked_youtube_matches_with_ai(
     def run_ai_advisor() -> None:
         try:
             import ai_reranker
-            duck_model = getattr(getattr(manager, "app_config", None), "duck_model", "1")
-            ranked_ids = ai_reranker.rank_candidates(target, ai_candidates, duck_model)
+            config = getattr(manager, "app_config", None)
+            duck_model = getattr(config, "duck_model", "1")
+            ai_provider = getattr(config, "ai_provider", "duckai")
+            gemini_model = getattr(config, "gemini_model", "gemini-1.5-flash")
+            ranked_ids = ai_reranker.rank_candidates(target, ai_candidates, duck_model, ai_provider, gemini_model)
             if ranked_ids:
                 result["ranked_ids"] = ranked_ids
         except Exception as exc:

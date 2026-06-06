@@ -769,9 +769,21 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   border-bottom: 0;
   border-radius: 8px 8px 0 0;
   background: var(--surface);
+  min-width: 0;
 }
 .details-head strong {
   font-size: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+#sideMeta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  color: var(--muted);
 }
 .details-cover {
   width: 100%;
