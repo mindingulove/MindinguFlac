@@ -17,6 +17,8 @@ def is_enabled() -> bool:
         return bool(os.environ.get("MINDINGUFLAC_AI_RERANK_URL"))
     if provider in {"duck", "duck_chat", "duckai"}:
         return _duck_available()
+    if provider == "gemini":
+        return True # Handled via playwright worker
     return False
 
 
@@ -26,7 +28,12 @@ def _provider() -> str:
         return explicit
     if os.environ.get("MINDINGUFLAC_AI_RERANK_URL"):
         return "openai"
-    return "duck_chat"
+    # Default to duckai if nothing else specified
+    return "duckai"
+
+
+def _selected_provider(ai_provider: str) -> str:
+    return (ai_provider or os.environ.get("MINDINGUFLAC_AI_RERANK_PROVIDER", "duckai")).strip().lower()
 
 
 def _timeout() -> float:
@@ -49,23 +56,53 @@ def _duck_available() -> bool:
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
+    """Robustly extract a JSON object from possibly-messy text."""
     raw = str(text or "").strip()
     if not raw:
         return {}
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        pass
 
-    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-    if not match:
-        return {}
-    try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+    # 1. Try markdown blocks
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL | re.IGNORECASE)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+
+    # 2. Try strict brace finding
+    start = raw.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(raw)):
+            ch = raw[i]
+            if in_str:
+                if esc: esc = False
+                elif ch == "\\": esc = True
+                elif ch == '"': in_str = False
+                continue
+            if ch == '"': in_str = True
+            elif ch == "{": depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        parsed = json.loads(raw[start:i + 1])
+                        if isinstance(parsed, dict): return parsed
+                    except Exception: break
+        start = raw.find("{", start + 1)
+        
+    # 3. LAZY PARSER: If Gemini returned prose like "Ranked IDs: [1, 2, 4]"
+    m_list = re.search(r"ranked_ids\"?:\s*\[([0-9,\s]+)\]", raw, re.IGNORECASE)
+    if m_list:
+        try:
+            ids = [int(x.strip()) for x in m_list.group(1).split(",") if x.strip()]
+            return {"ranked_ids": ids}
+        except Exception:
+            pass
+
+    return {}
 
 
 def _openai_compatible_request(prompt: str) -> dict[str, Any]:
@@ -142,12 +179,43 @@ def _duck_request(prompt: str, duck_model: str) -> dict[str, Any]:
     return {}
 
 
-def _request(prompt: str, duck_model: str) -> dict[str, Any]:
-    provider = _provider()
+def _gemini_request(prompt: str, model: str = "gemini-1.5-flash") -> dict[str, Any]:
+    print(f"[ai_reranker] Sending request to Gemini ({model})...")
+    import gemini_proxy
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "You rank clean music candidates. Return only JSON. "
+                "Never promote adult, restricted, or unrelated candidates.\n\n"
+                f"{prompt}"
+            ),
+        }
+    ]
+    res = gemini_proxy.send_chat(prompt=prompt, messages=messages, ensure_model=model)
+    if res.get("ok"):
+        return _parse_json_object(res.get("text", ""))
+    return {}
+
+
+def _request(prompt: str, duck_model: str = "1", ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> dict[str, Any]:
+    # Prefer the saved/app-selected provider. Environment override is only a fallback.
+    provider = _selected_provider(ai_provider)
+    
     if provider == "openai":
         return _openai_compatible_request(prompt)
+    
     if provider in {"duck", "duck_chat", "duckai"}:
-        return _duck_request(prompt, duck_model)
+        res = _duck_request(prompt, duck_model)
+        # Fallback to gemini if Duck.ai fails (e.g. rate limited)
+        if not res or (isinstance(res, dict) and res.get("rate_limited")):
+            print("[ai_reranker] Duck.ai limit reached or failed, falling back to Gemini")
+            return _gemini_request(prompt, gemini_model)
+        return res
+        
+    if provider == "gemini":
+        return _gemini_request(prompt, gemini_model)
+        
     return {}
 
 
@@ -169,7 +237,7 @@ def _parse_magnet(uri: str) -> dict[str, Any]:
         return {}
 
 
-def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], duck_model: str = "1") -> list[int]:
+def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], duck_model: str = "1", ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> list[int]:
     if not is_enabled() or not candidates:
         return []
     
@@ -220,7 +288,7 @@ def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], du
         },
         "candidates": compact_candidates,
     }, ensure_ascii=True)
-    result = _request(prompt, duck_model)
+    result = _request(prompt, duck_model, ai_provider, gemini_model)
     ranked = result.get("ranked_ids") if isinstance(result, dict) else None
     if not isinstance(ranked, list):
         return []

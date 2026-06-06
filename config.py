@@ -91,6 +91,11 @@ class AppConfig:
     track_max_retries: int = 1
     download_engine: str = "ytp-dl"
     duck_model: str = "1"
+    ai_provider: str = "duckai"
+    gemini_model: str = "flash"
+    tour_city: str = ""
+    tour_state: str = ""
+    tour_country: str = ""
     discogs_token: str = ""
     qobuz_token: str = ""
 
@@ -109,6 +114,11 @@ class AppConfig:
             "download_service": self.download_service,
             "download_engine": self.download_engine,
             "duck_model": self.duck_model,
+            "ai_provider": self.ai_provider,
+            "gemini_model": self.gemini_model,
+            "tour_city": self.tour_city,
+            "tour_state": self.tour_state,
+            "tour_country": self.tour_country,
             "cache_cleanup_frequency": self.cache_cleanup_frequency,
             "last_cache_cleanup": self.last_cache_cleanup,
             "strict_title_match": self.strict_title_match,
@@ -156,6 +166,11 @@ class AppConfig:
             track_max_retries=rt,
             download_engine=value.get("download_engine", cls.download_engine),
             duck_model=str(value.get("duck_model", "1") or "1"),
+            ai_provider=str(value.get("ai_provider", "duckai") or "duckai"),
+            gemini_model=str(value.get("gemini_model", "gemini-1.5-flash") or "gemini-1.5-flash"),
+            tour_city=str(value.get("tour_city", "") or "").strip(),
+            tour_state=str(value.get("tour_state", "") or "").strip(),
+            tour_country=str(value.get("tour_country", "") or "").strip(),
             discogs_token=str(value.get("discogs_token", "") or "").strip(),
             qobuz_token=str(value.get("qobuz_token", "") or "").strip(),
         )

@@ -51,6 +51,7 @@ const state = {
   progressLogEl: null,
   statusHintTippy: null,
   statusHintRef: null,
+  tourLocation: null,
 };
 
 const SERVICE_LABELS = {
@@ -430,6 +431,8 @@ function artistTarget(item = {}) {
     artist: name,
     artwork_url: item.artist_artwork_url || (item.type === "artist" ? item.artwork_url : ""),
     artist_id: item.artist_id || item.spotify_artist_id || (item.type === "artist" ? item.spotify_id : "") || item.musicbrainz_artist_id || "",
+    spotify_url: item.spotify_url || (item.external_urls && item.external_urls.spotify) || "",
+    external_urls: item.external_urls || {},
   };
 }
 
@@ -446,6 +449,8 @@ function albumTarget(item = {}) {
     year: item.year || "",
     musicbrainz_release_id: item.musicbrainz_release_id || item.release_id || (item.metadata && (item.metadata.musicbrainz_release_id || item.metadata.release_id)) || "",
     spotify_id: item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || (item.metadata && (item.metadata.album_spotify_id || item.metadata.spotify_album_id || item.metadata.spotify_id)) || "",
+    spotify_url: item.spotify_url || (item.external_urls && item.external_urls.spotify) || "",
+    external_urls: item.external_urls || {},
   };
 }
 
@@ -706,7 +711,7 @@ async function loadCatalog() {
 }
 
 async function enrichBatch(items, containerId) {
-  const toEnrich = items.filter(t => !t.artwork_url || t.artwork_url === "");
+  const toEnrich = items.filter(t => (!t.artwork_url || t.artwork_url === "") || (t.type === "artist" && !t.monthly_listeners));
   if (toEnrich.length === 0) return;
   
   // High-performance individual streaming with concurrency control (max 5 at once)
@@ -873,7 +878,7 @@ function cardsHtml(items, kind, offset = 0) {
   return items.map((item, index) => {
     const title = item.title || item.name || item.artist || item.album;
     const year = item.year ? ` (${item.year})` : "";
-    const sub = kind === "artist" ? "Artist" : `${artistLinkHtml(item)}${year}`;
+    const sub = kind === "artist" ? (item.monthly_listeners ? `${formatCount(item.monthly_listeners)} monthly listeners` : "Artist") : `${artistLinkHtml(item)}${year}`;
     const artUrl = item.artwork_url || "";
     const isActive = current && (item.title === current.title && item.artist === current.artist);
     const titleHtml = kind === "track" ? albumLinkHtml(item, title) : (kind === "artist" ? artistLinkHtml(item, title) : esc(title));
@@ -2073,8 +2078,10 @@ function updateDetailsPanel(track, job = null) {
   const qualityHtml = qualityLabel ? `<span class="quality-pill">${qualityLabel}</span>` : "";
 
   $("sideMeta").innerHTML = `
-    <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
-      ${artistLinkHtml(track) || "Search or choose from library"}
+    <div style="display: flex; align-items: center; justify-content: space-between; width: 100%; min-width: 0;">
+      <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;">
+        ${artistLinkHtml(track) || "Search or choose from library"}
+      </span>
       ${qualityHtml}
     </div>
   `;
@@ -2425,33 +2432,66 @@ async function loadSidebarCredits(track, requestId) {
 async function loadSidebarTour(track, requestId) {
   const artistName = primaryArtistName(track);
   const artistId = primaryArtistId(track);
-  // Cache-only: never trigger the slow Duck.ai worker from the sidebar.
+  const card = $("sideTourCard");
+  if (!card) return;
+  const fullName = track.artist || artistName;
+
+  // Fast path: render any cached preview immediately.
   const tour = await api("/api/artist/tour", {
     method: "POST",
     body: JSON.stringify({ artist_id: artistId, name: artistName, live: false }),
   });
   if (requestId !== state.sidebarRequestId) return;
-  const card = $("sideTourCard");
-  if (!card) return;
   const events = tour.events || [];
-  const fullName = track.artist || artistName;
   card.querySelector(".side-card-loading")?.remove();
-  if (events.length) {
-    card.insertAdjacentHTML("beforeend", `
-      <div class="side-tour-list">
-        ${events.slice(0, 3).map(event => tourEventHtml(event)).join("")}
-      </div>
-    `);
-  } else {
-    card.insertAdjacentHTML("beforeend", `
-      <button class="side-tour-find" id="sideTourFind" type="button">
-        <i class="bi bi-globe2"></i> Find tour dates
-      </button>
-    `);
-    $("sideTourFind")?.addEventListener("click", () => openTourPage(fullName));
-  }
-  bindExternalUrlButtons(card);
-  $("sideTourShowAll")?.addEventListener("click", () => openTourPage(fullName));
+
+  const renderSidebarTourCard = (rows, statusText = "", showButton = false) => {
+    card.querySelector(".side-tour-list")?.remove();
+    card.querySelector(".side-tour-find")?.remove();
+    card.querySelector(".side-tour-status")?.remove();
+    card.querySelector(".side-tour-empty")?.remove();
+    if (rows.length) {
+      card.insertAdjacentHTML("beforeend", `
+        <div class="side-tour-list">
+          ${rows.slice(0, 3).map(event => tourEventHtml(event)).join("")}
+        </div>
+      `);
+    } else if (statusText) {
+      card.insertAdjacentHTML("beforeend", `
+        <div class="side-tour-status">${esc(statusText)}</div>
+      `);
+    }
+    if (showButton) {
+      card.insertAdjacentHTML("beforeend", `
+        <button class="side-tour-find" id="sideTourFind" type="button">
+          <i class="bi bi-globe2"></i> Find tour dates
+        </button>
+      `);
+      $("sideTourFind")?.addEventListener("click", () => openTourPage(fullName));
+    }
+    bindExternalUrlButtons(card);
+    $("sideTourShowAll")?.addEventListener("click", () => openTourPage(fullName));
+  };
+
+  renderSidebarTourCard(events, events.length ? "" : "Loading tour dates...");
+
+  // Background live fetch: update the preview when the live worker returns.
+  api("/api/artist/tour", {
+    method: "POST",
+    body: JSON.stringify({ artist_id: artistId, name: artistName, live: true }),
+  }).then((liveTour) => {
+    if (requestId !== state.sidebarRequestId) return;
+    const liveEvents = liveTour?.events || [];
+    const loadingGone = card.querySelector(".side-tour-status");
+    if (loadingGone) loadingGone.remove();
+    renderSidebarTourCard(liveEvents, "", !liveEvents.length);
+    if (liveTour?.source && liveEvents.length) {
+      card.insertAdjacentHTML("beforeend", `<div class="tour-source">Sourced live via ${esc(liveTour.source)}</div>`);
+    }
+  }).catch((error) => {
+    if (requestId !== state.sidebarRequestId) return;
+    renderSidebarTourCard(events, String(error?.message || error || "Tour lookup failed"), !events.length);
+  });
 }
 
 function openTourPage(artistName) {
@@ -2579,14 +2619,14 @@ function showCreditsModal(credits = {}) {
 async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
   setActiveView("home");
   document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
-  const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || "");
-  const localCity = (tz.split("/").pop() || "").replace(/_/g, " ") || "you";
+  const tourLocation = await resolveTourLocation();
+  const localLabel = formatTourLocationLabel(tourLocation);
   const browseUrl = `https://www.songkick.com/search?query=${encodeURIComponent(artistName)}`;
 
   $("pageContent").innerHTML = `
     <div class="scroll-area tour-scroll">
       <div class="tour-events-page">
-        <div class="tour-hero">
+        <div class="tour-hero" id="tourHero">
           ${artistImage ? `<div class="tour-hero-art" style="background-image:url('${esc(artistImage)}')"></div>` : ""}
           <div class="tour-hero-overlay">
             <span class="tour-eyebrow">All events</span>
@@ -2594,7 +2634,7 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
           </div>
         </div>
         <div class="tour-hero-actions">
-          <span class="tour-loc-pill"><i class="bi bi-geo-alt-fill"></i> ${esc(localCity)}</span>
+          <span class="tour-loc-pill"><i class="bi bi-geo-alt-fill"></i> ${esc(localLabel)}</span>
           <a class="tour-share" href="${esc(browseUrl)}" target="_blank" rel="noopener" aria-label="Browse all events"><i class="bi bi-box-arrow-up"></i></a>
         </div>
         <div class="tour-body" id="tourBody">
@@ -2617,6 +2657,9 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
   const body = $("tourBody");
   if (!body) return;
   const events = tour.events || [];
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const upcomingEvents = events.filter(event => !event.date || String(event.date).slice(0, 10) >= todayIso);
+  const groupedEvents = groupTourEvents(upcomingEvents, tourLocation);
 
   const rowHtml = (event) => {
     const sub = [event.location || event.venue, event.info].filter(Boolean).join(" · ") || artistName;
@@ -2637,25 +2680,196 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
 
   body.innerHTML = `
     <section class="tour-near">
-      <h2>Near ${esc(localCity)}</h2>
-      <div class="tour-near-empty">
-        <p>No upcoming events.</p>
-        <a class="tour-browse-btn" href="${esc(browseUrl)}" target="_blank" rel="noopener">Browse all events</a>
-      </div>
+      <h2>Near ${esc(localLabel)}</h2>
+      ${groupedEvents.sameCity.length ? `
+        <div class="tour-event-list">${groupedEvents.sameCity.map(rowHtml).join("")}</div>
+      ` : `
+        <div class="tour-near-empty">
+          <p>No upcoming events.</p>
+          <a class="tour-browse-btn" href="${esc(browseUrl)}" target="_blank" rel="noopener">Browse all events</a>
+        </div>
+      `}
     </section>
-    ${events.length ? `
+    ${groupedEvents.sameState.length ? `
       <section class="tour-other">
-        <h2>Other locations</h2>
-        <div class="tour-event-list">${events.map(rowHtml).join("")}</div>
+        <h2>Same state</h2>
+        <div class="tour-event-list">${groupedEvents.sameState.map(rowHtml).join("")}</div>
+      </section>
+    ` : ""}
+    ${groupedEvents.sameCountry.length ? `
+      <section class="tour-other">
+        <h2>Same country</h2>
+        <div class="tour-event-list">${groupedEvents.sameCountry.map(rowHtml).join("")}</div>
+      </section>
+    ` : ""}
+    ${groupedEvents.otherCountries.length ? `
+      <section class="tour-other">
+        <h2>Other countries</h2>
+        <div class="tour-event-list">${groupedEvents.otherCountries.map(rowHtml).join("")}</div>
         ${tour.source ? `<div class="tour-source">Sourced live via ${esc(tour.source)}</div>` : ""}
       </section>
     ` : `
       <section class="tour-other">
-        <div class="tour-empty-state">${tour.error ? esc(tour.error) : "No tour dates found for this artist."}</div>
+        <div class="tour-empty-state">${tour.error ? esc(tour.error) : "No upcoming tour dates found for this artist."}</div>
       </section>
     `}
   `;
   bindExternalUrlButtons(body);
+  if (!artistImage) {
+    const hero = $("tourHero");
+    if (hero && !hero.querySelector(".tour-hero-art")) {
+      api("/api/artist/about", {
+        method: "POST",
+        body: JSON.stringify({ name: artistName }),
+      }).then((about) => {
+        const image = (about?.gallery && about.gallery[0] && about.gallery[0].url) || about?.avatar || "";
+        if (!image) return;
+        if (!hero.isConnected) return;
+        const art = document.createElement("div");
+        art.className = "tour-hero-art";
+        art.style.backgroundImage = `url("${String(image).replaceAll('"', '\\"')}")`;
+        hero.prepend(art);
+      }).catch(() => {});
+    }
+  }
+}
+
+function normalizePlaceKey(value = "") {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function formatTourLocationLabel(location = {}) {
+  return [location.city, location.state, location.country].filter(Boolean).join(", ") || "you";
+}
+
+async function resolveTourLocation() {
+  if (state.tourLocation) return state.tourLocation;
+  const settings = state.settings || {};
+  const override = {
+    city: String(settings.tour_city || "").trim(),
+    state: String(settings.tour_state || "").trim(),
+    country: String(settings.tour_country || "").trim(),
+  };
+  if (override.city || override.state || override.country) {
+    state.tourLocation = override;
+    return override;
+  }
+
+  const fallback = {
+    city: "",
+    state: "",
+    country: "",
+  };
+
+  const geo = await new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 6000);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        clearTimeout(timer);
+        finish({ lat: position.coords.latitude, lon: position.coords.longitude });
+      },
+      () => {
+        clearTimeout(timer);
+        finish(null);
+      },
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 60 * 1000 }
+    );
+  });
+
+  if (geo && Number.isFinite(geo.lat) && Number.isFinite(geo.lon)) {
+    try {
+      const resolved = await api(`/api/location/reverse?lat=${encodeURIComponent(geo.lat)}&lon=${encodeURIComponent(geo.lon)}`);
+      const location = {
+        city: String(resolved?.city || "").trim(),
+        state: String(resolved?.state || "").trim(),
+        country: String(resolved?.country || "").trim(),
+      };
+      state.tourLocation = location;
+      return location;
+    } catch (e) {}
+  }
+
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  fallback.city = (tz.split("/").pop() || "").replace(/_/g, " ") || "";
+  state.tourLocation = fallback;
+  return fallback;
+}
+
+function extractEventLocationParts(event = {}) {
+  const place = String(event.place || event.city || "").trim();
+  const location = String(event.location || "").trim();
+  const country = String(event.country || "").trim();
+  const state = String(event.state || event.region || "").trim();
+  let city = place;
+  let derivedState = state;
+  let derivedCountry = country;
+
+  if (location) {
+    const parts = location.split(",").map(part => part.trim()).filter(Boolean);
+    const venueish = /(arena|stadium|theatre|theater|park|hall|club|center|centre|dome|auditorium|festival|pavilion|ground|amphitheater|amphitheatre)/i;
+    if (!city) {
+      if (parts.length >= 3) city = venueish.test(parts[0]) ? parts[1] : parts[0];
+      else if (parts.length === 2) city = venueish.test(parts[0]) ? parts[1] : parts[0];
+      else if (parts.length === 1) city = parts[0];
+    }
+    if (!derivedState && parts.length >= 3) derivedState = parts[1];
+    if (!derivedCountry && parts.length >= 2) derivedCountry = parts[parts.length - 1];
+  }
+
+  return {
+    city,
+    state: derivedState,
+    country: derivedCountry,
+    cityKey: normalizePlaceKey(city),
+    stateKey: normalizePlaceKey(derivedState),
+    countryKey: normalizePlaceKey(derivedCountry),
+  };
+}
+
+function groupTourEvents(events, location) {
+  const targetCityKey = normalizePlaceKey(location.city);
+  const targetStateKey = normalizePlaceKey(location.state);
+  const targetCountryKey = normalizePlaceKey(location.country);
+  const out = {
+    sameCity: [],
+    sameState: [],
+    sameCountry: [],
+    otherCountries: [],
+  };
+
+  for (const event of events) {
+    const place = extractEventLocationParts(event);
+    if (targetCityKey && place.cityKey && place.cityKey === targetCityKey) {
+      out.sameCity.push(event);
+      continue;
+    }
+    if (targetStateKey && place.stateKey && place.stateKey === targetStateKey && (!targetCountryKey || !place.countryKey || place.countryKey === targetCountryKey)) {
+      out.sameState.push(event);
+      continue;
+    }
+    if (targetCountryKey && place.countryKey && place.countryKey === targetCountryKey) {
+      out.sameCountry.push(event);
+      continue;
+    }
+    out.otherCountries.push(event);
+  }
+
+  return out;
 }
 
 function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
@@ -3300,6 +3514,25 @@ async function renderSettings() {
     $("duckModel").value = state.settings.duck_model || "1";
   }
 
+  const aiProvider = $("aiProvider");
+  if (aiProvider) {
+    aiProvider.value = state.settings.ai_provider || "duckai";
+    const updateAiRows = () => {
+      const provider = aiProvider.value;
+      $("duckModelRow")?.classList.toggle("hidden", provider !== "duckai");
+      $("geminiModelRow")?.classList.toggle("hidden", provider !== "gemini");
+    };
+    aiProvider.onchange = updateAiRows;
+    updateAiRows();
+  }
+
+  if ($("geminiModel")) {
+    $("geminiModel").value = state.settings.gemini_model || "gemini-1.5-flash";
+  }
+  if ($("tourCity")) $("tourCity").value = state.settings.tour_city || "";
+  if ($("tourState")) $("tourState").value = state.settings.tour_state || "";
+  if ($("tourCountry")) $("tourCountry").value = state.settings.tour_country || "";
+
   $("trackMaxRetries").value = (state.settings.track_max_retries !== undefined) ? state.settings.track_max_retries : 1;
 
   $("cacheCleanupFrequency").value = state.settings.cache_cleanup_frequency || "never";
@@ -3326,7 +3559,12 @@ async function saveSettings(e) {
     cache_dir: $("cacheDir").value,
     music_dir: $("musicDir").value,
     download_engine: $("downloadEngine").value,
+    ai_provider: $("aiProvider") ? $("aiProvider").value : "duckai",
     duck_model: $("duckModel") ? $("duckModel").value : "1",
+    gemini_model: $("geminiModel") ? $("geminiModel").value : "gemini-1.5-flash",
+    tour_city: $("tourCity") ? $("tourCity").value.trim() : "",
+    tour_state: $("tourState") ? $("tourState").value.trim() : "",
+    tour_country: $("tourCountry") ? $("tourCountry").value.trim() : "",
     download_service: $("downloadService").value,
     default_quality: $("defaultQuality").value,
     track_max_retries: parseInt($("trackMaxRetries").value),
@@ -3342,6 +3580,7 @@ async function saveSettings(e) {
   try {
     await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
     state.settings = body;
+    state.tourLocation = null;
     alert("Settings saved");
   } catch (e) { alert("Save failed: " + e.message); }
 }

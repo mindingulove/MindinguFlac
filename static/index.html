@@ -112,10 +112,22 @@
                 </select>
               </div>
             </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>AI Advisor Provider</strong>
+                <span>Backend for torrent/YouTube ranking and tour lookup.</span>
+              </div>
+              <div class="settings-control">
+                <select id="aiProvider">
+                  <option value="duckai">Duck.ai</option>
+                  <option value="gemini">Gemini</option>
+                </select>
+              </div>
+            </div>
             <div class="settings-row" id="duckModelRow">
               <div class="settings-info">
                 <strong>Duck.ai model</strong>
-                <span>AI advisor for ranking torrent and YouTube candidates.</span>
+                <span>Model to use when Duck.ai is the provider.</span>
               </div>
               <div class="settings-control">
                 <select id="duckModel">
@@ -124,6 +136,30 @@
                   <option value="3">llama-4-scout</option>
                   <option value="4">mistral-small-4</option>
                 </select>
+              </div>
+            </div>
+            <div class="settings-row hidden" id="geminiModelRow">
+              <div class="settings-info">
+                <strong>Gemini model</strong>
+                <span>Model to use when Gemini is the provider.</span>
+              </div>
+              <div class="settings-control">
+                <select id="geminiModel">
+                  <option value="flash-lite">3.1 Flash-Lite (Fastest)</option>
+                  <option value="flash">3.5 Flash (All-around)</option>
+                  <option value="pro">3.1 Pro (Advanced)</option>
+                </select>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Tour location</strong>
+                <span>Used to group nearby events by city, state, and country. If blank, the browser GPS location is used.</span>
+              </div>
+              <div class="settings-control" style="display:grid; gap:6px; min-width: 260px;">
+                <input id="tourCity" type="text" placeholder="City" />
+                <input id="tourState" type="text" placeholder="State / region" />
+                <input id="tourCountry" type="text" placeholder="Country" />
               </div>
             </div>
             <div class="settings-row" id="serviceRow">

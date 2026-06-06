@@ -29,6 +29,10 @@ class TestAiReranker(unittest.TestCase):
 
         self.assertEqual(ranked, [2, 1])
 
+    def test_selected_provider_prefers_setting_over_env(self):
+        with patch.dict(os.environ, {"MINDINGUFLAC_AI_RERANK_PROVIDER": "duckai"}, clear=True):
+            self.assertEqual(ai_reranker._selected_provider("gemini"), "gemini")
+
 
 if __name__ == "__main__":
     unittest.main()

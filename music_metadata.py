@@ -1498,6 +1498,7 @@ def _bandsintown_events(artist_name: str) -> list[dict]:
             "month": month,
             "day": day,
             "city": venue.get("city") or location,
+            "state": venue.get("region") or "",
             "location": location,
             "venue": venue.get("name") or "",
             "country": venue.get("country") or "",
@@ -1517,10 +1518,10 @@ def _tour_cache_fresh(cached: dict) -> bool:
     return age <= ttl
 
 
-def artist_tour(artist_id: str, artist_name: str, live: bool = False, refresh: bool = False) -> dict:
+def artist_tour(artist_id: str, artist_name: str, live: bool = False, refresh: bool = False, ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> dict:
     """Resolve concert/tour dates for an artist.
 
-    Data comes from Duck.ai (GPT-5 + Web Search) via `tour_ai`, which is slow
+    Data comes from Duck.ai or Gemini via `tour_ai`, which is slow
     (a real headed-browser query, serialized with the torrent reranker), so
     results are cached in SQLite. The sidebar calls with live=False (cache-only,
     instant); the full tour page calls live=True to trigger a fresh fetch.
@@ -1534,18 +1535,18 @@ def artist_tour(artist_id: str, artist_name: str, live: bool = False, refresh: b
             return cached
 
     if not live:
-        # Cache-only request (sidebar): don't trigger the slow Duck.ai worker.
+        # Cache-only request (sidebar): don't trigger the slow worker.
         # Show any cached preview, even if slightly stale.
         stale = get_artist_tour_cache(key, None) if key else None
         if stale is not None:
             return stale
         return {"artist": artist_name, "events": [], "source": "", "pending": bool(artist_name)}
 
-    # Live request (tour page): fetch via Duck.ai web search, then cache.
+    # Live request (tour page): fetch via AI web search, then cache.
     result = {}
     try:
         import tour_ai
-        result = tour_ai.fetch_tour(artist_name)
+        result = tour_ai.fetch_tour(artist_name, ai_provider=ai_provider, gemini_model=gemini_model)
     except Exception as exc:
         result = {"artist": artist_name, "events": [], "source": "", "error": str(exc)}
 
@@ -1592,13 +1593,25 @@ def enrich_artwork_batch(results: list[dict]) -> list[dict]:
     # when making concurrent network requests.
     enriched = []
     for item in results:
-        if item.get("artwork_url"): 
+        if item.get("type") == "artist" and item.get("monthly_listeners"):
+             enriched.append(item)
+             continue
+        if item.get("type") != "artist" and item.get("artwork_url"):
             enriched.append(item)
             continue
         try:
-            if item.get("type") == "artist": 
-                item["artwork_url"] = spotify_artist_artwork(item.get("artist", ""))
-            elif item.get("type") == "album": 
+            if item.get("type") == "artist":
+                artist_name = item.get("artist", "")
+                artist_id = item.get("artist_id", "") or item.get("spotify_id", "")
+                about = artist_about(artist_id, artist_name)
+                if about:
+                    item["artwork_url"] = about.get("avatar") or item.get("artwork_url")
+                    item["monthly_listeners"] = about.get("monthly_listeners")
+                    item["followers"] = about.get("followers")
+                    if not item.get("biography"):
+                        item["biography"] = about.get("biography")
+            elif item.get("type") == "album":
+ 
                 item["artwork_url"] = spotify_album_artwork(item.get("artist", ""), item.get("title", ""))
             else:
                 sp = spotify_search_track(item.get("artist", ""), item.get("title", ""))

@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, load_config, save_config
@@ -211,6 +211,27 @@ _np_update_fn = None   # (info: dict) -> None
 _np_state_fn = None    # (state: int) -> None
 _np_clear_fn = None    # () -> None
 _macos_media_command_fn = None   # (action: str) -> None
+
+
+def reverse_geocode_location(lat: float, lon: float) -> dict:
+    url = "https://nominatim.openstreetmap.org/reverse?" + urlencode({
+        "format": "jsonv2",
+        "lat": f"{lat}",
+        "lon": f"{lon}",
+        "zoom": "18",
+        "addressdetails": "1",
+    })
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mindinguflac/1.0",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    address = data.get("address") or {}
+    city = address.get("city") or address.get("town") or address.get("village") or address.get("municipality") or address.get("hamlet") or ""
+    state = address.get("state") or address.get("region") or address.get("province") or address.get("county") or ""
+    country = address.get("country") or ""
+    return {"city": city, "state": state, "country": country}
 
 
 def load_playlists() -> list[dict]:
@@ -442,41 +463,69 @@ def get_dock_recent_items() -> list[dict]:
         return list(_dock_recent_items)
 
 
-def _spotify_import_playlist(playlist_url: str) -> dict:
+def _spotify_import_playlist(spotify_url: str) -> dict:
     """Returns {name, artwork_url, description, owner, followers, tracks} from Spotify."""
-    m = re.search(r"(?:playlist/|spotify:playlist:)([A-Za-z0-9]+)", playlist_url)
-    if not m:
-        return {"name": "", "artwork_url": "", "description": "", "owner": "", "followers": 0, "tracks": []}
-    playlist_id = m.group(1)
+    playlist_m = re.search(r"(?:playlist/|spotify:playlist:)([A-Za-z0-9]+)", spotify_url)
+    album_m = re.search(r"(?:album/|spotify:album:)([A-Za-z0-9]+)", spotify_url)
+    
     try:
         from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
         client = SpotifyMetadataClient()
-        info, imported_tracks, playlist_cover = client.get_playlist_tracks(playlist_id)
-        pl_name = info.get("name", "")
-        pl_artwork = info.get("cover_url", "") or playlist_cover
-        pl_description = info.get("description", "") or ""
-        pl_owner = info.get("owner", "") or ""
-        pl_followers = info.get("followers", 0) or 0
+        
+        if playlist_m:
+            playlist_id = playlist_m.group(1)
+            info, imported_tracks, playlist_cover = client.get_playlist_tracks(playlist_id)
+            pl_name = info.get("name", "")
+            pl_artwork = info.get("cover_url", "") or playlist_cover
+            pl_description = info.get("description", "") or ""
+            pl_owner = info.get("owner", "") or ""
+            pl_followers = info.get("followers", 0) or 0
+        elif album_m:
+            album_id = album_m.group(1)
+            info, imported_tracks = client.get_album_tracks(album_id)
+            pl_name = info.get("name", "")
+            pl_artwork = info.get("cover_url", "")
+            pl_owner = info.get("artist") or info.get("artists") or ""
+            if isinstance(pl_owner, list) and pl_owner:
+                pl_owner = pl_owner[0]
+            pl_description = f"Album by {pl_owner}" if pl_owner else ""
+            pl_followers = 0
+        else:
+            return {"name": "", "artwork_url": "", "description": "", "owner": "", "followers": 0, "tracks": []}
 
-        tracks = [{
-            "type": "track",
-            "title": track.title,
-            "artist": track.artists,
-            "artist_id": track.artist_id if hasattr(track, 'artist_id') else "",
-            "album": track.album,
-            "artwork_url": track.cover_url,
-            "spotify_id": track.id,
-            "spotify_url": track.external_url or f"https://open.spotify.com/track/{track.id}",
-            "duration_ms": track.duration_ms,
-            "isrc": track.isrc,
-        } for track in imported_tracks if track.id]
+        tracks = []
+        for track in imported_tracks:
+            # Handle both objects and dictionaries
+            def get_val(obj, key, default=""):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
+            t_id = get_val(track, "id") or get_val(track, "spotify_id")
+            if not t_id:
+                continue
+                
+            tracks.append({
+                "type": "track",
+                "title": get_val(track, "title") or get_val(track, "name"),
+                "artist": get_val(track, "artists") or get_val(track, "artist"),
+                "artist_id": get_val(track, "artist_id"),
+                "album": get_val(track, "album"),
+                "artwork_url": get_val(track, "cover_url") or get_val(track, "artwork_url"),
+                "spotify_id": t_id,
+                "spotify_url": get_val(track, "external_url") or f"https://open.spotify.com/track/{t_id}",
+                "duration_ms": get_val(track, "duration_ms", 0),
+                "isrc": get_val(track, "isrc"),
+            })
 
         return {
             "name": pl_name, "artwork_url": pl_artwork, "description": pl_description,
             "owner": pl_owner, "followers": pl_followers, "tracks": tracks,
         }
     except Exception as e:
-        print(f"[Spotify import] {e}")
+        print(f"[Spotify import] Error importing {spotify_url}: {e}")
+        import traceback
+        traceback.print_exc()
         return {"name": "", "artwork_url": "", "description": "", "owner": "", "followers": 0, "tracks": []}
 
 
@@ -870,6 +919,22 @@ class Handler(BaseHTTPRequestHandler):
                 import duck_proxy
                 self.send_json(duck_proxy.fetch_status())
                 return
+            if path == "/api/gemini/status":
+                import gemini_proxy
+                self.send_json(gemini_proxy.fetch_status())
+                return
+            if path == "/api/location/reverse":
+                try:
+                    lat = float(query.get("lat", [""])[0])
+                    lon = float(query.get("lon", [""])[0])
+                except Exception:
+                    self.send_error_json("Invalid coordinates", HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    self.send_json(reverse_geocode_location(lat, lon))
+                except Exception as exc:
+                    self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
+                return
             if path == "/api/native_audio/status":
                 self.send_json(native_audio.status())
                 return
@@ -981,6 +1046,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_json(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self) -> None:
+        global app_config, service_downloader
         path = urlparse(self.path).path
         body = read_body(self)
         try:
@@ -1039,6 +1105,8 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("name", ""),
                     live=bool(body.get("live")),
                     refresh=bool(body.get("refresh")),
+                    ai_provider=app_config.ai_provider,
+                    gemini_model=app_config.gemini_model,
                 ))
                 return
             if path == "/api/track/credits":
@@ -1090,7 +1158,6 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/settings":
                 updated = AppConfig.from_public_dict(body)
                 with config_lock:
-                    global app_config, service_downloader
                     app_config = updated
                     save_config(CONFIG_PATH, app_config)
                     service_downloader.update_config(app_config)
@@ -1204,6 +1271,14 @@ class Handler(BaseHTTPRequestHandler):
                     token=body.get("vqd_hash_1", ""),
                     messages=body.get("messages", []),
                     model=body.get("model", "gpt-5-mini"),
+                ))
+                return
+            if path == "/api/gemini/chat":
+                import gemini_proxy
+                self.send_json(gemini_proxy.send_chat(
+                    prompt=body.get("prompt", ""),
+                    messages=body.get("messages", []),
+                    ensure_model=body.get("model", "flash"),
                 ))
                 return
             if path == "/api/library/status":
