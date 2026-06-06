@@ -228,13 +228,97 @@ class _Worker:
         self.page.wait_for_timeout(1200)
         # Sanity: the prompt box must exist.
         self.page.wait_for_selector('textarea[name="user-prompt"]', timeout=10_000)
+        # Clear any announcement popup that would leave the box disabled.
+        self._dismiss_overlays()
+
+    _COMPOSER_READY = 'textarea[name="user-prompt"]:not([disabled])'
 
     def _new_chat(self):
+        page = self.page
+        # Prefer the explicit "New Chat" button; the keyboard shortcut is flaky
+        # in headless and silently no-ops if focus isn't on the page.
+        clicked = False
+        for name in ("New Chat", "New chat"):
+            try:
+                page.get_by_role("button", name=name).first.click(timeout=2500)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            try:
+                page.keyboard.press("Meta+Shift+KeyO")
+            except Exception:
+                pass
+        page.wait_for_timeout(300)
+
+    def _limit_reached(self) -> bool:
+        """Detect Duck.ai's daily message-limit notice (disables the composer)."""
         try:
-            self.page.keyboard.press("Meta+Shift+KeyO")
-            self.page.wait_for_timeout(300)
+            return bool(self.page.evaluate(
+                "() => /maximum number of messages|continue this chat tomorrow|reached the (daily )?maximum/i"
+                ".test(document.body.innerText || '')"
+            ))
+        except Exception:
+            return False
+
+    def _dismiss_overlays(self):
+        """Dismiss Duck.ai announcement/onboarding popups that disable the box.
+
+        Duck.ai periodically shows a feature popup ("You can now save up to 100
+        chats…", "Got It!") that disables the composer until dismissed.
+        """
+        page = self.page
+        for name in ("Got It!", "Got it", "Got it!", "Continue", "Accept all", "Accept", "I Agree", "Okay"):
+            try:
+                loc = page.get_by_role("button", name=name, exact=True)
+                if loc.count() > 0 and loc.first.is_visible():
+                    loc.first.click(timeout=1500)
+                    page.wait_for_timeout(250)
+            except Exception:
+                continue
+
+    def _ensure_composer_ready(self, timeout_ms: int = 12000) -> bool:
+        """Wait until the prompt box is enabled; recover if it is stuck.
+
+        Duck.ai disables the textarea while a response streams, or behind an
+        announcement popup. A prior turn that didn't fully settle leaves it
+        disabled, which made every later click (Tools, the textarea itself)
+        time out. Dismiss popups, stop any live generation, and as a last
+        resort reload the app to a clean state.
+        """
+        page = self.page
+        self._dismiss_overlays()
+        try:
+            page.wait_for_selector(self._COMPOSER_READY, timeout=timeout_ms)
+            return True
         except Exception:
             pass
+        self._dismiss_overlays()
+        for name in ("Stop generating", "Stop"):
+            try:
+                page.get_by_role("button", name=name).first.click(timeout=1500)
+                break
+            except Exception:
+                continue
+        page.wait_for_timeout(500)
+        try:
+            page.wait_for_selector(self._COMPOSER_READY, timeout=5000)
+            return True
+        except Exception:
+            pass
+        # Last resort: reload to a clean session (keeps the persistent profile,
+        # so RoboShield doesn't need re-solving from scratch).
+        try:
+            _log("composer stuck; reloading duck.ai")
+            page.goto("https://duck.ai/", wait_until="networkidle", timeout=_NAV_TIMEOUT_MS)
+            page.wait_for_timeout(1200)
+            self._dismiss_overlays()
+            page.wait_for_selector(self._COMPOSER_READY, timeout=8000)
+            return True
+        except Exception as exc:
+            _log(f"composer recovery failed: {exc}")
+            return False
 
     def _ensure_model(self, model: str):
         """Best-effort select a specific Duck.ai model (e.g. "GPT-5").
@@ -309,11 +393,27 @@ class _Worker:
         # Reset capture + start a fresh conversation each call (no context bleed).
         page.evaluate("() => { window.__ddgChat = {}; window.__ddgLatest = null; }")
         self._new_chat()
+        # Bail out fast on the daily-limit notice rather than running the full
+        # recovery dance (it can't be cleared by us).
+        if self._limit_reached():
+            return {"ok": False, "rate_limited": True,
+                    "error": "Duck.ai daily message limit reached for this browser — try again later."}
+        # The prompt box is disabled while a previous turn streams; wait for it
+        # (and recover if stuck) before any click, or every action times out.
+        if not self._ensure_composer_ready():
+            if self._limit_reached():
+                return {"ok": False, "rate_limited": True,
+                        "error": "Duck.ai daily message limit reached for this browser — try again later."}
+            return {"ok": False, "error": "composer never became ready (Duck.ai busy/blocked)"}
         if ensure_model:
             self._ensure_model(ensure_model)
         if web_search:
             self._enable_web_search()
         ta = page.locator('textarea[name="user-prompt"]')
+        try:
+            ta.wait_for(state="visible", timeout=8000)
+        except Exception:
+            pass
         ta.click()
         ta.fill(prompt)
         page.wait_for_timeout(120)

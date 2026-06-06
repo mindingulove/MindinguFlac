@@ -2651,7 +2651,7 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
       </section>
     ` : `
       <section class="tour-other">
-        <div class="tour-empty-state">${tour.error ? "Couldn't load tour dates right now. Please try again." : "No tour dates found for this artist."}</div>
+        <div class="tour-empty-state">${tour.error ? esc(tour.error) : "No tour dates found for this artist."}</div>
       </section>
     `}
   `;
