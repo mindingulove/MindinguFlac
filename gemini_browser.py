@@ -69,12 +69,9 @@ class _Worker:
         self.browser = None
         self.ctx = None
         self.page = None
-        self._stealth_cm = None
+        self._sp_cm = None
 
     def start(self):
-        from playwright_stealth import Stealth
-        from playwright.sync_api import sync_playwright
-
         try:
             self._start_with_retry()
         except Exception as e:
@@ -92,38 +89,31 @@ class _Worker:
                 raise e
 
     def _start_with_retry(self):
-        from playwright_stealth import Stealth
         from playwright.sync_api import sync_playwright
+        if not self._sp_cm:
+            self._sp_cm = sync_playwright()
+        p = self._sp_cm.__enter__()
 
-        if not self._stealth_cm:
-            self._stealth_cm = Stealth().use_sync(sync_playwright())
-        
-        p = self._stealth_cm.__enter__()
         args = [
             "--disable-blink-features=AutomationControlled",
             "--no-first-run",
             "--no-default-browser-check",
         ]
+        headless = not _HEADED
         if not _HEADED:
+            # Use Chromium's new headless mode by default so Gemini never
+            # needs to open a GUI browser window.
             args.append("--headless=new")
-            
-        # If persistence is requested (for saved login), use launch_persistent_context
-        # Otherwise, use a regular launch + new_context for "Incognito" behavior.
-        if os.environ.get("MINDINGUFLAC_GEMINI_PERSIST") == "1":
-            self.ctx = p.chromium.launch_persistent_context(
-                _PROFILE_DIR,
-                headless=False,
-                args=args,
-                user_agent=REAL_UA,
-                viewport={"width": 1280, "height": 900},
-            )
-        else:
-            # TRUE INCOGNITO: No profile directory, starts fresh every time.
-            self.browser = p.chromium.launch(headless=False, args=args)
-            self.ctx = self.browser.new_context(
-                user_agent=REAL_UA,
-                viewport={"width": 1280, "height": 900},
-            )
+
+        # Use a persistent context like the working Duck.ai worker. Gemini's
+        # browser flow is less tolerant of the launch()+new_context split.
+        self.ctx = p.chromium.launch_persistent_context(
+            _PROFILE_DIR,
+            headless=headless,
+            args=args,
+            user_agent=REAL_UA,
+            viewport={"width": 1280, "height": 900},
+        )
 
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
         self.page.goto("https://gemini.google.com/app", wait_until="networkidle", timeout=_NAV_TIMEOUT_MS)
@@ -340,9 +330,9 @@ class _Worker:
                 self.ctx.close()
         except Exception:
             pass
-        if self._stealth_cm:
+        if self._sp_cm:
             try:
-                self._stealth_cm.__exit__(None, None, None)
+                self._sp_cm.__exit__(None, None, None)
             except Exception:
                 pass
 

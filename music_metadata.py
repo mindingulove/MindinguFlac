@@ -1529,7 +1529,7 @@ def artist_tour(artist_id: str, artist_name: str, live: bool = False, refresh: b
     artist_name = (artist_name or "").strip()
     key = norm_name(artist_name)
 
-    if key and not refresh:
+    if not live and key and not refresh:
         cached = get_artist_tour_cache(key, None)
         if cached is not None and _tour_cache_fresh(cached):
             return cached

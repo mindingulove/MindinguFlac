@@ -4,7 +4,7 @@ Separate from `ai_reranker.py` (which keeps doing torrent reranking) — this
 module only fetches concert listings. It drives the same long-running headed
 Duck.ai browser worker through `duck_proxy.send_chat`, but forces GPT-5 with the
 "Web Search" tool enabled so answers are sourced from the live web (Songkick,
-Bandsintown, venue pages) rather than hallucinated.
+venue pages) rather than hallucinated.
 
 Public API:
   - fetch_tour(artist_name) -> {"artist", "events": [...], "source"} or {}
@@ -28,7 +28,7 @@ def _selected_provider(ai_provider: str) -> str:
 def _prompt(artist_name: str) -> str:
     return (
         f"Search for live concert / tour dates for \"{artist_name}\" in 2026. "
-        "Check Songkick, Bandsintown, and venue listings. "
+        "Check Songkick and venue listings. "
         "Respond with ONLY a JSON array and nothing else. "
         "If no dates are found, return []. "
         "Format each entry as: "
