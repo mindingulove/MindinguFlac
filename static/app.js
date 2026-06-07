@@ -2319,11 +2319,39 @@ function sidebarTrackRow(track, cls = "") {
   `;
 }
 
+// Builds the right-rail "Next in queue" card (or empty string when there is no
+// next track). Kept separate so queue mutations can refresh just this card in
+// place via updateSidebarNextQueue() without re-running the whole sidebar (which
+// would re-trigger the artist/credits/tour network loads).
+function nextQueueCardHtml() {
+  const next = nextQueueTrack();
+  if (!next) return "";
+  return `
+    <section class="side-card">
+      <div class="side-section-head">
+        <h3>Next in queue</h3>
+        <button class="side-text-btn" id="sideOpenQueue" type="button">Open queue</button>
+      </div>
+      ${sidebarTrackRow(next, "side-next-track")}
+    </section>
+  `;
+}
+
+// Refresh the sidebar "Next in queue" card to match the current queue order.
+// Called (ungated) from every queue-mutation site so the preview stays correct
+// even when the queue panel is closed but the sidebar is visible.
+function updateSidebarNextQueue() {
+  const slot = $("sideNextQueueSlot");
+  if (!slot) return;
+  slot.innerHTML = nextQueueCardHtml();
+  $("sideOpenQueue")?.addEventListener("click", openQueuePanel);
+  bindSidebarTrackRows(slot);
+}
+
 function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
   const content = $("sideRichContent");
   if (!content) return;
   const related = relatedTracksFor(track);
-  const next = nextQueueTrack();
   const artistName = primaryArtistName(track) || track.artist || "";
 
   content.innerHTML = `
@@ -2352,15 +2380,7 @@ function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
       </div>
       <div class="side-card-loading">Loading tour dates...</div>
     </section>
-    ${next ? `
-      <section class="side-card">
-        <div class="side-section-head">
-          <h3>Next in queue</h3>
-          <button class="side-text-btn" id="sideOpenQueue" type="button">Open queue</button>
-        </div>
-        ${sidebarTrackRow(next, "side-next-track")}
-      </section>
-    ` : ""}
+    <div id="sideNextQueueSlot">${nextQueueCardHtml()}</div>
   `;
 
   bindSidebarTrackRows(content);
@@ -4651,6 +4671,7 @@ function bindPlayer() {
         if (!$("queuePanel").hidden) {
           refreshQueuePanel();
         }
+        updateSidebarNextQueue();
 
         prefetchNextTracks().catch(() => {});
       }
@@ -5623,6 +5644,7 @@ function reorderQueueTrack(fromIndex, toIndex) {
   state.originalQueue = [...state.queue];
   prefetchNextTracks();
   refreshQueuePanel();
+  updateSidebarNextQueue();
   return true;
 }
 
@@ -5932,6 +5954,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
         }
         if (upcomingIdx <= state.queueIndex) state.queueIndex--;
         if (!$("queuePanel").hidden) refreshQueuePanel();
+        updateSidebarNextQueue();
         menu.hidden = true;
       };
     } else {
@@ -6000,6 +6023,7 @@ $("ctxAddQueue")?.addEventListener("click", () => {
     state.queue.push(contextMenuTargetTrack);
     if (state.originalQueue) state.originalQueue.push(contextMenuTargetTrack);
     if (!$("queuePanel").hidden) refreshQueuePanel();
+    updateSidebarNextQueue();
   }
   $("trackContextMenu").hidden = true;
 });
@@ -6061,6 +6085,7 @@ $("ctxAlbumAddQueue")?.addEventListener("click", async () => {
             if (state.originalQueue) state.originalQueue.push(trackItem);
         });
         if (!$("queuePanel").hidden) refreshQueuePanel();
+        updateSidebarNextQueue();
     }
   }
   $("albumContextMenu").hidden = true;
