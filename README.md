@@ -17,8 +17,13 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/settings.png" width="800" alt="Settings screen with AI and tour options">
-  <br><i>Settings for download engines, AI advisor backends, tour source, location, and cache maintenance</i>
+  <img src="docs/screenshots/settings_hyperbor_ai_place.png" width="800" alt="Settings screen with download engine, AI advisor, and tour options">
+  <br><i>Settings for download engines, AI advisor backends, tour source, and location</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/cache_every_start_close.png" width="800" alt="Cache maintenance with cleanup schedule and live cache activity">
+  <br><i>Cache maintenance: cleanup schedule (e.g. on every close or restart) and live cache activity</i>
 </p>
 
 ## Core Philosophy
