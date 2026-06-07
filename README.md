@@ -235,10 +235,4 @@ If the endpoint, network, or service limit is unavailable, the torrent job conti
 
 ---
 
-## Roadmap / TODO
-
-- [x] **Queue Interface**: Dedicated right-side queue panel with now-playing, upcoming tracks, recently played history, next-track preview in the sidebar, and drag-and-drop reordering with animated drop indicators.
-
----
-
 *Disclaimer: Mindinguflac is a research-oriented meta-search tool. Users are responsible for ensuring that their use of the platform and any media they index complies with local copyright laws and the terms of service of the metadata providers.*
