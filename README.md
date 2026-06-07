@@ -103,13 +103,23 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/sidebar_artist_info.png" width="330" alt="Sidebar Artist Details">
-  <br><i>Sidebar Details - Artist information, credits, tour dates, and queue preview</i>
+  <img src="docs/screenshots/Tour_sidebar.png" width="330" alt="Sidebar tour dates and next in queue">
+  <br><i>Tour Sidebar - Live tour dates and the next-in-queue preview</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/sidebar_next_queue.png" width="330" alt="Sidebar Next Queue">
-  <br><i>Sidebar Queue Preview - The next playable track stays visible at the end of the rail</i>
+  <img src="docs/screenshots/credits_modal.png" width="800" alt="Credits modal">
+  <br><i>Credits - Full artist, composer, writer, and performer credits</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/tour_page.png" width="800" alt="Tour page">
+  <br><i>Tour Page - "All events" page with location-aware "near me" grouping</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/Tour_page_events.png" width="800" alt="Tour events by country">
+  <br><i>Tour Page - Upcoming concerts by country with venue, date, and time</i>
 </p>
 
 <p align="center">
