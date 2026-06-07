@@ -1222,6 +1222,23 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
 
     about = spotify_artist_about(artist_id)
 
+    # A non-empty but wrong id resolves to nothing on Spotify's API and would
+    # otherwise short-circuit the reliable name-based lookup, leaving the sidebar
+    # with 0 listeners/followers and the album cover as the artist photo. This
+    # happens when an album/compilation-page track carries a non-Spotify
+    # artist_id (e.g. a MusicBrainz id) or a stale/wrong id. When the supplied id
+    # yields no stats, re-resolve the id from the name and retry. Guarding on
+    # stats (not name) leaves valid ids that legitimately resolve untouched.
+    if artist_name and not (about.get("monthly_listeners") or about.get("followers")):
+        try:
+            resolved_id = spotify_artist_id(artist_name) or ""
+        except Exception:
+            resolved_id = ""
+        if resolved_id and resolved_id != artist_id:
+            retry = spotify_artist_about(resolved_id)
+            if retry.get("monthly_listeners") or retry.get("followers"):
+                about, artist_id = retry, resolved_id
+
     # Ensure a real artist image is always available as a fallback for the
     # frontend (gallery is frequently empty even for the correct artist).
     if artist_name and not about.get("avatar") and not (about.get("gallery") or []):
