@@ -4,6 +4,23 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
 
+## v1.0.0 Preview
+
+<p align="center">
+  <img src="docs/screenshots/sidebar_about_tour.png" width="800" alt="Artist sidebar with about, credits, and tour dates">
+  <br><i>Rich artist sidebar with biography, credits, live tour dates, and queue context</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/sidebar_queue.png" width="800" alt="Queue and now playing panel">
+  <br><i>Queue-first playback with now-playing context and upcoming tracks</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/settings.png" width="800" alt="Settings screen with AI and tour options">
+  <br><i>Settings for download engines, AI advisor backends, tour source, location, and cache maintenance</i>
+</p>
+
 ## Core Philosophy
 
 - **Metadata Centralization**: Aggregates data from MusicBrainz, Discogs, and other open databases to provide a comprehensive view of musical history.
@@ -27,11 +44,11 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - **Smart Parallel Prefetching**: Automatically downloads the next 5 tracks in your queue in parallel, ensuring instant transitions between songs.
 - **Persistent SQLite Engine**: All successfully resolved Torrent magnets, YouTube URLs, and enriched metadata (Spotify IDs, ISRCs, MusicBrainz IDs) are now saved in a local SQLite database for instant offline access and to prevent redundant searches.
 - **Torrent Safety Filters**: Adult/video vocabulary is stored in the local SQLite database and checked before fuzzy scoring and again after torrent metadata exposes internal file paths. Terms found in the requested track title or album are allowed only for that request; unrelated adult/video terms are still blocked.
-- **Optional AI Torrent Advisor**: Clean torrent candidates can be ranked in parallel by an optional AI advisor. AI never sees candidates blocked by the local adult/video filter and cannot override metadata checks or the "first real byte progress wins" torrent race.
+- **Optional AI Advisor**: Clean torrent and YouTube candidates can be ranked in parallel by Gemini or DuckDuckGo/Duck.ai. AI never sees candidates blocked by the local adult/video filter and cannot override metadata checks or the "first real byte progress wins" torrent race.
 - **Improved YouTube Engine**: Smart quality-scoring and automatic skipping of age-restricted or blocked videos with persistent blacklisting.
 - **Visual Quality Indicators**: Real-time **HI-RES** and **HQ** badges in the player sidebar indicating the actual audio fidelity being streamed.
 - **Rich Now Playing Sidebar**: Spotify-style right rail with artwork, quality badges, related music, artist information, credits, tour dates, and the next queue item.
-- **Live Tour Dates**: A dedicated Spotify-style "All events" page lists an artist's upcoming concerts (venue, city, date, time, price), fetched on-demand via AI web search and cached locally.
+- **Live Tour Dates**: A dedicated Spotify-style "All events" page lists an artist's upcoming concerts (venue, city, date, time, price), fetched via Hypebot/Bandsintown or the selected AI backend and cached locally with 12-hour renewal metadata.
 
 ## Screenshots
 
