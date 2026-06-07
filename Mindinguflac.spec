@@ -32,7 +32,7 @@ hiddenimports = [
     'ai_reranker',
     'duck_proxy',
     'ddg_browser',
-    'tour_ai', 'gemini_proxy', 'gemini_browser',
+    'tour_ai', 'hypebot_tour', 'gemini_proxy', 'gemini_browser',
     'db'
 ]
 tmp_ret = collect_all('SpotiFLAC')
@@ -126,8 +126,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '0.9.2',
-        'CFBundleVersion': '0.9.2',
+        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleVersion': '1.0.0',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

@@ -1422,16 +1422,53 @@ def _musicbrainz_recording_for_credits(track: dict, title: str, artist: str) -> 
         return {}
 
 
+def _track_credits_cache_key(track: dict, title: str, artist: str) -> str:
+    metadata = track.get("metadata") or {}
+    identifiers = [
+        ("musicbrainz_recording_id", track.get("musicbrainz_recording_id") or metadata.get("musicbrainz_recording_id")),
+        ("isrc", track.get("isrc") or metadata.get("isrc")),
+        ("spotify_id", track.get("spotify_id") or metadata.get("spotify_id")),
+    ]
+    for kind, value in identifiers:
+        value = str(value or "").strip()
+        if value:
+            return f"{kind}:{norm_name(value)}"
+
+    album = track.get("album") or metadata.get("album") or ""
+    duration = track.get("duration_ms") or track.get("length") or metadata.get("duration_ms") or metadata.get("length") or ""
+    parts = [norm_name(artist), norm_name(title), norm_name(album), str(duration or "").strip()]
+    key = "||".join(part for part in parts if part)
+    return f"track:{key}" if key else ""
+
+
 def track_credits(track: dict) -> dict:
     metadata = track.get("metadata") or {}
     title = track.get("title") or metadata.get("title") or "Track"
     artists = _split_people(track.get("artist") or metadata.get("artist"))
     main = artists[:1]
     featured = artists[1:]
+    artist_name = track.get("artist") or metadata.get("artist") or ""
+    cache_key = _track_credits_cache_key(track, title, artist_name)
+
+    if cache_key:
+        try:
+            import db
+            cached = db.get_track_credits(cache_key)
+            if cached is not None:
+                return cached
+        except Exception:
+            pass
 
     mb_recording = _musicbrainz_recording_for_credits(track, title, main[0] if main else "")
     if mb_recording:
-        return _recording_credit_sections(mb_recording, title, track.get("artist") or metadata.get("artist") or "")
+        result = _recording_credit_sections(mb_recording, title, artist_name)
+        if cache_key:
+            try:
+                import db
+                db.save_track_credits(cache_key, result)
+            except Exception:
+                pass
+        return result
 
     artist_rows = [{"name": name, "role": "Main Artist"} for name in main]
     artist_rows.extend({"name": name, "role": "Featured Artist"} for name in featured)
@@ -1446,9 +1483,9 @@ def track_credits(track: dict) -> dict:
     composition_rows = [{"name": name, "role": "Writer"} for name in _split_people(writer_names)]
     production_rows = [{"name": name, "role": "Producer"} for name in _split_people(producer_names)]
 
-    return {
+    result = {
         "title": title,
-        "artist": track.get("artist") or metadata.get("artist") or "",
+        "artist": artist_name,
         "source": "Track metadata",
         "sections": [
             {"title": "Artist", "rows": artist_rows},
@@ -1456,6 +1493,13 @@ def track_credits(track: dict) -> dict:
             {"title": "Production", "rows": production_rows},
         ],
     }
+    if cache_key:
+        try:
+            import db
+            db.save_track_credits(cache_key, result)
+        except Exception:
+            pass
+    return result
 
 
 def _bandsintown_events(artist_name: str) -> list[dict]:
@@ -1509,59 +1553,189 @@ def _bandsintown_events(artist_name: str) -> list[dict]:
 
 
 _TOUR_CACHE_TTL = 12 * 3600  # real listings: refresh roughly twice a day
-_TOUR_EMPTY_TTL = 3600       # empty results may be a flaky miss; recheck within an hour
+_TOUR_EMPTY_TTL = _TOUR_CACHE_TTL
+
+
+def _tour_iso(timestamp: float) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(timestamp)))
+    except Exception:
+        return ""
+
+
+def _tour_cache_ttl(cached: dict) -> float:
+    return _TOUR_CACHE_TTL if (cached.get("events")) else _TOUR_EMPTY_TTL
+
+
+def _stamp_tour_cache(payload: dict, cached_at: float | None = None) -> dict:
+    cached_at = float(cached_at or payload.get("cached_at") or time.time())
+    ttl = float(payload.get("cache_ttl_seconds") or _tour_cache_ttl(payload))
+    expires_at = cached_at + ttl
+    payload["cached_at"] = cached_at
+    payload["cached_at_iso"] = _tour_iso(cached_at)
+    payload["cache_ttl_seconds"] = ttl
+    payload["expires_at"] = expires_at
+    payload["expires_at_iso"] = _tour_iso(expires_at)
+    payload["refresh_needed"] = False
+    payload["stale"] = False
+    return payload
+
+
+def _annotate_tour_cache(cached: dict) -> dict:
+    if not isinstance(cached, dict):
+        return cached
+    annotated = dict(cached)
+    cached_at = float(annotated.get("cached_at") or annotated.get("_cache_last_updated") or 0)
+    ttl = float(annotated.get("cache_ttl_seconds") or _tour_cache_ttl(annotated))
+    expires_at = cached_at + ttl if cached_at else 0
+    age = time.time() - cached_at if cached_at else float("inf")
+    is_stale = age > ttl
+    annotated["cached_at"] = cached_at
+    annotated["cached_at_iso"] = _tour_iso(cached_at) if cached_at else ""
+    annotated["cache_ttl_seconds"] = ttl
+    annotated["expires_at"] = expires_at
+    annotated["expires_at_iso"] = _tour_iso(expires_at) if expires_at else ""
+    annotated["cache_age_seconds"] = max(0, round(age, 3)) if cached_at else None
+    annotated["refresh_needed"] = is_stale
+    annotated["stale"] = is_stale
+    return annotated
 
 
 def _tour_cache_fresh(cached: dict) -> bool:
-    age = time.time() - (cached.get("cached_at") or 0)
-    ttl = _TOUR_CACHE_TTL if (cached.get("events")) else _TOUR_EMPTY_TTL
-    return age <= ttl
+    return not _annotate_tour_cache(cached).get("refresh_needed")
 
 
-def artist_tour(artist_id: str, artist_name: str, live: bool = False, refresh: bool = False, ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> dict:
+def artist_tour(
+    artist_id: str,
+    artist_name: str,
+    live: bool = False,
+    refresh: bool = False,
+    ai_provider: str = "duckai",
+    gemini_model: str = "gemini-1.5-flash",
+    timeout_s: float | None = None,
+    tour_source: str = "ai",
+    tour_url: str = "",
+) -> dict:
     """Resolve concert/tour dates for an artist.
 
-    Data comes from Duck.ai or Gemini via `tour_ai`, which is slow
-    (a real headed-browser query, serialized with the torrent reranker), so
-    results are cached in SQLite. The sidebar calls with live=False (cache-only,
-    instant); the full tour page calls live=True to trigger a fresh fetch.
+    Live data comes from the selected tour source. "ai" uses Duck.ai/Gemini via
+    `tour_ai`; "hypebot" scrapes Hypebot/Bandsintown JSON-LD first and falls
+    back to the selected AI provider when no matching artist/events are found.
+    Results are cached in SQLite. The sidebar calls with live=False
+    (cache-only, instant); the full tour page calls live=True to refresh.
     """
     artist_name = (artist_name or "").strip()
+    tour_url = (tour_url or "").strip()
+    if tour_url:
+        live = True
     key = norm_name(artist_name)
 
-    if not live and key and not refresh:
+    if key and not refresh and not tour_url:
         cached = get_artist_tour_cache(key, None)
-        if cached is not None and _tour_cache_fresh(cached):
-            return cached
+        if cached is not None:
+            cached = _annotate_tour_cache(cached)
+            if _tour_cache_fresh(cached):
+                return cached
+            if not live:
+                cached["pending"] = True
+                return cached
 
     if not live:
         # Cache-only request (sidebar): don't trigger the slow worker.
-        # Show any cached preview, even if slightly stale.
+        # Show any cached preview, even if stale, while marking it for refresh.
         stale = get_artist_tour_cache(key, None) if key else None
         if stale is not None:
+            stale = _annotate_tour_cache(stale)
+            stale["pending"] = True
             return stale
         return {"artist": artist_name, "events": [], "source": "", "pending": bool(artist_name)}
 
-    # Live request (tour page): fetch via AI web search, then cache.
+    def _fetch_ai() -> dict:
+        try:
+            import tour_ai
+            return tour_ai.fetch_tour(
+                artist_name,
+                ai_provider=ai_provider,
+                gemini_model=gemini_model,
+                timeout_s=timeout_s,
+            )
+        except Exception as exc:
+            return {"artist": artist_name, "events": [], "source": "", "error": str(exc)}
+
+    def _fetch_hypebot() -> dict:
+        try:
+            import hypebot_tour
+            return hypebot_tour.fetch_artist_concerts(
+                artist=artist_name,
+                url=tour_url,
+                limit=1,
+                timeout=max(1.0, min(30.0, float(timeout_s or 15))),
+            )
+        except Exception as exc:
+            return {"artist": artist_name, "events": [], "source": "Hypebot/Bandsintown", "error": str(exc)}
+
+    # Live request (tour page): fetch from the selected source.
+    selected_source = (tour_source or "ai").strip().lower()
+    if tour_url:
+        selected_source = "hypebot"
+    print(f"[artist_tour] Live lookup for {artist_name!r} using {selected_source}")
     result = {}
-    try:
-        import tour_ai
-        result = tour_ai.fetch_tour(artist_name, ai_provider=ai_provider, gemini_model=gemini_model)
-    except Exception as exc:
-        result = {"artist": artist_name, "events": [], "source": "", "error": str(exc)}
+    hypebot_error = ""
+    if selected_source == "hypebot":
+        result = _fetch_hypebot()
+        events = (result or {}).get("events") or []
+        pages = (result or {}).get("pages") or []
+        message = str((result or {}).get("message") or "").strip()
+        print(f"[artist_tour] Hypebot returned {len(events)} events for {artist_name!r}")
+        if not events and pages and message:
+            print(f"[artist_tour] Hypebot has no events for {artist_name!r}: {message}")
+        elif not events:
+            hypebot_error = str((result or {}).get("error") or "Hypebot found no matching tour dates.")
+            print(f"[artist_tour] Falling back to AI for {artist_name!r}: {hypebot_error}")
+            result = _fetch_ai()
+            if not result.get("error"):
+                result["fallback_from"] = "Hypebot/Bandsintown"
+                result["fallback_reason"] = hypebot_error
+    else:
+        print(f"[artist_tour] Using AI provider {ai_provider!r} for {artist_name!r}")
+        result = _fetch_ai()
 
     events = (result or {}).get("events") or []
     error = (result or {}).get("error")
+    if error and "timeout" in str(error).lower():
+        return {
+            "artist": artist_name,
+            "events": [],
+            "source": result.get("source", ""),
+            "error": "Tour lookup timed out. Please try again.",
+        }
     # Cache any successful query (even an empty result) so a non-touring artist
     # doesn't keep re-triggering the slow worker. Errors are never cached, so
     # they retry on the next open.
     if not error:
+        pages = (result or {}).get("pages") or []
+        page_url = str((result or {}).get("url") or "").strip()
+        if not page_url and pages:
+            page_url = str((pages[0] or {}).get("url") or "").strip()
         payload = {
             "artist": artist_name,
             "events": events,
             "source": result.get("source") or "Duck.ai",
-            "cached_at": time.time(),
         }
+        _stamp_tour_cache(payload)
+        if page_url:
+            payload["url"] = page_url
+            payload["hypebot_url"] = page_url
+            payload["artist_url"] = page_url
+            payload["tour_url"] = page_url
+        if pages:
+            payload["pages"] = pages
+        if result.get("message"):
+            payload["message"] = result.get("message")
+        if result.get("fallback_from"):
+            payload["fallback_from"] = result.get("fallback_from")
+        if result.get("fallback_reason"):
+            payload["fallback_reason"] = result.get("fallback_reason")
         if key:
             try:
                 import db

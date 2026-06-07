@@ -426,16 +426,16 @@ class _Worker:
         else:
             ta.press("Enter")
 
-        deadline = time.time() + (timeout_s if timeout_s and timeout_s > 0 else _REPLY_TIMEOUT_S)
+        deadline = None if timeout_s <= 0 else time.time() + timeout_s
         rec = None
-        while time.time() < deadline:
+        while deadline is None or time.time() < deadline:
             page.wait_for_timeout(300)
             rec = page.evaluate(
                 "() => { const id = window.__ddgLatest; return id ? window.__ddgChat[id] : null; }"
             )
             if rec and rec.get("done"):
                 break
-        if not rec:
+        if deadline is not None and not rec:
             return {"ok": False, "error": "no /chat request observed (UI may have changed)"}
         status = rec.get("status")
         raw = rec.get("text", "") or ""

@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from config import jobs_path
+from config import app_data_dir, jobs_path
 
 
 def clean_part(value: str) -> str:
@@ -642,6 +642,26 @@ class ServiceDownloadManager:
         for kind, message in changes:
             self._append_cache_event(job, kind, message)
 
+    def _writable_cache_root(self) -> Path:
+        candidates = [
+            Path(self.config.cache_dir),
+            app_data_dir() / "cache",
+            Path(os.environ.get("TMPDIR") or "/tmp") / "Mindinguflac" / "cache",
+        ]
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                probe = candidate / ".__mindinguflac_write_test__"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+                return candidate
+            except Exception:
+                continue
+        return candidates[-1]
+
+    def _fallback_output_dir(self, job: dict) -> Path:
+        return self._writable_cache_root() / clean_part(job["id"])
+
     def promote_job(self, job_id: str) -> bool:
         """Clear a job's prefetch flag so the torrent prefetch gate stops
         throttling it. Called when a still-downloading prefetch job becomes the
@@ -1204,10 +1224,20 @@ class ServiceDownloadManager:
         if downloaded_bytes <= 0:
             return False
 
-        total_bytes = max(int(job.get("estimated_total_bytes") or 0), _estimated_total_bytes(job, detected_ext))
-        if downloaded_bytes >= total_bytes:
+        engine = str(job.get("engine") or "").lower()
+        engine_bytes = int(job.get("active_audio_ready_bytes") or 0)
+        engine_total = int(job.get("active_audio_size") or 0)
+        use_engine_progress = engine == "torrent" and engine_bytes > 0 and engine_total > 0
+
+        if use_engine_progress:
+            progress_bytes = min(engine_bytes, engine_total)
+            total_bytes = engine_total
+        else:
+            progress_bytes = downloaded_bytes
+            total_bytes = max(int(job.get("estimated_total_bytes") or 0), _estimated_total_bytes(job, detected_ext))
+        if not use_engine_progress and downloaded_bytes >= total_bytes:
             total_bytes = int(downloaded_bytes * 1.1)
-        progress = min(95.0, (downloaded_bytes / total_bytes) * 100.0)
+        progress = min(95.0, (progress_bytes / total_bytes) * 100.0)
         if progress <= 0:
             return False
 
@@ -1218,7 +1248,6 @@ class ServiceDownloadManager:
         # (a stale partial audio file in the folder stops growing) and get a
         # false "no progress" timeout. active_audio_ready_bytes comes straight
         # from handle.file_progress(), so this reflects the real download rate.
-        engine_bytes = int(job.get("active_audio_ready_bytes") or 0)
         active_bytes = max(downloaded_bytes, engine_bytes)
         now = time.time()
         prev_bytes = int(job.get("_last_active_bytes") or 0)
@@ -1241,12 +1270,15 @@ class ServiceDownloadManager:
 
         with self._lock:
             current = float(job.get("progress") or 0)
-            if progress <= current and current < 95:
+            correcting_preallocated_torrent = use_engine_progress and current > progress + 10 and current < 95
+            if progress <= current and current < 95 and not correcting_preallocated_torrent:
                 return False
             job["progress"] = progress
-            job["downloaded_bytes"] = downloaded_bytes
+            job["downloaded_bytes"] = progress_bytes
+            job["preallocated_file_bytes"] = downloaded_bytes
             job["estimated_total_bytes"] = total_bytes
-            print(f"[Progress] {job.get('title')} (file) -> {job['progress']:.1f}% ({downloaded_bytes}/{total_bytes} bytes)")
+            source = "engine" if use_engine_progress else "file"
+            print(f"[Progress] {job.get('title')} ({source}) -> {job['progress']:.1f}% ({progress_bytes}/{total_bytes} bytes)")
         return True
 
     def start_job(self, payload: dict) -> dict:
@@ -1388,7 +1420,20 @@ class ServiceDownloadManager:
                     shutil.rmtree(output_dir, ignore_errors=True)
                 except Exception:
                     pass
-            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError) as exc:
+                fallback_output_dir = self._fallback_output_dir(job)
+                if fallback_output_dir != output_dir:
+                    print(f"[ServiceDownload] Falling back to cache dir for {job.get('title')}: {exc}")
+                    output_dir = fallback_output_dir
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    with self._lock:
+                        job["output_dir"] = str(output_dir)
+                        if job.get("mode") == "download":
+                            job["last_status"] = "Using cache directory after library path was unavailable"
+                else:
+                    raise
 
             engine = job.get("engine", "spotiflac")
 

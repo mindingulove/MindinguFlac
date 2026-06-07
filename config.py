@@ -93,6 +93,7 @@ class AppConfig:
     duck_model: str = "1"
     ai_provider: str = "duckai"
     gemini_model: str = "flash"
+    tour_source: str = "ai"
     tour_city: str = ""
     tour_lat: str = ""
     tour_lon: str = ""
@@ -118,6 +119,7 @@ class AppConfig:
             "duck_model": self.duck_model,
             "ai_provider": self.ai_provider,
             "gemini_model": self.gemini_model,
+            "tour_source": self.tour_source,
             "tour_city": self.tour_city,
             "tour_lat": self.tour_lat,
             "tour_lon": self.tour_lon,
@@ -156,6 +158,10 @@ class AppConfig:
             try: rt = int(rt)
             except: rt = 1
 
+        tour_source = str(value.get("tour_source", "ai") or "ai").strip().lower()
+        if tour_source not in {"ai", "hypebot"}:
+            tour_source = "ai"
+
         return cls(
             cache_dir=_to_path(cache_dir_str, default_cache_dir),
             music_dir=_to_path(music_dir_str, default_music_dir),
@@ -172,6 +178,7 @@ class AppConfig:
             duck_model=str(value.get("duck_model", "1") or "1"),
             ai_provider=str(value.get("ai_provider", "duckai") or "duckai"),
             gemini_model=str(value.get("gemini_model", "gemini-1.5-flash") or "gemini-1.5-flash"),
+            tour_source=tour_source,
             tour_city=str(value.get("tour_city", "") or "").strip(),
             tour_lat=str(value.get("tour_lat", "") or "").strip(),
             tour_lon=str(value.get("tour_lon", "") or "").strip(),

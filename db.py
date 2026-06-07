@@ -96,6 +96,13 @@ def _init_db(conn: sqlite3.Connection):
             last_updated REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS track_credits (
+            credit_key TEXT PRIMARY KEY,
+            metadata_json TEXT,
+            last_updated REAL
+        )
+    """)
     conn.commit()
 
 
@@ -204,6 +211,36 @@ def get_artist_tour(artist_key: str, max_age: float | None = None) -> dict | Non
     row = conn.execute(
         "SELECT metadata_json, last_updated FROM artist_tours WHERE artist_key = ?",
         (artist_key,),
+    ).fetchone()
+    if not row:
+        return None
+    if max_age is not None and (time.time() - (row["last_updated"] or 0)) > max_age:
+        return None
+    try:
+        data = json.loads(row["metadata_json"])
+        if isinstance(data, dict):
+            last_updated = float(row["last_updated"] or 0)
+            data.setdefault("cached_at", last_updated)
+            data["_cache_last_updated"] = last_updated
+        return data
+    except Exception:
+        return None
+
+
+def save_track_credits(credit_key: str, data: dict):
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO track_credits (credit_key, metadata_json, last_updated)
+        VALUES (?, ?, ?)
+    """, (credit_key, json.dumps(data), time.time()))
+    conn.commit()
+
+
+def get_track_credits(credit_key: str, max_age: float | None = None) -> dict | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT metadata_json, last_updated FROM track_credits WHERE credit_key = ?",
+        (credit_key,),
     ).fetchone()
     if not row:
         return None

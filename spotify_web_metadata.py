@@ -6,8 +6,10 @@ import hashlib
 import hmac
 import json
 import re
+import socket
 import struct
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -16,15 +18,49 @@ WEB_PLAYER_ALBUM_URL = "https://open.spotify.com/album/{album_id}"
 QUERY_URL = "https://api-partner.spotify.com/pathfinder/v2/query"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
 APP_VERSION = "896000000"
+REQUEST_TIMEOUT_S = 18
+REQUEST_RETRIES = 3
+REQUEST_RETRY_DELAY_S = 0.5
+ARTIST_ABOUT_CACHE_TTL_S = 600
+ARTIST_ABOUT_FAILURE_TTL_S = 45
 _playcount_cache: dict[str, tuple[float, dict[str, int]]] = {}
 _artist_about_cache: dict[str, tuple[float, dict]] = {}
 
 
-def _request_text(url: str, headers: dict[str, str] | None = None, data: bytes | None = None) -> str:
+def _is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionResetError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        return isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError, OSError))
+    return isinstance(exc, OSError)
+
+
+def _request_text(
+    url: str,
+    headers: dict[str, str] | None = None,
+    data: bytes | None = None,
+    timeout: float = REQUEST_TIMEOUT_S,
+    retries: int = REQUEST_RETRIES,
+) -> str:
     request_headers = {"User-Agent": USER_AGENT, **(headers or {})}
     request = urllib.request.Request(url, data=data, headers=request_headers)
-    with urllib.request.urlopen(request, timeout=10) as response:
-        return response.read().decode("utf-8")
+    attempts = max(1, int(retries or 1))
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8")
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not _is_retryable_error(exc):
+                raise
+            delay = REQUEST_RETRY_DELAY_S * attempt
+            print(f"[SpotifyWeb] Request retry {attempt}/{attempts - 1} for {url}: {exc}")
+            time.sleep(delay)
+    if last_error:
+        raise last_error
+    return ""
 
 
 def _totp(secret: bytes, timestamp: float) -> str:
@@ -235,12 +271,17 @@ def spotify_artist_about(artist_id: str) -> dict:
     if not artist_id:
         return {}
     cached = _artist_about_cache.get(artist_id)
-    if cached and time.time() - cached[0] < 600:
-        return cached[1]
+    if cached:
+        ttl = ARTIST_ABOUT_CACHE_TTL_S if cached[1] else ARTIST_ABOUT_FAILURE_TTL_S
+        if time.time() - cached[0] < ttl:
+            return cached[1]
+    started = time.time()
     try:
         result = _load_artist_about(artist_id)
     except Exception as e:
-        print(f"[SpotifyWeb] Error loading artist about for {artist_id}: {e}")
+        print(f"[SpotifyWeb] Error loading artist about for {artist_id} after {round(time.time() - started, 1)}s: {e}")
+        if cached:
+            return cached[1]
         result = {}
     _artist_about_cache[artist_id] = (time.time(), result)
     return result

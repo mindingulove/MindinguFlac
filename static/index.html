@@ -112,10 +112,37 @@
                 </select>
               </div>
             </div>
+            <div class="settings-row" id="serviceRow">
+              <div class="settings-info">
+                <strong>Service source</strong>
+                <span>Primary provider for the selected engine.</span>
+              </div>
+              <div class="settings-control">
+                <select id="downloadService"></select>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
+                <strong>Default quality</strong>
+                <span>Preferred bitrate for streaming and downloads.</span>
+              </div>
+              <div class="settings-control">
+                <select id="defaultQuality"></select>
+              </div>
+            </div>
+            <div class="settings-row" id="retriesRow">
+              <div class="settings-info">
+                <strong>Download retries</strong>
+                <span>Attempts per provider. Set to 0 to bypass to Tor immediately.</span>
+              </div>
+              <div class="settings-control">
+                <input id="trackMaxRetries" type="number" min="0" max="5" value="1" style="width: 60px; text-align: center;">
+              </div>
+            </div>
             <div class="settings-row">
               <div class="settings-info">
                 <strong>AI Advisor Provider</strong>
-                <span>Backend for torrent/YouTube ranking and tour lookup.</span>
+                <span>Backend for torrent/YouTube ranking and AI tour fallback.</span>
               </div>
               <div class="settings-control">
                 <select id="aiProvider">
@@ -153,6 +180,18 @@
             </div>
             <div class="settings-row">
               <div class="settings-info">
+                <strong>Tour source</strong>
+                <span>Use AI or try Hypebot first with AI fallback.</span>
+              </div>
+              <div class="settings-control">
+                <select id="tourSource">
+                  <option value="ai">AI</option>
+                  <option value="hypebot">Hypebot</option>
+                </select>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-info">
                 <strong>Tour location</strong>
                 <span>Pick a city. The app stores hidden coordinates and uses GPS only when nothing is set.</span>
               </div>
@@ -161,33 +200,6 @@
                 <input id="tourLat" type="hidden">
                 <input id="tourLon" type="hidden">
                 <div id="tourLocationSuggestions" class="tour-location-suggestions hidden"></div>
-              </div>
-            </div>
-            <div class="settings-row" id="serviceRow">
-              <div class="settings-info">
-                <strong>Service source</strong>
-                <span>Primary provider for the selected engine.</span>
-              </div>
-              <div class="settings-control">
-                <select id="downloadService"></select>
-              </div>
-            </div>
-            <div class="settings-row">
-              <div class="settings-info">
-                <strong>Default quality</strong>
-                <span>Preferred bitrate for streaming and downloads.</span>
-              </div>
-              <div class="settings-control">
-                <select id="defaultQuality"></select>
-              </div>
-            </div>
-            <div class="settings-row" id="retriesRow">
-              <div class="settings-info">
-                <strong>Download retries</strong>
-                <span>Attempts per provider. Set to 0 to bypass to Tor immediately.</span>
-              </div>
-              <div class="settings-control">
-                <input id="trackMaxRetries" type="number" min="0" max="5" value="1" style="width: 60px; text-align: center;">
               </div>
             </div>
           </div>
@@ -250,7 +262,7 @@
 
           <div class="settings-footer" style="display: flex; justify-content: space-between; align-items: center;">
             <div style="font-size: 12px; color: var(--muted);">
-              Mindingulove © 2026 | Version 0.9.2
+              Mindingulove © 2026 | Version 1.0.0
             </div>
             <button class="primary" type="submit">Save settings</button>
           </div>

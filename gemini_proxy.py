@@ -119,9 +119,8 @@ def _exchange(payload: dict, reply_timeout: float | None = None) -> dict:
         _stop_worker()
         return {"ok": False, "error": _last_error}
 
-    wait_s = (reply_timeout + 30) if reply_timeout else _REPLY_TIMEOUT_S
-    deadline = time.time() + wait_s
-    while time.time() < deadline:
+    deadline = None if reply_timeout is None or reply_timeout <= 0 else time.time() + (reply_timeout + 30)
+    while deadline is None or time.time() < deadline:
         if _proc.poll() is not None:
             _last_error = "worker died while awaiting reply"
             _stop_worker()
@@ -151,7 +150,7 @@ def send_chat(prompt: str, messages: list | None = None, ensure_model: str = "",
     payload = {"prompt": _compose_prompt(prompt, messages)}
     if ensure_model:
         payload["ensure_model"] = ensure_model
-    if timeout_s:
+    if timeout_s is not None and timeout_s > 0:
         payload["timeout_s"] = timeout_s
         
     with _lock:
@@ -162,3 +161,9 @@ def send_chat(prompt: str, messages: list | None = None, ensure_model: str = "",
             if _start_worker():
                 res = _exchange(dict(payload), reply_timeout=timeout_s)
     return res
+
+
+def shutdown() -> None:
+    """Stop the long-running Gemini worker if it is running."""
+    with _lock:
+        _stop_worker()

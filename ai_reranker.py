@@ -11,8 +11,8 @@ import urllib.request
 from typing import Any
 
 
-def is_enabled() -> bool:
-    provider = _provider()
+def is_enabled(ai_provider: str = "") -> bool:
+    provider = _selected_provider(ai_provider) if ai_provider else _provider()
     if provider == "openai":
         return bool(os.environ.get("MINDINGUFLAC_AI_RERANK_URL"))
     if provider in {"duck", "duck_chat", "duckai"}:
@@ -238,7 +238,7 @@ def _parse_magnet(uri: str) -> dict[str, Any]:
 
 
 def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], duck_model: str = "1", ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> list[int]:
-    if not is_enabled() or not candidates:
+    if not is_enabled(ai_provider) or not candidates:
         return []
     
     is_youtube = any("youtube" in str(c.get("query", "")).lower() or "youtube" in str(c.get("source", "")).lower() for c in candidates)

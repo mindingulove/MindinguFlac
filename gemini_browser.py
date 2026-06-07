@@ -54,6 +54,7 @@ def _default_profile() -> str:
 
 _PROFILE_DIR = _default_profile()
 _HEADED = os.environ.get("MINDINGUFLAC_GEMINI_HEADED", "0") == "1"
+_DEBUG_TEXT = os.environ.get("MINDINGUFLAC_GEMINI_DEBUG", "0") == "1"
 _NAV_TIMEOUT_MS = 90_000
 _REPLY_TIMEOUT_S = float(os.environ.get("MINDINGUFLAC_GEMINI_REPLY_TIMEOUT", "180"))
 
@@ -154,7 +155,7 @@ class _Worker:
         # Gemini prompt box is often a contenteditable div
         # In Guest Mode, it might take a moment to appear after dismissing popups
         try:
-            self.page.wait_for_selector('div[contenteditable="true"]', timeout=15000)
+            self.page.wait_for_selector('[role="textbox"][aria-label="Enter a prompt for Gemini"]', timeout=15000)
             return True
         except Exception:
             # Try to see if there's a "Chat with Gemini" or "Get started" button first
@@ -165,7 +166,7 @@ class _Worker:
                         btn.first.click(timeout=2000)
                         self.page.wait_for_timeout(1000)
                 
-                self.page.wait_for_selector('div[contenteditable="true"]', timeout=10000)
+                self.page.wait_for_selector('[role="textbox"][aria-label="Enter a prompt for Gemini"]', timeout=10000)
                 return True
             except Exception:
                 return False
@@ -212,6 +213,70 @@ class _Worker:
             except Exception:
                 pass
 
+    def _new_chat(self):
+        """Start a fresh Gemini chat for this request.
+
+        The worker process stays alive, but each request should get its own
+        conversation so stale context does not bleed across lookups.
+        """
+        page = self.page
+        try:
+            page.goto("https://gemini.google.com/app", wait_until="networkidle", timeout=_NAV_TIMEOUT_MS)
+            page.wait_for_timeout(1000)
+            page.wait_for_selector('[role="textbox"][aria-label="Enter a prompt for Gemini"]', timeout=15000)
+        except Exception:
+            pass
+
+    def _extract_response_text(self, page) -> str:
+        """Pull the latest Gemini response from the live page text.
+
+        Gemini's DOM has shifted away from the old `message-content` shape. In
+        the current UI, the useful text lives in the Quill editor wrapper and is
+        surfaced in page text as a `Gemini said` section. Use that first, then
+        fall back to visible response containers.
+        """
+        try:
+            body_text = page.locator("body").inner_text(timeout=2000).strip()
+        except Exception:
+            body_text = ""
+
+        if body_text:
+            marker = "Gemini said"
+            idx = body_text.rfind(marker)
+            if idx != -1:
+                chunk = body_text[idx + len(marker):].strip()
+                # Stop at the next conversation chrome or footer noise.
+                stop_markers = [
+                    "\n\nNew\n",
+                    "\nNew\n",
+                    "\nGemini is AI and can make mistakes.",
+                    "\nConversation with Gemini\n",
+                ]
+                for stop in stop_markers:
+                    pos = chunk.find(stop)
+                    if pos != -1:
+                        chunk = chunk[:pos].strip()
+                if chunk:
+                    return chunk
+
+        for sel in [
+            'message-content',
+            '.message-content',
+            '[aria-label*="response"]',
+            '.ql-editor',
+            'main .ql-editor',
+            'main',
+        ]:
+            try:
+                loc = page.locator(sel)
+                if loc.count() > 0:
+                    txt = loc.last.inner_text(timeout=2000).strip()
+                    if txt:
+                        return txt
+            except Exception:
+                continue
+        return ""
+
     def ask(self, prompt: str, ensure_model: str = "", timeout_s: float = 0.0) -> dict:
         if not self._ensure_ready():
             if self._limit_reached():
@@ -219,35 +284,28 @@ class _Worker:
             return {"ok": False, "error": "Gemini interface not ready or login required."}
 
         page = self.page
+        self._new_chat()
         if ensure_model:
             self._ensure_model(ensure_model)
             
         # Find prompt box
-        box = page.locator('div[contenteditable="true"]').first
+        box = page.get_by_role("textbox", name="Enter a prompt for Gemini").first
         box.click()
         box.fill(prompt)
         page.wait_for_timeout(200)
         page.keyboard.press("Enter")
 
-        deadline = time.time() + (timeout_s if timeout_s > 0 else _REPLY_TIMEOUT_S)
+        deadline = None if timeout_s <= 0 else time.time() + timeout_s
         
         last_text = ""
         stable_count = 0
-        
-        # Selectors for Gemini's response area
-        selectors = [
-            'message-content',
-            '.message-content',
-            'div[data-message-author-role="assistant"]',
-            '.model-response-text'
-        ]
         
         # Dead zone: wait for Gemini to acknowledge the prompt
         page.wait_for_timeout(4000)
         
         has_started_responding = False
         
-        while time.time() < deadline:
+        while deadline is None or time.time() < deadline:
             page.wait_for_timeout(2000)
             try:
                 # 1. Detect "Searching" or "Thinking" state
@@ -264,32 +322,12 @@ class _Worker:
                             break
                     except: pass
                 
-                # 2. Extract text from assistant messages
-                current_text = ""
-                assistant_loc = page.locator('div[data-message-author-role="assistant"], .message-content, message-content')
-                
-                if assistant_loc.count() > 0:
-                    # Get the absolute last message
-                    current_text = assistant_loc.last.inner_text().strip()
-                
-                if not current_text:
-                    # Scraper fallback
-                    current_text = page.evaluate("""() => {
-                        const msgs = Array.from(document.querySelectorAll('div, section, article'))
-                            .filter(el => {
-                                const t = el.innerText;
-                                if (t.length < 20) return false;
-                                if (el.querySelector('textarea')) return false;
-                                // Try to exclude user prompt by looking for "You said" or matching start
-                                if (t.includes('You said') || t.startsWith('Search for')) return false;
-                                return true;
-                            });
-                        return msgs.length ? msgs[msgs.length - 1].innerText : "";
-                    }""").strip()
+                # 2. Extract text from Gemini's visible response sections.
+                current_text = self._extract_response_text(page)
 
                 # 3. Check if we have a real response starting (not just our own prompt echo)
                 if not has_started_responding:
-                    if len(current_text) > 10 and not (prompt[:40] in current_text or "You said" in current_text):
+                    if current_text.strip():
                         has_started_responding = True
                         _log("Detected start of assistant response.")
                     else:
@@ -318,10 +356,13 @@ class _Worker:
                 if _HEADED: _log(f"Loop error: {e}")
                 continue
 
-        if not last_text or len(last_text.strip()) < 5:
+        if deadline is not None and (not last_text or len(last_text.strip()) < 5):
             return {"ok": False, "error": "No response captured from Gemini (timeout)."}
 
         _log(f"Captured {len(last_text)} chars from Gemini.")
+        if _HEADED or _DEBUG_TEXT:
+            preview = last_text[:4000]
+            _log("Captured text:", preview)
         return {"ok": True, "text": last_text}
 
     def close(self):

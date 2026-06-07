@@ -17,7 +17,7 @@ import re
 import time
 
 _MODEL = "GPT-5"
-_REPLY_TIMEOUT_S = 100.0
+_REPLY_TIMEOUT_S = float(os.environ.get("MINDINGUFLAC_TOUR_REPLY_TIMEOUT", "180"))
 _MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
@@ -232,11 +232,13 @@ def _invert_date(iso: str) -> str:
         return iso
 
 
-def fetch_tour(artist_name: str, ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> dict:
+def fetch_tour(artist_name: str, ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash", timeout_s: float | None = None) -> dict:
     artist_name = str(artist_name or "").strip()
     if not artist_name:
         return {}
         
+    reply_timeout = None if timeout_s is None else float(timeout_s)
+
     # Prefer the saved/app-selected provider. Environment override is only a fallback.
     provider = _selected_provider(ai_provider)
     
@@ -254,7 +256,7 @@ def fetch_tour(artist_name: str, ai_provider: str = "duckai", gemini_model: str 
                 model="gpt-5",
                 ensure_model=_MODEL,
                 web_search=True,
-                reply_timeout=_REPLY_TIMEOUT_S,
+                reply_timeout=reply_timeout,
             )
             return res
         except Exception as e:
@@ -267,7 +269,7 @@ def fetch_tour(artist_name: str, ai_provider: str = "duckai", gemini_model: str 
             prompt = _prompt(artist_name)
             # Add explicit instruction for Gemini to use its search capabilities
             full_prompt = f"Use your Google Search capabilities to find live concert dates.\n\n{prompt}"
-            return gemini_proxy.send_chat(prompt=full_prompt, ensure_model=gemini_model, timeout_s=_REPLY_TIMEOUT_S)
+            return gemini_proxy.send_chat(prompt=full_prompt, ensure_model=gemini_model, timeout_s=reply_timeout)
         except Exception as e:
             return {"error": str(e)}
 

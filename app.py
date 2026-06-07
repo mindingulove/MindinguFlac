@@ -23,6 +23,8 @@ mimetypes.add_type("text/css", ".css")
 import os
 import re
 import shutil
+import signal
+import tempfile
 import threading
 import time
 import urllib.request
@@ -198,7 +200,43 @@ PLAYLISTS_PATH = DATA / "playlists.json"
 DOCK_RECENTS_PATH = DATA / "dock_recents.json"
 
 config_lock = threading.Lock()
-app_config = load_config(CONFIG_PATH)
+
+
+def _is_writable_directory(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".__mindinguflac_write_test__"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def _writable_cache_fallback() -> Path:
+    candidates = [
+        DATA / "cache",
+        Path(tempfile.gettempdir()) / "Mindinguflac" / "cache",
+    ]
+    for candidate in candidates:
+        if _is_writable_directory(candidate):
+            return candidate
+    return candidates[-1]
+
+
+def _sanitize_runtime_config(config: AppConfig) -> AppConfig:
+    if not _is_writable_directory(config.cache_dir):
+        fallback = _writable_cache_fallback()
+        print(f"[Config] Cache dir is not writable: {config.cache_dir}; using {fallback}")
+        config.cache_dir = fallback
+        try:
+            save_config(CONFIG_PATH, config)
+        except Exception:
+            pass
+    return config
+
+
+app_config = _sanitize_runtime_config(load_config(CONFIG_PATH))
 service_downloader = ServiceDownloadManager(app_config)
 
 
@@ -816,7 +854,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/0.9.2"
+    server_version = "SpotiFLACStreamer/1.0.0"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -946,6 +984,30 @@ class Handler(BaseHTTPRequestHandler):
                 release_id = query.get("release_id", [""])[0].strip()
                 spotify_id = query.get("spotify_id", [""])[0].strip()
                 self.send_json(album_tracks(app_config, artist, album, release_id, spotify_id))
+                return
+            if path == "/api/test/hypebot/concerts":
+                import hypebot_tour
+                artist = query.get("artist", [""])[0].strip()
+                letter = query.get("letter", [""])[0].strip()
+                url = query.get("url", [""])[0].strip()
+                try:
+                    limit = max(1, min(10, int(query.get("limit", ["1"])[0] or 1)))
+                except Exception:
+                    limit = 1
+                try:
+                    timeout_s = max(1.0, min(30.0, float(query.get("timeout_s", ["15"])[0] or 15)))
+                except Exception:
+                    timeout_s = 15.0
+                if not artist and not letter and not url:
+                    self.send_error_json("Missing artist, letter, or url", HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json(hypebot_tour.fetch_artist_concerts(
+                    artist=artist,
+                    letter=letter,
+                    url=url,
+                    limit=limit,
+                    timeout=timeout_s,
+                ))
                 return
             if path == "/api/settings":
                 print(f"[API] GET /api/settings -> {app_config.cache_dir}, {app_config.music_dir}")
@@ -1195,13 +1257,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(artist_about(body.get("artist_id"), body.get("name")))
                 return
             if path == "/api/artist/tour":
+                tour_url = (
+                    body.get("url")
+                    or body.get("hypebot_url")
+                    or body.get("artist_url")
+                    or body.get("page_url")
+                    or ""
+                )
                 self.send_json(artist_tour(
                     body.get("artist_id", ""),
-                    body.get("name", ""),
+                    body.get("name") or body.get("artist", ""),
                     live=bool(body.get("live")),
                     refresh=bool(body.get("refresh")),
                     ai_provider=app_config.ai_provider,
                     gemini_model=app_config.gemini_model,
+                    timeout_s=float(body.get("timeout_s") or 0) or None,
+                    tour_source=app_config.tour_source,
+                    tour_url=str(tour_url or "").strip(),
                 ))
                 return
             if path == "/api/track/credits":
@@ -1251,7 +1323,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "added": added_count})
                 return
             if path == "/api/settings":
-                updated = AppConfig.from_public_dict(body)
+                updated = _sanitize_runtime_config(AppConfig.from_public_dict(body))
                 with config_lock:
                     app_config = updated
                     save_config(CONFIG_PATH, app_config)
@@ -1579,14 +1651,42 @@ def create_server(host: str = "0.0.0.0", port: int = 8888) -> ThreadingHTTPServe
     return ThreadingHTTPServer((host, port), Handler)
 
 
+def _shutdown_browser_workers() -> None:
+    for mod_name, fn_name in (("duck_proxy", "shutdown"), ("gemini_proxy", "shutdown")):
+        try:
+            module = __import__(mod_name)
+            getattr(module, fn_name)()
+        except Exception:
+            pass
+
+
 def main() -> None:
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8888"))
     server = create_server(host, port)
     print(f"Serving on http://{host}:{port}")
+    shutting_down = False
+
+    def _handle_signal(signum, frame):
+        nonlocal shutting_down
+        if shutting_down:
+            return
+        shutting_down = True
+        _shutdown_browser_workers()
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+    except Exception:
+        pass
     try:
         server.serve_forever()
     finally:
+        _shutdown_browser_workers()
         apply_shutdown_cache_cleanup()
 
 

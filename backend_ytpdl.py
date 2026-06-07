@@ -534,7 +534,9 @@ def _ranked_youtube_matches_with_ai(
         return candidates
     try:
         import ai_reranker
-        if not ai_reranker.is_enabled():
+        config = getattr(manager, "config", None)
+        ai_provider = getattr(config, "ai_provider", "duckai")
+        if not ai_reranker.is_enabled(ai_provider):
             return candidates
     except Exception as exc:
         manager._append_cache_event(job, "trying", f"YouTube AI advisor unavailable ({exc})")
@@ -563,7 +565,7 @@ def _ranked_youtube_matches_with_ai(
     def run_ai_advisor() -> None:
         try:
             import ai_reranker
-            config = getattr(manager, "app_config", None)
+            config = getattr(manager, "config", None)
             duck_model = getattr(config, "duck_model", "1")
             ai_provider = getattr(config, "ai_provider", "duckai")
             gemini_model = getattr(config, "gemini_model", "gemini-1.5-flash")

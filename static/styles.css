@@ -1007,6 +1007,12 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   display: grid;
   gap: 2px;
 }
+.side-tour-status {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 2px 0 10px;
+}
 .side-next-track {
   padding: 0;
 }
@@ -2910,12 +2916,14 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   border-radius: 0 0 8px 8px;
   overflow: hidden;
   background: linear-gradient(105deg, #d9dbe0 0%, #eef0f3 44%, #b9bcc2 100%);
+  isolation: isolate;
 }
 .tour-hero-art {
   position: absolute;
   inset: 0;
   background-size: cover;
-  background-position: center top;
+  background-repeat: no-repeat;
+  background-position: center;
   filter: grayscale(0.15) contrast(0.96) brightness(1.03);
   opacity: 0.95;
 }
@@ -2953,17 +2961,19 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   z-index: 1;
 }
 .tour-eyebrow {
-  color: #111;
+  color: #fff;
+  mix-blend-mode: difference;
   font-size: 15px;
   font-weight: 600;
   margin-bottom: 8px;
 }
 .tour-hero-name {
   margin: 0;
-  color: #0a0a0a;
+  color: #fff;
+  mix-blend-mode: difference;
   font-size: clamp(48px, 8vw, 116px);
   font-weight: 800;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   line-height: 0.92;
 }
 .tour-hero-actions {

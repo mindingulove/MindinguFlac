@@ -21,6 +21,11 @@ export PYTHONUNBUFFERED=1
 
 # Find and kill any process listening on the specified port
 echo "Freeing up port $PORT..."
-lsof -t -i:"$PORT" | xargs kill -9 2>/dev/null || true
+PIDS="$(lsof -t -i:"$PORT" 2>/dev/null || true)"
+if [ -n "$PIDS" ]; then
+  kill "$PIDS" 2>/dev/null || true
+  sleep 1
+  lsof -t -i:"$PORT" 2>/dev/null | xargs kill -9 2>/dev/null || true
+fi
 
 exec "$VENV/bin/python" app.py "$@"

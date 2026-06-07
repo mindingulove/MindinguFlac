@@ -133,9 +133,8 @@ def _exchange(payload: dict, reply_timeout: float | None = None) -> dict:
 
     # Web-search / GPT-5 turns can run well past the default reply window; let
     # callers extend it. Pad past the worker's own deadline so it answers first.
-    wait_s = (reply_timeout + 20) if reply_timeout else _REPLY_TIMEOUT_S
-    deadline = time.time() + wait_s
-    while time.time() < deadline:
+    deadline = None if reply_timeout is None or reply_timeout <= 0 else time.time() + (reply_timeout + 20)
+    while deadline is None or time.time() < deadline:
         if _proc.poll() is not None:
             _last_error = "worker died while awaiting reply"
             _stop_worker()
@@ -193,7 +192,7 @@ def send_chat(
         payload["web_search"] = True
     if ensure_model:
         payload["ensure_model"] = ensure_model
-    if reply_timeout:
+    if reply_timeout is not None and reply_timeout > 0:
         payload["timeout_s"] = reply_timeout
     with _lock:
         if not _ensure_worker():
@@ -208,3 +207,9 @@ def send_chat(
 
 def save_bypass(data):  # retained for backward compatibility
     pass
+
+
+def shutdown() -> None:
+    """Stop the long-running browser worker if it is running."""
+    with _lock:
+        _stop_worker()
