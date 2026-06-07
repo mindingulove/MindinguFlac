@@ -40,6 +40,7 @@ First stable release of the current Mindinguflac desktop experience. This releas
 ## Assets
 
 - `Mindinguflac-macos-arm64.zip` - macOS Apple Silicon desktop build.
+- `Mindinguflac-windows.zip` - Windows x64 desktop build.
 
 ## Previous v0.9 line
 
