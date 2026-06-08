@@ -1207,6 +1207,14 @@ async function renderArtistPage(artist) {
         <div id="artistAlbumsGrid" class="grid"></div>
       </div>
 
+      <div id="artistTourSection" class="hidden">
+        <div class="section-head sticky-head">
+          <h2>On Tour</h2>
+          <button class="see-more" id="artistTourShowAll" type="button">Show all</button>
+        </div>
+        <div id="artistTourGrid" class="grid tour-tile-grid"></div>
+      </div>
+
       <div id="artistAboutSection" class="hidden"></div>
 
       <div id="artistRelatedSection" class="hidden">
@@ -1297,6 +1305,50 @@ async function renderArtistPage(artist) {
         spotify_id: resolvedArtistId
       }));
     }
+  }
+
+  function redrawArtistTour(events = [], source = "") {
+    const section = $("artistTourSection");
+    const grid = $("artistTourGrid");
+    if (!section || !grid) return;
+    if (!events.length) {
+      section.classList.add("hidden");
+      return;
+    }
+    section.classList.remove("hidden");
+    // Show top 6 events in the main artist page
+    grid.innerHTML = events.slice(0, 6).map(ev => tourEventHtml(ev)).join("");
+    section.querySelector(".tour-source-footer")?.remove();
+    if (source) {
+      grid.insertAdjacentHTML("afterend", `<div class="tour-source-footer">Sourced live via ${esc(source)}</div>`);
+    }
+    bindExternalUrlButtons(grid);
+    
+    const toggle = $("artistTourShowAll");
+    if (toggle) {
+      toggle.classList.toggle("hidden", events.length <= 6);
+      toggle.onclick = () => openTourPage(artistName);
+    }
+  }
+
+  async function loadArtistTour() {
+    try {
+      const tour = await api("/api/artist/tour", {
+        method: "POST",
+        body: JSON.stringify({ artist_id: resolvedArtistId, name: artistName, live: false }),
+      });
+      if (tour.events?.length) {
+        redrawArtistTour(tour.events, tour.source);
+      }
+      if (tour.pending || tour.refresh_needed || tour.stale) {
+        api("/api/artist/tour", {
+          method: "POST",
+          body: JSON.stringify({ artist_id: resolvedArtistId, name: artistName, live: true }),
+        }).then(liveTour => {
+          if (liveTour.events?.length) redrawArtistTour(liveTour.events, liveTour.source);
+        }).catch(() => {});
+      }
+    } catch (e) {}
   }
 
   async function loadArtistAbout() {
@@ -1428,6 +1480,7 @@ async function renderArtistPage(artist) {
         // Force attempt to load about info for every artist
         if (resolvedArtistId) {
           loadArtistAbout();
+          loadArtistTour();
         } else {
           // If no ID, attempt to fetch it via quick search
           api("/api/music/suggest", { q: artistName }).then(res => {
@@ -1435,6 +1488,7 @@ async function renderArtistPage(artist) {
             if (match && match.id) {
               resolvedArtistId = match.id;
               loadArtistAbout();
+              loadArtistTour();
             }
           }).catch(() => {});
         }

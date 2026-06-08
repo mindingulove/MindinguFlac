@@ -523,9 +523,42 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   gap: 24px;
 }
 
+.tour-tile-grid {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.tour-tile-grid .side-tour-row {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 12px 16px;
+  width: 100%;
+  border: 0;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.tour-tile-grid .side-tour-row:hover {
+  background: var(--surface-3);
+}
+
+.tour-source-footer {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 14px;
+  margin-bottom: 8px;
+}
+
 @media (max-width: 1100px) {
   .round-grid {
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .tour-tile-grid {
+    grid-template-columns: 1fr;
   }
 }
 
