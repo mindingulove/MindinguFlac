@@ -1210,7 +1210,7 @@ async function renderArtistPage(artist) {
       <div id="artistTourSection" class="hidden">
         <div class="section-head sticky-head">
           <h2>On Tour</h2>
-          <button class="see-more" id="artistTourShowAll" type="button">Show all</button>
+          <button class="tour-link hidden" id="artistTourShowAll" type="button"></button>
         </div>
         <div id="artistTourGrid" class="grid tour-tile-grid"></div>
       </div>
@@ -1326,7 +1326,8 @@ async function renderArtistPage(artist) {
     
     const toggle = $("artistTourShowAll");
     if (toggle) {
-      toggle.classList.toggle("hidden", events.length <= 6);
+      toggle.textContent = `View all upcoming concerts (${events.length})`;
+      toggle.classList.remove("hidden");
       toggle.onclick = () => openTourPage(artistName);
     }
   }

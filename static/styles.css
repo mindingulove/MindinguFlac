@@ -553,6 +553,22 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   margin-bottom: 8px;
 }
 
+.tour-link {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 2px;
+}
+
+.tour-link:hover {
+  color: var(--text);
+}
+
 @media (max-width: 1100px) {
   .round-grid {
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
