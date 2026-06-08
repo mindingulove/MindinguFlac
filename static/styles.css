@@ -518,6 +518,17 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   align-items: stretch;
 }
 
+.round-grid {
+  grid-template-columns: repeat(5, 1fr);
+  gap: 24px;
+}
+
+@media (max-width: 1100px) {
+  .round-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+}
+
 .music-card {
   background: var(--surface);
   border: 0;
@@ -876,6 +887,80 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   display: grid;
   gap: 8px;
 }
+.side-carousel {
+  position: relative;
+}
+.side-carousel-track {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  margin: 0 -4px;
+  padding: 0 4px 4px;
+}
+.side-carousel-track::-webkit-scrollbar { display: none; }
+.side-carousel-card {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  flex: 0 0 132px;
+  width: 132px;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  scroll-snap-align: start;
+  display: grid;
+  gap: 6px;
+}
+.side-carousel-art {
+  width: 132px;
+  height: 132px;
+  border-radius: 8px;
+  background: var(--surface-3);
+  background-size: cover;
+  background-position: center;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 34px;
+}
+.side-carousel-card strong {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-carousel-card span {
+  color: var(--muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-carousel-nav {
+  position: absolute;
+  top: 66px;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(0,0,0,0.65);
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity .15s ease;
+}
+.side-carousel:hover .side-carousel-nav { opacity: 1; }
+.side-carousel-nav.prev { left: -2px; }
+.side-carousel-nav.next { right: -2px; }
+.side-carousel-nav.is-hidden { display: none; }
 .side-track-row,
 .side-tour-row,
 .side-artist-trigger {

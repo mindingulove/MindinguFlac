@@ -2,6 +2,7 @@ const API_BASE = "";
 const CATALOG_REFRESH_MS = 15 * 60 * 1000;
 const ARTIST_TRACK_PREVIEW_COUNT = 5;
 const ARTIST_ALBUM_PREVIEW_COUNT = 6;
+const ARTIST_RELATED_PREVIEW_COUNT = 6;
 const PREFETCH_AHEAD_COUNT = 5;
 
 const state = {
@@ -968,6 +969,34 @@ function renderAlbumsPage() {
   enrichBatch(albums, "fullAlbumsGrid");
 }
 
+async function renderRelatedArtistsPage(artist) {
+  setActiveView("home");
+  const artistName = artist.name || artist.artist;
+  const artistId = artist.artist_id || artist.spotify_id || "";
+  
+  $("pageContent").innerHTML = `
+    <div class="section-head sticky-head">
+      <h1>Fans also like</h1>
+      <span>Artists similar to ${esc(artistName)}</span>
+    </div>
+    <div class="scroll-area"><div id="fullRelatedArtistsGrid" class="grid round-grid"></div></div>
+    <div id="fullRelatedLoading" class="loading"><div class="spinner"></div><span>Fetching more artists…</span></div>
+  `;
+
+  try {
+    const data = await api("/api/artist/related", {
+      method: "POST",
+      body: JSON.stringify({ artist_id: artistId, name: artistName, limit: 20 }),
+    });
+    if ($("fullRelatedLoading")) $("fullRelatedLoading").remove();
+    const artists = data.artists || [];
+    renderCards("fullRelatedArtistsGrid", artists, "artist");
+    enrichBatch(artists, "fullRelatedArtistsGrid");
+  } catch (e) {
+    if ($("fullRelatedLoading")) $("fullRelatedLoading").innerHTML = "<span>Failed to load related artists.</span>";
+  }
+}
+
 function renderPersonalTracksPage() {
   setActiveView("home");
   $("pageContent").innerHTML = `
@@ -1179,6 +1208,14 @@ async function renderArtistPage(artist) {
       </div>
 
       <div id="artistAboutSection" class="hidden"></div>
+
+      <div id="artistRelatedSection" class="hidden">
+        <div class="section-head sticky-head">
+          <h2>Fans also like</h2>
+          <button class="see-more" id="artistRelatedToggle" type="button">Show all</button>
+        </div>
+        <div id="artistRelatedGrid" class="grid round-grid"></div>
+      </div>
       
       <div id="artistLoading" class="loading"><div class="spinner"></div><span>Loading discovery data…</span></div>
     </div>
@@ -1192,6 +1229,7 @@ async function renderArtistPage(artist) {
   const artistId = artist.artist_id || artist.spotify_id || "";
   let artistTracks = [];
   let artistAlbums = [];
+  let artistRelated = [];
   let artistArtwork = artist.artwork_url || "";
   let resolvedArtistId = artistId;
   let tracksExpanded = false;
@@ -1240,6 +1278,25 @@ async function renderArtistPage(artist) {
       albumsExpanded = !albumsExpanded;
       redrawArtistAlbums();
     });
+  }
+
+  function redrawArtistRelated() {
+    const shownRelated = artistRelated.slice(0, ARTIST_RELATED_PREVIEW_COUNT);
+    renderCards("artistRelatedGrid", shownRelated.map(a => ({
+      ...a,
+      type: "artist",
+    })), "artist");
+    
+    const toggle = $("artistRelatedToggle");
+    if (toggle) {
+      toggle.classList.toggle("hidden", artistRelated.length === 0);
+      toggle.onclick = () => pushPage(() => renderRelatedArtistsPage({
+        name: artistName,
+        artist: artistName,
+        artist_id: resolvedArtistId,
+        spotify_id: resolvedArtistId
+      }));
+    }
   }
 
   async function loadArtistAbout() {
@@ -1392,6 +1449,13 @@ async function renderArtistPage(artist) {
             artistAlbums = part.albums;
             $("artistAlbumsSection").classList.remove("hidden");
             redrawArtistAlbums();
+        }
+      }
+      if (part.type === "related_artists") {
+        if (part.artists && part.artists.length) {
+            artistRelated = part.artists;
+            $("artistRelatedSection").classList.remove("hidden");
+            redrawArtistRelated();
         }
       }
     } catch (err) {}
@@ -2384,23 +2448,14 @@ function updateSidebarNextQueue() {
 function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
   const content = $("sideRichContent");
   if (!content) return;
-  const related = relatedTracksFor(track);
   const artistName = primaryArtistName(track) || track.artist || "";
 
   content.innerHTML = `
-    ${related.length ? `
-      <section class="side-card">
-        <div class="side-section-head"><h3>Related music</h3></div>
-        <div class="side-related-grid">
-          ${related.map(item => sidebarTrackRow(item)).join("")}
-        </div>
-      </section>
-    ` : ""}
+    <section class="side-card" id="sideRelatedArtistsCard">
+      <div class="side-card-loading">Loading related music...</div>
+    </section>
     <section class="side-card side-artist-card" id="sideArtistCard">
       <div class="side-card-loading">Loading artist info...</div>
-    </section>
-    <section class="side-card" id="sideRelatedArtistsCard">
-      <div class="side-card-loading">Loading related artists...</div>
     </section>
     <section class="side-card" id="sideCreditsCard">
       <div class="side-section-head">
@@ -2454,34 +2509,61 @@ function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
   loadSidebarTour(track, requestId).catch(() => {});
 }
 
-// "Fans also like" — real related artists fetched from the backend (Spotify
+// Wire a sidebar carousel's prev/next arrows and toggle their visibility based
+// on scroll position (Spotify-style horizontal rail).
+function wireSideCarousel(root) {
+  const track = root.querySelector(".side-carousel-track");
+  const prev = root.querySelector(".side-carousel-nav.prev");
+  const next = root.querySelector(".side-carousel-nav.next");
+  if (!track || !prev || !next) return;
+  const update = () => {
+    const max = track.scrollWidth - track.clientWidth - 1;
+    prev.classList.toggle("is-hidden", track.scrollLeft <= 0);
+    next.classList.toggle("is-hidden", track.scrollLeft >= max);
+  };
+  const step = () => Math.max(160, Math.round(track.clientWidth * 0.8));
+  prev.addEventListener("click", () => track.scrollBy({ left: -step(), behavior: "smooth" }));
+  next.addEventListener("click", () => track.scrollBy({ left: step(), behavior: "smooth" }));
+  track.addEventListener("scroll", update, { passive: true });
+  requestAnimationFrame(update);
+}
+
+// "Related music" — real related artists fetched from the backend (Spotify
 // "fans also like", or MusicBrainz relationships as a fallback). Replaces the
-// purely-local "Related music" card's blind spot: it works even when the artist
-// has nothing else in the user's local catalog.
+// old purely-local "Related music" card, which went blank whenever the artist
+// had nothing else in the user's local catalog.
 async function loadSidebarRelatedArtists(track, requestId) {
   const card = $("sideRelatedArtistsCard");
   if (!card) return;
   try {
-    const data = await api("/api/artist/related", {
+    const data = await api("/api/artist/top_tracks", {
       method: "POST",
       timeout: 20000,
       body: JSON.stringify({ artist_id: primaryArtistId(track), name: track.artist || primaryArtistName(track) }),
     });
     if (requestId !== state.sidebarRequestId) return;
-    const artists = (data.artists || []).slice(0, 8);
-    if (!artists.length) { card.remove(); return; }
+    const currentTitle = track.title || "";
+    const currentArtist = track.artist || "";
+    const tracks = (data.tracks || []).filter(t => (t.title || t.name) !== currentTitle).slice(0, 10);
+    if (!tracks.length) { card.remove(); return; }
     card.innerHTML = `
-      <div class="side-section-head"><h3>Fans also like</h3></div>
-      <div class="side-related-grid">
-        ${artists.map(a => `
-          <button class="side-track-row" type="button" data-open-artist='${attrJson(artistTarget({ ...a, type: "artist" }))}'>
-            <span class="side-track-art" ${a.artwork_url ? `style="background-image:url('${a.artwork_url}')"` : ""}>${a.artwork_url ? "" : '<i class="bi bi-person-fill"></i>'}</span>
-            <span class="side-track-copy"><strong>${esc(a.name)}</strong><span>Artist</span></span>
-          </button>
-        `).join("")}
+      <div class="side-section-head"><h3>Related music</h3></div>
+      <div class="side-carousel">
+        <button class="side-carousel-nav prev is-hidden" type="button" aria-label="Scroll left"><i class="bi bi-chevron-left"></i></button>
+        <div class="side-carousel-track">
+          ${tracks.map(t => `
+            <button class="side-carousel-card" type="button" data-side-track='${attrJson(t)}'>
+              <span class="side-carousel-art" ${t.artwork_url ? `style="background-image:url('${t.artwork_url}')"` : ""}>${t.artwork_url ? "" : '<i class="bi bi-music-note"></i>'}</span>
+              <strong>${esc(t.title || t.name)}</strong>
+              <span>Track</span>
+            </button>
+          `).join("")}
+        </div>
+        <button class="side-carousel-nav next" type="button" aria-label="Scroll right"><i class="bi bi-chevron-right"></i></button>
       </div>
     `;
-    bindEntityLinks(card);
+    bindSidebarTrackRows(card);
+    wireSideCarousel(card);
   } catch (error) {
     if (requestId !== state.sidebarRequestId) return;
     card.remove();

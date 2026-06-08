@@ -1084,6 +1084,9 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
         })
     yield {"type": "albums", "albums": albums}
 
+    related = related_artists(resolved_artist_id, artist)
+    yield {"type": "related_artists", "artists": related.get("artists", [])}
+
 
 def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "", spotify_id: str = "") -> dict:
     import db
@@ -1283,7 +1286,7 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
     return about
 
 
-def musicbrainz_related_artists(artist_name: str, limit: int = 8) -> list[dict]:
+def musicbrainz_related_artists(artist_name: str, limit: int = 100) -> list[dict]:
     """Relationship-based related artists from MusicBrainz (band members,
     collaborators, etc.). MusicBrainz has no true 'similar artists', so this is
     a best-effort fallback when Spotify has no 'fans also like' data. No images
@@ -1320,37 +1323,36 @@ def musicbrainz_related_artists(artist_name: str, limit: int = 8) -> list[dict]:
         return []
 
 
-def related_artists(artist_id: str, artist_name: str, limit: int = 8) -> dict:
-    """Return {"artists": [...], "source": "Spotify"|"MusicBrainz"|""} of related
-    artists. Prefers Spotify's "fans also like" (carried in the cached artist
-    overview), falling back to MusicBrainz relationships when Spotify has none."""
+def related_artists(artist_id: str, artist_name: str, limit: int = 20) -> dict:
+    """Return {"artists": [...]} of related artists from the Spotify overview."""
     if not artist_id and artist_name:
-        try:
-            artist_id = spotify_artist_id(artist_name) or ""
-        except Exception:
-            artist_id = ""
+        artist_id = spotify_artist_id(artist_name)
+    
+    if not artist_id:
+        return {"artists": [], "source": ""}
 
-    about = spotify_artist_about(artist_id) if artist_id else {}
+    about = spotify_artist_about(artist_id)
+    raw_related = about.get("related_artists") or []
+    
     items = []
-    for entry in (about.get("related_artists") or []):
+    for entry in raw_related:
         name = (entry.get("name") or "").strip()
-        if not name:
+        art = entry.get("image") or ""
+        sid = entry.get("id") or ""
+        if not name or not sid:
             continue
+            
         items.append({
             "name": name,
-            "artist_id": entry.get("id", ""),
-            "spotify_artist_id": entry.get("id", ""),
-            "artwork_url": proxy_artwork_url(entry["image"]) if entry.get("image") else "",
+            "artist_id": sid,
+            "spotify_artist_id": sid,
+            "artwork_url": proxy_artwork_url(art) if art else "",
             "type": "artist",
         })
         if len(items) >= limit:
             break
 
-    if items:
-        return {"artists": items, "source": "Spotify"}
-
-    fallback = musicbrainz_related_artists(artist_name, limit)
-    return {"artists": fallback, "source": "MusicBrainz" if fallback else ""}
+    return {"artists": items, "source": "Spotify"}
 
 
 def _split_people(value) -> list[str]:

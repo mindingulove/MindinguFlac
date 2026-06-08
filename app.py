@@ -1258,7 +1258,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/artist/related":
                 from music_metadata import related_artists
-                self.send_json(related_artists(body.get("artist_id", ""), body.get("name", "")))
+                self.send_json(related_artists(body.get("artist_id", ""), body.get("name", ""), limit=int(body.get("limit") or 8)))
+                return
+            if path == "/api/artist/top_tracks":
+                from music_metadata import spotify_artist_top_tracks
+                self.send_json({"tracks": spotify_artist_top_tracks(body.get("name"), artist_id=body.get("artist_id"))})
                 return
             if path == "/api/artist/tour":
                 tour_url = (
