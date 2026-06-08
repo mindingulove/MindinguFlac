@@ -35,7 +35,7 @@ hiddenimports = [
     'tour_ai', 'hypebot_tour', 'gemini_proxy', 'gemini_browser',
     'db'
 ]
-tmp_ret = collect_all('SpotiFLAC')
+tmp_ret = collect_all('backend')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 try:

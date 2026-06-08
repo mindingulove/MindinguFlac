@@ -115,7 +115,7 @@ def _get_spotify_client():
         if _spotify_client_cache is not None:
             return _spotify_client_cache if _spotify_client_cache is not False else None
         try:
-            from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+            from backend.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
             _spotify_client_cache = SpotifyMetadataClient()
             return _spotify_client_cache
         except ImportError:

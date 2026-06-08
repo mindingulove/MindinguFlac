@@ -244,7 +244,7 @@ def _install_stream_capture() -> None:
     if _STREAM_CAPTURE_INSTALLED:
         return
     try:
-        from SpotiFLAC.core.http import HttpClient  # type: ignore
+        from backend.core.http import HttpClient  # type: ignore
     except Exception:
         return
 
@@ -274,7 +274,7 @@ def _ensure_spotiflac_metadata_patch() -> None:
         if _spotiflac_patch_installed:
             return
         try:
-            from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+            from backend.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
             _original_get_track = SpotifyMetadataClient.get_track
 
             def _thread_local_get_track(client, track_id):
@@ -287,7 +287,7 @@ def _ensure_spotiflac_metadata_patch() -> None:
             SpotifyMetadataClient.get_track = _thread_local_get_track
 
             # Also patch the NetworkManager to return our proxy-aware clients
-            from SpotiFLAC.core.http import NetworkManager  # type: ignore
+            from backend.core.http import NetworkManager  # type: ignore
             NetworkManager.get_sync_client = classmethod(_patched_get_sync_client)
 
             _spotiflac_patch_installed = True
@@ -304,7 +304,7 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
     prefetch_tor()
 
     try:
-        from SpotiFLAC import SpotiFLAC  # type: ignore
+        from backend import SpotiFLAC  # type: ignore
     except Exception as exc:
         raise RuntimeError("SpotiFLAC is not installed in this environment. Install it with: pip install -r requirements.txt") from exc
     _install_stream_capture()

@@ -31,7 +31,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
             "/fallback-cover",
         ))
 
-        with patch("SpotiFLAC.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("backend.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("https://open.spotify.com/playlist/playlist-id?si=test")
 
         self.assertEqual(imported["name"], "Imported Playlist")
@@ -42,7 +42,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
     def test_import_accepts_spotify_playlist_uri(self):
         client = SimpleNamespace(get_playlist_tracks=lambda playlist_id: ({"name": playlist_id}, [], ""))
 
-        with patch("SpotiFLAC.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("backend.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M")
 
         self.assertEqual(imported["name"], "37i9dQZF1DXcBWIGoYBM5M")
