@@ -250,6 +250,23 @@ def _load_artist_about(artist_id: str) -> dict:
 
     hero_image = _pick_feature_image()
 
+    # "Fans also like" — related artists are part of the same overview payload,
+    # so we extract them here for free (no extra request).
+    related_artists = []
+    for item in ((artist.get("relatedContent") or {}).get("relatedArtists") or {}).get("items") or []:
+        node = item.get("data") or item
+        node_profile = node.get("profile") or {}
+        node_name = node_profile.get("name") or ""
+        if not node_name:
+            continue
+        node_id = str(node.get("uri") or "").rsplit(":", 1)[-1]
+        node_sources = ((node.get("visuals") or {}).get("avatarImage") or {}).get("sources") or []
+        node_image = ""
+        if node_sources:
+            top = max(node_sources, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
+            node_image = top.get("url", "")
+        related_artists.append({"name": node_name, "id": node_id, "image": node_image})
+
     return {
         "name": profile.get("name", ""),
         "monthly_listeners": stats.get("monthlyListeners") or stats.get("monthly_listeners") or 0,
@@ -264,6 +281,7 @@ def _load_artist_about(artist_id: str) -> dict:
         "avatar": avatar,
         "hero_image": hero_image,
         "verified": bool(profile.get("verified")),
+        "related_artists": related_artists,
     }
 
 

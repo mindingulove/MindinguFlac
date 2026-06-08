@@ -1283,6 +1283,76 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
     return about
 
 
+def musicbrainz_related_artists(artist_name: str, limit: int = 8) -> list[dict]:
+    """Relationship-based related artists from MusicBrainz (band members,
+    collaborators, etc.). MusicBrainz has no true 'similar artists', so this is
+    a best-effort fallback when Spotify has no 'fans also like' data. No images
+    are available from MusicBrainz, so tiles fall back to a placeholder."""
+    if not artist_name:
+        return []
+    try:
+        q = urllib.parse.quote(f'artist:"{artist_name}"')
+        data = get_json(f"https://musicbrainz.org/ws/2/artist/?query={q}&fmt=json&limit=1")
+        arts = data.get("artists") or []
+        mbid = (arts[0].get("id") if arts else "") or ""
+        if not mbid:
+            return []
+        detail = get_json(f"https://musicbrainz.org/ws/2/artist/{mbid}?inc=artist-rels&fmt=json")
+        out, seen = [], {norm_name(artist_name)}
+        for rel in (detail.get("relations") or []):
+            target = rel.get("artist") or {}
+            name = (target.get("name") or "").strip()
+            key = norm_name(name)
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "name": name,
+                "artist_id": "",
+                "musicbrainz_artist_id": target.get("id", ""),
+                "artwork_url": "",
+                "type": "artist",
+            })
+            if len(out) >= limit:
+                break
+        return out
+    except Exception:
+        return []
+
+
+def related_artists(artist_id: str, artist_name: str, limit: int = 8) -> dict:
+    """Return {"artists": [...], "source": "Spotify"|"MusicBrainz"|""} of related
+    artists. Prefers Spotify's "fans also like" (carried in the cached artist
+    overview), falling back to MusicBrainz relationships when Spotify has none."""
+    if not artist_id and artist_name:
+        try:
+            artist_id = spotify_artist_id(artist_name) or ""
+        except Exception:
+            artist_id = ""
+
+    about = spotify_artist_about(artist_id) if artist_id else {}
+    items = []
+    for entry in (about.get("related_artists") or []):
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+        items.append({
+            "name": name,
+            "artist_id": entry.get("id", ""),
+            "spotify_artist_id": entry.get("id", ""),
+            "artwork_url": proxy_artwork_url(entry["image"]) if entry.get("image") else "",
+            "type": "artist",
+        })
+        if len(items) >= limit:
+            break
+
+    if items:
+        return {"artists": items, "source": "Spotify"}
+
+    fallback = musicbrainz_related_artists(artist_name, limit)
+    return {"artists": fallback, "source": "MusicBrainz" if fallback else ""}
+
+
 def _split_people(value) -> list[str]:
     if not value:
         return []

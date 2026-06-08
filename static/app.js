@@ -2399,6 +2399,9 @@ function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
     <section class="side-card side-artist-card" id="sideArtistCard">
       <div class="side-card-loading">Loading artist info...</div>
     </section>
+    <section class="side-card" id="sideRelatedArtistsCard">
+      <div class="side-card-loading">Loading related artists...</div>
+    </section>
     <section class="side-card" id="sideCreditsCard">
       <div class="side-section-head">
         <h3>Credits</h3>
@@ -2446,8 +2449,43 @@ function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
   }
 
   loadSidebarArtistInfo(track, requestId, qualityLabel).catch(() => {});
+  loadSidebarRelatedArtists(track, requestId).catch(() => {});
   loadSidebarCredits(track, requestId).catch(() => {});
   loadSidebarTour(track, requestId).catch(() => {});
+}
+
+// "Fans also like" — real related artists fetched from the backend (Spotify
+// "fans also like", or MusicBrainz relationships as a fallback). Replaces the
+// purely-local "Related music" card's blind spot: it works even when the artist
+// has nothing else in the user's local catalog.
+async function loadSidebarRelatedArtists(track, requestId) {
+  const card = $("sideRelatedArtistsCard");
+  if (!card) return;
+  try {
+    const data = await api("/api/artist/related", {
+      method: "POST",
+      timeout: 20000,
+      body: JSON.stringify({ artist_id: primaryArtistId(track), name: track.artist || primaryArtistName(track) }),
+    });
+    if (requestId !== state.sidebarRequestId) return;
+    const artists = (data.artists || []).slice(0, 8);
+    if (!artists.length) { card.remove(); return; }
+    card.innerHTML = `
+      <div class="side-section-head"><h3>Fans also like</h3></div>
+      <div class="side-related-grid">
+        ${artists.map(a => `
+          <button class="side-track-row" type="button" data-open-artist='${attrJson(artistTarget({ ...a, type: "artist" }))}'>
+            <span class="side-track-art" ${a.artwork_url ? `style="background-image:url('${a.artwork_url}')"` : ""}>${a.artwork_url ? "" : '<i class="bi bi-person-fill"></i>'}</span>
+            <span class="side-track-copy"><strong>${esc(a.name)}</strong><span>Artist</span></span>
+          </button>
+        `).join("")}
+      </div>
+    `;
+    bindEntityLinks(card);
+  } catch (error) {
+    if (requestId !== state.sidebarRequestId) return;
+    card.remove();
+  }
 }
 
 function bindSidebarTrackRows(root) {
