@@ -103,7 +103,38 @@ def _init_db(conn: sqlite3.Connection):
             last_updated REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     conn.commit()
+    _run_one_time_migrations(conn)
+
+
+# Artist-id fields that can carry a wrong/non-Spotify id cached before the
+# name-fallback fix in music_metadata.artist_about. Scrubbing them forces a
+# fresh, correct re-resolution on next lookup.
+_ARTIST_ID_FIELDS = ("spotify_artist_id", "artist_id")
+
+
+def _run_one_time_migrations(conn: sqlite3.Connection):
+    """Idempotent, sentinel-guarded migrations. Safe to call on every connect:
+    each migration runs once per database (flagged in the meta table)."""
+    try:
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'artist_id_scrub_v1'"
+        ).fetchone()
+        if not done:
+            _clear_cached_artist_ids_conn(conn, None)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('artist_id_scrub_v1', ?)",
+                (str(time.time()),),
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def save_resolved_source(track_key: str, engine: str, service: str, quality: str, resolved_url: str):
@@ -274,6 +305,58 @@ def get_track_metadata(track_key: str) -> dict | None:
         except Exception:
             pass
     return None
+
+
+def _clear_cached_artist_ids_conn(conn: sqlite3.Connection, artist: str | None) -> int:
+    changed = 0
+    for table, key_col in (("tracks", "track_key"), ("albums", "album_key")):
+        if artist:
+            prefix = f"{str(artist).strip().lower()}||%"
+            rows = conn.execute(
+                f"SELECT {key_col} AS k, metadata_json AS j FROM {table} WHERE {key_col} LIKE ?",
+                (prefix,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {key_col} AS k, metadata_json AS j FROM {table}"
+            ).fetchall()
+        for row in rows:
+            try:
+                data = json.loads(row["j"])
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            dirty = False
+            for field in _ARTIST_ID_FIELDS:
+                if data.get(field):
+                    data[field] = ""
+                    dirty = True
+            # Album rows embed a tracklist; scrub each track's id too.
+            for track in (data.get("tracks") or []):
+                if isinstance(track, dict):
+                    for field in _ARTIST_ID_FIELDS:
+                        if track.get(field):
+                            track[field] = ""
+                            dirty = True
+            if dirty:
+                conn.execute(
+                    f"UPDATE {table} SET metadata_json = ? WHERE {key_col} = ?",
+                    (json.dumps(data), row["k"]),
+                )
+                changed += 1
+    conn.commit()
+    return changed
+
+
+def clear_cached_artist_ids(artist: str | None = None) -> int:
+    """Strip cached Spotify/generic artist-id fields from track & album metadata
+    so the next lookup re-resolves them from scratch. Use to scrub 'poisoned'
+    rows where a wrong/non-Spotify artist id was cached (which would otherwise
+    feed the sidebar/tour/credits a bad id). Pass an artist name to limit the
+    scrub to that artist (matched on the 'artist||...' key prefix), or None to
+    scrub every cached row. Returns the number of rows changed."""
+    return _clear_cached_artist_ids_conn(_get_conn(), artist)
 
 
 def save_album_source(album_key: str, engine: str, resolved_url: str):
