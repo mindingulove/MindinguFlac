@@ -2269,6 +2269,39 @@ function formatArtistBioLinks(text) {
   return formatBiographyHtml(text);
 }
 
+// Sanitize backend-provided biography HTML (e.g. a Wikipedia lead section whose
+// inline article links we want to keep). Rebuilds only whitelisted tags with
+// only safe attributes and https hrefs, so untrusted markup can't inject script.
+function sanitizeBioFragment(html = "") {
+  const ALLOWED = new Set(["P", "A", "B", "I", "EM", "STRONG", "BR"]);
+  const src = document.createElement("template");
+  src.innerHTML = String(html || "");
+  const clean = (srcNode, destParent) => {
+    srcNode.childNodes.forEach((node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        destParent.appendChild(document.createTextNode(node.nodeValue));
+      } else if (node.nodeType === Node.ELEMENT_NODE && ALLOWED.has(node.tagName)) {
+        const el = document.createElement(node.tagName.toLowerCase());
+        if (node.tagName === "A") {
+          const href = node.getAttribute("href") || "";
+          if (/^https:\/\//i.test(href)) {
+            el.setAttribute("href", href);
+            el.setAttribute("target", "_blank");
+            el.setAttribute("rel", "noopener noreferrer");
+          }
+        }
+        clean(node, el);
+        destParent.appendChild(el);
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        clean(node, destParent); // unwrap disallowed element, keep its content
+      }
+    });
+  };
+  const out = document.createElement("div");
+  clean(src.content, out);
+  return out.innerHTML;
+}
+
 function primaryArtistName(track = {}) {
   return String(track.artist || track.metadata?.artist || "").split(/,\s*|\s+&\s+|\s+feat\.?\s+/i)[0].trim();
 }
@@ -2654,11 +2687,15 @@ function bindArtistInlineLinks(root, modal = null) {
 
 function showArtistAboutModal(about = {}, artistName = "Artist", artistId = "", image = "") {
   document.getElementById("sidebarArtistAboutModal")?.remove();
-  const bioHtml = formatBiographyHtml(about.biography || "No biography available.", {
-    name: artistName,
-    artist: artistName,
-    artist_id: artistId,
-  });
+  // Wikipedia-sourced bios carry their own inline links in biography_html; render
+  // those (sanitized) directly. Spotify/plain bios go through the catalog linker.
+  const bioHtml = about.biography_html
+    ? sanitizeBioFragment(about.biography_html)
+    : formatBiographyHtml(about.biography || "No biography available.", {
+        name: artistName,
+        artist: artistName,
+        artist_id: artistId,
+      });
   const gallery = about.gallery || [];
   const heroImage = image || about.hero_image || (gallery[0] && gallery[0].url) || "";
   const dialog = document.createElement("dialog");

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from config import AppConfig, MusicIndexerConfig
 from discogs_metadata import discogs_album_images
-from spotify_web_metadata import spotify_album_playcounts, spotify_artist_about, fetch_wikipedia_bio
+from spotify_web_metadata import spotify_album_playcounts, spotify_artist_about, fetch_wikipedia_bio, fetch_wikipedia_about
 
 
 USER_AGENT = "Streambox/1.0 (self-hosted; https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)"
@@ -1258,15 +1258,28 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
         about["biography"] = spotify_bio or "Official biography currently unavailable."
         about["bio_source"] = "Spotify"
     else:
-        # ABSOLUTE FALLBACK: Only if Spotify has zero stats AND zero bio.
-        wiki_bio = fetch_wikipedia_bio(f"{artist_name} (musician)") or fetch_wikipedia_bio(artist_name)
-        if wiki_bio and "may refer to:" not in wiki_bio:
-            about["biography"] = wiki_bio
+        # ABSOLUTE FALLBACK: Only if Spotify has zero stats AND zero bio. Pull the
+        # Wikipedia lead section (with its inline article links preserved) and the
+        # page image, so the sidebar can show linked text and a real photo instead
+        # of the album cover.
+        wiki = fetch_wikipedia_about(f"{artist_name} (musician)")
+        if not (wiki.get("text") or "").strip():
+            wiki = fetch_wikipedia_about(artist_name)
+        wiki_text = (wiki.get("text") or "").strip()
+        if wiki_text and "may refer to:" not in wiki_text:
+            about["biography"] = wiki_text
+            if wiki.get("html"):
+                about["biography_html"] = wiki["html"]
             about["bio_source"] = "Wikipedia"
+            # Use the Wikipedia page image when Spotify gave us no artist photo.
+            if wiki.get("image") and not about.get("avatar") and not (about.get("gallery") or []):
+                proxied = proxy_artwork_url(wiki["image"])
+                about["avatar"] = proxied
+                about.setdefault("hero_image", proxied)
         else:
             about["biography"] = "Official artist information is currently unavailable."
             about["bio_source"] = "Spotify"
-        
+
     return about
 
 

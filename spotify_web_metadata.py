@@ -306,3 +306,118 @@ def fetch_wikipedia_bio(artist_name: str) -> str:
     except Exception:
         pass
     return ""
+
+
+_WIKI_BASE = "https://en.wikipedia.org"
+
+
+def _wiki_href_ok(href: str) -> str:
+    """Keep only main-namespace article links (/wiki/Title with no namespace
+    colon). Drops File:/Help:/Category: links, #cite anchors, and /w/index.php
+    red links. Returns the absolute https URL or "" to unwrap to plain text."""
+    if not href or not href.startswith("/wiki/"):
+        return ""
+    title = href[len("/wiki/"):]
+    head = title.split("#", 1)[0]
+    if not head or ":" in head:
+        return ""
+    return _WIKI_BASE + href
+
+
+def _wiki_serialize_child(node) -> str:
+    """Serialize one lxml node to a sanitized HTML string: keep p/a/b/i with
+    safe attrs, drop references/IPA/style, unwrap everything else to text."""
+    import html as _htmlmod
+    tag = node.tag if isinstance(node.tag, str) else ""
+    tail = _htmlmod.escape(node.tail or "")
+    cls = node.get("class") or ""
+    if tag in ("sup", "style", "script") or "IPA" in cls or "reference" in cls or "noprint" in cls:
+        return tail
+    inner = _htmlmod.escape(node.text or "")
+    for child in node:
+        inner += _wiki_serialize_child(child)
+    if tag == "a":
+        href = _wiki_href_ok(node.get("href") or "")
+        if href:
+            return (
+                f'<a href="{_htmlmod.escape(href, quote=True)}" '
+                f'target="_blank" rel="noopener noreferrer">{inner}</a>' + tail
+            )
+        return inner + tail
+    if tag in ("b", "strong"):
+        return f"<b>{inner}</b>" + tail
+    if tag in ("i", "em"):
+        return f"<i>{inner}</i>" + tail
+    return inner + tail
+
+
+def fetch_wikipedia_about(artist_name: str) -> dict:
+    """Return {"text", "html", "image"} for an artist's Wikipedia page. "html"
+    is the lead section with its inline article links preserved and sanitized;
+    "text" is the plain-text fallback; "image" is the raw page-image URL (the
+    caller is responsible for proxying it). Used as the bio fallback when
+    Spotify has no data for the artist."""
+    result = {"text": "", "html": "", "image": ""}
+    try:
+        from lxml import html as lxml_html
+    except Exception:
+        lxml_html = None
+
+    try:
+        params = urllib.parse.urlencode({
+            "action": "parse", "format": "json", "prop": "text",
+            "section": 0, "redirects": 1, "page": artist_name, "formatversion": 2,
+        })
+        data = json.loads(_request_text(f"https://en.wikipedia.org/w/api.php?{params}"))
+        raw_html = (data.get("parse") or {}).get("text") or ""
+        if isinstance(raw_html, dict):
+            raw_html = raw_html.get("*", "")
+        if raw_html and lxml_html is not None:
+            root = lxml_html.fromstring(raw_html)
+            paras, text_parts = [], []
+            import html as _htmlmod
+            # Skip infobox/hatnote paragraphs by excluding anything inside a table.
+            for p in root.xpath("//p[not(ancestor::table)]"):
+                # Drop reference markers, IPA pronunciation blobs and inline CSS so
+                # both the plain text and the serialized HTML are clean.
+                for bad in p.xpath(
+                    './/style | .//sup | .//span[contains(@class,"IPA")] '
+                    '| .//span[contains(@class,"reference")] '
+                    '| .//span[contains(@class,"noprint")]'
+                ):
+                    bad.getparent().remove(bad)
+                txt = " ".join((p.text_content() or "").split()).strip()
+                if len(txt) < 40:
+                    continue
+                html_p = (_htmlmod.escape(p.text or "") + "".join(
+                    _wiki_serialize_child(c) for c in p
+                )).strip()
+                if html_p:
+                    paras.append(f"<p>{html_p}</p>")
+                    text_parts.append(txt)
+                if len(paras) >= 2:
+                    break
+            result["html"] = "".join(paras)
+            result["text"] = "\n\n".join(text_parts)
+    except Exception:
+        pass
+
+    try:
+        params = urllib.parse.urlencode({
+            "action": "query", "format": "json", "prop": "pageimages",
+            "piprop": "original|thumbnail", "pithumbsize": 640,
+            "titles": artist_name, "redirects": 1, "formatversion": 2,
+        })
+        data = json.loads(_request_text(f"https://en.wikipedia.org/w/api.php?{params}"))
+        pages = (data.get("query") or {}).get("pages") or []
+        if isinstance(pages, dict):
+            pages = list(pages.values())
+        for pg in pages:
+            src = ((pg.get("original") or {}).get("source")) or ((pg.get("thumbnail") or {}).get("source")) or ""
+            if src:
+                result["image"] = src
+                break
+    except Exception:
+        pass
+
+    return result
