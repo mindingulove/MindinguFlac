@@ -1447,16 +1447,6 @@ class ServiceDownloadManager:
                 import backend_monochrome
                 backend_monochrome.run(output_dir, job, self)
 
-            elif engine == "musicdl":
-                with self._lock:
-                    job["status"] = "running"
-                    job["output_dir"] = str(output_dir)
-                if job.get("mode", "stream") == "stream":
-                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
-                self._ensure_progress_thread()
-                import backend_musicdl
-                backend_musicdl.run(output_dir, job, self)
-
             elif engine == "ytp-dl":
                 with self._lock:
                     job["status"] = "running"
@@ -1487,31 +1477,6 @@ class ServiceDownloadManager:
                 # the shared libtorrent session and starve the playing track.
                 with backend_torrent.prefetch_torrent_gate(job):
                     backend_torrent.run(output_dir, job, self)
-
-            elif engine == "tidal_hifi":
-                # Use the specific service selected in the UI (amazon, apple, etc.)
-                svc = job.get("service") or self.config.download_service or "tidal"
-                
-                # Priority 1: Try specific service (Amazon, etc.)
-                resolved_url = resolve_download_url(merged, service=svc, kind=kind)
-
-                # Priority 2: Fallback to searching for the Spotify URL (The engines handle Spotify -> Service resolution best)
-                if not resolved_url:
-                    print(f"[Engine] {svc} resolution failed, falling back to Spotify metadata...")
-                    resolved_url = resolve_download_url(merged, service="spotify", kind=kind)
-
-                if not resolved_url:
-                    raise RuntimeError(f"Could not resolve a {svc} or Spotify URL for this track")
-
-                with self._lock:
-                    job["status"] = "running"
-                    job["resolved_url"] = resolved_url
-                    job["output_dir"] = str(output_dir)
-                if job.get("mode", "stream") == "stream":
-                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
-                self._ensure_progress_thread()
-                import backend_other
-                backend_other.run(resolved_url, output_dir, job, self)
 
             else:  # spotiflac (default)
                 resolved_url = resolve_download_url(merged, service="spotify", kind=kind)

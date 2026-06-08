@@ -66,13 +66,6 @@ const SERVICE_LABELS = {
   apple_music: "Apple Music",
   soundcloud: "SoundCloud",
   youtube: "YouTube",
-  netease: "NetEase Music",
-  kugou: "Kugou",
-  kuwo: "Kuwo",
-  baidu: "Baidu Music",
-  migu: "Migu",
-  fivesing: "5Sing",
-  qianqian: "QianQian",
 };
 
 const SERVICE_QUALITIES = {
@@ -139,47 +132,6 @@ const ENGINE_QUALITIES = {
   spotiflac: null,
 };
 
-const MUSICDL_QUALITIES = {
-  netease: [
-    { value: "best", label: "Best available" },
-    { value: "hires", label: "Hi-Res" },
-    { value: "lossless", label: "Lossless (FLAC)" },
-    { value: "320", label: "High (320kbps)" },
-    { value: "128", label: "Standard (128kbps)" },
-  ],
-  kugou: [
-    { value: "best", label: "Best available" },
-    { value: "hires", label: "Hi-Res" },
-    { value: "lossless", label: "Lossless (FLAC)" },
-    { value: "320", label: "High (320kbps)" },
-    { value: "128", label: "Standard (128kbps)" },
-  ],
-  kuwo: [
-    { value: "best", label: "Best available" },
-    { value: "lossless", label: "Lossless (FLAC)" },
-    { value: "320", label: "High (320kbps)" },
-  ],
-  migu: [
-    { value: "best", label: "Best available" },
-    { value: "hires", label: "Hi-Res FLAC" },
-    { value: "lossless", label: "Lossless (FLAC)" },
-    { value: "320", label: "High (320kbps)" },
-    { value: "128", label: "Standard (128kbps)" },
-  ],
-  fivesing: [
-    { value: "best", label: "Best available" },
-    { value: "sq", label: "SQ" },
-    { value: "hq", label: "HQ" },
-    { value: "lq", label: "LQ" },
-  ],
-  qianqian: [
-    { value: "best", label: "Best available" },
-    { value: "lossless", label: "Highest (3000kbps)" },
-    { value: "320", label: "High (320kbps)" },
-    { value: "128", label: "Standard (128kbps)" },
-  ],
-};
-
 function updateQualityOptions(service, currentQuality) {
   const sel = $("defaultQuality");
   if (!sel) return;
@@ -225,15 +177,7 @@ function updateEngineControls(engine, currentService, currentQuality) {
   }
 
   // Populate quality options
-  if (engine === "musicdl") {
-    const updateMusicdlQualities = (quality) => {
-      const opts = MUSICDL_QUALITIES[serviceSel.value] || MUSICDL_QUALITIES.netease;
-      qualitySel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
-      qualitySel.value = opts.some(o => o.value === quality) ? quality : opts[0].value;
-    };
-    updateMusicdlQualities(currentQuality);
-    serviceSel.onchange = () => updateMusicdlQualities("best");
-  } else if (engineQualities) {
+  if (engineQualities) {
     qualitySel.innerHTML = engineQualities.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
     if (currentQuality && engineQualities.some(o => o.value === currentQuality)) {
       qualitySel.value = currentQuality;

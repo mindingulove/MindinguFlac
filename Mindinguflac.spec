@@ -25,7 +25,6 @@ hiddenimports = [
     'backend_spotiflac',
     'backend_tidal_hifi',
     'backend_monochrome',
-    'backend_other',
     'backend_ytpdl',
     'catalog',
     'service_downloader',
