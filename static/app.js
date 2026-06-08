@@ -1786,6 +1786,11 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
         state.queue = [...state.originalQueue];
     }
     state.queueIndex = state.queue.findIndex(t => trackKey(t) === trackKey(item));
+    // The sidebar is rendered above (prepareSelectedTrackUi) BEFORE this queue is
+    // built, so its "Next in queue" slot was computed against the old/empty queue.
+    // Refresh just that slot now that the queue exists, otherwise the card only
+    // appears once the user transitions to the next track.
+    updateSidebarNextQueue();
   }
   cancelPrefetchJobs("outside current queue window", currentPrefetchWindowKeys(), currentQueueOrderKey());
 
