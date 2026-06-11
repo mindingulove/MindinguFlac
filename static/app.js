@@ -1027,7 +1027,15 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
     let col2 = `<strong>${isTrack ? albumLinkHtml(item, item.title || item.name || item.artist) : esc(item.title || item.name || item.artist)}</strong>`;
     let col3 = "", col4 = "";
-    const col5 = item.duration || "";
+    
+    // Ensure duration is always formatted if missing but duration_ms is present
+    let col5 = item.duration || "";
+    if (!col5 && item.duration_ms) {
+      const totalSeconds = Math.floor(item.duration_ms / 1000);
+      const min = Math.floor(totalSeconds / 60);
+      const sec = totalSeconds % 60;
+      col5 = `${min}:${sec.toString().padStart(2, "0")}`;
+    }
 
     if (context === "search") {
       col2 += `<span>${artistLinkHtml(item)}</span>`;
@@ -1409,7 +1417,7 @@ async function renderArtistPage(artist) {
       setTimeout(() => { if ($("artistLoading")) $("artistLoading").remove(); }, 3000);
     }
     es.close();
-  }, 12000);
+  }, 30000);
 
   es.onmessage = (e) => {
     clearTimeout(timeout);

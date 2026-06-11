@@ -1,17 +1,26 @@
 # Mindinguflac v1.0.2
 
-A reliability-focused patch release addressing critical metadata discovery bugs and cache corruption issues.
+A reliability-focused patch release addressing critical metadata discovery bugs, cache corruption issues, and stricter artist matching.
 
 ## Highlights
 
 ### Artist and Album Discovery
-- **Chronological Sorting:** The artist profile page now correctly prioritizes main studio albums over singles, compilations, and EPs. This ensures that an artist's core discography is always visible in the top 8 positions, instead of being buried by posthumous releases or modern digital singles.
-- **Improved Falling Search:** Updated the fallback artist/album search logic to use exact-match quoted queries. This fixes issues where artists with multi-word names (like Jimi Hendrix) or albums with special characters would fail to resolve when the primary discography API was unavailable.
-- **Recursion Guard:** Fixed a critical bug where certain live albums (e.g. Jimi Hendrix Experience 1967/1969) could cause an infinite backend recursion loop during fallback resolution, resulting in empty tracklists.
+- **Chronological Sorting:** The artist profile page now correctly prioritizes main studio albums over singles, compilations, and EPs.
+- **Reliable Artist Links:** Fixed a bug where clicking multi-word artists (like Jimi Hendrix) would sometimes load an empty profile. Uses exact-match quoted queries for better resolution.
+- **Improved Fallback Search:** Updated fallback search logic to handle special characters and multi-word names reliably.
+- **Recursion Guard:** Fixed a critical bug where certain live albums could cause an infinite backend recursion loop.
+- **Extended Discovery Timeout:** Increased discovery timeout to 30s to ensure deep discography lookups complete successfully.
 
-### Cache Reliability
-- **Self-Healing SQLite Storage:** Improved the persistent metadata cache to automatically identify and ignore "poisoned" entries. If a previous fetch attempt failed and cached an empty tracklist, the app now automatically detects the corruption, bypasses the cache, and re-fetches the correct data.
-- **Safe Caching:** The backend now strictly refuses to cache empty results into the persistent database, preventing transient API timeouts from becoming permanent failures.
+### Stricter Audio Matching
+- **Cover/Tribute Penalties:** Added explicit penalties for "Tribute", "Cover", "Reimagined", and "Karaoke" versions to prevent picking cover versions when original artists are requested.
+- **Artist Path Verification:** The torrent engine now strictly verifies that the requested artist name appears in the file path or torrent title.
+- **Torrent Engine Stability:** Fixed a bug where an undefined variable would cause torrent metadata probes to fail.
+- **Cleaner SpotiFLAC Fallbacks:** Prioritizes high-fidelity official streaming providers and avoids low-quality user-uploaded covers.
+
+### Playlist and UI Fixes
+- **Auto-Formatting Durations:** Fixed an issue where tracks in imported playlists would show empty durations. Now automatically formats `duration_ms` if needed.
+- **Self-Healing SQLite Storage:** Automatically identifies and bypasses "poisoned" 0-track cache entries.
+- **Safe Caching:** Backend now strictly refuses to cache empty results into the persistent database.
 
 ## Desktop Packages
 - `Mindinguflac-macos-arm64.zip` - macOS Apple Silicon desktop build.

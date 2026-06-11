@@ -531,8 +531,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     )
                     
                     # If artist is not verified in the torrent title, we MUST have a strong filename match
-                    if not is_artist_verified and title_score < 75:
-                        continue
+                    # and the artist name should ideally appear in the path.
+                    if not is_artist_verified:
+                        if title_score < 75:
+                            continue
+                        # Artist check in path
+                        path_norm = path_text.lower()
+                        artist_found = any(token in path_norm for token in artist_variations[0].lower().split())
+                        if not artist_found:
+                            # Strict penalty for missing artist in path if torrent title is unverified
+                            continue
                     # Significant word check: 
                     # For short titles (1-2 words), we want a high match to avoid "Kill the King" vs "Temple of the King".
                     # For longer titles, we allow some flexibility (65%).
@@ -597,6 +605,23 @@ def run(output_dir: Path, job: dict, manager) -> None:
             best_f_idx, best_f_score = find_best_audio_file(torrent_info, is_artist_verified=is_artist_verified)
             if best_f_idx == -1 or best_f_score < 60:
                 return None, "Track not found"
+
+            # Penalty for "Covers", "Tribute", "Reimagined" unless explicitly requested
+            torrent_name_lower = torrent_name.lower()
+            tribute_terms = {"tribute", "cover", "covers", "reimagined", "karaoke", "instrumental", "remix", "remixed", "acoustic", "rework"}
+            requested_text = f"{raw_title} {target_album}".lower()
+            has_tribute_in_torrent = any(t in torrent_name_lower for t in tribute_terms)
+            has_tribute_in_request = any(t in requested_text for t in tribute_terms)
+            if has_tribute_in_torrent and not has_tribute_in_request:
+                # If artist is verified and it's an official Hendrix release (e.g. 'Axis: Bold as Love'),
+                # don't penalize it just because it says 'remaster' or similar. 
+                # But if it says 'tribute', it's almost certainly not him.
+                bad_tribute = any(t in torrent_name_lower for t in ["tribute", "karaoke", "instrumental"])
+                if bad_tribute:
+                    return None, "Tribute/Karaoke content"
+                # For 'cover', 'remix', etc. we check if the artist is verified.
+                if not is_artist_verified:
+                    return None, "Potential cover/remix mismatch"
 
             target_album_clean = clean_term(target_album).lower()
             generic_targets = {"", "unknown", "album", "complete", "discography", "compilation", "live", "other"}

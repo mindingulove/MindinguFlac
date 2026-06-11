@@ -164,9 +164,9 @@ def prefetch_tor() -> None:
 
 def spotiflac_fallback_services(selected_service: str, quality: str) -> list[str]:
     # Prioritize Qobuz and Deezer over Amazon for better stability
-    fallback_order = ["qobuz", "deezer", "amazon", "soundcloud", "youtube", "tidal"]
+    fallback_order = ["qobuz", "deezer", "amazon", "tidal"]
     if selected_service in _LOSSY_ONLY_SERVICES:
-        peers = [service for service in ("soundcloud", "youtube") if service != selected_service]
+        peers = []
         lossless = [service for service in fallback_order if service not in _LOSSY_ONLY_SERVICES and service != selected_service]
         return [selected_service, *peers, *lossless]
     candidates = [selected_service, *[service for service in fallback_order if service != selected_service]]

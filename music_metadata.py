@@ -774,32 +774,37 @@ def _raw_artist_profile_artwork(client: object, artist_id: str) -> str:
 
 @functools.lru_cache(maxsize=128)
 def spotify_artist_artwork(artist: str, artist_id: str = "") -> str:
-    data = _sp("search", q=f"artist:{artist}", type="artist", limit=3)
-    items = (data.get("artists") or {}).get("items") or []
-    for a in items:
-        if norm_name(a.get("name", "")) == norm_name(artist):
-            images = a.get("images") or []
-            if images:
-                return proxy_artwork_url(images[0]["url"])
-    if items:
-        images = items[0].get("images") or []
-        if images:
-            return proxy_artwork_url(images[0]["url"])
+    sp_id = artist_id or spotify_artist_id(artist)
+    if not sp_id:
+        # Last resort: try unquoted search but it's unreliable for multi-word
+        data = _sp("search", q=f"artist:{artist}", type="artist", limit=3)
+        items = (data.get("artists") or {}).get("items") or []
+        for a in items:
+            if norm_name(a.get("name", "")) == norm_name(artist):
+                images = a.get("images") or []
+                if images: return proxy_artwork_url(images[0]["url"])
+        return ""
+
+    # Try to get the artist object directly
+    data = _sp(f"artists/{sp_id}")
+    images = data.get("images") or []
+    if images:
+        return proxy_artwork_url(images[0]["url"])
+    
+    # Scraper fallback
     client = _get_spotify_client()
-    raw_artwork = _raw_artist_profile_artwork(client, artist_id or spotify_artist_id(artist)) if client else ""
-    if raw_artwork:
-        return proxy_artwork_url(raw_artwork)
-    return ""
+    raw_artwork = _raw_artist_profile_artwork(client, sp_id) if client else ""
+    return proxy_artwork_url(raw_artwork) if raw_artwork else ""
 
 
 @functools.lru_cache(maxsize=128)
 def spotify_artist_id(artist_name: str) -> str:
-    data = _sp("search", q=f"artist:{artist_name}", type="artist", limit=3)
+    data = _sp("search", q=f'artist:"{artist_name}"', type="artist", limit=3)
     sp_artists = (data.get("artists") or {}).get("items") or []
     for item in sp_artists:
         if norm_name(item.get("name", "")) == norm_name(artist_name):
             return item.get("id", "")
-    return sp_artists[0].get("id", "") if sp_artists else ""
+    return (sp_artists[0].get("id") or "") if sp_artists else ""
 
 
 @functools.lru_cache(maxsize=128)
@@ -1058,21 +1063,30 @@ def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:
 
 
 def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
-    resolved_artist_id = spotify_artist_id(artist) or artist_id
-    art = spotify_artist_artwork(artist, resolved_artist_id)
+    resolved_artist_id = artist_id or spotify_artist_id(artist)
+    art = ""
     if resolved_artist_id:
+        art = spotify_artist_artwork(artist, resolved_artist_id)
         from catalog import save_artist_identity
         save_artist_identity(artist, resolved_artist_id, art)
+    
     yield {"type": "artist_info", "artist": artist, "artist_id": resolved_artist_id, "artwork_url": art}
     
     top_tracks = spotify_artist_top_tracks(artist, artist_id=resolved_artist_id)
     yield {"type": "top_tracks", "tracks": top_tracks}
 
     client = _get_spotify_client()
-    album_items = _raw_artist_discography_items(client, resolved_artist_id) if client and resolved_artist_id else []
+    album_items = []
+    if client and resolved_artist_id:
+        try:
+            album_items = _raw_artist_discography_items(client, resolved_artist_id)
+        except Exception:
+            album_items = []
+    
     if album_items:
         source_items = [_legacy_simple_item(item, "album") for item in album_items]
     else:
+        # Fallback to search if discography fetch failed or no ID
         data = _sp("search", q=f'artist:"{artist}"', type="album", limit=50)
         source_items = (data.get("albums") or {}).get("items") or []
     albums = []
