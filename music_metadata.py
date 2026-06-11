@@ -161,6 +161,7 @@ def _legacy_simple_item(item: dict, kind: str) -> dict:
         "artists": artists or [],
         "images": [{"url": cover_url}] if cover_url else [],
         "release_date": item.get("release_date", ""),
+        "release_type": item.get("release_type", ""),
         "external_urls": {"spotify": item.get("external_url", "")},
         "popularity": _numeric_plays(item.get("plays", 0)) // 10000,
         "type": kind,
@@ -241,6 +242,7 @@ def _raw_artist_discography_items(client: object, artist_id: str) -> list[dict]:
             "cover_url": _best_raw_image(release.get("coverArt", {})),
             "release_date": release.get("date", {}).get("isoString", ""),
             "external_url": f"https://open.spotify.com/album/{spotify_id}",
+            "release_type": release_type,
         })
     return results
 
@@ -1071,7 +1073,7 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
     if album_items:
         source_items = [_legacy_simple_item(item, "album") for item in album_items]
     else:
-        data = _sp("search", q=f"artist:{artist}", type="album", limit=50)
+        data = _sp("search", q=f'artist:"{artist}"', type="album", limit=50)
         source_items = (data.get("albums") or {}).get("items") or []
     albums = []
     for item in source_items:
@@ -1080,8 +1082,21 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
             "type": "album", "title": item["name"], "artist": artist, "album": item["name"],
             "year": release_year(item.get("release_date", "")),
             "artwork_url": proxy_artwork_url(images[0].get("url", "")) if images else "",
-            "spotify_id": item["id"], "source": "Spotify"
+            "spotify_id": item["id"], "source": "Spotify",
+            "release_type": item.get("release_type", "")
         })
+    
+    # Sort albums to prioritize main studio albums over singles/compilations
+    def _album_sort_key(a):
+        rt = a.get("release_type", "").upper()
+        # 0 for ALBUM, 1 for COMPILATION, 2 for SINGLE/EP, 3 for others
+        priority = 0 if rt == "ALBUM" else (1 if rt == "COMPILATION" else (2 if rt == "SINGLE" else 3))
+        # Secondary sort by year (newest first, fallback to empty)
+        year = a.get("year", "")
+        return (priority, "" if not year else str(9999 - int(year)) if year.isdigit() else year)
+    
+    albums.sort(key=_album_sort_key)
+    
     yield {"type": "albums", "albums": albums}
 
     related = related_artists(resolved_artist_id, artist)
