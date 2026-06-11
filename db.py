@@ -221,7 +221,11 @@ def get_album_metadata(album_key: str) -> dict | None:
     row = conn.execute("SELECT metadata_json FROM albums WHERE album_key = ?", (album_key,)).fetchone()
     if row:
         try:
-            return json.loads(row["metadata_json"])
+            data = json.loads(row["metadata_json"])
+            # Self-heal corrupted/empty cache entries
+            if data and not data.get("tracks"):
+                return None
+            return data
         except Exception:
             pass
     return None

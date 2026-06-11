@@ -1155,9 +1155,12 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
 
     if not tracks:
         try:
-            data = _sp("search", q=f"artist:{artist} album:{album}", type="album", limit=1)
+            # Fallback search if ID fetch failed or wasn't provided
+            search_q = f'artist:"{artist}" album:"{album}"'
+            data = _sp("search", q=search_q, type="album", limit=1)
             items = (data.get("albums") or {}).get("items") or []
-            if items: return album_tracks(config, artist, album, "", items[0]["id"])
+            if items and items[0].get("id") and items[0]["id"] != spotify_id:
+                return album_tracks(config, artist, album, "", items[0]["id"])
         except Exception: pass
 
     if not art: art = spotify_album_artwork(artist, album)
@@ -1216,10 +1219,11 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
     }
     
     # Cache it!
-    import db
-    album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
-    db.save_album_metadata(album_key, result)
-    
+    if tracks:
+        import db
+        album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
+        db.save_album_metadata(album_key, result)
+
     return result
 
 
