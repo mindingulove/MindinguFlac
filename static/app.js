@@ -373,12 +373,18 @@ function attrJson(value) {
 }
 
 function artistTarget(item = {}) {
-  const name = item.artist || item.name || "";
+  const isArtist = item.type === "artist";
+  const name = isArtist
+    ? (item.name || item.artist || "")
+    : (primaryArtistName(item) || item.artist || item.name || "");
+  const artistId = item.artist_id || item.spotify_artist_id || (isArtist ? item.spotify_id : "") || item.musicbrainz_artist_id || "";
   return {
     name,
     artist: name,
     artwork_url: item.artist_artwork_url || (item.type === "artist" ? item.artwork_url : ""),
-    artist_id: item.artist_id || item.spotify_artist_id || (item.type === "artist" ? item.spotify_id : "") || item.musicbrainz_artist_id || "",
+    artist_id: artistId,
+    spotify_artist_id: artistId,
+    spotify_id: item.spotify_id || artistId,
     spotify_url: item.spotify_url || (item.external_urls && item.external_urls.spotify) || "",
     external_urls: item.external_urls || {},
   };
@@ -386,17 +392,21 @@ function artistTarget(item = {}) {
 
 function albumTarget(item = {}) {
   const album = item.album || item.title || "";
+  const artist = item.artist || item.name || "";
+  const artistId = item.spotify_artist_id || item.artist_id || "";
+  const albumId = item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || (item.metadata && (item.metadata.album_spotify_id || item.metadata.spotify_album_id || item.metadata.spotify_id)) || "";
   return {
     type: "album",
     title: album,
     album,
-    artist: item.artist || "",
+    artist,
     artwork_url: item.album_artwork_url || item.artwork_url || "",
     artist_artwork_url: item.artist_artwork_url || "",
-    spotify_artist_id: item.spotify_artist_id || item.artist_id || "",
+    artist_id: artistId,
+    spotify_artist_id: artistId,
     year: item.year || "",
     musicbrainz_release_id: item.musicbrainz_release_id || item.release_id || (item.metadata && (item.metadata.musicbrainz_release_id || item.metadata.release_id)) || "",
-    spotify_id: item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || (item.metadata && (item.metadata.album_spotify_id || item.metadata.spotify_album_id || item.metadata.spotify_id)) || "",
+    spotify_id: albumId,
     spotify_url: item.spotify_url || (item.external_urls && item.external_urls.spotify) || "",
     external_urls: item.external_urls || {},
   };
@@ -439,9 +449,10 @@ async function fetchAlbumTracks(album = {}) {
 }
 
 function artistLinkHtml(item, text = null, className = "") {
-  const label = text || (item && item.artist) || (item && item.name) || "";
+  const target = artistTarget(item || {});
+  const label = text || target.artist || target.name || (item && item.artist) || (item && item.name) || "";
   if (!label) return "";
-  return `<button class="inline-entity-link artist-link ${className}" type="button" title="${esc(label)}" data-open-artist='${attrJson(artistTarget({ ...item, artist: label }))}'>${esc(label)}</button>`;
+  return `<button class="inline-entity-link artist-link ${className}" type="button" title="${esc(label)}" data-open-artist='${attrJson(target)}'>${esc(label)}</button>`;
 }
 
 function albumLinkHtml(item, text = null, className = "") {
@@ -1280,7 +1291,7 @@ async function renderArtistPage(artist) {
     if (toggle) {
       toggle.textContent = `View all upcoming concerts (${events.length})`;
       toggle.classList.remove("hidden");
-      toggle.onclick = () => openTourPage(artistName);
+      toggle.onclick = () => openTourPage({ name: artistName, artist_id: resolvedArtistId, image: artistArtwork });
     }
   }
 
@@ -2488,7 +2499,11 @@ function renderDetailsSidebar(track, job, requestId, qualityLabel = "") {
 
   bindSidebarTrackRows(content);
   $("sideOpenQueue")?.addEventListener("click", openQueuePanel);
-  $("sideTourShowAll")?.addEventListener("click", () => openTourPage(track.artist || primaryArtistName(track)));
+  $("sideTourShowAll")?.addEventListener("click", () => openTourPage({
+    name: track.artist || primaryArtistName(track),
+    artist_id: primaryArtistId(track),
+    image: state.sidebarArtist?.tourImage || state.sidebarArtist?.image || track.artist_artwork_url || track.artwork_url || "",
+  }));
 
   const artistCard = $("sideArtistCard");
   if (artistCard) {
@@ -2711,10 +2726,10 @@ async function loadSidebarTour(track, requestId) {
           <i class="bi bi-globe2"></i> Find tour dates
         </button>
       `);
-      $("sideTourFind")?.addEventListener("click", () => openTourPage(fullName));
+      $("sideTourFind")?.addEventListener("click", () => openTourPage({ name: fullName, artist_id: artistId, image: track.artist_artwork_url || track.artwork_url || "" }));
     }
     bindExternalUrlButtons(card);
-    $("sideTourShowAll")?.addEventListener("click", () => openTourPage(fullName));
+    $("sideTourShowAll")?.addEventListener("click", () => openTourPage({ name: fullName, artist_id: artistId, image: track.artist_artwork_url || track.artwork_url || "" }));
   };
 
   const shouldRefreshTour = Boolean(tour.pending || tour.refresh_needed || tour.stale);
@@ -2747,10 +2762,13 @@ async function loadSidebarTour(track, requestId) {
   });
 }
 
-function openTourPage(artistName) {
+function openTourPage(artist = {}) {
+  const artistName = typeof artist === "string" ? artist : (artist.name || artist.artist || "Artist");
+  const artistId = typeof artist === "string" ? "" : (artist.artist_id || artist.spotify_id || "");
+  const artistImage = typeof artist === "string" ? "" : (artist.image || artist.artwork_url || "");
   const ctx = state.sidebarArtist || {};
-  const image = (ctx.name && ctx.name.toLowerCase() === String(artistName).toLowerCase()) ? (ctx.tourImage || ctx.image) : "";
-  pushPage(() => renderArtistTourPage(artistName, image));
+  const image = artistImage || ((ctx.name && ctx.name.toLowerCase() === String(artistName).toLowerCase()) ? (ctx.tourImage || ctx.image) : "");
+  pushPage(() => renderArtistTourPage({ name: artistName, artist_id: artistId, image }));
 }
 
 function pickTourHeroArtistImage(about = {}) {
@@ -2896,7 +2914,10 @@ function showCreditsModal(credits = {}) {
   dialog.showModal();
 }
 
-async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
+async function renderArtistTourPage(artist = {}) {
+  const artistName = typeof artist === "string" ? artist : (artist.name || artist.artist || "Artist");
+  const artistId = typeof artist === "string" ? "" : (artist.artist_id || artist.spotify_id || "");
+  const artistImage = typeof artist === "string" ? "" : (artist.image || "");
   const requestId = ++state.tourPageRequestId;
   setActiveView("home");
   document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
@@ -2991,7 +3012,7 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
   try {
     const cachedTour = await api("/api/artist/tour", {
       method: "POST",
-      body: JSON.stringify({ name: artistName, live: false }),
+      body: JSON.stringify({ artist_id: artistId, name: artistName, live: false }),
       timeout: 12000,
     });
     if (requestId !== state.tourPageRequestId) return;
@@ -3006,7 +3027,7 @@ async function renderArtistTourPage(artistName = "Artist", artistImage = "") {
 
   api("/api/artist/tour", {
       method: "POST",
-      body: JSON.stringify({ name: artistName, live: true }),
+      body: JSON.stringify({ artist_id: artistId, name: artistName, live: true }),
       timeout: 0,
     }).then((tour) => {
       if (!body.isConnected || requestId !== state.tourPageRequestId) return;
@@ -3913,6 +3934,20 @@ function suggestionMarkup(item, index) {
   `;
 }
 
+function openSuggestionItem(item = {}) {
+  if (item.type === "artist") {
+    pushPage(() => renderArtistPage(artistTarget(item)));
+    return;
+  }
+  if (item.type === "album") {
+    pushPage(() => renderAlbumPage(albumTarget(item)));
+    return;
+  }
+  if (item.type === "track") {
+    pushPage(() => renderAlbumPage(albumTarget(item)));
+  }
+}
+
 function bindSuggestionButtons(root = document) {
   root.querySelectorAll("[data-suggestion]").forEach((button) => {
     if (button.dataset.bound) return;
@@ -3921,12 +3956,7 @@ function bindSuggestionButtons(root = document) {
       const item = state.suggestionResults[Number(button.dataset.suggestion)];
       $("searchInput").value = item.title || item.artist || "";
       hideSuggestions();
-      if (item.type === "artist" || item.type === "album") {
-        searchMusic(item.title || item.artist, item.type);
-        selectMusicItem(item);
-      } else {
-        searchMusic(item.title || item.artist, "track");
-      }
+      openSuggestionItem(item);
     };
   });
 }
@@ -6068,7 +6098,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
       artistContainer.innerHTML = `<button id="ctxGoArtist" class="context-menu-item"><i class="bi bi-person" style="color:var(--muted);"></i> Go to artist</button>`;
       $("ctxGoArtist").onclick = () => {
         menu.hidden = true;
-        pushPage(() => renderArtistPage(artistTarget({ ...track, artist: artists[0] })));
+        pushPage(() => renderArtistPage(artistTarget({ ...track, artist: artists[0], name: artists[0], artist_id: primaryArtistId(track) })));
       };
     } else if (artists.length > 1) {
       const submenuItems = artists.map((a, i) => `<button id="ctxGoArtistSub_${i}" class="context-menu-item">${esc(a)}</button>`).join("");
@@ -6082,7 +6112,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
       artists.forEach((a, i) => {
         $(`ctxGoArtistSub_${i}`).onclick = () => {
           menu.hidden = true;
-          pushPage(() => renderArtistPage(artistTarget({ ...track, artist: a })));
+          pushPage(() => renderArtistPage(artistTarget({ ...track, artist: a, name: a, artist_id: primaryArtistId(track) })));
         };
       });
     }

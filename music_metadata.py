@@ -132,6 +132,20 @@ def _reset_spotify_client_cache() -> None:
         _spotify_client_cache = None
 
 
+_spotify_artist_id_cache_lock = threading.Lock()
+_spotify_artist_id_cache: OrderedDict[str, str] = OrderedDict()
+_spotify_artist_top_tracks_cache_lock = threading.Lock()
+_spotify_artist_top_tracks_cache: OrderedDict[tuple[str, int, str], list[dict]] = OrderedDict()
+_SPOTIFY_ARTIST_CACHE_SIZE = 128
+
+
+def clear_spotify_artist_caches() -> None:
+    with _spotify_artist_id_cache_lock:
+        _spotify_artist_id_cache.clear()
+    with _spotify_artist_top_tracks_cache_lock:
+        _spotify_artist_top_tracks_cache.clear()
+
+
 def _numeric_plays(value: object) -> int:
     try:
         return int(str(value or "0").replace(",", ""))
@@ -781,69 +795,138 @@ def _raw_artist_profile_artwork(client: object, artist_id: str) -> str:
     return _best_raw_image(artist_data.get("visuals", {}).get("avatarImage", {}))
 
 
-@functools.lru_cache(maxsize=128)
 def spotify_artist_artwork(artist: str, artist_id: str = "") -> str:
-    sp_id = artist_id or spotify_artist_id(artist)
-    if not sp_id:
-        # Last resort: try unquoted search but it's unreliable for multi-word
-        data = _sp("search", q=f"artist:{artist}", type="artist", limit=3)
-        items = (data.get("artists") or {}).get("items") or []
-        for a in items:
-            if norm_name(a.get("name", "")) == norm_name(artist):
-                images = a.get("images") or []
-                if images: return proxy_artwork_url(images[0]["url"])
+    key = (artist.strip().lower(), artist_id.strip())
+    with _spotify_artist_id_cache_lock:
+        cached = _spotify_artist_id_cache.get(f"artwork:{key[0]}::{key[1]}")
+        if cached is not None:
+            return cached
+
+    for attempt in range(2):
+        sp_id = artist_id or spotify_artist_id(artist)
+        if not sp_id:
+            data = _sp("search", q=f"artist:{artist}", type="artist", limit=3)
+            items = (data.get("artists") or {}).get("items") or []
+            for a in items:
+                if norm_name(a.get("name", "")) == norm_name(artist):
+                    images = a.get("images") or []
+                    if images:
+                        result = proxy_artwork_url(images[0]["url"])
+                        with _spotify_artist_id_cache_lock:
+                            _spotify_artist_id_cache[f"artwork:{key[0]}::{key[1]}"] = result
+                        return result
+            if attempt == 0:
+                _reset_spotify_client_cache()
+                continue
+            return ""
+
+        data = _sp(f"artists/{sp_id}")
+        images = data.get("images") or []
+        if images:
+            result = proxy_artwork_url(images[0]["url"])
+            with _spotify_artist_id_cache_lock:
+                _spotify_artist_id_cache[f"artwork:{key[0]}::{key[1]}"] = result
+            return result
+
+        client = _get_spotify_client(force_refresh=attempt > 0)
+        raw_artwork = _raw_artist_profile_artwork(client, sp_id) if client else ""
+        if raw_artwork:
+            result = proxy_artwork_url(raw_artwork)
+            with _spotify_artist_id_cache_lock:
+                _spotify_artist_id_cache[f"artwork:{key[0]}::{key[1]}"] = result
+            return result
+        if attempt == 0:
+            _reset_spotify_client_cache()
+            continue
         return ""
-
-    # Try to get the artist object directly
-    data = _sp(f"artists/{sp_id}")
-    images = data.get("images") or []
-    if images:
-        return proxy_artwork_url(images[0]["url"])
-    
-    # Scraper fallback
-    client = _get_spotify_client()
-    raw_artwork = _raw_artist_profile_artwork(client, sp_id) if client else ""
-    return proxy_artwork_url(raw_artwork) if raw_artwork else ""
+    return ""
 
 
-@functools.lru_cache(maxsize=128)
 def spotify_artist_id(artist_name: str) -> str:
-    data = _sp("search", q=f'artist:"{artist_name}"', type="artist", limit=3)
-    sp_artists = (data.get("artists") or {}).get("items") or []
-    for item in sp_artists:
-        if norm_name(item.get("name", "")) == norm_name(artist_name):
-            return item.get("id", "")
-    return (sp_artists[0].get("id") or "") if sp_artists else ""
+    key = artist_name.strip().lower()
+    if not key:
+        return ""
+    with _spotify_artist_id_cache_lock:
+        cached = _spotify_artist_id_cache.get(key)
+        if cached is not None:
+            _spotify_artist_id_cache.move_to_end(key)
+            return cached
+
+    for attempt in range(2):
+        data = _sp("search", q=f'artist:"{artist_name}"', type="artist", limit=3)
+        sp_artists = (data.get("artists") or {}).get("items") or []
+        for item in sp_artists:
+            if norm_name(item.get("name", "")) == norm_name(artist_name):
+                artist_id = item.get("id", "")
+                if artist_id:
+                    with _spotify_artist_id_cache_lock:
+                        _spotify_artist_id_cache[key] = artist_id
+                        _spotify_artist_id_cache.move_to_end(key)
+                        while len(_spotify_artist_id_cache) > _SPOTIFY_ARTIST_CACHE_SIZE:
+                            _spotify_artist_id_cache.popitem(last=False)
+                return artist_id
+        fallback_id = (sp_artists[0].get("id") or "") if sp_artists else ""
+        if fallback_id:
+            with _spotify_artist_id_cache_lock:
+                _spotify_artist_id_cache[key] = fallback_id
+                _spotify_artist_id_cache.move_to_end(key)
+                while len(_spotify_artist_id_cache) > _SPOTIFY_ARTIST_CACHE_SIZE:
+                    _spotify_artist_id_cache.popitem(last=False)
+            return fallback_id
+        if attempt == 0:
+            _reset_spotify_client_cache()
+            continue
+        return ""
+    return ""
 
 
-@functools.lru_cache(maxsize=128)
 def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str = "") -> list[dict]:
-    sp_artist_id = spotify_artist_id(artist_name) or artist_id
-    if not sp_artist_id:
+    key = (artist_name.strip().lower(), int(limit or 0), artist_id.strip())
+    with _spotify_artist_top_tracks_cache_lock:
+        cached = _spotify_artist_top_tracks_cache.get(key)
+        if cached is not None:
+            _spotify_artist_top_tracks_cache.move_to_end(key)
+            return [dict(r) for r in cached]
+
+    for attempt in range(2):
+        sp_artist_id = artist_id or spotify_artist_id(artist_name)
+        if not sp_artist_id:
+            return []
+        data = _sp(f"artists/{sp_artist_id}/top-tracks", market="US")
+        sp_tracks = (data.get("tracks") or [])[:limit]
+        results = []
+        for t in sp_tracks:
+            images = (t.get("album") or {}).get("images") or []
+            art = proxy_artwork_url(images[0]["url"]) if images else ""
+            album_name = (t.get("album") or {}).get("name", "")
+            if not art and album_name:
+                art = spotify_album_artwork(artist_name, album_name)
+            results.append({
+                "title": t.get("name", ""),
+                "artist": artist_name,
+                "album": album_name,
+                "artwork_url": art,
+                "duration": format_duration_ms(t.get("duration_ms", 0)),
+                "length": t.get("duration_ms", 0),
+                "plays": t.get("popularity", 0) * 10000,
+                "spotify_url": (t.get("external_urls") or {}).get("spotify", ""),
+                "spotify_id": t.get("id", ""),
+                "isrc": (t.get("external_ids") or {}).get("isrc", ""),
+                "source": "Spotify",
+            })
+        if results:
+            cached_results = tuple(results)
+            with _spotify_artist_top_tracks_cache_lock:
+                _spotify_artist_top_tracks_cache[key] = results
+                _spotify_artist_top_tracks_cache.move_to_end(key)
+                while len(_spotify_artist_top_tracks_cache) > _SPOTIFY_ARTIST_CACHE_SIZE:
+                    _spotify_artist_top_tracks_cache.popitem(last=False)
+            return [dict(r) for r in cached_results]
+        if attempt == 0:
+            _reset_spotify_client_cache()
+            continue
         return []
-    data = _sp(f"artists/{sp_artist_id}/top-tracks", market="US")
-    sp_tracks = (data.get("tracks") or [])[:limit]
-    results = []
-    for t in sp_tracks:
-        images = (t.get("album") or {}).get("images") or []
-        art = proxy_artwork_url(images[0]["url"]) if images else ""
-        album_name = (t.get("album") or {}).get("name", "")
-        if not art and album_name:
-            art = spotify_album_artwork(artist_name, album_name)
-        results.append({
-            "title": t.get("name", ""),
-            "artist": artist_name,
-            "album": album_name,
-            "artwork_url": art,
-            "duration": format_duration_ms(t.get("duration_ms", 0)),
-            "length": t.get("duration_ms", 0),
-            "plays": t.get("popularity", 0) * 10000,
-            "spotify_url": (t.get("external_urls") or {}).get("spotify", ""),
-            "spotify_id": t.get("id", ""),
-            "isrc": (t.get("external_ids") or {}).get("isrc", ""),
-            "source": "Spotify",
-        })
-    return results
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -1116,13 +1199,19 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
     top_tracks = spotify_artist_top_tracks(artist, artist_id=resolved_artist_id)
     yield {"type": "top_tracks", "tracks": top_tracks}
 
-    client = _get_spotify_client()
     album_items = []
-    if client and resolved_artist_id:
-        try:
-            album_items = _raw_artist_discography_items(client, resolved_artist_id)
-        except Exception:
-            album_items = []
+    if resolved_artist_id:
+        for attempt in range(2):
+            client = _get_spotify_client(force_refresh=attempt > 0)
+            if not client:
+                break
+            try:
+                album_items = _raw_artist_discography_items(client, resolved_artist_id)
+            except Exception:
+                album_items = []
+            if album_items or attempt > 0:
+                break
+            _reset_spotify_client_cache()
     
     if album_items:
         source_items = [_legacy_simple_item(item, "album") for item in album_items]

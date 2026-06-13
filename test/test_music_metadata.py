@@ -110,10 +110,10 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
     def setUp(self):
         if hasattr(music_metadata, "clear_search_music_cache"):
             music_metadata.clear_search_music_cache()
+        if hasattr(music_metadata, "clear_spotify_artist_caches"):
+            music_metadata.clear_spotify_artist_caches()
         music_metadata.spotify_search_track.cache_clear()
         music_metadata.spotify_artist_artwork.cache_clear()
-        music_metadata.spotify_artist_id.cache_clear()
-        music_metadata.spotify_artist_top_tracks.cache_clear()
 
     def test_search_music_does_not_cache_empty_results(self):
         class EmptyIndexer:
@@ -163,6 +163,38 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
             results = music_metadata.SpotifyIndexer().search("Michael Jackson")
 
         self.assertEqual(results[0]["title"], "Beat It")
+
+    def test_spotify_artist_top_tracks_retries_after_transient_client_failure(self):
+        class BrokenClient(FakePublicSpotifyClient):
+            def search_tracks(self, query, limit=20):
+                raise RuntimeError("stale session")
+
+        class WorkingClient(FakePublicSpotifyClient):
+            pass
+
+        with patch.object(music_metadata, "_get_spotify_client", side_effect=[BrokenClient(), WorkingClient()]):
+            tracks = music_metadata.spotify_artist_top_tracks("Michael Jackson", artist_id="artist-id")
+
+        self.assertEqual(tracks[0]["title"], "Beat It")
+
+    def test_artist_page_retries_album_discography_after_transient_client_failure(self):
+        class BrokenClient(FakePublicSpotifyClient):
+            def __init__(self):
+                self.web_client = self
+
+            def get_artist_discography(self, artist_id):
+                raise RuntimeError("stale session")
+
+        class WorkingClient(FakeDiscographyClient):
+            pass
+
+        with patch.object(music_metadata, "spotify_artist_artwork", return_value=""):
+            with patch.object(music_metadata, "spotify_artist_top_tracks", return_value=[{"title": "Beat It"}]):
+                with patch.object(music_metadata, "_get_spotify_client", side_effect=[BrokenClient(), WorkingClient()]):
+                    parts = list(music_metadata.artist_page(AppConfig(), "Michael Jackson", artist_id="artist-id"))
+
+        self.assertEqual(parts[1]["tracks"][0]["title"], "Beat It")
+        self.assertEqual([item["title"] for item in parts[-2]["albums"]], ["First Album", "Second Album"])
 
     def test_public_client_search_is_exposed_to_search_and_artwork_helpers(self):
         with patch.object(music_metadata, "_spotify_client_cache", FakePublicSpotifyClient()):
