@@ -4,6 +4,7 @@ import json
 import html
 import time
 import functools
+from collections import OrderedDict
 import urllib.parse
 import urllib.request
 import rapidfuzz
@@ -109,9 +110,11 @@ _spotify_client_cache = None
 _spotify_client_lock = threading.Lock()
 
 
-def _get_spotify_client():
+def _get_spotify_client(force_refresh: bool = False):
     global _spotify_client_cache
     with _spotify_client_lock:
+        if force_refresh and _spotify_client_cache not in (None, False):
+            _spotify_client_cache = None
         if _spotify_client_cache is not None:
             return _spotify_client_cache if _spotify_client_cache is not False else None
         try:
@@ -121,6 +124,12 @@ def _get_spotify_client():
         except ImportError:
             _spotify_client_cache = False
             return None
+
+
+def _reset_spotify_client_cache() -> None:
+    global _spotify_client_cache
+    with _spotify_client_lock:
+        _spotify_client_cache = None
 
 
 def _numeric_plays(value: object) -> int:
@@ -874,15 +883,28 @@ class BaseMusicIndexer:
 
 class SpotifyIndexer(BaseMusicIndexer):
     def search(self, query: str) -> list[dict]:
-        client = _get_spotify_client()
-        web_client = getattr(client, "web_client", None)
-        payload_builder = getattr(client, "_search_payload", None)
-        if not web_client or not payload_builder:
-            return []
-        try:
-            data = web_client.query(payload_builder(query, 20))
-            search_v2 = data.get("data", {}).get("searchV2", {})
-        except Exception:
+        search_v2 = {}
+        for attempt in range(2):
+            client = _get_spotify_client(force_refresh=attempt > 0)
+            web_client = getattr(client, "web_client", None)
+            payload_builder = getattr(client, "_search_payload", None)
+            if not web_client or not payload_builder:
+                if attempt == 0:
+                    _reset_spotify_client_cache()
+                    continue
+                return []
+            try:
+                data = web_client.query(payload_builder(query, 20))
+                search_v2 = data.get("data", {}).get("searchV2", {})
+            except Exception:
+                if attempt == 0:
+                    _reset_spotify_client_cache()
+                    continue
+                return []
+            if search_v2 or attempt > 0:
+                break
+            _reset_spotify_client_cache()
+        if not search_v2:
             return []
 
         def _join_artists(node):
@@ -1015,19 +1037,31 @@ def build_music_indexers(config: AppConfig) -> list[BaseMusicIndexer]:
     return [SpotifyIndexer()] if _get_spotify_client() else []
 
 
+_search_music_cache_lock = threading.Lock()
+_search_music_cache: OrderedDict[str, tuple[dict, ...]] = OrderedDict()
+_SEARCH_MUSIC_CACHE_SIZE = 128
+
+
+def clear_search_music_cache() -> None:
+    with _search_music_cache_lock:
+        _search_music_cache.clear()
+
+
 def search_music(config: AppConfig, query: str) -> list[dict]:
     # `config` is accepted for API symmetry but is NOT part of the cache key:
     # AppConfig is an unhashable dataclass, so caching search_music on it crashed
     # every text search with "unhashable type: 'AppConfig'". build_music_indexers
     # ignores config anyway, so the results depend only on the query. Cache on the
-    # lower-cased query alone and hand callers fresh dicts.
+    # lower-cased query alone and hand callers fresh dicts. Do not cache empty
+    # results so a transient provider failure does not poison later searches.
     query = query.strip().lower()
     if not query: return []
-    return [dict(r) for r in _search_music_cached(query)]
+    with _search_music_cache_lock:
+        cached = _search_music_cache.get(query)
+        if cached is not None:
+            _search_music_cache.move_to_end(query)
+            return [dict(r) for r in cached]
 
-
-@functools.lru_cache(maxsize=128)
-def _search_music_cached(query: str) -> tuple[dict, ...]:
     results, seen = [], set()
     for idx in build_music_indexers(None):
         try:
@@ -1045,7 +1079,14 @@ def _search_music_cached(query: str) -> tuple[dict, ...]:
         except Exception: pass
     results.sort(key=lambda x: x.get("_relevance", (0, 0, 0, 0)), reverse=True)
     for r in results: r.pop("_relevance", None)
-    return tuple(results)
+    cached_results = tuple(results)
+    if cached_results:
+        with _search_music_cache_lock:
+            _search_music_cache[query] = cached_results
+            _search_music_cache.move_to_end(query)
+            while len(_search_music_cache) > _SEARCH_MUSIC_CACHE_SIZE:
+                _search_music_cache.popitem(last=False)
+    return [dict(r) for r in cached_results]
 
 
 def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:

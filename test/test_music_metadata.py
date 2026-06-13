@@ -108,10 +108,61 @@ class FakeDiscographyClient(FakePublicSpotifyClient):
 
 class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
     def setUp(self):
+        if hasattr(music_metadata, "clear_search_music_cache"):
+            music_metadata.clear_search_music_cache()
         music_metadata.spotify_search_track.cache_clear()
         music_metadata.spotify_artist_artwork.cache_clear()
         music_metadata.spotify_artist_id.cache_clear()
         music_metadata.spotify_artist_top_tracks.cache_clear()
+
+    def test_search_music_does_not_cache_empty_results(self):
+        class EmptyIndexer:
+            def search(self, query):
+                return []
+
+        class ResultIndexer:
+            def search(self, query):
+                return [{"type": "track", "title": "Beat It", "artist": "Michael Jackson", "spotify_id": "track-id"}]
+
+        calls = []
+
+        def fake_build_music_indexers(_config):
+            calls.append(1)
+            return [EmptyIndexer()] if len(calls) == 1 else [ResultIndexer()]
+
+        with patch.object(music_metadata, "build_music_indexers", side_effect=fake_build_music_indexers):
+            first = music_metadata.search_music(AppConfig(), "Michael Jackson")
+            second = music_metadata.search_music(AppConfig(), "Michael Jackson")
+
+        self.assertEqual(first, [])
+        self.assertEqual(second[0]["title"], "Beat It")
+
+    def test_spotify_indexer_retries_after_transient_client_failure(self):
+        class BrokenClient:
+            def __init__(self):
+                self.web_client = self
+
+            def _search_payload(self, query, limit):
+                return {}
+
+            def query(self, payload):
+                raise RuntimeError("stale session")
+
+        class WorkingClient(BrokenClient):
+            def query(self, payload):
+                return {"data": {"searchV2": {"tracksV2": {"items": [{
+                    "item": {"data": {
+                        "id": "track-id",
+                        "name": "Beat It",
+                        "albumOfTrack": {"name": "Thriller", "coverArt": {}},
+                        "artists": {"items": [{"profile": {"name": "Michael Jackson"}}]},
+                    }}
+                }]}}}}
+
+        with patch.object(music_metadata, "_get_spotify_client", side_effect=[BrokenClient(), WorkingClient()]):
+            results = music_metadata.SpotifyIndexer().search("Michael Jackson")
+
+        self.assertEqual(results[0]["title"], "Beat It")
 
     def test_public_client_search_is_exposed_to_search_and_artwork_helpers(self):
         with patch.object(music_metadata, "_spotify_client_cache", FakePublicSpotifyClient()):
