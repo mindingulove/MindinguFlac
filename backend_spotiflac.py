@@ -287,7 +287,7 @@ def _ensure_spotiflac_metadata_patch() -> None:
             SpotifyMetadataClient.get_track = _thread_local_get_track
 
             # Also patch the NetworkManager to return our proxy-aware clients
-            from backend.core.http import NetworkManager  # type: ignore
+            from SpotiFLAC.core.http import NetworkManager  # type: ignore
             NetworkManager.get_sync_client = classmethod(_patched_get_sync_client)
 
             _spotiflac_patch_installed = True

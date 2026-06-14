@@ -177,7 +177,7 @@ def _resolve_platform_url(candidate_url: str, service: str) -> str:
 
 def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "track", isrc: str = "") -> str:
     try:
-        from backend.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
         client = SpotifyMetadataClient()
 
         queries = []
@@ -1155,7 +1155,7 @@ class ServiceDownloadManager:
     def _sync_progress(self) -> None:
         updated = False
         try:
-            from backend.core.progress import DownloadManager
+            from SpotiFLAC.core.progress import DownloadManager
             stats = DownloadManager().get_stats()
             queue = stats.get("queue", [])
             with self._lock:

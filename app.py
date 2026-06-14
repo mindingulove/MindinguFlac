@@ -705,7 +705,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
     album_m = re.search(r"(?:album/|spotify:album:)([A-Za-z0-9]+)", spotify_url)
     
     try:
-        from backend.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
         client = SpotifyMetadataClient()
         
         if playlist_m:
