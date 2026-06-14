@@ -1671,7 +1671,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       el.oncontextmenu = (event) => {
         event.preventDefault();
         if (typeof showTrackContextMenu === "function") {
-          showTrackContextMenu(event, item);
+          showTrackContextMenu(event, item, playbackContext || {});
         }
       };
     }
@@ -6513,17 +6513,16 @@ async function boot() {
     if (!prev || !next) return;
     const SCROLL_BY = 160;
     const _update = () => {
-      const canScrollLeft = row.scrollLeft > 1;
-      const canScrollRight = row.scrollWidth - row.clientWidth - row.scrollLeft > 1;
-      prev.hidden = !canScrollLeft;
-      next.hidden = !canScrollRight;
+      const canScrollLeft = row.scrollLeft > 2;
+      const canScrollRight = row.scrollWidth - row.clientWidth - row.scrollLeft > 2;
+      prev.classList.toggle("can-scroll", canScrollLeft);
+      next.classList.toggle("can-scroll", canScrollRight);
     };
     row.addEventListener("scroll", _update, { passive: true });
     window.addEventListener("resize", _update, { passive: true });
     prev.onclick = () => { row.scrollBy({ left: -SCROLL_BY, behavior: "smooth" }); };
     next.onclick = () => { row.scrollBy({ left: SCROLL_BY, behavior: "smooth" }); };
-    // Defer initial check until after layout is complete
-    requestAnimationFrame(_update);
+    requestAnimationFrame(() => requestAnimationFrame(_update));
   })();
 
   document.querySelectorAll("[data-view-jump]").forEach(el => {
@@ -7443,6 +7442,28 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
     const status = String(affinity?.status || "");
     applyTasteState(status === "liked", status === "hard_blacklisted");
   }).catch(() => {});
+
+  // Remove from playlist
+  const btnRemoveFromPlaylist = $("ctxRemoveFromPlaylist");
+  if (btnRemoveFromPlaylist) {
+    const playlistCtx = contextInfo && contextInfo.kind === "playlist" ? contextInfo : null;
+    btnRemoveFromPlaylist.style.display = playlistCtx ? "flex" : "none";
+    if (playlistCtx) {
+      btnRemoveFromPlaylist.onclick = async () => {
+        menu.hidden = true;
+        await api("/api/playlists/tracks", {
+          method: "POST",
+          body: JSON.stringify({ playlist_id: playlistCtx.id, track, action: "remove" }),
+        });
+        const idx = state.playlists.findIndex(p => p.id === playlistCtx.id);
+        if (idx !== -1) {
+          const tKey = trackKey(track);
+          state.playlists[idx].tracks = state.playlists[idx].tracks.filter(t => trackKey(t) !== tKey);
+          renderPlaylistPage(state.playlists[idx]);
+        }
+      };
+    }
+  }
 
   // Share buttons
   const btnCopySpotify = $("ctxCopySpotify");

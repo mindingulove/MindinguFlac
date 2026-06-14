@@ -52,6 +52,14 @@ try:
 except Exception:
     pass
 
+# yt-dlp is imported dynamically so PyInstaller won't detect it automatically.
+try:
+    tmp_ret = collect_all('yt_dlp')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('yt_dlp')
+except Exception:
+    pass
+
 # Playwright (Duck.ai AI-reranker browser worker). collect_all bundles the node
 # driver + package data; playwright_stealth bundles its JS evasion files. NOTE:
 # the actual Chromium browser is NOT bundled — it lives in the per-user

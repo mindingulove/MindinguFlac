@@ -2327,34 +2327,41 @@ button.primary, button.use-torrent { background: var(--accent); color: #000; bor
   top: 50%;
   transform: translateY(-50%);
   z-index: 4;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   border: none;
-  background: #2a2d35;
+  background: rgba(30, 32, 40, 0.88);
   color: var(--text);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 13px;
-  box-shadow: 2px 0 8px rgba(0,0,0,0.5);
-  transition: background 0.15s ease, opacity 0.15s ease;
+  font-size: 12px;
   padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, background 0.15s ease;
+  backdrop-filter: blur(4px);
+}
+
+.library-pill-scroll-wrap:hover .pill-scroll-btn.can-scroll {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .pill-scroll-btn:hover {
-  background: #363a44;
+  background: rgba(54, 58, 68, 0.96);
 }
 
 .pill-scroll-prev {
-  left: 4px;
-  box-shadow: 2px 0 8px rgba(0,0,0,0.5);
+  left: 2px;
+  box-shadow: 4px 0 12px rgba(0,0,0,0.55);
 }
 
 .pill-scroll-next {
-  right: 4px;
-  box-shadow: -2px 0 8px rgba(0,0,0,0.5);
+  right: 2px;
+  box-shadow: -4px 0 12px rgba(0,0,0,0.55);
 }
 
 .library-pill {
