@@ -5467,6 +5467,16 @@ function renderPlaylistRecommendationsLoading() {
   `;
 }
 
+function sortPlaylistRecommendationItems(items = []) {
+  return [...items].sort((a, b) => {
+    const byPlays = Number(b?.plays || 0) - Number(a?.plays || 0);
+    if (byPlays) return byPlays;
+    const byScore = Number(b?.score || 0) - Number(a?.score || 0);
+    if (byScore) return byScore;
+    return String(a?.title || "").localeCompare(String(b?.title || ""));
+  });
+}
+
 function renderPlaylistRecommendations(playlistId, items = []) {
   const box = $("playlistRecommendations");
   if (!box) return;
@@ -5527,24 +5537,54 @@ async function loadPlaylistRecommendations(playlist, refresh = false) {
   const box = $("playlistRecommendations");
   if (!box) return;
   box.innerHTML = renderPlaylistRecommendationsLoading();
+  const previousState = state.playlistRecommendationState[playlist.id] || { items: [], itemsByKey: {} };
   const playlistKeys = [...playlistTrackKeys(playlist)];
-  const visibleKeys = Object.keys((state.playlistRecommendationState[playlist.id] || {}).itemsByKey || {});
-  const exclude = new Set([...playlistKeys, ...visibleKeys, ...queueTrackKeys()]);
-  const previousSession = state.playlistRecommendationSessions[playlist.id] || "";
-  const params = new URLSearchParams({
-    limit: "10",
-    refresh: refresh ? "1" : "0",
-    exclude: [...exclude].join(","),
-    queue_track_keys: [...queueTrackKeys()].join(","),
+  const queueKeys = [...queueTrackKeys()];
+  const merged = new Map();
+  const seedItems = Array.isArray(previousState.items) ? previousState.items : [];
+  seedItems.forEach(item => {
+    if (item && item.track_key && !merged.has(item.track_key)) merged.set(item.track_key, item);
   });
-  if (!refresh && previousSession) params.set("session_id", previousSession);
-  const data = await api(`/api/playlists/${encodeURIComponent(playlist.id)}/recommendations?${params.toString()}`);
-  state.playlistRecommendationSessions[playlist.id] = data.session_id || previousSession || "";
-  const items = data.items || [];
-  const itemsByKey = {};
-  items.forEach(item => { if (item && item.track_key) itemsByKey[item.track_key] = item; });
-  state.playlistRecommendationState[playlist.id] = { items, itemsByKey };
-  renderPlaylistRecommendations(playlist.id, items);
+
+  let sessionId = state.playlistRecommendationSessions[playlist.id] || "";
+  let firstRequest = true;
+  let attempts = 0;
+  let grew = true;
+
+  while (merged.size < 10 && grew && attempts < 6) {
+    attempts++;
+    const exclude = new Set([...playlistKeys, ...queueKeys, ...merged.keys()]);
+    const params = new URLSearchParams({
+      limit: "10",
+      refresh: firstRequest && refresh ? "1" : "0",
+      exclude: [...exclude].join(","),
+      queue_track_keys: queueKeys.join(","),
+    });
+    if (sessionId) params.set("session_id", sessionId);
+    const data = await api(`/api/playlists/${encodeURIComponent(playlist.id)}/recommendations?${params.toString()}`);
+    sessionId = data.session_id || sessionId || "";
+    state.playlistRecommendationSessions[playlist.id] = sessionId;
+    const freshItems = Array.isArray(data.items) ? data.items : [];
+    const sizeBefore = merged.size;
+    freshItems.forEach(item => {
+      if (item && item.track_key && !merged.has(item.track_key)) {
+        merged.set(item.track_key, item);
+      }
+    });
+    const items = sortPlaylistRecommendationItems([...merged.values()]).slice(0, 10);
+    const itemsByKey = {};
+    items.forEach(item => { if (item && item.track_key) itemsByKey[item.track_key] = item; });
+    state.playlistRecommendationState[playlist.id] = { items, itemsByKey };
+    renderPlaylistRecommendations(playlist.id, items);
+    grew = merged.size > sizeBefore;
+    firstRequest = false;
+    if (!freshItems.length) break;
+  }
+
+  if (merged.size === 0) {
+    state.playlistRecommendationState[playlist.id] = { items: [], itemsByKey: {} };
+    renderPlaylistRecommendations(playlist.id, []);
+  }
 }
 
 async function addPlaylistRecommendation(playlistId, item, button) {
@@ -5611,14 +5651,11 @@ async function addPlaylistRecommendation(playlistId, item, button) {
         exclude: [...new Set([...playlistTrackKeys(playlist), ...queueTrackKeys(), ...current.items.map(entry => entry.track_key)])].join(","),
         queue_track_keys: [...queueTrackKeys()].join(","),
       }).toString()}`);
-      current.items = Array.isArray(refilled.items) && refilled.items.length ? refilled.items : current.items;
-      current.items.sort((a, b) => {
-        const byPlays = Number(b?.plays || 0) - Number(a?.plays || 0);
-        if (byPlays) return byPlays;
-        const byScore = Number(b?.score || 0) - Number(a?.score || 0);
-        if (byScore) return byScore;
-        return String(a?.title || "").localeCompare(String(b?.title || ""));
+      const merged = new Map();
+      [...(current.items || []), ...((refilled && refilled.items) || [])].forEach(entry => {
+        if (entry && entry.track_key && !merged.has(entry.track_key)) merged.set(entry.track_key, entry);
       });
+      current.items = sortPlaylistRecommendationItems([...merged.values()]).slice(0, 10);
     }
     current.itemsByKey = Object.fromEntries((current.items || []).map(entry => [entry.track_key, entry]));
     state.playlistRecommendationState[playlistId] = current;
