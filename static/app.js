@@ -5266,6 +5266,8 @@ function absoluteUrl(url) {
 }
 
 function _callNowPlaying(fnName, arg) {
+  if (!state.nativeAudio.active && fnName !== "clear_now_playing") return;
+  
   if (fnName === "set_now_playing") {
     api("/api/now_playing", { method: "POST", body: JSON.stringify(arg) }).catch(() => {});
   } else if (fnName === "set_playback_state") {
@@ -5276,8 +5278,7 @@ function _callNowPlaying(fnName, arg) {
 }
 
 function shouldExposeNowPlaying() {
-  const audio = $("audioPlayer");
-  return state.nativeAudio.active ? !!state.nativeAudio.playing : !!audio && !audio.paused;
+  return !!state.currentTrack;
 }
 
 function clearMediaSession() {
@@ -5293,39 +5294,52 @@ function updateMediaSession(track) {
     clearMediaSession();
     return;
   }
+  
   const art = absoluteUrl(track.artwork_url || "");
-  if ("mediaSession" in navigator) {
-    const artwork = art ? [
-      { src: art, sizes: "96x96", type: "image/png" },
-      { src: art, sizes: "128x128", type: "image/png" },
-      { src: art, sizes: "256x256", type: "image/png" },
-      { src: art, sizes: "512x512", type: "image/png" },
-    ] : [];
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: track.title || "Unknown",
-      artist: track.artist || "",
-      album: track.album || "",
-      artwork,
-    });
-  }
-  // macOS Touch Bar / Now Playing
-  const audio = $("audioPlayer");
   const durSec = state.nativeAudio.active && state.nativeAudio.duration > 0
     ? state.nativeAudio.duration
-    : (audio && isFinite(audio.duration) && audio.duration > 0)
-    ? audio.duration
+    : ($("audioPlayer") && isFinite($("audioPlayer").duration) && $("audioPlayer").duration > 0)
+    ? $("audioPlayer").duration
     : (track.duration_ms ? track.duration_ms / 1000 : 300);
   const position = state.nativeAudio.active
     ? state.nativeAudio.position
-    : ((audio && isFinite(audio.currentTime)) ? audio.currentTime : 0);
-  _callNowPlaying("set_now_playing", {
-    title: track.title || "Unknown",
-    artist: track.artist || "",
-    album: track.album || "",
-    duration: durSec,
-    position,
-    artwork_url: art,
-  });
+    : (($("audioPlayer") && isFinite($("audioPlayer").currentTime)) ? $("audioPlayer").currentTime : 0);
+
+  if (state.nativeAudio.active) {
+    // Native audio output: use the Swift helper, clear the browser media session
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.playbackState = "none";
+    }
+    _callNowPlaying("set_now_playing", {
+      title: track.title || "Unknown",
+      artist: track.artist || "",
+      album: track.album || "",
+      duration: durSec,
+      position,
+      artwork_url: art,
+    });
+  } else {
+    // Browser audio output: use the browser media session, clear the Swift helper
+    _callNowPlaying("clear_now_playing");
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.title || "Unknown",
+        artist: track.artist || "",
+        album: track.album || "",
+        artwork: art ? [
+          { src: art, sizes: "96x96", type: "image/png" },
+          { src: art, sizes: "128x128", type: "image/png" },
+          { src: art, sizes: "256x256", type: "image/png" },
+          { src: art, sizes: "512x512", type: "image/png" },
+        ] : []
+      });
+      navigator.mediaSession.setActionHandler('play', () => $("playPause")?.click());
+      navigator.mediaSession.setActionHandler('pause', () => $("playPause")?.click());
+      navigator.mediaSession.setActionHandler('previoustrack', () => $("btnPrev")?.click());
+      navigator.mediaSession.setActionHandler('nexttrack', () => $("btnNext")?.click());
+    }
+  }
 }
 
 function bindMediaSessionActions() {

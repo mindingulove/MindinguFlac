@@ -1181,7 +1181,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/settings":
                 print(f"[API] GET /api/settings -> {app_config.cache_dir}, {app_config.music_dir}")
-                self.send_json(app_config.public_dict())
+                settings_dict = app_config.public_dict()
+                settings_dict["native_now_playing_active"] = bool(_np_update_fn)
+                self.send_json(settings_dict)
                 return
             if path == "/api/image":
                 url = query.get("url", [""])[0].strip()

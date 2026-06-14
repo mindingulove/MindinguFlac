@@ -33,6 +33,7 @@ private final class NowPlayingBridge {
     private var appActive = false
     private var artworkURL = ""
     private var artworkImage: NSImage? = nil
+    private var activity: NSObjectProtocol?
 
     init(baseURL: URL) {
         self.baseURL = baseURL
@@ -54,7 +55,14 @@ private final class NowPlayingBridge {
             
             if let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100) {
                 buffer.frameLength = 44100
-                // An empty buffer is silent by default
+                // Add a virtually imperceptible value to prevent silence optimization
+                if let floatChannelData = buffer.floatChannelData {
+                    for channel in 0..<Int(format.channelCount) {
+                        for frame in 0..<Int(buffer.frameLength) {
+                            floatChannelData[channel][frame] = Float.ulpOfOne
+                        }
+                    }
+                }
                 player.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
             }
         }
@@ -126,8 +134,15 @@ private final class NowPlayingBridge {
         
         if isPlaying {
             player.play()
+            if activity == nil {
+                activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "Now Playing Activity")
+            }
         } else {
             player.pause()
+            if let act = activity {
+                ProcessInfo.processInfo.endActivity(act)
+                activity = nil
+            }
         }
 
         var info: [String: Any] = [
@@ -169,6 +184,12 @@ private final class NowPlayingBridge {
         playbackState = 0
         artworkURL = ""
         artworkImage = nil
+        
+        if let act = activity {
+            ProcessInfo.processInfo.endActivity(act)
+            activity = nil
+        }
+        
         clearPublishedNowPlaying()
     }
 
