@@ -31,19 +31,24 @@ hiddenimports = [
     'db',
 ]
 
-tmp_ret = collect_all('backend')
-datas += tmp_ret[0]
-binaries += tmp_ret[1]
-hiddenimports += tmp_ret[2]
-
-try:
-    tmp_ret = collect_all('torrfetch')
-    datas += tmp_ret[0]
-    binaries += tmp_ret[1]
-    hiddenimports += tmp_ret[2]
-    hiddenimports += collect_submodules('torrfetch')
-except Exception:
-    pass
+for _pkg in (
+    'SpotiFLAC',
+    'torrfetch',
+    'yt_dlp',
+    'rapidfuzz',
+    'pydantic', 'pydantic_core',
+    'httpx', 'httpcore', 'h2', 'hpack', 'hyperframe',
+    'mutagen', 'cryptography',
+    'countrystatecity_countries',
+):
+    try:
+        tmp_ret = collect_all(_pkg)
+        datas += tmp_ret[0]
+        binaries += tmp_ret[1]
+        hiddenimports += tmp_ret[2]
+        hiddenimports += collect_submodules(_pkg)
+    except Exception:
+        pass
 
 datas += collect_data_files('webview')
 hiddenimports += collect_submodules('webview')
