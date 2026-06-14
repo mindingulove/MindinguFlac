@@ -41,6 +41,44 @@ try:
 except Exception:
     pass
 
+# rapidfuzz has C extensions and is imported at module level across multiple files.
+try:
+    tmp_ret = collect_all('rapidfuzz')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+except Exception:
+    pass
+
+# pydantic-core is a Rust extension — PyInstaller needs it explicitly collected.
+for _pkg in ('pydantic', 'pydantic_core'):
+    try:
+        tmp_ret = collect_all(_pkg)
+        datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    except Exception:
+        pass
+
+# httpx with http2 pulls in h2/hpack/hyperframe which may not be traced statically.
+for _pkg in ('httpx', 'httpcore', 'h2', 'hpack', 'hyperframe'):
+    try:
+        tmp_ret = collect_all(_pkg)
+        datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    except Exception:
+        pass
+
+# countrystatecity_countries is imported inside a try block (dynamic-ish).
+try:
+    tmp_ret = collect_all('countrystatecity_countries')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+except Exception:
+    pass
+
+# mutagen, cryptography, pywebview bundled for completeness.
+for _pkg in ('mutagen', 'cryptography', 'pywebview'):
+    try:
+        tmp_ret = collect_all(_pkg)
+        datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    except Exception:
+        pass
+
 try:
     tmp_ret = collect_all('torrfetch')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -106,7 +144,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PIL', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
+    excludes=['MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
     noarchive=False,
     optimize=0,
 )
