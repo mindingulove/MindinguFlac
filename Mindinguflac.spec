@@ -33,13 +33,26 @@ hiddenimports = [
     'tour_ai', 'hypebot_tour', 'gemini_proxy', 'gemini_browser',
     'db'
 ]
-tmp_ret = collect_all('backend')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# SpotiFLAC — all imports now use 'SpotiFLAC.*' (updated from old 'backend.*' API).
+try:
+    tmp_ret = collect_all('SpotiFLAC')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('SpotiFLAC')
+except Exception:
+    pass
 
 try:
     tmp_ret = collect_all('torrfetch')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
     hiddenimports += collect_submodules('torrfetch')
+except Exception:
+    pass
+
+# libtorrent ships as a compiled extension — collect_all ensures its .so and
+# any data files are bundled alongside the hiddenimport entry.
+try:
+    tmp_ret = collect_all('libtorrent')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 except Exception:
     pass
 
