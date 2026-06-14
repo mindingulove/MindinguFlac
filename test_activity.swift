@@ -1,0 +1,3 @@
+import Foundation
+print(ProcessInfo.ActivityOptions.userInitiated.rawValue)
+print(ProcessInfo.ActivityOptions.userInitiatedAllowingIdleSystemSleep.rawValue)
