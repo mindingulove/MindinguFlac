@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import MediaPlayer
+import AVFoundation
 
 private struct InputMessage: Decodable {
     let type: String
@@ -11,6 +12,7 @@ private struct InputMessage: Decodable {
     let position: Double?
     let state: Int?
     let active: Bool?
+    let artwork_url: String?
 }
 
 private final class NowPlayingBridge {
@@ -19,6 +21,9 @@ private final class NowPlayingBridge {
     private let nowPlayingCenter = MPNowPlayingInfoCenter.default()
     private let commandQueue = DispatchQueue(label: "com.mindinguflac.nowplaying.command")
 
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+
     private var title = ""
     private var artist = ""
     private var album = ""
@@ -26,10 +31,33 @@ private final class NowPlayingBridge {
     private var position: Double = 0
     private var playbackState = 0
     private var appActive = false
+    private var artworkURL = ""
+    private var artworkImage: NSImage? = nil
 
     init(baseURL: URL) {
         self.baseURL = baseURL
         installRemoteCommands()
+        
+        // Force macOS to recognize this background app as a Now Playing app
+        if let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW) {
+            if let sym = dlsym(handle, "MRMediaRemoteSetCanBeNowPlayingApplication") {
+                typealias Fn = @convention(c) (Bool) -> Void
+                let fn = unsafeBitCast(sym, to: Fn.self)
+                fn(true)
+            }
+        }
+
+        engine.attach(player)
+        if let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2) {
+            engine.connect(player, to: engine.mainMixerNode, format: format)
+            try? engine.start()
+            
+            if let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100) {
+                buffer.frameLength = 44100
+                // An empty buffer is silent by default
+                player.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
+            }
+        }
     }
 
     func handle(_ message: InputMessage) {
@@ -40,6 +68,22 @@ private final class NowPlayingBridge {
             if let album = message.album { self.album = album }
             if let duration = message.duration, duration > 0 { self.duration = duration }
             if let position = message.position, position >= 0 { self.position = position }
+            
+            if let newArt = message.artwork_url, newArt != self.artworkURL {
+                self.artworkURL = newArt
+                self.artworkImage = nil
+                if let parsed = URL(string: newArt) {
+                    URLSession.shared.dataTask(with: parsed) { [weak self] data, _, _ in
+                        guard let self = self, let data = data, let image = NSImage(data: data) else { return }
+                        DispatchQueue.main.async {
+                            if self.artworkURL == newArt {
+                                self.artworkImage = image
+                                self.refresh()
+                            }
+                        }
+                    }.resume()
+                }
+            }
             refresh()
         case "set_playback_state":
             playbackState = message.state ?? 0
@@ -79,7 +123,14 @@ private final class NowPlayingBridge {
         }
 
         let isPlaying = playbackState == 1
-        let info: [String: Any] = [
+        
+        if isPlaying {
+            player.play()
+        } else {
+            player.pause()
+        }
+
+        var info: [String: Any] = [
             MPMediaItemPropertyTitle: title,
             MPMediaItemPropertyArtist: artist,
             MPMediaItemPropertyAlbumTitle: album,
@@ -88,6 +139,11 @@ private final class NowPlayingBridge {
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyCurrentPlaybackDate: Date(),
         ]
+        
+        if let image = artworkImage {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        }
+        
         let npState: MPNowPlayingPlaybackState = isPlaying ? .playing : .paused
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -98,6 +154,7 @@ private final class NowPlayingBridge {
     }
 
     private func clearPublishedNowPlaying() {
+        player.pause()
         nowPlayingCenter.nowPlayingInfo = nil
         nowPlayingCenter.playbackState = .stopped
         updateCommandAvailability(false)
@@ -110,6 +167,8 @@ private final class NowPlayingBridge {
         duration = 1
         position = 0
         playbackState = 0
+        artworkURL = ""
+        artworkImage = nil
         clearPublishedNowPlaying()
     }
 
