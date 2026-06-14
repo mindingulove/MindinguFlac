@@ -4777,7 +4777,8 @@ async function refreshCacheLogs() {
       // on a live active-job stream — never when already playing the cache file
       // or on native output (re-selecting there just redownloads/loops) and
       // never if the user manually paused (re-selecting restarts from 0).
-      if (msg.includes("Ready to play") && state.currentTrack && !state.manualPauseRequested && !state.nativeAudio.playing && $("audioPlayer").paused && isActiveJobStreamUrl(state.currentStreamUrl)) {
+      const isCurrentActiveJob = event.job_id && event.job_id === state.activeJobId;
+      if (msg.includes("Ready to play") && state.currentTrack && !state.manualPauseRequested && !state.nativeAudio.playing && $("audioPlayer").paused && isActiveJobStreamUrl(state.currentStreamUrl) && isCurrentActiveJob) {
         const title = (state.currentTrack.title || "").toLowerCase();
         if (msg.toLowerCase().includes(title)) {
            console.log("[Player] Detected file readiness, forcing high-fidelity stream...");
@@ -5453,7 +5454,10 @@ function bindPlayer() {
     $("currentTime").textContent = formatTime(audio.currentTime);
     $("durationTime").textContent = formatTime(audio.duration);
     $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
-    if (audio.currentTime >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
+    // Only prefetch from a stable browser source. Live active-job streams can
+    // still be growing, and starting background downloads against them can
+    // race the stream handoff and trigger an early advance.
+    if (audio.currentTime >= 2 && state.prefetchedForRequestId !== state.playbackRequestId && !isActiveJobStreamUrl(state.currentStreamUrl)) {
       state.prefetchedForRequestId = state.playbackRequestId;
       prefetchNextTracks().catch(() => {});
     }
