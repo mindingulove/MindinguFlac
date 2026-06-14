@@ -35,6 +35,7 @@ const state = {
   playerStatus: "Choose a track to stream",
   activeJobPhase: "",
   playbackRequestId: 0,
+  listeningSession: null,
   sidebarRequestId: 0,
   tourPageRequestId: 0,
   sidebarTrackKey: null,
@@ -56,6 +57,10 @@ const state = {
   tourLocation: null,
   tourLocationSearchTimer: null,
   tourEventLocationCache: new Map(),
+  playlistRecommendationSessions: {},
+  playlistRecommendationState: {},
+  activePlaylistId: null,
+  playlistContinuationLoads: new Set(),
 };
 
 const SERVICE_LABELS = {
@@ -1695,6 +1700,10 @@ async function renderAlbumPage(album) {
 // ---------------------------------------------------------------------------
 async function selectMusicItem(item, mode = "stream", contextList = null, playbackContext = null) {
   if (!item) return;
+  const incomingKey = trackKey(item);
+  if (state.listeningSession && state.listeningSession.track_key && state.listeningSession.track_key !== incomingKey) {
+    finalizeListeningSession("skip", "track_replaced").catch(() => {});
+  }
   if (item.type === "artist") {
     pushPage(() => renderArtistPage(item));
     return;
@@ -1717,6 +1726,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   state.activeJobId = null;
   state.currentTrack = item;
   state.currentLibraryPath = ""; // Clear path for new selection
+  startListeningSession(item, playbackContext);
   recordDockRecentSelection(item, playbackContext);
   
   prepareSelectedTrackUi(item, "Loading...");
@@ -3474,6 +3484,109 @@ function recentTrackKey(item) {
   ].map(value => String(value).trim().toLowerCase()).join("||");
 }
 
+function listeningTrackPayload(track) {
+  return {
+    track_key: trackKey(track),
+    title: track?.title || track?.name || "",
+    artist: track?.artist || "",
+    album: track?.album || "",
+    duration_ms: Number(track?.duration_ms || track?.metadata?.duration_ms || 0),
+    source_engine: track?.source_engine || state.settings.download_engine || "",
+    source_service: track?.source_service || state.settings.download_service || "",
+    resolved_url: track?.resolved_url || track?.spotify_url || track?.url || "",
+    metadata: track?.metadata || track || {},
+  };
+}
+
+function startListeningSession(track, playbackContext = null) {
+  if (!track) return;
+  state.listeningSession = {
+    event_id: crypto.randomUUID(),
+    started_at: Date.now() / 1000,
+    track_key: trackKey(track),
+    title: track.title || track.name || "",
+    artist: track.artist || "",
+    album: track.album || "",
+    duration_ms: Number(track.duration_ms || track.metadata?.duration_ms || 0),
+    listened_ms: 0,
+    max_position_ms: 0,
+    metadata: track.metadata || track || {},
+    playbackContext,
+  };
+}
+
+function updateListeningSessionPosition(positionSeconds = 0, durationSeconds = 0) {
+  const session = state.listeningSession;
+  if (!session) return;
+  const listenedMs = Math.max(0, Math.round(Number(positionSeconds || 0) * 1000));
+  session.max_position_ms = Math.max(session.max_position_ms || 0, listenedMs);
+  if (!session.duration_ms && durationSeconds > 0) {
+    session.duration_ms = Math.round(Number(durationSeconds) * 1000);
+  }
+}
+
+async function finalizeListeningSession(eventType = "", reason = "") {
+  const session = state.listeningSession;
+  if (!session || !session.track_key) return null;
+  const durationMs = Number(session.duration_ms || 0) || 0;
+  const listenedMs = Math.max(0, Number(session.max_position_ms || 0));
+  const listenedPercent = durationMs > 0 ? Math.min(100, (listenedMs / durationMs) * 100) : 0;
+  const payload = {
+    event_id: session.event_id,
+    track_key: session.track_key,
+    title: session.title,
+    artist: session.artist,
+    album: session.album,
+    duration_ms: durationMs,
+    listened_ms: listenedMs,
+    listened_percent: listenedPercent,
+    started_at: session.started_at,
+    ended_at: Date.now() / 1000,
+    event_type: eventType || (listenedPercent >= 95 ? "complete" : listenedPercent >= 30 ? "play" : "skip"),
+    reason,
+    metadata: session.metadata || {},
+  };
+  state.listeningSession = null;
+  try {
+    return await api("/api/listening/event", {
+      method: "POST",
+      timeout: 10000,
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    return null;
+  }
+}
+
+function beaconListeningSession(eventType = "", reason = "") {
+  const session = state.listeningSession;
+  if (!session || !session.track_key || !navigator.sendBeacon) return false;
+  const durationMs = Number(session.duration_ms || 0) || 0;
+  const listenedMs = Math.max(0, Number(session.max_position_ms || 0));
+  const listenedPercent = durationMs > 0 ? Math.min(100, (listenedMs / durationMs) * 100) : 0;
+  const payload = {
+    event_id: session.event_id,
+    track_key: session.track_key,
+    title: session.title,
+    artist: session.artist,
+    album: session.album,
+    duration_ms: durationMs,
+    listened_ms: listenedMs,
+    listened_percent: listenedPercent,
+    started_at: session.started_at,
+    ended_at: Date.now() / 1000,
+    event_type: eventType || (listenedPercent >= 95 ? "complete" : listenedPercent >= 30 ? "play" : "skip"),
+    reason,
+    metadata: session.metadata || {},
+  };
+  state.listeningSession = null;
+  try {
+    return navigator.sendBeacon("/api/listening/event", new Blob([JSON.stringify(payload)], { type: "application/json" }));
+  } catch (error) {
+    return false;
+  }
+}
+
 function uniqueRecentTracks(items = []) {
   const seen = new Set();
   const out = [];
@@ -3567,6 +3680,16 @@ function playQueueOffset(delta) {
   restoreLinearOriginalQueue();
   if (!state.queue.length) return;
   const idx = getQueueIndex();
+  const playlistCtx = currentPlaylistContext();
+  if (delta > 0 && playlistCtx && idx >= state.queue.length - 1) {
+    continuePlaylistWithRecommendations("manual_next").then((advanced) => {
+      if (advanced && state.queue.length > idx + 1) {
+        state.queueIndex = idx + 1;
+        selectMusicItem(state.queue[state.queueIndex], "stream", null, state.queueContext);
+      }
+    }).catch(() => {});
+    return;
+  }
   state.queueIndex = ((idx < 0 ? 0 : idx) + delta + state.queue.length) % state.queue.length;
   selectMusicItem(state.queue[state.queueIndex], "stream", null, state.queueContext);
 }
@@ -4227,6 +4350,7 @@ async function startNativeAudio(filePath, track, requestId, position = 0) {
     path: filePath,
     ended: false,
   };
+  updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
   syncPlayPauseButton();
   updateMediaSession(track);
   startNativeAudioPolling(requestId);
@@ -4296,6 +4420,7 @@ function startNativeAudioPolling(requestId) {
       duration: status.duration || 0,
       ended: !!status.ended,
     };
+    updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
     syncNativeAudioUi();
     // Prefetch the next track once playback is underway. The <audio> element's
     // ontimeupdate never fires on the native path, so trigger it here too.
@@ -4304,6 +4429,7 @@ function startNativeAudioPolling(requestId) {
       prefetchNextTracks().catch(() => {});
     }
     if (status.ended && !state.manualPauseRequested) {
+      await finalizeListeningSession("complete", "native_audio_ended").catch(() => {});
       await stopNativeAudio();
       clearMediaSession();
       playQueueOffset(1);
@@ -4699,11 +4825,22 @@ function bindPlayer() {
     // if the user paused, that would wrap a length-1 queue back onto the same
     // track and replay it from the start.
     if (state.manualPauseRequested) return;
+    finalizeListeningSession("complete", "audio_ended").catch(() => {});
     clearMediaSession();
+    const playlistCtx = currentPlaylistContext();
+    if (playlistCtx && state.queueIndex >= state.queue.length - 1) {
+      continuePlaylistWithRecommendations("audio_ended").then((advanced) => {
+        if (advanced && state.queue.length > state.queueIndex + 1) {
+          playQueueOffset(1);
+        }
+      }).catch(() => {});
+      return;
+    }
     playQueueOffset(1);
   };
   audio.ontimeupdate = () => {
     if (!audio.duration) return;
+    updateListeningSessionPosition(audio.currentTime, audio.duration);
     if (state.streamRetryCount) state.streamRetryCount = 0; // playback recovered
     $("seekBar").value = (audio.currentTime / audio.duration) * 1000;
     $("currentTime").textContent = formatTime(audio.currentTime);
@@ -4720,6 +4857,9 @@ function bindPlayer() {
         duration: audio.duration || 0,
         position: audio.currentTime || 0,
       });
+    }
+    if (audio.duration) {
+      updateListeningSessionPosition(audio.currentTime || 0, audio.duration);
     }
   };
   audio.oncanplay = () => {
@@ -4929,12 +5069,14 @@ function renderSidebarPlaylists() {
     const art = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
     const artStyle = art ? `style="background-image: url('${art}')"` : "";
     const artIcon = art ? "" : `<i class="bi bi-music-note-list"></i>`;
+    const origin = inferPlaylistOrigin(pl);
+    const originLabel = origin === "album" ? "Album" : "Created";
     return `
       <div class="sidebar-playlist-item" data-playlist-id="${pl.id}">
         <div class="sidebar-playlist-art" ${artStyle}>${artIcon}</div>
         <div class="sidebar-playlist-info">
           <div class="sidebar-playlist-name">${esc(pl.name)}</div>
-          <div class="sidebar-playlist-count">${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}</div>
+          <div class="sidebar-playlist-count">${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""} · ${esc(originLabel)}</div>
         </div>
         <button class="sidebar-playlist-delete" type="button" data-delete-playlist="${pl.id}" aria-label="Delete playlist" title="Delete playlist"><i class="bi bi-trash3"></i></button>
       </div>
@@ -4985,7 +5127,17 @@ function renderPlaylistPage(playlist) {
     el.classList.toggle("active", el.dataset.playlistId === playlist.id);
   });
   const pl = state.playlists.find(p => p.id === playlist.id) || playlist;
-  _renderPlaylistContent(pl);
+  state.activePlaylistId = pl.id;
+  const playlistOrigin = inferPlaylistOrigin(pl);
+  const playlistPlaybackContext = {
+    kind: "playlist",
+    id: pl.id,
+    name: pl.name,
+    origin: playlistOrigin,
+    allow_playlist_continuation: playlistOrigin === "manual",
+  };
+  _renderPlaylistContent(pl, playlistPlaybackContext);
+  loadPlaylistRecommendations(pl, true).catch(() => {});
 
   // Auto-refresh once if imported from Spotify but metadata not yet fetched
   if (pl.spotify_url && !pl.metadata_fetched) {
@@ -4994,7 +5146,15 @@ function renderPlaylistPage(playlist) {
         const idx = state.playlists.findIndex(p => p.id === pl.id);
         if (idx !== -1) state.playlists[idx] = updated;
         renderSidebarPlaylists();
-        _renderPlaylistContent(updated);
+        const updatedOrigin = inferPlaylistOrigin(updated);
+        _renderPlaylistContent(updated, {
+          kind: "playlist",
+          id: updated.id,
+          name: updated.name,
+          origin: updatedOrigin,
+          allow_playlist_continuation: updatedOrigin === "manual",
+        });
+        loadPlaylistRecommendations(updated, true).catch(() => {});
         document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
           el.classList.toggle("active", el.dataset.playlistId === pl.id);
         });
@@ -5002,7 +5162,7 @@ function renderPlaylistPage(playlist) {
   }
 }
 
-function _renderPlaylistContent(pl) {
+function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
   const heroArt = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
   const artStyle = heroArt ? `background-image: url('${heroArt}')` : "";
   const artIcon = artStyle ? "" : `<i class="bi bi-music-note-list"></i>`;
@@ -5034,13 +5194,241 @@ function _renderPlaylistContent(pl) {
       </div>
 
       <div id="playlistTrackList" class="track-list"></div>
+
+      <div class="playlist-recommendations-head">
+        <div>
+          <h2>Recommended</h2>
+          <p>Based on this playlist and your listening taste</p>
+        </div>
+        <button class="playlist-recommendations-refresh" id="playlistRecommendationsRefresh" type="button">Refresh</button>
+      </div>
+      <div id="playlistRecommendations" class="playlist-recommendations"></div>
     </div>
   `;
 
   if (pl.tracks.length) {
-    renderTrackList("playlistTrackList", pl.tracks, "general", { kind: "playlist", id: pl.id, name: pl.name });
+    renderTrackList(
+      "playlistTrackList",
+      pl.tracks,
+      "general",
+      playlistPlaybackContext || { kind: "playlist", id: pl.id, name: pl.name, allow_playlist_continuation: false }
+    );
   } else {
     $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">No songs yet — click the status icon while a track is playing to add it.</div>`;
+  }
+  $("playlistRecommendationsRefresh").onclick = () => loadPlaylistRecommendations(pl, true).catch(() => {});
+}
+
+function playlistTrackKeys(playlist = {}) {
+  return new Set((playlist.tracks || []).map(trackKey).filter(Boolean));
+}
+
+function queueTrackKeys() {
+  return new Set((state.queue || []).map(trackKey).filter(Boolean));
+}
+
+function inferPlaylistOrigin(pl = {}) {
+  const origin = String(pl.playlist_origin || "").trim().toLowerCase();
+  return origin === "album" ? "album" : "manual";
+}
+
+function currentPlaylistContext() {
+  return state.queueContext && state.queueContext.kind === "playlist" ? state.queueContext : null;
+}
+
+function playlistAllowsContinuation(ctx = null) {
+  const context = ctx || currentPlaylistContext();
+  if (!context) return false;
+  if (context.allow_playlist_continuation === true) return true;
+  if (context.allow_playlist_continuation === false) return false;
+  return false;
+}
+
+function appendTracksToPlaybackQueue(tracks = [], playlistId = "") {
+  if (!Array.isArray(tracks) || !tracks.length) return 0;
+  const seen = new Set([...(state.queue || []).map(trackKey).filter(Boolean)]);
+  let added = 0;
+  for (const raw of tracks) {
+    const item = { ...raw };
+    const key = trackKey(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    state.queue.push(item);
+    state.originalQueue.push(item);
+    added++;
+  }
+  if (playlistId && state.playlistRecommendationState[playlistId]) {
+    const current = state.playlistRecommendationState[playlistId];
+    current.items = current.items || [];
+    current.itemsByKey = current.itemsByKey || {};
+  }
+  return added;
+}
+
+async function continuePlaylistWithRecommendations(reason = "queue_end") {
+  const ctx = currentPlaylistContext();
+  if (!ctx || !ctx.id || !playlistAllowsContinuation(ctx) || state.playlistContinuationLoads.has(ctx.id)) return false;
+  const playlist = state.playlists.find(p => p.id === ctx.id) || { id: ctx.id, tracks: [] };
+  const playlistKeys = [...playlistTrackKeys(playlist)];
+  const queueKeys = [...queueTrackKeys()];
+  const currentState = state.playlistRecommendationState[ctx.id] || { items: [], itemsByKey: {} };
+  const exclude = new Set([...playlistKeys, ...queueKeys, ...Object.keys(currentState.itemsByKey || {})]);
+  state.playlistContinuationLoads.add(ctx.id);
+  try {
+    const previousSession = state.playlistRecommendationSessions[ctx.id] || "";
+    const params = new URLSearchParams({
+      limit: "10",
+      refresh: "0",
+      exclude: [...exclude].join(","),
+      queue_track_keys: queueKeys.join(","),
+    });
+    if (previousSession) params.set("session_id", previousSession);
+    const data = await api(`/api/playlists/${encodeURIComponent(ctx.id)}/recommendations?${params.toString()}`);
+    if (data.session_id) state.playlistRecommendationSessions[ctx.id] = data.session_id;
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (!items.length) return false;
+    const added = appendTracksToPlaybackQueue(items.map(item => ({ ...item, kind: "track", source: "playlist_recommendation" })), ctx.id);
+    currentState.items = [...(currentState.items || []), ...items];
+    currentState.itemsByKey = Object.fromEntries((currentState.items || []).map(item => [item.track_key, item]));
+    state.playlistRecommendationState[ctx.id] = currentState;
+    if (state.activePlaylistId === ctx.id) {
+      renderPlaylistRecommendations(ctx.id, currentState.items);
+    }
+    if (added > 0) {
+      updateSidebarNextQueue();
+      if (!$("queuePanel").hidden) refreshQueuePanel();
+    }
+    return added > 0;
+  } finally {
+    state.playlistContinuationLoads.delete(ctx.id);
+  }
+}
+
+function renderPlaylistRecommendationsLoading() {
+  return `
+    <div class="playlist-recommendation-loading">
+      <div class="spinner"></div>
+      <span>Finding recommendations…</span>
+    </div>
+  `;
+}
+
+function playlistRecommendationRow(item, playlistId) {
+  const art = item.artwork_url ? `style="background-image:url('${esc(item.artwork_url)}')"` : "";
+  const sessionId = state.playlistRecommendationSessions[playlistId] || "";
+  return `
+    <div class="playlist-recommendation-row" data-rec-key="${esc(item.track_key)}">
+      <div class="playlist-recommendation-art" ${art}></div>
+      <div class="playlist-recommendation-info">
+        <strong>${esc(item.title || "Unknown Track")}</strong>
+        <span>${esc(item.artist || "")}${item.album ? ` • ${esc(item.album)}` : ""}</span>
+        ${item.reason ? `<small>${esc(item.reason)}</small>` : ""}
+      </div>
+      <button class="playlist-recommendation-add" type="button"
+        data-rec-add="${esc(item.track_key)}"
+        data-rec-session="${esc(sessionId)}">Add</button>
+    </div>
+  `;
+}
+
+function renderPlaylistRecommendations(playlistId, items = []) {
+  const box = $("playlistRecommendations");
+  if (!box) return;
+  if (!items.length) {
+    box.innerHTML = `<div class="playlist-recommendation-empty">No recommendations right now.</div>`;
+    return;
+  }
+  box.innerHTML = items.map(item => playlistRecommendationRow(item, playlistId)).join("");
+  box.querySelectorAll("[data-rec-add]").forEach((button) => {
+    button.onclick = () => addPlaylistRecommendation(playlistId, button.dataset.recKey || "", button).catch((error) => {
+      alert(error.message || "Failed to add recommendation");
+    });
+  });
+}
+
+async function loadPlaylistRecommendations(playlist, refresh = false) {
+  if (!playlist || !playlist.id) return;
+  const box = $("playlistRecommendations");
+  if (!box) return;
+  box.innerHTML = renderPlaylistRecommendationsLoading();
+  const playlistKeys = [...playlistTrackKeys(playlist)];
+  const visibleKeys = Object.keys((state.playlistRecommendationState[playlist.id] || {}).itemsByKey || {});
+  const exclude = new Set([...playlistKeys, ...visibleKeys, ...queueTrackKeys()]);
+  const previousSession = state.playlistRecommendationSessions[playlist.id] || "";
+  const params = new URLSearchParams({
+    limit: "10",
+    refresh: refresh ? "1" : "0",
+    exclude: [...exclude].join(","),
+    queue_track_keys: [...queueTrackKeys()].join(","),
+  });
+  if (!refresh && previousSession) params.set("session_id", previousSession);
+  const data = await api(`/api/playlists/${encodeURIComponent(playlist.id)}/recommendations?${params.toString()}`);
+  state.playlistRecommendationSessions[playlist.id] = data.session_id || previousSession || "";
+  const items = data.items || [];
+  const itemsByKey = {};
+  items.forEach(item => { if (item && item.track_key) itemsByKey[item.track_key] = item; });
+  state.playlistRecommendationState[playlist.id] = { items, itemsByKey };
+  renderPlaylistRecommendations(playlist.id, items);
+}
+
+async function addPlaylistRecommendation(playlistId, trackKeyValue, button) {
+  const playlist = state.playlists.find(p => p.id === playlistId);
+  if (!playlist) throw new Error("Playlist not found");
+  const recState = state.playlistRecommendationState[playlistId] || { items: [] };
+  const item = (recState.items || []).find(entry => entry.track_key === trackKeyValue);
+  if (!item) throw new Error("Recommendation not found");
+  const row = button.closest(".playlist-recommendation-row");
+  const parent = row?.parentElement || null;
+  const nextSibling = row?.nextElementSibling || null;
+  const snapshot = row ? row.cloneNode(true) : null;
+  const sessionId = state.playlistRecommendationSessions[playlistId] || "";
+  const allPlaylistKeys = new Set([...playlistTrackKeys(playlist), ...queueTrackKeys(), ...Object.keys(recState.itemsByKey || {})]);
+  const excludeTrackKeys = [...allPlaylistKeys];
+  if (row) row.remove();
+  button.disabled = true;
+  try {
+    const added = await api(`/api/playlists/${encodeURIComponent(playlistId)}/tracks`, {
+      method: "POST",
+      body: JSON.stringify({
+        playlist_id: playlistId,
+        track_key: item.track_key,
+        title: item.title,
+        artist: item.artist,
+        album: item.album,
+        artwork_url: item.artwork_url,
+        duration_ms: item.duration_ms || 0,
+        metadata: item.metadata || {},
+        source: "recommendation",
+        session_id: sessionId,
+      }),
+    });
+    const idx = state.playlists.findIndex(p => p.id === playlistId);
+    if (idx !== -1 && added.track && !playlist.tracks.some(t => trackKey(t) === trackKey(added.track))) {
+      state.playlists[idx].tracks.push(added.track);
+      const trackList = $("playlistTrackList");
+      if (trackList) renderTrackList("playlistTrackList", state.playlists[idx].tracks, "general", { kind: "playlist", id: playlistId, name: playlist.name });
+      renderSidebarPlaylists();
+    }
+    const replacement = await api(`/api/playlists/${encodeURIComponent(playlistId)}/recommendations/replacement`, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionId,
+        exclude_track_keys: excludeTrackKeys,
+        queue_track_keys: [...queueTrackKeys()],
+      }),
+    });
+    const current = state.playlistRecommendationState[playlistId] || { items: [], itemsByKey: {} };
+    current.items = (current.items || []).filter(entry => entry.track_key !== trackKeyValue);
+    if (replacement && replacement.item) {
+      current.items.push(replacement.item);
+    }
+    current.itemsByKey = Object.fromEntries((current.items || []).map(entry => [entry.track_key, entry]));
+    state.playlistRecommendationState[playlistId] = current;
+    renderPlaylistRecommendations(playlistId, current.items);
+  } catch (error) {
+    if (snapshot && parent) parent.insertBefore(snapshot, nextSibling);
+    button.disabled = false;
+    throw error;
   }
 }
 
@@ -5165,7 +5553,7 @@ function openCreatePlaylistDialog(trackToAdd = null) {
     try {
       const result = await api("/api/playlists", {
         method: "POST",
-        body: JSON.stringify({ name, spotify_url: spotifyUrl }),
+        body: JSON.stringify({ name, spotify_url: spotifyUrl, origin: "manual" }),
       });
       state.playlists.unshift(result);
       // If a track was queued to be added, add it now
@@ -5238,6 +5626,7 @@ async function restorePlaybackState() {
     if (status && status.metadata && status.path) {
       const track = status.metadata;
       state.currentTrack = track;
+      startListeningSession(track);
       state.playbackRequestId++;
       state.nativeAudio = {
         active: true,
@@ -5247,6 +5636,7 @@ async function restorePlaybackState() {
         path: status.path,
         ended: !!status.ended,
       };
+      updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
       
       // If playing, start polling
       if (status.playing) {
@@ -6161,6 +6551,46 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
     }
   }
 
+  const tastePayload = () => ({
+    track_key: trackKey(track),
+    title: track.title || track.name || "",
+    artist: track.artist || "",
+    album: track.album || "",
+    metadata: track.metadata || track,
+  });
+
+  const btnLike = $("ctxLikeTrack");
+  if (btnLike) {
+    btnLike.onclick = async () => {
+      await api("/api/taste/manual-like", { method: "POST", body: JSON.stringify(tastePayload()) });
+      menu.hidden = true;
+    };
+  }
+
+  const btnDislike = $("ctxDislikeTrack");
+  if (btnDislike) {
+    btnDislike.onclick = async () => {
+      await api("/api/taste/manual-dislike", { method: "POST", body: JSON.stringify(tastePayload()) });
+      menu.hidden = true;
+    };
+  }
+
+  const btnHardBlacklist = $("ctxHardBlacklistTrack");
+  if (btnHardBlacklist) {
+    btnHardBlacklist.onclick = async () => {
+      await api("/api/taste/manual-hard-blacklist", { method: "POST", body: JSON.stringify(tastePayload()) });
+      menu.hidden = true;
+    };
+  }
+
+  const btnRemoveHardBlacklist = $("ctxRemoveHardBlacklistTrack");
+  if (btnRemoveHardBlacklist) {
+    btnRemoveHardBlacklist.onclick = async () => {
+      await api("/api/taste/remove-hard-blacklist", { method: "POST", body: JSON.stringify(tastePayload()) });
+      menu.hidden = true;
+    };
+  }
+
   // Share buttons
   const btnCopySpotify = $("ctxCopySpotify");
   if (btnCopySpotify) {
@@ -6330,6 +6760,7 @@ $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
           body: JSON.stringify({
             name: target.title || contextMenuTargetAlbum.name || "New Playlist",
             spotify_url: spotifyAlbumUrl(target),
+            origin: "album",
           }),
         });
         // 3. Add tracks
@@ -6347,6 +6778,10 @@ $("ctxAlbumGoArtist")?.addEventListener("click", () => {
     pushPage(() => renderArtistPage(artistTarget(contextMenuTargetAlbum)));
   }
   $("albumContextMenu").hidden = true;
+});
+
+window.addEventListener("beforeunload", () => {
+  beaconListeningSession("", "beforeunload");
 });
 
 document.addEventListener("click", (e) => {

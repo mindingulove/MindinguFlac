@@ -2745,6 +2745,112 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   font-weight: 500;
 }
 
+.playlist-recommendations-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 28px 0 12px;
+  padding: 0 4px;
+}
+
+.playlist-recommendations-head h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.playlist-recommendations-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.playlist-recommendations-refresh,
+.playlist-recommendation-add {
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  color: var(--text);
+  font-weight: 700;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: 0.15s;
+}
+
+.playlist-recommendations-refresh:hover,
+.playlist-recommendation-add:hover {
+  background: rgba(32, 212, 102, 0.18);
+  color: var(--accent);
+}
+
+.playlist-recommendations {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.playlist-recommendation-loading,
+.playlist-recommendation-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 16px 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.playlist-recommendation-row {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid transparent;
+}
+
+.playlist-recommendation-row:hover {
+  border-color: rgba(32, 212, 102, 0.18);
+  background: rgba(255,255,255,0.06);
+}
+
+.playlist-recommendation-art {
+  width: 54px;
+  height: 54px;
+  border-radius: 10px;
+  background: var(--surface-3);
+  background-size: cover;
+  background-position: center;
+}
+
+.playlist-recommendation-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.playlist-recommendation-info strong {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-recommendation-info span,
+.playlist-recommendation-info small {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-recommendation-add[disabled] {
+  opacity: 0.55;
+  cursor: progress;
+}
+
 @media (max-width: 900px) {
   body { grid-template-columns: 0 1fr 0; }
   .sidebar, .details-panel { display: none; }

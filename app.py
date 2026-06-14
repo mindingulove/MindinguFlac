@@ -38,7 +38,9 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, load_config, save_config
+import db
 from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, search_music, search_relevance, track_credits
+from playlist_recommender import generate_one_replacement_recommendation, generate_playlist_recommendations, get_playlist_track_keys, record_recommendation_feedback
 from native_audio import native_audio
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
 
@@ -509,6 +511,15 @@ def start_playlist_identifier_enrichment(playlist_id: str) -> None:
     ).start()
 
 
+def playlist_track_key(track: dict) -> str:
+    spotify_id = str(track.get("spotify_id") or track.get("track_key") or "").strip()
+    if spotify_id:
+        return spotify_id
+    artist = str(track.get("artist") or "").strip().lower()
+    title = str(track.get("title") or track.get("name") or "").strip().lower()
+    return f"{artist}||{title}" if artist or title else ""
+
+
 def enrich_download_payload(body: dict) -> dict:
     track = body.get("track") if isinstance(body.get("track"), dict) else {}
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else track
@@ -759,9 +770,8 @@ def quick_music_suggestions(term: str, limit: int = 24) -> list[dict]:
             continue
         seen.add(dedupe)
         results.append(item)
-        if len(results) >= limit:
-            break
-    return results
+    results.sort(key=lambda item: search_relevance(term, item), reverse=True)
+    return results[:limit]
 
 
 def json_bytes(value: object) -> bytes:
@@ -854,7 +864,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.0.3"
+    server_version = "SpotiFLACStreamer/1.1.0"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -1047,6 +1057,54 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/playlists":
                 with playlists_lock:
                     self.send_json(load_playlists())
+                return
+            m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations", path)
+            if m:
+                playlist_id = m.group(1)
+                limit = int(query.get("limit", ["10"])[0] or 10)
+                refresh = query.get("refresh", ["0"])[0] in {"1", "true", "True"}
+                session_id = query.get("session_id", [""])[0].strip() or None
+                exclude = {
+                    key.strip()
+                    for key in (query.get("exclude", [""])[0] or "").split(",")
+                    if key.strip()
+                }
+                queue_track_keys = {
+                    key.strip()
+                    for key in (query.get("queue_track_keys", [""])[0] or "").split(",")
+                    if key.strip()
+                }
+                self.send_json(generate_playlist_recommendations(
+                    playlist_id,
+                    limit=limit,
+                    refresh=refresh,
+                    exclude_track_keys=exclude,
+                    queue_track_keys=queue_track_keys,
+                    session_id=session_id,
+                ))
+                return
+            if path == "/api/taste/liked":
+                self.send_json({"items": db.get_liked_tracks()})
+                return
+            if path == "/api/taste/blacklist":
+                self.send_json({
+                    "soft_blacklisted": db.get_soft_blacklisted_tracks(),
+                    "hard_blacklisted": db.get_hard_blacklisted_tracks(),
+                })
+                return
+            if path == "/api/stats/listened":
+                track_key = query.get("track_key", [""])[0].strip() or None
+                artist = query.get("artist", [""])[0].strip() or None
+                period = query.get("period", ["all"])[0].strip() or "all"
+                self.send_json(db.get_listened_time(track_key, artist, period))
+                return
+            if path == "/api/taste/track":
+                track_key = query.get("track_key", [""])[0].strip()
+                self.send_json(db.get_track_affinity(track_key) or {})
+                return
+            if path == "/api/taste/artist":
+                artist = query.get("artist", [""])[0].strip()
+                self.send_json(db.get_artist_affinity(artist) or {})
                 return
             if path == "/api/cache":
                 self.send_json(cache_stats())
@@ -1252,6 +1310,58 @@ class Handler(BaseHTTPRequestHandler):
                 error = bluetooth_scan.pair_device(body.get("address", ""))
                 self.send_json({"ok": not error, "error": error})
                 return
+            if path == "/api/listening/event":
+                self.send_json(db.process_listening_event(body))
+                return
+            if path == "/api/taste/manual-like":
+                payload = dict(body or {})
+                payload["event_type"] = "manual_like"
+                self.send_json(db.process_listening_event(payload))
+                return
+            if path == "/api/taste/manual-dislike":
+                payload = dict(body or {})
+                payload["event_type"] = "manual_dislike"
+                self.send_json(db.process_listening_event(payload))
+                return
+            if path == "/api/taste/manual-hard-blacklist":
+                payload = dict(body or {})
+                payload["event_type"] = "manual_hard_blacklist"
+                self.send_json(db.process_listening_event(payload))
+                return
+            if path == "/api/taste/remove-hard-blacklist":
+                payload = dict(body or {})
+                payload["event_type"] = "manual_remove_hard_blacklist"
+                self.send_json(db.process_listening_event(payload))
+                return
+            m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations/replacement", path)
+            if m:
+                playlist_id = m.group(1)
+                exclude = {str(key).strip() for key in (body.get("exclude_track_keys") or []) if str(key).strip()}
+                queue_track_keys = {str(key).strip() for key in (body.get("queue_track_keys") or []) if str(key).strip()}
+                item = generate_one_replacement_recommendation(
+                    playlist_id,
+                    exclude,
+                    queue_track_keys=queue_track_keys,
+                    session_id=body.get("session_id") or None,
+                )
+                self.send_json({"item": item})
+                return
+            m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations/([^/]+)/dismiss", path)
+            if m:
+                playlist_id, track_key = m.group(1), m.group(2)
+                record_recommendation_feedback(playlist_id, track_key, "dismissed", body.get("session_id") or None)
+                self.send_json({"ok": True})
+                return
+            m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations/([^/]+)/feedback", path)
+            if m:
+                playlist_id, track_key = m.group(1), m.group(2)
+                action = str(body.get("action") or "").strip()
+                if not action:
+                    self.send_error_json("Missing action", HTTPStatus.BAD_REQUEST)
+                    return
+                record_recommendation_feedback(playlist_id, track_key, action, body.get("session_id") or None)
+                self.send_json({"ok": True})
+                return
             if path == "/api/artist/about":
                 from music_metadata import artist_about
                 self.send_json(artist_about(body.get("artist_id"), body.get("name")))
@@ -1295,6 +1405,58 @@ class Handler(BaseHTTPRequestHandler):
                     for i in range(len(enriched)):
                         enriched[i] = enrich_track_identifiers(enriched[i])
                 self.send_json({"tracks": enriched})
+                return
+
+            m = re.fullmatch(r"/api/playlists/([^/]+)/tracks", path)
+            if m:
+                playlist_id = m.group(1)
+                track = body.get("track") if isinstance(body.get("track"), dict) else body
+                if not isinstance(track, dict):
+                    self.send_error_json("Missing track payload", HTTPStatus.BAD_REQUEST)
+                    return
+                action = str(body.get("action") or "add").strip().lower()
+                source = str(body.get("source") or "").strip().lower()
+                session_id = str(body.get("session_id") or "").strip() or None
+                track = dict(track)
+                track.setdefault("track_key", playlist_track_key(track))
+                with playlists_lock:
+                    data = load_playlists()
+                    pl = next((p for p in data if p["id"] == playlist_id), None)
+                    if not pl:
+                        self.send_error_json("Playlist not found", HTTPStatus.NOT_FOUND)
+                        return
+
+                    def same_track(t):
+                        if track.get("spotify_id") and t.get("spotify_id"):
+                            return t["spotify_id"] == track["spotify_id"]
+                        if track.get("track_key") and t.get("track_key"):
+                            return t["track_key"] == track["track_key"]
+                        return (
+                            t.get("title", "").lower() == track.get("title", "").lower()
+                            and t.get("artist", "").lower() == track.get("artist", "").lower()
+                        )
+
+                    existing = next((t for t in pl["tracks"] if same_track(t)), None)
+                    if action == "remove":
+                        pl["tracks"] = [t for t in pl["tracks"] if not same_track(t)]
+                        in_playlist = False
+                    else:
+                        if not existing:
+                            pl["tracks"].append(track)
+                            in_playlist = True
+                        else:
+                            in_playlist = True
+                    save_playlists(data)
+                if in_playlist and not existing:
+                    threading.Thread(
+                        target=enrich_and_persist_track,
+                        args=(track,),
+                        daemon=True,
+                        name="playlist-track-enrich",
+                    ).start()
+                if source == "recommendation" and session_id:
+                    record_recommendation_feedback(playlist_id, track.get("track_key", ""), "added", session_id)
+                self.send_json({"ok": True, "in_playlist": in_playlist, "track": track})
                 return
 
             if path == "/api/playlists/tracks/add":
@@ -1341,6 +1503,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/playlists":
                 user_name = body.get("name", "").strip()
                 spotify_url = body.get("spotify_url", "").strip()
+                origin = str(body.get("origin") or "manual").strip().lower() or "manual"
                 imported = {"name": "", "artwork_url": "", "tracks": []}
                 if spotify_url:
                     imported = _spotify_import_playlist(spotify_url)
@@ -1355,6 +1518,7 @@ class Handler(BaseHTTPRequestHandler):
                     "owner": imported.get("owner", ""),
                     "followers": imported.get("followers", 0),
                     "spotify_url": spotify_url,
+                    "playlist_origin": origin,
                     "tracks": imported["tracks"],
                     "metadata_fetched": bool(spotify_url and imported["tracks"]),
                     "created_at": time.time(),

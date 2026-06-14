@@ -4,6 +4,13 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
 
+## v1.1.0
+
+- Local taste profiles now learn from actual listening, likes, dislikes, and blacklists.
+- Playlist recommendations continue from the end of manual playlists with dynamic replenishment.
+- Playlist origins are stored explicitly so album-derived playlists stay separate from user-created playlists.
+- Search, artist pages, and playlist recommendations now favor ID-first matching and taste-aware ranking.
+
 ## v1.0.0 Preview
 
 <p align="center">
@@ -239,6 +246,10 @@ export MINDINGUFLAC_AI_RERANK_MODEL="your-model"
 ```
 
 If the endpoint, network, or service limit is unavailable, the torrent job continues with the local scoring and fallback path.
+
+## TODO
+
+- Spotify-style track suggestions and playlist-end recommendations
 
 ## Technical Implementation
 

@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+import db
 from config import AppConfig, MusicIndexerConfig
 from discogs_metadata import discogs_album_images
 from spotify_web_metadata import spotify_album_playcounts, spotify_artist_about, fetch_wikipedia_bio, fetch_wikipedia_about
@@ -1182,6 +1183,11 @@ def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:
     score = rapidfuzz.fuzz.WRatio(wanted, primary)
     if norm_name(primary) == wanted_norm: score += 1000
     if primary.startswith(wanted): score += 500
+    track_key = str(result.get("track_key") or result.get("spotify_id") or "").strip()
+    if kind == "track" and track_key:
+        score += int(db.get_taste_score_for_track(track_key) * 2.0)
+    if artist:
+        score += int(db.get_taste_score_for_artist(artist) * 1.0)
     kind_prio = {"artist": 100, "track": 50, "album": 10}.get(kind, 0)
     return (score, kind_prio, int(result.get("plays") or 0), 0)
 
@@ -1197,6 +1203,14 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
     yield {"type": "artist_info", "artist": artist, "artist_id": resolved_artist_id, "artwork_url": art}
     
     top_tracks = spotify_artist_top_tracks(artist, artist_id=resolved_artist_id)
+    top_tracks.sort(
+        key=lambda track: (
+            db.get_taste_score_for_track(str(track.get("track_key") or track.get("spotify_id") or "")),
+            db.get_taste_score_for_artist(str(track.get("artist") or artist or "")),
+            int(track.get("plays") or 0),
+        ),
+        reverse=True,
+    )
     yield {"type": "top_tracks", "tracks": top_tracks}
 
     album_items = []
