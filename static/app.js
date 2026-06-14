@@ -60,6 +60,8 @@ const state = {
   playlistRecommendationSessions: {},
   playlistRecommendationState: {},
   activePlaylistId: null,
+  activeLibraryPill: "home",
+  statsPeriod: "month",
   playlistContinuationLoads: new Set(),
 };
 
@@ -517,6 +519,24 @@ function isTypingTarget(target) {
 // Views & Navigation
 // ---------------------------------------------------------------------------
 
+function normalizeLibraryPill(pill) {
+  const value = String(pill || "").trim().toLowerCase();
+  return ["home", "stats", "tracks", "albums", "artists"].includes(value) ? value : "home";
+}
+
+function setActiveLibraryPill(pill) {
+  state.activeLibraryPill = normalizeLibraryPill(pill);
+  document.querySelectorAll(".library-pill").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.libraryPill === state.activeLibraryPill);
+  });
+}
+
+function renderSidebarLibraryPills() {
+  document.querySelectorAll(".library-pill").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.libraryPill === state.activeLibraryPill);
+  });
+}
+
 function setActiveView(id) {
   if (id !== "settings") stopCacheLogPolling();
   if (window.artistEvtSource) {
@@ -524,12 +544,9 @@ function setActiveView(id) {
     window.artistEvtSource = null;
   }
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  document.querySelectorAll(".nav").forEach((b) => b.classList.remove("active"));
   document.querySelectorAll(".sidebar-playlist-item").forEach(el => el.classList.remove("active"));
   const view = $(id);
   if (view) view.classList.add("active");
-  const nav = document.querySelector(`.nav[data-view="${id}"]`);
-  if (nav) nav.classList.add("active");
 }
 
 function pushPage(renderFn) {
@@ -657,7 +674,7 @@ function applyCatalog(catalog) {
 
 async function refreshCatalog() {
   try {
-    applyCatalog(await api("/api/discover?refresh=1"));
+    applyCatalog(await api("/api/discover?refresh=1", { timeout: 60000 }));
   } catch (e) {
     console.error("Refresh catalog failed", e);
   }
@@ -688,7 +705,7 @@ async function enrichBatch(items, containerId) {
     active++;
     
     try {
-      const res = await api("/api/music/enrich", { method: "POST", body: JSON.stringify({ tracks: [item] }) });
+      const res = await api("/api/music/enrich", { method: "POST", body: JSON.stringify({ tracks: [item] }), timeout: 30000 });
       if (res && res.tracks && res.tracks[0]) {
         const enriched = res.tracks[0];
         
@@ -742,6 +759,7 @@ function renderHomePage() {
     $("pageContent").innerHTML = '<div class="loading"><div class="spinner"></div><span>Loading library...</span></div>';
     return;
   }
+  setActiveLibraryPill("home");
   setActiveView("home");
   
   const personalTracks = (state.catalog.personal_tracks || []).slice(0, 6);
@@ -806,22 +824,16 @@ function renderHomePage() {
   if (recentTracks.length) {
     renderCards("recentTracksGrid", recentTracks, "track", state.catalog.recent_tracks);
     $("seeMoreRecent").onclick = () => pushPage(renderRecentTracksPage);
-    enrichBatch(recentTracks, "recentTracksGrid");
   }
 
   if (personalTracks.length) {
     renderCards("personalTracksGrid", personalTracks, "track", state.catalog.personal_tracks);
     $("seeMorePersonal").onclick = () => pushPage(renderPersonalTracksPage);
-    enrichBatch(personalTracks, "personalTracksGrid");
   }
 
   renderCards("topTracksGrid", globalTracks, "track", state.catalog.top_tracks);
   renderCards("topArtistsGrid", topArtists, "artist");
   renderCards("topAlbumsGrid", topAlbums, "album");
-
-  enrichBatch(globalTracks, "topTracksGrid");
-  enrichBatch(topArtists, "topArtistsGrid");
-  enrichBatch(topAlbums, "topAlbumsGrid");
 
   $("seeMoreGlobalTracks").onclick = () => pushPage(renderGlobalTracksPage);
   $("seeMoreArtists").onclick = () => pushPage(renderArtistsPage);
@@ -896,10 +908,8 @@ function bindCardClicks(container, items, contextItems) {
 // ---------------------------------------------------------------------------
 
 function renderArtistsPage() {
+  setActiveLibraryPill("artists");
   setActiveView("home");
-  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
-  const navItem = document.querySelector('.nav[data-view="artists"]');
-  if (navItem) navItem.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Artists</h1>
@@ -909,14 +919,11 @@ function renderArtistsPage() {
   `;
   const artists = state.catalog.artists || [];
   renderCards("fullArtistsGrid", artists, "artist");
-  enrichBatch(artists, "fullArtistsGrid");
 }
 
 function renderAlbumsPage() {
+  setActiveLibraryPill("albums");
   setActiveView("home");
-  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
-  const navItem = document.querySelector('.nav[data-view="albums"]');
-  if (navItem) navItem.classList.add("active");
   $("pageContent").innerHTML = `
     <div class="section-head sticky-head">
       <h1>Top Albums</h1>
@@ -926,7 +933,6 @@ function renderAlbumsPage() {
   `;
   const albums = state.catalog.albums || [];
   renderCards("fullAlbumsGrid", albums, "album");
-  enrichBatch(albums, "fullAlbumsGrid");
 }
 
 async function renderRelatedArtistsPage(artist) {
@@ -951,31 +957,42 @@ async function renderRelatedArtistsPage(artist) {
     if ($("fullRelatedLoading")) $("fullRelatedLoading").remove();
     const artists = data.artists || [];
     renderCards("fullRelatedArtistsGrid", artists, "artist");
-    enrichBatch(artists, "fullRelatedArtistsGrid");
   } catch (e) {
     if ($("fullRelatedLoading")) $("fullRelatedLoading").innerHTML = "<span>Failed to load related artists.</span>";
   }
 }
 
 function renderPersonalTracksPage() {
+  setActiveLibraryPill("tracks");
   setActiveView("home");
+  const personalTracks = state.catalog.personal_tracks || [];
+  const tracks = personalTracks.length ? personalTracks : (state.catalog.top_tracks || []);
+  const eyebrow = personalTracks.length ? "Personal" : "Discovery";
+  const title = personalTracks.length ? "Top Tracks" : "Global Top Songs";
   $("pageContent").innerHTML = `
     <div class="scroll-area">
       <div class="library-hero compact-hero">
         <div>
-          <span class="eyebrow">Personal</span>
-          <h1>Your Most Listened</h1>
+          <span class="eyebrow">${eyebrow}</span>
+          <h1>${title}</h1>
         </div>
+      </div>
+      <div class="track-list-header" style="margin-top: 24px">
+        <div>#</div>
+        <div>Title</div>
+        <div></div>
+        <div>Album</div>
+        <div class="time-column"><i class="bi bi-clock"></i></div>
+        <div></div>
       </div>
       <div id="fullPersonalTracks" class="track-list"></div>
     </div>
   `;
-  const tracks = state.catalog.personal_tracks || [];
   renderTrackList("fullPersonalTracks", tracks);
-  enrichBatch(tracks, "fullPersonalTracks");
 }
 
 function renderRecentTracksPage() {
+  setActiveLibraryPill("home");
   setActiveView("home");
   $("pageContent").innerHTML = `
     <div class="scroll-area">
@@ -990,10 +1007,10 @@ function renderRecentTracksPage() {
   `;
   const tracks = uniqueRecentTracks(state.catalog.recent_tracks || []);
   renderTrackList("fullRecentTracks", tracks);
-  enrichBatch(tracks, "fullRecentTracks");
 }
 
 function renderGlobalTracksPage() {
+  setActiveLibraryPill("home");
   setActiveView("home");
   $("pageContent").innerHTML = `
     <div class="scroll-area">
@@ -1003,12 +1020,563 @@ function renderGlobalTracksPage() {
           <h1>Global Top Songs</h1>
         </div>
       </div>
+      <div class="track-list-header" style="margin-top: 24px">
+        <div>#</div>
+        <div>Title</div>
+        <div></div>
+        <div>Album</div>
+        <div class="time-column"><i class="bi bi-clock"></i></div>
+        <div></div>
+      </div>
       <div id="fullGlobalTracks" class="track-list"></div>
     </div>
   `;
   const tracks = state.catalog.top_tracks || [];
   renderTrackList("fullGlobalTracks", tracks);
-  enrichBatch(tracks, "fullGlobalTracks");
+}
+
+const STATS_PERIODS = [
+  { key: "today", label: "Today" },
+  { key: "week", label: "This Week" },
+  { key: "month", label: "This Month" },
+  { key: "year", label: "This Year" },
+  { key: "all", label: "All Time" },
+];
+
+function normalizeStatsPeriod(period) {
+  const value = String(period || "").trim().toLowerCase();
+  if (value === "custom") return "custom";
+  return STATS_PERIODS.some(p => p.key === value) ? value : "month";
+}
+
+function statsMsLabel(ms = 0) {
+  const totalMinutes = Math.max(0, Math.floor(Number(ms || 0) / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function availableStatsYears() {
+  const now = new Date().getFullYear();
+  const years = new Set([now, now - 1, now - 2, now - 3, now - 4]);
+  (state.catalog.recent_tracks || []).forEach(item => {
+    const year = Number(item.year || item.release_year || 0);
+    if (year >= 1970 && year <= now + 1) years.add(year);
+  });
+  return [...years].sort((a, b) => b - a);
+}
+
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function _statsMonthsLabel() {
+  const sel = state.statsMonths || [];
+  if (!sel.length) return "All Months";
+  if (sel.length === 1) return MONTH_NAMES[sel[0] - 1];
+  if (sel.length === 12) return "All Months";
+  return `${sel.length} months`;
+}
+
+function renderStatsRangePill(activeYear) {
+  const years = availableStatsYears();
+  const selected = new Set(state.statsMonths || []);
+  return `
+    <div class="stats-range-pill" title="Pick a specific year and months">
+      <select id="statsYearSelect" class="stats-select">
+        <option value="">All Years</option>
+        ${years.map(y => `<option value="${y}" ${String(y) === String(activeYear) ? "selected" : ""}>${y}</option>`).join("")}
+      </select>
+      <div class="stats-month-picker" id="statsMonthPicker">
+        <button class="stats-month-btn" id="statsMonthBtn" type="button">${_statsMonthsLabel()}</button>
+        <div class="stats-month-dropdown" id="statsMonthDropdown" hidden>
+          <button class="stats-month-opt ${!selected.size ? "active" : ""}" data-month="0" type="button">All Months</button>
+          ${MONTH_NAMES.map((name, i) => `<button class="stats-month-opt ${selected.has(i+1) ? "active" : ""}" data-month="${i+1}" type="button">${name}</button>`).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _bindStatsMonthPicker(onChangeCallback) {
+  const btn = $("statsMonthBtn");
+  const dropdown = $("statsMonthDropdown");
+  if (!btn || !dropdown) return;
+
+  // Portal pattern: move dropdown to body so overflow:hidden ancestors don't clip it
+  const _placeDropdown = () => {
+    const rect = btn.getBoundingClientRect();
+    dropdown.style.top = (rect.bottom + 6) + "px";
+    dropdown.style.right = (window.innerWidth - rect.right) + "px";
+  };
+  const _openDropdown = () => {
+    document.body.appendChild(dropdown);
+    _placeDropdown();
+    dropdown.hidden = false;
+    document.querySelector(".scroll-area")?.addEventListener("scroll", _closeDropdown, { passive: true, once: true });
+  };
+  const _closeDropdown = () => {
+    dropdown.hidden = true;
+  };
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    if (dropdown.hidden) { _openDropdown(); } else { _closeDropdown(); }
+  };
+
+  dropdown.querySelectorAll("[data-month]").forEach(opt => {
+    opt.onclick = (e) => {
+      e.stopPropagation();
+      const m = parseInt(opt.dataset.month, 10);
+      if (m === 0) {
+        state.statsMonths = [];
+      } else {
+        const cur = new Set(state.statsMonths || []);
+        if (cur.has(m)) { cur.delete(m); } else { cur.add(m); }
+        state.statsMonths = [...cur].sort((a, b) => a - b);
+      }
+      dropdown.querySelectorAll("[data-month]").forEach(o => {
+        const om = parseInt(o.dataset.month, 10);
+        o.classList.toggle("active", om === 0 ? !(state.statsMonths || []).length : (state.statsMonths || []).includes(om));
+      });
+      btn.textContent = _statsMonthsLabel();
+      if (onChangeCallback) onChangeCallback();
+    };
+  });
+
+  // Close on outside click (dropdown is now in body, so check btn separately)
+  document.addEventListener("click", function closeOnOutside(e) {
+    if (!document.body.contains(dropdown)) { document.removeEventListener("click", closeOnOutside); return; }
+    if (e.target !== btn && !btn.contains(e.target) && !dropdown.contains(e.target)) {
+      _closeDropdown();
+    }
+  });
+}
+
+function renderStatsDateFilters(activeYear) {
+  return renderStatsRangePill(activeYear);
+}
+
+function getStatsFilterState() {
+  return {
+    year: state.statsYear || "",
+    months: state.statsMonths || [],
+    period: state.statsPeriod || "month",
+  };
+}
+
+function statsQueryParams(extra = {}) {
+  const stateFilters = getStatsFilterState();
+  const params = new URLSearchParams({
+    period: extra.period || stateFilters.period || "month",
+  });
+  const year = extra.year ?? stateFilters.year;
+  const months = extra.months ?? stateFilters.months;
+  if (year) params.set("year", year);
+  if (months && months.length) params.set("months", months.join(","));
+  return params;
+}
+
+function renderStatsPeriodPills(activePeriod, activeYear = "") {
+  return `
+    <div class="stats-period-row">
+      ${STATS_PERIODS.map(p => `<button class="library-pill stats-period-pill ${p.key === activePeriod ? "active" : ""}" data-stats-period="${p.key}" type="button">${p.label}</button>`).join("")}
+      ${renderStatsRangePill(activeYear)}
+    </div>
+  `;
+}
+
+function statsPeriodLabel(period) {
+  const value = String(period || "").trim().toLowerCase();
+  if (value === "custom") return "Custom range";
+  return STATS_PERIODS.find(p => p.key === value)?.label || "This Month";
+}
+
+function statsSummaryCards(summary = {}) {
+  const cards = [
+    { label: "Total listened", value: statsMsLabel(summary.total_listened_ms || 0) },
+    { label: "Tracks played", value: Number(summary.tracks_played || 0).toLocaleString() },
+    { label: "Artists heard", value: Number(summary.artists_heard || 0).toLocaleString() },
+    { label: "Albums heard", value: Number(summary.albums_heard || 0).toLocaleString() },
+  ];
+  return cards.map(card => `
+    <div class="stats-card">
+      <span>${esc(card.label)}</span>
+      <strong>${esc(card.value)}</strong>
+    </div>
+  `).join("");
+}
+
+function renderStatsTrackRows(items = []) {
+  const rows = items.map((item, idx) => `
+    <button class="stats-track-row" type="button" data-item-idx="${idx}" data-item-data='${JSON.stringify(item).replace(/'/g, "&apos;")}'>
+      <span class="stats-track-rank">${idx + 1}</span>
+      <span class="stats-track-title">
+        <span class="track-art" ${item.artwork_url ? `style="background-image: url('${item.artwork_url}')" ` : ""}></span>
+        <span class="stats-track-title-text">
+          <strong>${esc(item.title || "Unknown")}</strong>
+          <span>${esc(item.artist || "")}</span>
+        </span>
+      </span>
+      <span class="stats-track-artist">${esc(item.artist || "")}</span>
+      <span class="stats-track-album">${esc(item.album || "")}</span>
+      <span class="stats-track-plays">${Number(item.plays || 0).toLocaleString()}</span>
+      <span class="stats-track-time">${statsMsLabel(item.listened_ms || 0)}</span>
+    </button>
+  `).join("");
+  return `
+    <div class="stats-track-table">
+      <div class="stats-track-header">
+        <span>#</span>
+        <span>Title</span>
+        <span>Artist</span>
+        <span>Album</span>
+        <span>Plays</span>
+        <span>Listened time</span>
+      </div>
+      ${rows}
+    </div>
+  `;
+}
+
+function bindStatsTrackRows(containerId, items = []) {
+  const container = $(containerId);
+  if (!container) return;
+  container.querySelectorAll(".stats-track-row").forEach(el => {
+    const item = items[Number(el.dataset.itemIdx)];
+    if (!item) return;
+    el.onclick = () => selectMusicItem(item, "stream", items);
+    if (playableQueueItem(item)) {
+      el.oncontextmenu = (event) => {
+        event.preventDefault();
+        showTrackContextMenu(event, item);
+      };
+    }
+  });
+  bindEntityLinks(container);
+}
+
+function renderStatsTimeline(items = []) {
+  const clean = (items || []).map(item => ({
+    label: String(item.label || ""),
+    listened_ms: Number(item.listened_ms || 0),
+    plays: Number(item.plays || 0),
+  })).filter(item => item.label);
+  if (!clean.length) {
+    return `<div class="stats-empty">No listening activity in this period.</div>`;
+  }
+  const maxValue = Math.max(...clean.map(item => item.listened_ms || item.plays || 0), 1);
+  const BAR_MAX_PX = 140;
+  return `
+    <div class="stats-chart">
+      ${clean.map(item => {
+        const value = item.listened_ms || item.plays || 0;
+        const barPx = Math.max(6, Math.round((value / maxValue) * BAR_MAX_PX));
+        return `
+          <div class="stats-chart-bar-wrap" title="${esc(statsMsLabel(item.listened_ms || 0))} — ${esc(item.label)}">
+            <div class="stats-chart-bar-area">
+              <div class="stats-chart-bar" style="height:${barPx}px"></div>
+            </div>
+            <span class="stats-chart-value">${statsMsLabel(item.listened_ms || 0)}</span>
+            <span class="stats-chart-label">${esc(item.label)}</span>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderStatsGenres(items = []) {
+  const clean = (items || []).filter(item => item && (item.genre || item.genre_key));
+  if (!clean.length) {
+    return `<div class="stats-empty">No genre data in this period.</div>`;
+  }
+  const maxValue = Math.max(...clean.map(item => Number(item.listened_ms || 0)), 1);
+  return `
+    <div class="stats-genre-list">
+      ${clean.map(item => {
+        const width = Math.max(6, Math.round((Number(item.listened_ms || 0) / maxValue) * 100));
+        return `
+          <div class="stats-genre-row">
+            <div class="stats-genre-head">
+              <strong>${esc(item.genre || item.genre_key || "Unknown")}</strong>
+              <span>${statsMsLabel(item.listened_ms || 0)}</span>
+            </div>
+            <div class="stats-genre-bar"><div style="width:${width}%"></div></div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+// Stats cache: keyed by statsQueryParams string → { summary, tracks, artists, albums, timeline, genres, fetchedAt }
+if (!state.statsCache) state.statsCache = {};
+
+function _statsPageKey(period) {
+  return statsQueryParams({ period }).toString();
+}
+
+// Apply a single stats section immediately when its fetch resolves.
+// Progressive rendering: each section appears as it arrives, not all at once.
+function _applyStatsSummary(summary, activePeriod) {
+  if ($("statsSummary")) $("statsSummary").innerHTML = statsSummaryCards(summary || {});
+}
+function _applyStatsTracks(tracks, activePeriod) {
+  const items = (tracks && tracks.items) || [];
+  if ($("statsTracks")) { $("statsTracks").innerHTML = renderStatsTrackRows(items); bindStatsTrackRows("statsTracks", items); }
+  if ($("statsSeeAllTracks")) $("statsSeeAllTracks").onclick = () => pushPage(() => renderStatsTracksPage(activePeriod));
+}
+function _applyStatsArtists(artists, activePeriod) {
+  const items = (artists && artists.items) || [];
+  if ($("statsArtists")) renderCards("statsArtists", items, "artist");
+  if ($("statsSeeAllArtists")) $("statsSeeAllArtists").onclick = () => pushPage(() => renderStatsArtistsPage(activePeriod));
+}
+function _applyStatsAlbums(albums, activePeriod) {
+  const items = (albums && albums.items) || [];
+  if ($("statsAlbums")) renderCards("statsAlbums", items, "album");
+  if ($("statsSeeAllAlbums")) $("statsSeeAllAlbums").onclick = () => pushPage(() => renderStatsAlbumsPage(activePeriod));
+}
+function _applyStatsTimeline(timeline) {
+  const items = (timeline && timeline.items) || [];
+  if ($("statsTimeline")) $("statsTimeline").innerHTML = renderStatsTimeline(items);
+}
+function _applyStatsGenres(genres) {
+  const items = (genres && genres.items) || [];
+  if ($("statsGenres")) $("statsGenres").innerHTML = renderStatsGenres(items);
+}
+
+// Re-apply all sections from cache (used when cache hit or background refresh finishes).
+function _applyStatsData(data, activePeriod) {
+  _applyStatsSummary(data.summary, activePeriod);
+  _applyStatsTracks(data.tracks, activePeriod);
+  _applyStatsArtists(data.artists, activePeriod);
+  _applyStatsAlbums(data.albums, activePeriod);
+  _applyStatsTimeline(data.timeline);
+  _applyStatsGenres(data.genres);
+}
+
+// Fire all 6 stat fetches independently; each section renders as its fetch resolves.
+// Updates state.statsCache[cacheKey] incrementally so cache is always as fresh as possible.
+// Returns a Promise that resolves when all 6 are done.
+function _fetchStatsDataProgressive(activePeriod, cacheKey) {
+  const q = statsQueryParams({ period: activePeriod }).toString();
+  const partial = state.statsCache[cacheKey] || { summary: {}, tracks: { items: [] }, artists: { items: [] }, albums: { items: [] }, timeline: { items: [] }, genres: { items: [] }, fetchedAt: 0 };
+
+  const run = (url, key, applyFn) =>
+    api(url, { timeout: 30000 }).then(data => {
+      partial[key] = data;
+      partial.fetchedAt = Date.now();
+      state.statsCache[cacheKey] = { ...partial };
+      if ($("statsTimeline")) applyFn(data, activePeriod); // only apply if page still active
+    }).catch(() => {});
+
+  return Promise.all([
+    run(`/api/stats/summary?${q}`, "summary", _applyStatsSummary),
+    run(`/api/stats/top-listened-tracks?${q}&limit=6&offset=0`, "tracks", _applyStatsTracks),
+    run(`/api/stats/top-listened-artists?${q}&limit=6&offset=0`, "artists", _applyStatsArtists),
+    run(`/api/stats/top-listened-albums?${q}&limit=6&offset=0`, "albums", _applyStatsAlbums),
+    run(`/api/stats/listening-over-time?${q}`, "timeline", (d) => _applyStatsTimeline(d)),
+    run(`/api/stats/top-genres?${q}&limit=6&offset=0`, "genres", (d) => _applyStatsGenres(d)),
+  ]);
+}
+
+async function renderStatsPage(period = "month") {
+  setActiveLibraryPill("stats");
+  setActiveView("home");
+  const activePeriod = String(period || "").trim().toLowerCase() === "custom" ? "custom" : normalizeStatsPeriod(period);
+  state.statsPeriod = activePeriod;
+
+  const isFirstRender = !$("statsTimeline");
+  if (isFirstRender) {
+    $("pageContent").innerHTML = `
+      <div class="scroll-area">
+        <div class="library-hero compact-hero">
+          <div>
+            <span class="eyebrow">Personal Music Discovery</span>
+            <h1>Your Listening Stats</h1>
+          </div>
+        </div>
+        ${renderStatsPeriodPills(activePeriod, state.statsYear)}
+        <div id="statsSummary" class="stats-summary-grid"></div>
+        <div class="section-head sticky-head">
+          <h2>Listening over time</h2>
+          <span>How your listening changed over the selected period</span>
+        </div>
+        <div id="statsTimeline" class="stats-timeline"></div>
+        <div class="section-head sticky-head">
+          <h2>Top listened tracks</h2>
+          <button class="see-more" id="statsSeeAllTracks" type="button">See all <i class="bi bi-chevron-right"></i></button>
+        </div>
+        <div class="stats-table-wrap"><div id="statsTracks" class="track-list stats-track-list"></div></div>
+        <div class="section-head sticky-head">
+          <h2>Top listened artists</h2>
+          <button class="see-more" id="statsSeeAllArtists" type="button">See all <i class="bi bi-chevron-right"></i></button>
+        </div>
+        <div id="statsArtists" class="grid round-grid stats-artist-grid"></div>
+        <div class="section-head sticky-head">
+          <h2>Top listened albums</h2>
+          <button class="see-more" id="statsSeeAllAlbums" type="button">See all <i class="bi bi-chevron-right"></i></button>
+        </div>
+        <div id="statsAlbums" class="grid stats-album-grid"></div>
+        <div class="section-head sticky-head">
+          <h2>Top genres</h2>
+          <span>What you listened to most in this period</span>
+        </div>
+        <div id="statsGenres" class="stats-genre-panel"></div>
+      </div>
+    `;
+  } else {
+    // Page already rendered — just update the period pills without full re-render
+    const pillRow = document.querySelector(".stats-period-row");
+    if (pillRow) pillRow.outerHTML = renderStatsPeriodPills(activePeriod, state.statsYear);
+    _bindStatsMonthPicker(() => { state.statsPeriod = "custom"; renderStatsPage("custom"); });
+  }
+
+  // Wire period pills
+  document.querySelectorAll("[data-stats-period]").forEach(btn => {
+    btn.onclick = () => {
+      state.statsYear = "";
+      state.statsMonths = [];
+      state.statsPeriod = btn.dataset.statsPeriod;
+      renderStatsPage(btn.dataset.statsPeriod);
+    };
+  });
+  const yearSelect = $("statsYearSelect");
+  if (yearSelect) yearSelect.onchange = () => {
+    state.statsYear = yearSelect.value;
+    if (!yearSelect.value) state.statsMonths = [];
+    state.statsPeriod = "custom";
+    renderStatsPage("custom");
+  };
+  _bindStatsMonthPicker(() => {
+    if ((state.statsMonths || []).length && !state.statsYear) state.statsYear = String(new Date().getFullYear());
+    state.statsPeriod = "custom";
+    renderStatsPage("custom");
+  });
+
+  const cacheKey = _statsPageKey(activePeriod);
+  const cached = state.statsCache[cacheKey];
+  const CACHE_TTL_MS = 60 * 1000; // 60 seconds
+
+  if (cached && cached.fetchedAt > 0) {
+    // Render immediately from cache so sections appear at once
+    _applyStatsData(cached, activePeriod);
+    // Refresh in background if stale — updates each section progressively as it arrives
+    if (Date.now() - cached.fetchedAt > CACHE_TTL_MS) {
+      _fetchStatsDataProgressive(activePeriod, cacheKey);
+    }
+  } else {
+    // First load — fire all 6 fetches independently; each section renders as it resolves
+    await _fetchStatsDataProgressive(activePeriod, cacheKey);
+  }
+}
+
+async function renderStatsTracksPage(period = "month") {
+  setActiveLibraryPill("stats");
+  setActiveView("home");
+  const activePeriod = String(period || "").trim().toLowerCase() === "custom" ? "custom" : normalizeStatsPeriod(period);
+  state.statsPeriod = activePeriod;
+  $("pageContent").innerHTML = `
+    <div class="scroll-area">
+      <div class="section-head sticky-head">
+        <h1>Top listened tracks</h1>
+        <span>Period: ${statsPeriodLabel(activePeriod)}</span>
+      </div>
+      ${renderStatsPeriodPills(activePeriod, state.statsYear)}
+      <div id="statsTracksFull" class="track-list"><div class="stats-loading">Loading…</div></div>
+    </div>
+  `;
+  document.querySelectorAll("[data-stats-period]").forEach(btn => btn.onclick = () => { state.statsYear = ""; state.statsMonths = []; replacePage(() => renderStatsTracksPage(btn.dataset.statsPeriod)); });
+  const yearSelect = $("statsYearSelect");
+  const reloadStats = () => replacePage(() => renderStatsTracksPage("custom"));
+  if (yearSelect) yearSelect.onchange = () => { state.statsYear = yearSelect.value; if (!yearSelect.value) state.statsMonths = []; state.statsPeriod = "custom"; reloadStats(); };
+  _bindStatsMonthPicker(() => { if ((state.statsMonths||[]).length && !state.statsYear) state.statsYear = String(new Date().getFullYear()); state.statsPeriod = "custom"; reloadStats(); });
+  // Progressive loading: first 10, then remainder in chunks
+  const allItems = [];
+  const container = $("statsTracksFull");
+  const q = () => statsQueryParams({ period: activePeriod }).toString();
+  const first = await api(`/api/stats/top-listened-tracks?${q()}&limit=10&offset=0`).catch(() => ({ items: [], total: 0 }));
+  allItems.push(...(first.items || []));
+  if (container) { container.innerHTML = renderStatsTrackRows(allItems); bindStatsTrackRows("statsTracksFull", allItems); }
+  const total = first.total || 0;
+  for (let offset = 10; offset < Math.min(total, 200); offset += 20) {
+    if (!$("statsTracksFull")) break;
+    const chunk = await api(`/api/stats/top-listened-tracks?${q()}&limit=20&offset=${offset}`).catch(() => ({ items: [] }));
+    allItems.push(...(chunk.items || []));
+    if ($("statsTracksFull")) { $("statsTracksFull").innerHTML = renderStatsTrackRows(allItems); bindStatsTrackRows("statsTracksFull", allItems); }
+    if (!(chunk.items || []).length) break;
+  }
+}
+
+async function renderStatsArtistsPage(period = "month") {
+  setActiveLibraryPill("stats");
+  setActiveView("home");
+  const activePeriod = String(period || "").trim().toLowerCase() === "custom" ? "custom" : normalizeStatsPeriod(period);
+  state.statsPeriod = activePeriod;
+  $("pageContent").innerHTML = `
+    <div class="scroll-area">
+      <div class="section-head sticky-head">
+        <h1>Top listened artists</h1>
+        <span>Period: ${statsPeriodLabel(activePeriod)}</span>
+      </div>
+      ${renderStatsPeriodPills(activePeriod, state.statsYear)}
+      <div id="statsArtistsFull" class="grid round-grid"><div class="stats-loading">Loading…</div></div>
+    </div>
+  `;
+  document.querySelectorAll("[data-stats-period]").forEach(btn => btn.onclick = () => { state.statsYear = ""; state.statsMonths = []; replacePage(() => renderStatsArtistsPage(btn.dataset.statsPeriod)); });
+  const yearSelect = $("statsYearSelect");
+  const reloadStats = () => replacePage(() => renderStatsArtistsPage("custom"));
+  if (yearSelect) yearSelect.onchange = () => { state.statsYear = yearSelect.value; if (!yearSelect.value) state.statsMonths = []; state.statsPeriod = "custom"; reloadStats(); };
+  _bindStatsMonthPicker(() => { if ((state.statsMonths||[]).length && !state.statsYear) state.statsYear = String(new Date().getFullYear()); state.statsPeriod = "custom"; reloadStats(); });
+  // Progressive loading
+  const allItems = [];
+  const q = () => statsQueryParams({ period: activePeriod }).toString();
+  const first = await api(`/api/stats/top-listened-artists?${q()}&limit=10&offset=0`).catch(() => ({ items: [], total: 0 }));
+  allItems.push(...(first.items || []));
+  if ($("statsArtistsFull")) { renderCards("statsArtistsFull", allItems, "artist"); bindEntityLinks($("pageContent")); }
+  const total = first.total || 0;
+  for (let offset = 10; offset < Math.min(total, 200); offset += 20) {
+    if (!$("statsArtistsFull")) break;
+    const chunk = await api(`/api/stats/top-listened-artists?${q()}&limit=20&offset=${offset}`).catch(() => ({ items: [] }));
+    allItems.push(...(chunk.items || []));
+    if ($("statsArtistsFull")) { renderCards("statsArtistsFull", allItems, "artist"); bindEntityLinks($("pageContent")); }
+    if (!(chunk.items || []).length) break;
+  }
+}
+
+async function renderStatsAlbumsPage(period = "month") {
+  setActiveLibraryPill("stats");
+  setActiveView("home");
+  const activePeriod = String(period || "").trim().toLowerCase() === "custom" ? "custom" : normalizeStatsPeriod(period);
+  state.statsPeriod = activePeriod;
+  $("pageContent").innerHTML = `
+    <div class="scroll-area">
+      <div class="section-head sticky-head">
+        <h1>Top listened albums</h1>
+        <span>Period: ${statsPeriodLabel(activePeriod)}</span>
+      </div>
+      ${renderStatsPeriodPills(activePeriod, state.statsYear)}
+      <div id="statsAlbumsFull" class="grid"><div class="stats-loading">Loading…</div></div>
+    </div>
+  `;
+  document.querySelectorAll("[data-stats-period]").forEach(btn => btn.onclick = () => { state.statsYear = ""; state.statsMonths = []; replacePage(() => renderStatsAlbumsPage(btn.dataset.statsPeriod)); });
+  const yearSelect = $("statsYearSelect");
+  const reloadStats = () => replacePage(() => renderStatsAlbumsPage("custom"));
+  if (yearSelect) yearSelect.onchange = () => { state.statsYear = yearSelect.value; if (!yearSelect.value) state.statsMonths = []; state.statsPeriod = "custom"; reloadStats(); };
+  _bindStatsMonthPicker(() => { if ((state.statsMonths||[]).length && !state.statsYear) state.statsYear = String(new Date().getFullYear()); state.statsPeriod = "custom"; reloadStats(); });
+  // Progressive loading
+  const allItems = [];
+  const q = () => statsQueryParams({ period: activePeriod }).toString();
+  const first = await api(`/api/stats/top-listened-albums?${q()}&limit=10&offset=0`).catch(() => ({ items: [], total: 0 }));
+  allItems.push(...(first.items || []));
+  if ($("statsAlbumsFull")) { renderCards("statsAlbumsFull", allItems, "album"); bindEntityLinks($("pageContent")); }
+  const total = first.total || 0;
+  for (let offset = 10; offset < Math.min(total, 200); offset += 20) {
+    if (!$("statsAlbumsFull")) break;
+    const chunk = await api(`/api/stats/top-listened-albums?${q()}&limit=20&offset=${offset}`).catch(() => ({ items: [] }));
+    allItems.push(...(chunk.items || []));
+    if ($("statsAlbumsFull")) { renderCards("statsAlbumsFull", allItems, "album"); bindEntityLinks($("pageContent")); }
+    if (!(chunk.items || []).length) break;
+  }
 }
 
 function renderTrackList(containerId, items, context = "general", playbackContext = null, queueItems = null) {
@@ -2933,7 +3501,7 @@ async function renderArtistTourPage(artist = {}) {
   const artistImage = typeof artist === "string" ? "" : (artist.image || "");
   const requestId = ++state.tourPageRequestId;
   setActiveView("home");
-  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
+  setActiveLibraryPill("artists");
   const tourLocation = await resolveTourLocation();
   if (requestId !== state.tourPageRequestId) return;
   const localLabel = formatTourLocationLabel(tourLocation);
@@ -5089,8 +5657,9 @@ function renderSidebarPlaylists() {
     const artIcon = art ? "" : `<i class="bi bi-music-note-list"></i>`;
     const origin = inferPlaylistOrigin(pl);
     const originLabel = origin === "album" ? "Album" : "Created";
+    const isActive = state.activePlaylistId === pl.id;
     return `
-      <div class="sidebar-playlist-item" data-playlist-id="${pl.id}">
+      <div class="sidebar-playlist-item${isActive ? " active" : ""}" data-playlist-id="${pl.id}">
         <div class="sidebar-playlist-art" ${artStyle}>${artIcon}</div>
         <div class="sidebar-playlist-info">
           <div class="sidebar-playlist-name">${esc(pl.name)}</div>
@@ -5140,7 +5709,6 @@ function formatDuration(tracks) {
 
 function renderPlaylistPage(playlist) {
   setActiveView("home");
-  document.querySelectorAll(".nav").forEach(b => b.classList.remove("active"));
   document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
     el.classList.toggle("active", el.dataset.playlistId === playlist.id);
   });
@@ -5196,9 +5764,8 @@ function renderPlaylistPage(playlist) {
           if (cached.length >= 10) renderPlaylistRecommendations(updated.id, cached);
           else loadPlaylistRecommendations(updated, true).catch(() => {});
         }
-        document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
-          el.classList.toggle("active", el.dataset.playlistId === pl.id);
-        });
+        state.activePlaylistId = updated.id;
+        renderSidebarPlaylists();
       }).catch(() => {});
   }
 }
@@ -5485,11 +6052,11 @@ function renderPlaylistRecommendations(playlistId, items = []) {
     return;
   }
   box.innerHTML = items.map((item, idx) => {
-    const art = item.artwork_url ? `background-image: url('${esc(item.artwork_url)}')` : "";
+    const artAttr = item.artwork_url ? ` data-art="${esc(item.artwork_url)}"` : "";
     const duration = item.duration_ms ? formatTime(Math.floor(Number(item.duration_ms) / 1000)) : "";
     return `
       <div class="track-row recommendation-track-row" data-item-idx="${idx}" data-item-data='${JSON.stringify(item).replace(/'/g, "&apos;")}'>
-        <div class="track-art" style="${art}"></div>
+        <div class="track-art"${artAttr}></div>
         <div class="track-main">
           <strong>${esc(item.title || "Unknown Track")}</strong>
           <span>${esc(item.artist || "")}</span>
@@ -5505,6 +6072,11 @@ function renderPlaylistRecommendations(playlistId, items = []) {
       </div>
     `;
   }).join("");
+  box.querySelectorAll(".track-art[data-art]").forEach(artEl => {
+    const img = new Image();
+    img.onload = () => { artEl.style.backgroundImage = `url('${artEl.dataset.art}')`; };
+    img.src = artEl.dataset.art;
+  });
   box.querySelectorAll(".track-row").forEach(el => {
     const item = items[Number(el.dataset.itemIdx)];
     el.onclick = (event) => {
@@ -5551,34 +6123,45 @@ async function loadPlaylistRecommendations(playlist, refresh = false) {
   let attempts = 0;
   let grew = true;
 
-  while (merged.size < 10 && grew && attempts < 6) {
-    attempts++;
-    const exclude = new Set([...playlistKeys, ...queueKeys, ...merged.keys()]);
-    const params = new URLSearchParams({
-      limit: "10",
-      refresh: firstRequest && refresh ? "1" : "0",
-      exclude: [...exclude].join(","),
-      queue_track_keys: queueKeys.join(","),
-    });
-    if (sessionId) params.set("session_id", sessionId);
-    const data = await api(`/api/playlists/${encodeURIComponent(playlist.id)}/recommendations?${params.toString()}`);
-    sessionId = data.session_id || sessionId || "";
-    state.playlistRecommendationSessions[playlist.id] = sessionId;
-    const freshItems = Array.isArray(data.items) ? data.items : [];
-    const sizeBefore = merged.size;
-    freshItems.forEach(item => {
-      if (item && item.track_key && !merged.has(item.track_key)) {
-        merged.set(item.track_key, item);
+  try {
+    while (merged.size < 10 && grew && attempts < 6) {
+      attempts++;
+      const exclude = new Set([...playlistKeys, ...queueKeys, ...merged.keys()]);
+      const params = new URLSearchParams({
+        limit: "10",
+        refresh: firstRequest && refresh ? "1" : "0",
+        exclude: [...exclude].join(","),
+        queue_track_keys: queueKeys.join(","),
+      });
+      if (sessionId) params.set("session_id", sessionId);
+      const data = await api(`/api/playlists/${encodeURIComponent(playlist.id)}/recommendations?${params.toString()}`);
+      sessionId = data.session_id || sessionId || "";
+      state.playlistRecommendationSessions[playlist.id] = sessionId;
+      const freshItems = Array.isArray(data.items) ? data.items : [];
+      const sizeBefore = merged.size;
+      freshItems.forEach(item => {
+        if (item && item.track_key && !merged.has(item.track_key)) {
+          merged.set(item.track_key, item);
+        }
+      });
+      const items = sortPlaylistRecommendationItems([...merged.values()]).slice(0, 10);
+      const itemsByKey = {};
+      items.forEach(item => { if (item && item.track_key) itemsByKey[item.track_key] = item; });
+      state.playlistRecommendationState[playlist.id] = { items, itemsByKey };
+      renderPlaylistRecommendations(playlist.id, items);
+      grew = merged.size > sizeBefore;
+      firstRequest = false;
+      if (!freshItems.length) break;
+    }
+  } catch (err) {
+    if ($("playlistRecommendations")) {
+      if (merged.size > 0) {
+        // Partial results already rendered — leave them
+      } else {
+        $("playlistRecommendations").innerHTML = `<div class="playlist-recommendation-empty">Couldn't load recommendations right now.</div>`;
       }
-    });
-    const items = sortPlaylistRecommendationItems([...merged.values()]).slice(0, 10);
-    const itemsByKey = {};
-    items.forEach(item => { if (item && item.track_key) itemsByKey[item.track_key] = item; });
-    state.playlistRecommendationState[playlist.id] = { items, itemsByKey };
-    renderPlaylistRecommendations(playlist.id, items);
-    grew = merged.size > sizeBefore;
-    firstRequest = false;
-    if (!freshItems.length) break;
+    }
+    return;
   }
 
   if (merged.size === 0) {
@@ -5908,14 +6491,38 @@ async function boot() {
     }
   });
 
-  document.querySelectorAll("[data-view]").forEach(el => {
+  document.querySelectorAll("[data-library-pill]").forEach(el => {
     el.onclick = () => {
-       if (el.dataset.view === "settings") pushPage(renderSettings);
-       else if (el.dataset.view === "home") replacePage(renderHomePage);
-       else if (el.dataset.view === "artists") pushPage(renderArtistsPage);
-       else if (el.dataset.view === "albums") pushPage(renderAlbumsPage);
+       const pill = normalizeLibraryPill(el.dataset.libraryPill);
+       setActiveLibraryPill(pill);
+       if (pill === "home") replacePage(renderHomePage);
+       else if (pill === "stats") replacePage(() => renderStatsPage(state.statsPeriod || "month"));
+       else if (pill === "tracks") pushPage(renderPersonalTracksPage);
+       else if (pill === "artists") pushPage(renderArtistsPage);
+       else if (pill === "albums") pushPage(renderAlbumsPage);
     };
   });
+
+  (function _bindPillScrollArrows() {
+    const row = $("libraryPillRow");
+    if (!row) return;
+    const wrap = row.closest(".library-pill-scroll-wrap");
+    if (!wrap) return;
+    const prev = wrap.querySelector(".pill-scroll-prev");
+    const next = wrap.querySelector(".pill-scroll-next");
+    if (!prev || !next) return;
+    const SCROLL_BY = 160;
+    const _update = () => {
+      const canScrollLeft = row.scrollLeft > 4;
+      const canScrollRight = row.scrollLeft < row.scrollWidth - row.clientWidth - 4;
+      prev.hidden = !canScrollLeft;
+      next.hidden = !canScrollRight;
+    };
+    row.addEventListener("scroll", _update, { passive: true });
+    prev.onclick = () => { row.scrollBy({ left: -SCROLL_BY, behavior: "smooth" }); };
+    next.onclick = () => { row.scrollBy({ left: SCROLL_BY, behavior: "smooth" }); };
+    _update();
+  })();
 
   document.querySelectorAll("[data-view-jump]").forEach(el => {
     el.onclick = () => {

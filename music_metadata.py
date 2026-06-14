@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import html
+import socket
+import struct
 import time
 import functools
 from collections import OrderedDict
+import urllib.error
 import urllib.parse
 import urllib.request
 import rapidfuzz
@@ -16,7 +22,6 @@ from pathlib import Path
 import db
 from config import AppConfig, MusicIndexerConfig
 from discogs_metadata import discogs_album_images
-from spotify_web_metadata import spotify_album_playcounts, spotify_artist_about, fetch_wikipedia_bio, fetch_wikipedia_about
 
 
 USER_AGENT = "Streambox/1.0 (self-hosted; https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)"
@@ -439,6 +444,96 @@ def musicbrainz_recording_identifiers(artist: str, title: str, album: str = "", 
     return {key: value for key, value in identifiers.items() if value}
 
 
+def _musicbrainz_unique_genres(raw: object) -> list[str]:
+    genres: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                genres.append(item)
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("genre") or item.get("title")
+                if isinstance(name, str) and name:
+                    genres.append(name)
+    elif isinstance(raw, dict):
+        for item in raw.values():
+            if isinstance(item, str):
+                genres.append(item)
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("genre") or item.get("title")
+                if isinstance(name, str) and name:
+                    genres.append(name)
+    seen: set[str] = set()
+    out: list[str] = []
+    for genre in genres:
+        key = norm_name(genre)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(genre)
+    return out
+
+
+_MB_GENRE_RELEASE_CACHE: dict[str, list] = {}
+_MB_GENRE_RECORDING_CACHE: dict[str, list] = {}
+_MB_GENRE_TRACK_CACHE: dict[tuple, list] = {}
+
+
+def musicbrainz_genres_for_release(release_id: str) -> list[str]:
+    release_id = str(release_id or "").strip()
+    if not release_id:
+        return []
+    if release_id in _MB_GENRE_RELEASE_CACHE:
+        return _MB_GENRE_RELEASE_CACHE[release_id]
+    try:
+        data = get_json(
+            f"https://musicbrainz.org/ws/2/release/{urllib.parse.quote(release_id)}?"
+            + urllib.parse.urlencode({"inc": "genres", "fmt": "json"})
+        )
+        result = _musicbrainz_unique_genres(data.get("genres") or data.get("genre") or [])
+    except Exception:
+        result = []
+    if result:
+        _MB_GENRE_RELEASE_CACHE[release_id] = result
+    return result
+
+
+def musicbrainz_genres_for_recording(recording_id: str) -> list[str]:
+    recording_id = str(recording_id or "").strip()
+    if not recording_id:
+        return []
+    if recording_id in _MB_GENRE_RECORDING_CACHE:
+        return _MB_GENRE_RECORDING_CACHE[recording_id]
+    try:
+        data = get_json(
+            f"https://musicbrainz.org/ws/2/recording/{urllib.parse.quote(recording_id)}?"
+            + urllib.parse.urlencode({"inc": "genres", "fmt": "json"})
+        )
+        result = _musicbrainz_unique_genres(data.get("genres") or data.get("genre") or [])
+    except Exception:
+        result = []
+    if result:
+        _MB_GENRE_RECORDING_CACHE[recording_id] = result
+    return result
+
+
+def musicbrainz_genres_for_track(artist: str, title: str, album: str = "", duration_ms: int = 0) -> list[str]:
+    artist = str(artist or "").strip()
+    title = str(title or "").strip()
+    album = str(album or "").strip()
+    if not artist or not title:
+        return []
+    _cache_key = (artist.lower(), title.lower(), album.lower(), duration_ms)
+    if _cache_key in _MB_GENRE_TRACK_CACHE:
+        return _MB_GENRE_TRACK_CACHE[_cache_key]
+    ids = musicbrainz_recording_identifiers(artist, title, album, duration_ms)
+    recording_id = str(ids.get("musicbrainz_recording_id") or "").strip()
+    result: list[str] = []
+    if recording_id:
+        result = musicbrainz_genres_for_recording(recording_id)
+    if result:
+        _MB_GENRE_TRACK_CACHE[_cache_key] = result
+    return result
+
+
 @functools.lru_cache(maxsize=1024)
 def get_artist_id(artist_name: str) -> str | None:
     """Fetch MusicBrainz Artist ID."""
@@ -631,6 +726,32 @@ def enrich_track_identifiers(track: dict) -> dict:
     for key, value in mb_ids.items():
         if value and not enriched.get(key):
             enriched[key] = value
+    if not enriched.get("genres"):
+        genres = []
+        release_id = str(enriched.get("musicbrainz_release_id") or "").strip()
+        recording_id = str(enriched.get("musicbrainz_recording_id") or "").strip()
+        if release_id:
+            genres = musicbrainz_genres_for_release(release_id)
+        if not genres and recording_id:
+            genres = musicbrainz_genres_for_recording(recording_id)
+        if not genres:
+            genres = musicbrainz_genres_for_track(
+                enriched.get("artist", ""),
+                enriched.get("title", ""),
+                enriched.get("album", ""),
+                duration_ms,
+            )
+        if not genres:
+            artist_id = str(enriched.get("artist_id") or "").strip()
+            if artist_id:
+                try:
+                    artist_data = _sp(f"artists/{artist_id}")
+                    genres = [g for g in (artist_data.get("genres") or []) if isinstance(g, str) and g]
+                except Exception:
+                    genres = []
+        if genres:
+            enriched["genres"] = genres
+            enriched["genre"] = genres[0]
 
     if not enriched.get("isrc"):
         from isrc_resolver import resolve_isrc
@@ -1270,6 +1391,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         return cached
 
     tracks, art, yr, total_ms = [], "", "", 0
+    release_genres = musicbrainz_genres_for_release(release_id) if release_id else []
     if spotify_id:
         try:
             sp_album = _sp(f"albums/{spotify_id}", market="US")
@@ -1287,6 +1409,8 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                         "duration": format_duration_ms(t.get("duration_ms", 0)),
                         "artwork_url": art, "spotify_id": t["id"], "source": "Spotify",
                         "length": t.get("duration_ms", 0), "plays": playcounts.get(t["id"], 0),
+                        "genres": release_genres,
+                        "genre": release_genres[0] if release_genres else "",
                     })
                 total_ms = sum(int(t.get("duration_ms", 0)) for t in sp_album.get("tracks", {}).get("items") or [])
         except Exception: pass
@@ -1307,7 +1431,9 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                         "track_number": it.get("number", ""), "duration": format_duration_ms(ln),
                         "artwork_url": art or spotify_album_artwork(artist, album_name),
                         "musicbrainz_recording_id": rec.get("id", ""), "musicbrainz_release_id": release_id,
-                        "source": "MusicBrainz", "length": ln
+                        "source": "MusicBrainz", "length": ln,
+                        "genres": release_genres or musicbrainz_genres_for_recording(rec.get("id", "")),
+                        "genre": (release_genres or musicbrainz_genres_for_recording(rec.get("id", "")) or [""])[0],
                     })
         except Exception: pass
 
@@ -1374,6 +1500,8 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         "gallery_images": gallery_images,
         "release_id": release_id,
         "spotify_id": spotify_id,
+        "genres": release_genres,
+        "genre": release_genres[0] if release_genres else "",
     }
     
     # Cache it!
@@ -2077,3 +2205,362 @@ def enrich_artwork_batch(results: list[dict]) -> list[dict]:
 
 def enrich_albums_batch(results: list[dict]) -> list[dict]:
     return results
+
+
+# ---------------------------------------------------------------------------
+# Spotify Web / Wikipedia helpers (merged from spotify_web_metadata)
+# ---------------------------------------------------------------------------
+
+_WEB_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
+_WEB_QUERY_URL = "https://api-partner.spotify.com/pathfinder/v2/query"
+_WEB_APP_VERSION = "896000000"
+_WEB_REQUEST_TIMEOUT_S = 18
+_WEB_REQUEST_RETRIES = 3
+_WEB_REQUEST_RETRY_DELAY_S = 0.5
+_ARTIST_ABOUT_CACHE_TTL_S = 600
+_ARTIST_ABOUT_FAILURE_TTL_S = 45
+_playcount_cache: dict[str, tuple[float, dict[str, int]]] = {}
+_artist_about_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _web_is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionResetError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        return isinstance(reason, (TimeoutError, socket.timeout, ConnectionResetError, OSError))
+    return isinstance(exc, OSError)
+
+
+def _web_request_text(
+    url: str,
+    headers: dict[str, str] | None = None,
+    data: bytes | None = None,
+    timeout: float = _WEB_REQUEST_TIMEOUT_S,
+    retries: int = _WEB_REQUEST_RETRIES,
+) -> str:
+    request_headers = {"User-Agent": _WEB_USER_AGENT, **(headers or {})}
+    request = urllib.request.Request(url, data=data, headers=request_headers)
+    attempts = max(1, int(retries or 1))
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8")
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not _web_is_retryable_error(exc):
+                raise
+            delay = _WEB_REQUEST_RETRY_DELAY_S * attempt
+            print(f"[SpotifyWeb] Request retry {attempt}/{attempts - 1} for {url}: {exc}")
+            time.sleep(delay)
+    if last_error:
+        raise last_error
+    return ""
+
+
+def _totp(secret: bytes, timestamp: float) -> str:
+    counter = int(timestamp) // 30
+    digest = hmac.new(secret, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(value % 1_000_000).zfill(6)
+
+
+def _web_player_config(path_id: str, is_artist: bool = False) -> tuple[int, str]:
+    path = f"artist/{path_id}" if is_artist else f"album/{path_id}"
+    html_text = _web_request_text(f"https://open.spotify.com/{path}")
+    server_config = re.search(r'id="appServerConfig"[^>]*>([^<]+)', html_text)
+    script = re.search(r'<script src="([^"]+/web-player\.[^"]+\.js)"', html_text)
+    if not server_config or not script:
+        raise ValueError("Spotify web-player configuration was not found")
+    config = json.loads(base64.b64decode(server_config.group(1)))
+    return int(config.get("serverTime") or time.time()), script.group(1)
+
+
+@functools.lru_cache(maxsize=16)
+def _query_contract(script_url: str) -> dict[str, str]:
+    javascript = _web_request_text(script_url)
+    contracts = {}
+    patterns = {
+        "album": r'queryAlbumTracks","query","([0-9a-f]{64})"',
+        "artist": r'queryArtistOverview","query","([0-9a-f]{64})"',
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, javascript)
+        if match:
+            contracts[key] = match.group(1)
+    token_secret = re.search(r"let eU=\[\{secret:(['\"])(.*?)\1,version:(\d+)", javascript)
+    if not token_secret:
+        raise ValueError("Spotify web-player secret contract was not found")
+    encoded_secret = token_secret.group(2).encode("utf-8").decode("unicode_escape")
+    secret = "".join(str(ord(char) ^ (index % 33 + 9)) for index, char in enumerate(encoded_secret)).encode()
+    contracts["secret"] = secret
+    contracts["token_version"] = token_secret.group(3)
+    return contracts
+
+
+def _anonymous_token(server_time: int, secret: bytes, token_version: str) -> str:
+    query = urllib.parse.urlencode({
+        "reason": "init",
+        "productType": "web_player",
+        "totp": _totp(secret, time.time()),
+        "totpServer": _totp(secret, server_time),
+        "totpVer": token_version,
+    })
+    response = json.loads(_web_request_text(f"https://open.spotify.com/api/token?{query}"))
+    return response.get("accessToken", "")
+
+
+def _load_album_playcounts(album_id: str) -> dict[str, int]:
+    server_time, script_url = _web_player_config(album_id)
+    contract = _query_contract(script_url)
+    token = _anonymous_token(server_time, contract["secret"], contract["token_version"])
+    if not token:
+        return {}
+    body = {
+        "operationName": "queryAlbumTracks",
+        "variables": {"uri": f"spotify:album:{album_id}", "locale": "", "offset": 0, "limit": 50},
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": contract["album"]}},
+    }
+    response = json.loads(_web_request_text(
+        _WEB_QUERY_URL,
+        {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "spotify-app-version": _WEB_APP_VERSION},
+        json.dumps(body).encode("utf-8"),
+    ))
+    items = response.get("data", {}).get("albumUnion", {}).get("tracksV2", {}).get("items", [])
+    playcounts = {}
+    for item in items:
+        track = item.get("track") or {} if isinstance(item, dict) else {}
+        track_id = track.get("id") or str(track.get("uri", "")).removeprefix("spotify:track:")
+        if track_id and str(track.get("playcount", "")).isdigit():
+            playcounts[track_id] = int(track["playcount"])
+    return playcounts
+
+
+def spotify_album_playcounts(album_id: str) -> dict[str, int]:
+    if not album_id:
+        return {}
+    cached = _playcount_cache.get(album_id)
+    if cached and time.time() - cached[0] < 300:
+        return cached[1]
+    try:
+        result = _load_album_playcounts(album_id)
+    except Exception:
+        result = {}
+    _playcount_cache[album_id] = (time.time(), result)
+    return result
+
+
+def _load_artist_about(artist_id: str) -> dict:
+    server_time, script_url = _web_player_config(artist_id, is_artist=True)
+    contract = _query_contract(script_url)
+    if "artist" not in contract:
+        return {}
+    token = _anonymous_token(server_time, contract["secret"], contract["token_version"])
+    if not token:
+        return {}
+    body = {
+        "operationName": "queryArtistOverview",
+        "variables": {"uri": f"spotify:artist:{artist_id}", "locale": "", "includePrerelease": True},
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": contract["artist"]}},
+    }
+    response = json.loads(_web_request_text(
+        _WEB_QUERY_URL,
+        {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "spotify-app-version": _WEB_APP_VERSION},
+        json.dumps(body).encode("utf-8"),
+    ))
+    data = response.get("data", {})
+    artist = data.get("artistUnion") or data.get("artist") or {}
+    stats = artist.get("stats") or {}
+    visuals = artist.get("visuals") or {}
+    profile = artist.get("profile") or {}
+    gallery = []
+    for item in visuals.get("gallery", {}).get("items", []):
+        sources = item.get("sources") or []
+        if sources:
+            top = max(sources, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
+            gallery.append({"url": top["url"], "width": top.get("width"), "height": top.get("height")})
+    avatar_sources = (visuals.get("avatarImage") or {}).get("sources") or []
+    if not avatar_sources:
+        avatar_sources = (visuals.get("visualIdentity", {}).get("avatarImage") or {}).get("sources") or []
+    avatar = ""
+    if avatar_sources:
+        top_avatar = max(avatar_sources, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
+        avatar = top_avatar.get("url", "")
+
+    def _pick_feature_image() -> str:
+        if not gallery:
+            return avatar
+        def score(i: dict) -> tuple[int, int, int]:
+            w = int(i.get("width") or 0)
+            h = int(i.get("height") or 0)
+            area = w * h
+            aspect = (w / h) if w and h else 0
+            photo_bias = 1 if aspect >= 1.2 or aspect <= 0.85 else 0
+            square_penalty = 1 if 0.9 <= aspect <= 1.1 else 0
+            return (photo_bias, area, -square_penalty)
+        return max(gallery, key=score).get("url", "") or avatar
+
+    related_artists = []
+    for item in ((artist.get("relatedContent") or {}).get("relatedArtists") or {}).get("items") or []:
+        node = item.get("data") or item
+        node_profile = node.get("profile") or {}
+        node_name = node_profile.get("name") or ""
+        if not node_name:
+            continue
+        node_id = str(node.get("uri") or "").rsplit(":", 1)[-1]
+        node_sources = ((node.get("visuals") or {}).get("avatarImage") or {}).get("sources") or []
+        node_image = ""
+        if node_sources:
+            top = max(node_sources, key=lambda x: (x.get("width") or 0) * (x.get("height") or 0))
+            node_image = top.get("url", "")
+        related_artists.append({"name": node_name, "id": node_id, "image": node_image})
+
+    return {
+        "name": profile.get("name", ""),
+        "monthly_listeners": stats.get("monthlyListeners") or stats.get("monthly_listeners") or 0,
+        "global_chart_position": stats.get("globalChartPosition") or stats.get("global_chart_position") or 0,
+        "followers": stats.get("followers") or 0,
+        "biography": profile.get("biography", {}).get("text", ""),
+        "top_cities": [
+            {"city": c.get("city", ""), "country": c.get("country", ""), "count": c.get("numberOfListeners", c.get("numberOf_listeners", 0))}
+            for c in (stats.get("topCities", {}).get("items") or [])
+        ],
+        "gallery": gallery,
+        "avatar": avatar,
+        "hero_image": _pick_feature_image(),
+        "verified": bool(profile.get("verified")),
+        "related_artists": related_artists,
+    }
+
+
+def spotify_artist_about(artist_id: str) -> dict:
+    if not artist_id:
+        return {}
+    cached = _artist_about_cache.get(artist_id)
+    if cached:
+        ttl = _ARTIST_ABOUT_CACHE_TTL_S if cached[1] else _ARTIST_ABOUT_FAILURE_TTL_S
+        if time.time() - cached[0] < ttl:
+            return cached[1]
+    started = time.time()
+    try:
+        result = _load_artist_about(artist_id)
+    except Exception as e:
+        print(f"[SpotifyWeb] Error loading artist about for {artist_id} after {round(time.time() - started, 1)}s: {e}")
+        if cached:
+            return cached[1]
+        result = {}
+    _artist_about_cache[artist_id] = (time.time(), result)
+    return result
+
+
+def fetch_wikipedia_bio(artist_name: str) -> str:
+    try:
+        params = urllib.parse.urlencode({
+            "action": "query", "format": "json", "prop": "extracts",
+            "exintro": 1, "explaintext": 1, "titles": artist_name, "redirects": 1,
+        })
+        data = json.loads(_web_request_text(f"https://en.wikipedia.org/w/api.php?{params}"))
+        pages = data.get("query", {}).get("pages", {})
+        for page_id in pages:
+            return pages[page_id].get("extract", "")
+    except Exception:
+        pass
+    return ""
+
+
+_WIKI_BASE = "https://en.wikipedia.org"
+
+
+def _wiki_href_ok(href: str) -> str:
+    if not href or not href.startswith("/wiki/"):
+        return ""
+    title = href[len("/wiki/"):]
+    head = title.split("#", 1)[0]
+    if not head or ":" in head:
+        return ""
+    return _WIKI_BASE + href
+
+
+def _wiki_serialize_child(node) -> str:
+    import html as _htmlmod
+    tag = node.tag if isinstance(node.tag, str) else ""
+    tail = _htmlmod.escape(node.tail or "")
+    cls = node.get("class") or ""
+    if tag in ("sup", "style", "script") or "IPA" in cls or "reference" in cls or "noprint" in cls:
+        return tail
+    inner = _htmlmod.escape(node.text or "")
+    for child in node:
+        inner += _wiki_serialize_child(child)
+    if tag == "a":
+        href = _wiki_href_ok(node.get("href") or "")
+        if href:
+            return f'<a href="{_htmlmod.escape(href, quote=True)}" target="_blank" rel="noopener noreferrer">{inner}</a>' + tail
+        return inner + tail
+    if tag in ("b", "strong"):
+        return f"<b>{inner}</b>" + tail
+    if tag in ("i", "em"):
+        return f"<i>{inner}</i>" + tail
+    return inner + tail
+
+
+def fetch_wikipedia_about(artist_name: str) -> dict:
+    result = {"text": "", "html": "", "image": ""}
+    try:
+        from lxml import html as lxml_html
+    except Exception:
+        lxml_html = None
+    try:
+        params = urllib.parse.urlencode({
+            "action": "parse", "format": "json", "prop": "text",
+            "section": 0, "redirects": 1, "page": artist_name, "formatversion": 2,
+        })
+        data = json.loads(_web_request_text(f"https://en.wikipedia.org/w/api.php?{params}"))
+        raw_html = (data.get("parse") or {}).get("text") or ""
+        if isinstance(raw_html, dict):
+            raw_html = raw_html.get("*", "")
+        if raw_html and lxml_html is not None:
+            root = lxml_html.fromstring(raw_html)
+            paras, text_parts = [], []
+            import html as _htmlmod
+            for p in root.xpath("//p[not(ancestor::table)]"):
+                for bad in p.xpath(
+                    './/style | .//sup | .//span[contains(@class,"IPA")] '
+                    '| .//span[contains(@class,"reference")] '
+                    '| .//span[contains(@class,"noprint")]'
+                ):
+                    bad.getparent().remove(bad)
+                txt = " ".join((p.text_content() or "").split()).strip()
+                if len(txt) < 40:
+                    continue
+                html_p = (_htmlmod.escape(p.text or "") + "".join(
+                    _wiki_serialize_child(c) for c in p
+                )).strip()
+                if html_p:
+                    paras.append(f"<p>{html_p}</p>")
+                    text_parts.append(txt)
+                if len(paras) >= 2:
+                    break
+            result["html"] = "".join(paras)
+            result["text"] = "\n\n".join(text_parts)
+    except Exception:
+        pass
+    try:
+        params = urllib.parse.urlencode({
+            "action": "query", "format": "json", "prop": "pageimages",
+            "piprop": "original|thumbnail", "pithumbsize": 640,
+            "titles": artist_name, "redirects": 1, "formatversion": 2,
+        })
+        data = json.loads(_web_request_text(f"https://en.wikipedia.org/w/api.php?{params}"))
+        pages = (data.get("query") or {}).get("pages") or []
+        if isinstance(pages, dict):
+            pages = list(pages.values())
+        for pg in pages:
+            src = ((pg.get("original") or {}).get("source")) or ((pg.get("thumbnail") or {}).get("source")) or ""
+            if src:
+                result["image"] = src
+                break
+    except Exception:
+        pass
+    return result

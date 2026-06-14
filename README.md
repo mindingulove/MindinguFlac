@@ -7,9 +7,11 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 ## v1.1.0
 
 - Local taste profiles now learn from actual listening, likes, dislikes, and blacklists.
-- Playlist recommendations continue from the end of manual playlists with dynamic replenishment.
+- Playlist recommendations continue from the end of manual playlists with dynamic replenishment; add or dismiss individual suggestions with automatic replacement.
 - Playlist origins are stored explicitly so album-derived playlists stay separate from user-created playlists.
 - Search, artist pages, and playlist recommendations now favor ID-first matching and taste-aware ranking.
+- Stats month picker rebuilt as a proper dropdown overlay; home pill shows a house icon.
+- Fixed SQLite database lock storms caused by background migration threads cascading on startup.
 
 ## v1.0.0 Preview
 

@@ -605,6 +605,16 @@ def start_playlist_identifier_enrichment(playlist_id: str) -> None:
     ).start()
 
 
+_TRACK_KEY_PREFIXES = {"spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_track_id", "deezer_id", "tidal_id"}
+
+def _strip_track_key_prefix(key: str) -> str:
+    if ":" in key:
+        prefix, _, value = key.partition(":")
+        if prefix in _TRACK_KEY_PREFIXES:
+            return value
+    return key
+
+
 def playlist_track_key(track: dict) -> str:
     spotify_id = str(track.get("spotify_id") or track.get("track_key") or "").strip()
     if spotify_id:
@@ -1226,12 +1236,12 @@ class Handler(BaseHTTPRequestHandler):
                 refresh = query.get("refresh", ["0"])[0] in {"1", "true", "True"}
                 session_id = query.get("session_id", [""])[0].strip() or None
                 exclude = {
-                    key.strip()
+                    _strip_track_key_prefix(key.strip())
                     for key in (query.get("exclude", [""])[0] or "").split(",")
                     if key.strip()
                 }
                 queue_track_keys = {
-                    key.strip()
+                    _strip_track_key_prefix(key.strip())
                     for key in (query.get("queue_track_keys", [""])[0] or "").split(",")
                     if key.strip()
                 }
@@ -1258,6 +1268,64 @@ class Handler(BaseHTTPRequestHandler):
                 artist = query.get("artist", [""])[0].strip() or None
                 period = query.get("period", ["all"])[0].strip() or "all"
                 self.send_json(db.get_listened_time(track_key, artist, period))
+                return
+            if path == "/api/stats/summary":
+                period = query.get("period", ["month"])[0].strip() or "month"
+                year = query.get("year", [""])[0].strip() or None
+                month = query.get("month", [""])[0].strip() or None
+                _mr = query.get("months", [""])[0].strip()
+                months = [int(m) for m in _mr.split(",") if m.strip().isdigit()] if _mr else None
+                self.send_json(db.get_stats_summary(period, year=year, month=month, months=months))
+                return
+            if path == "/api/stats/top-listened-tracks":
+                period = query.get("period", ["month"])[0].strip() or "month"
+                limit = int(query.get("limit", ["10"])[0] or 10)
+                offset = int(query.get("offset", ["0"])[0] or 0)
+                year = query.get("year", [""])[0].strip() or None
+                month = query.get("month", [""])[0].strip() or None
+                _mr = query.get("months", [""])[0].strip()
+                months = [int(m) for m in _mr.split(",") if m.strip().isdigit()] if _mr else None
+                self.send_json(db.get_top_listened_tracks(period, limit=limit, offset=offset, year=year, month=month, months=months))
+                return
+            if path == "/api/stats/top-listened-artists":
+                period = query.get("period", ["month"])[0].strip() or "month"
+                limit = int(query.get("limit", ["10"])[0] or 10)
+                offset = int(query.get("offset", ["0"])[0] or 0)
+                year = query.get("year", [""])[0].strip() or None
+                month = query.get("month", [""])[0].strip() or None
+                _mr = query.get("months", [""])[0].strip()
+                months = [int(m) for m in _mr.split(",") if m.strip().isdigit()] if _mr else None
+                self.send_json(db.get_top_listened_artists(period, limit=limit, offset=offset, year=year, month=month, months=months))
+                return
+            if path == "/api/stats/top-listened-albums":
+                period = query.get("period", ["month"])[0].strip() or "month"
+                limit = int(query.get("limit", ["10"])[0] or 10)
+                offset = int(query.get("offset", ["0"])[0] or 0)
+                year = query.get("year", [""])[0].strip() or None
+                month = query.get("month", [""])[0].strip() or None
+                _mr = query.get("months", [""])[0].strip()
+                months = [int(m) for m in _mr.split(",") if m.strip().isdigit()] if _mr else None
+                self.send_json(db.get_top_listened_albums(period, limit=limit, offset=offset, year=year, month=month, months=months))
+                return
+            if path == "/api/stats/listening-over-time":
+                period = query.get("period", ["month"])[0].strip() or "month"
+                year = query.get("year", [""])[0].strip() or None
+                month = query.get("month", [""])[0].strip() or None
+                bucket = query.get("bucket", [""])[0].strip() or None
+                # months=1,2,3 from multiselect filter
+                months_raw = query.get("months", [""])[0].strip()
+                months_list = [int(m) for m in months_raw.split(",") if m.strip().isdigit()] if months_raw else None
+                self.send_json(db.get_listening_over_time(period, bucket=bucket, year=year, month=month, months=months_list))
+                return
+            if path == "/api/stats/top-genres":
+                period = query.get("period", ["month"])[0].strip() or "month"
+                limit = int(query.get("limit", ["10"])[0] or 10)
+                offset = int(query.get("offset", ["0"])[0] or 0)
+                year = query.get("year", [""])[0].strip() or None
+                month = query.get("month", [""])[0].strip() or None
+                _mr = query.get("months", [""])[0].strip()
+                months = [int(m) for m in _mr.split(",") if m.strip().isdigit()] if _mr else None
+                self.send_json(db.get_top_genres(period, limit=limit, offset=offset, year=year, month=month, months=months))
                 return
             if path == "/api/taste/track":
                 track_key = query.get("track_key", [""])[0].strip()
@@ -1510,8 +1578,8 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations/replacement", path)
             if m:
                 playlist_id = m.group(1)
-                exclude = {str(key).strip() for key in (body.get("exclude_track_keys") or []) if str(key).strip()}
-                queue_track_keys = {str(key).strip() for key in (body.get("queue_track_keys") or []) if str(key).strip()}
+                exclude = {_strip_track_key_prefix(str(key).strip()) for key in (body.get("exclude_track_keys") or []) if str(key).strip()}
+                queue_track_keys = {_strip_track_key_prefix(str(key).strip()) for key in (body.get("queue_track_keys") or []) if str(key).strip()}
                 item = generate_one_replacement_recommendation(
                     playlist_id,
                     exclude,
@@ -1537,8 +1605,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
             if path == "/api/artist/about":
-                from music_metadata import artist_about
-                self.send_json(artist_about(body.get("artist_id"), body.get("name")))
+                try:
+                    from music_metadata import artist_about
+                    self.send_json(artist_about(body.get("artist_id"), body.get("name")))
+                except Exception as _e:
+                    self.send_json({"error": str(_e), "monthly_listeners": 0, "followers": 0, "biography": "", "avatar": "", "gallery": [], "related_artists": []})
                 return
             if path == "/api/artist/related":
                 from music_metadata import related_artists
@@ -1572,12 +1643,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(track_credits(body.get("track") or body))
                 return
             if path == "/api/music/enrich":
+                import queue as _queue
                 tracks = body.get("tracks") or []
-                enriched = enrich_artwork_batch(tracks)
-                # Also enrich identifiers for the batch if it's small (to avoid timeout)
-                if len(enriched) <= 20:
-                    for i in range(len(enriched)):
-                        enriched[i] = enrich_track_identifiers(enriched[i])
+                _result_q: _queue.Queue = _queue.Queue()
+                def _run_enrich():
+                    try:
+                        _result_q.put(enrich_artwork_batch(tracks))
+                    except Exception:
+                        _result_q.put(None)
+                threading.Thread(target=_run_enrich, daemon=True).start()
+                try:
+                    enriched = _result_q.get(timeout=8) or tracks
+                except _queue.Empty:
+                    enriched = tracks
                 self.send_json({"tracks": enriched})
                 return
 

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import datetime as _dt
+import functools
+import re
 import sqlite3
 import threading
 import time
 import uuid
-from pathlib import Path
+import urllib.parse
+import urllib.request
 from typing import Any
 
 from config import app_data_dir
@@ -24,6 +28,8 @@ def _get_conn():
 
 
 def _init_db(conn: sqlite3.Connection):
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sources (
             track_key TEXT PRIMARY KEY,
@@ -148,6 +154,7 @@ def _init_db(conn: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS artist_affinity (
             artist_key TEXT PRIMARY KEY,
             artist_name TEXT,
+            spotify_artist_id TEXT,
             score REAL DEFAULT 0,
             status TEXT DEFAULT 'neutral',
             total_plays INTEGER DEFAULT 0,
@@ -237,6 +244,130 @@ def _init_db(conn: sqlite3.Connection):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_playlist_recommendation_cache_playlist_id ON playlist_recommendation_cache(playlist_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_playlist_recommendation_cache_score ON playlist_recommendation_cache(score)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_playlist_recommendation_cache_expires_at ON playlist_recommendation_cache(expires_at)")
+    # ── Per-listen append-only stats tables ────────────────────────────────────
+    # Part of the refactor described in plans/mindinguflac_per_listen_stats_refactor.md
+    # One row per playback session per track/artist/album/genre.
+    # Stats are calculated by SUM over rows — never by overwriting totals.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS track_listen_stats_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            track_key TEXT NOT NULL,
+            title TEXT,
+            artist TEXT,
+            album TEXT,
+            album_key TEXT,
+            artwork_url TEXT,
+            spotify_track_id TEXT,
+            spotify_artist_id TEXT,
+            isrc TEXT,
+            musicbrainz_recording_id TEXT,
+            musicbrainz_artist_id TEXT,
+            deezer_track_id TEXT,
+            tidal_track_id TEXT,
+            listened_ms INTEGER DEFAULT 0,
+            duration_ms INTEGER DEFAULT 0,
+            listened_percent REAL DEFAULT 0,
+            play_count INTEGER DEFAULT 0,
+            complete_count INTEGER DEFAULT 0,
+            skip_count INTEGER DEFAULT 0,
+            event_type TEXT NOT NULL,
+            event_timestamp REAL NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE(event_id, track_key)
+        )
+    """)
+    # artist_key = spotify_artist_id when available, else normalize_artist_key(name).
+    # This avoids collisions between artists with the same name.
+    # See plans/mindinguflac_per_listen_stats_refactor.md Part 5.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS artist_listen_stats_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            artist_key TEXT NOT NULL,
+            artist_normalized_key TEXT,
+            artist_name TEXT NOT NULL,
+            spotify_artist_id TEXT,
+            musicbrainz_artist_id TEXT,
+            track_key TEXT NOT NULL,
+            spotify_track_id TEXT,
+            isrc TEXT,
+            title TEXT,
+            album TEXT,
+            album_key TEXT,
+            listened_ms INTEGER DEFAULT 0,
+            play_count INTEGER DEFAULT 0,
+            complete_count INTEGER DEFAULT 0,
+            skip_count INTEGER DEFAULT 0,
+            event_type TEXT NOT NULL,
+            event_timestamp REAL NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE(event_id, artist_key)
+        )
+    """)
+    # album_key = "{artist_normalized_key}_{normalized_album}" composite.
+    # Prevents collision between same-named albums by different artists (e.g., "Greatest Hits").
+    # spotify_album_id stored separately for future cross-platform grouping.
+    # See plans/mindinguflac_per_listen_stats_refactor.md Part 5.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS album_listen_stats_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            album_key TEXT NOT NULL,
+            album TEXT NOT NULL,
+            artist_key TEXT,
+            artist_normalized_key TEXT,
+            artist_name TEXT,
+            spotify_album_id TEXT,
+            track_key TEXT NOT NULL,
+            spotify_track_id TEXT,
+            isrc TEXT,
+            title TEXT,
+            artwork_url TEXT,
+            listened_ms INTEGER DEFAULT 0,
+            play_count INTEGER DEFAULT 0,
+            complete_count INTEGER DEFAULT 0,
+            skip_count INTEGER DEFAULT 0,
+            event_type TEXT NOT NULL,
+            event_timestamp REAL NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE(event_id, album_key, track_key)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS genre_listen_stats_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            genre_key TEXT NOT NULL,
+            genre_name TEXT NOT NULL,
+            track_key TEXT NOT NULL,
+            spotify_track_id TEXT,
+            isrc TEXT,
+            title TEXT,
+            artist TEXT,
+            album TEXT,
+            album_key TEXT,
+            listened_ms INTEGER DEFAULT 0,
+            play_count INTEGER DEFAULT 0,
+            complete_count INTEGER DEFAULT 0,
+            skip_count INTEGER DEFAULT 0,
+            event_type TEXT NOT NULL,
+            event_timestamp REAL NOT NULL,
+            created_at REAL NOT NULL,
+            UNIQUE(event_id, genre_key)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_stats_event_timestamp ON track_listen_stats_events(event_timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_stats_track_key ON track_listen_stats_events(track_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_stats_spotify_track_id ON track_listen_stats_events(spotify_track_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_stats_isrc ON track_listen_stats_events(isrc)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_stats_event_type ON track_listen_stats_events(event_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artist_stats_event_timestamp ON artist_listen_stats_events(event_timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_artist_stats_artist_key ON artist_listen_stats_events(artist_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_album_stats_event_timestamp ON album_listen_stats_events(event_timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_album_stats_album_key ON album_listen_stats_events(album_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_genre_stats_event_timestamp ON genre_listen_stats_events(event_timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_genre_stats_genre_key ON genre_listen_stats_events(genre_key)")
     conn.commit()
     _run_one_time_migrations(conn)
 
@@ -281,6 +412,80 @@ def _run_one_time_migrations(conn: sqlite3.Connection):
                 (str(time.time()),),
             )
             conn.commit()
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'genre_affinity_backfill_v1'"
+        ).fetchone()
+        if not done:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('genre_affinity_backfill_v1', ?)",
+                (str(time.time()),),
+            )
+            conn.commit()
+            def _run_genre_backfill():
+                try:
+                    bg_conn = _get_conn()
+                    _backfill_genre_affinity(bg_conn)
+                except Exception:
+                    pass
+            threading.Thread(target=_run_genre_backfill, daemon=True, name="genre-affinity-backfill").start()
+        # Recreate artist/album stats tables with correct key schema (v2).
+        # artist_key = spotify_artist_id when available (avoids same-name collisions).
+        # album_key = {artist_key}_{normalized_album} composite (prevents "Greatest Hits" collisions).
+        # See plans/mindinguflac_per_listen_stats_refactor.md Part 5.
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'listen_stats_key_schema_v2'"
+        ).fetchone()
+        if not done:
+            conn.execute("DROP TABLE IF EXISTS artist_listen_stats_events")
+            conn.execute("DROP TABLE IF EXISTS album_listen_stats_events")
+            conn.execute("""CREATE TABLE IF NOT EXISTS artist_listen_stats_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+                artist_key TEXT NOT NULL, artist_normalized_key TEXT, artist_name TEXT NOT NULL,
+                spotify_artist_id TEXT, musicbrainz_artist_id TEXT,
+                track_key TEXT NOT NULL, spotify_track_id TEXT, isrc TEXT, title TEXT, album TEXT, album_key TEXT,
+                listened_ms INTEGER DEFAULT 0, play_count INTEGER DEFAULT 0,
+                complete_count INTEGER DEFAULT 0, skip_count INTEGER DEFAULT 0,
+                event_type TEXT NOT NULL, event_timestamp REAL NOT NULL, created_at REAL NOT NULL,
+                UNIQUE(event_id, artist_key))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS album_listen_stats_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
+                album_key TEXT NOT NULL, album TEXT NOT NULL,
+                artist_key TEXT, artist_normalized_key TEXT, artist_name TEXT, spotify_album_id TEXT,
+                track_key TEXT NOT NULL, spotify_track_id TEXT, isrc TEXT, title TEXT, artwork_url TEXT,
+                listened_ms INTEGER DEFAULT 0, play_count INTEGER DEFAULT 0,
+                complete_count INTEGER DEFAULT 0, skip_count INTEGER DEFAULT 0,
+                event_type TEXT NOT NULL, event_timestamp REAL NOT NULL, created_at REAL NOT NULL,
+                UNIQUE(event_id, album_key, track_key))""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_artist_stats_event_timestamp ON artist_listen_stats_events(event_timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_artist_stats_artist_key ON artist_listen_stats_events(artist_key)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_artist_stats_spotify_artist_id ON artist_listen_stats_events(spotify_artist_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_album_stats_event_timestamp ON album_listen_stats_events(event_timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_album_stats_album_key ON album_listen_stats_events(album_key)")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('listen_stats_key_schema_v2', ?)",
+                (str(time.time()),),
+            )
+            conn.commit()
+        # Per-listen stats event tables backfill (plans/mindinguflac_per_listen_stats_refactor.md)
+        # Runs in background; idempotent (INSERT OR IGNORE).
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'listen_stats_events_backfill_v2'"
+        ).fetchone()
+        if not done:
+            # Set sentinel immediately so subsequent _init_db calls from new threads
+            # don't also spawn backfill threads (cascading lock storm).
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('listen_stats_events_backfill_v2', ?)",
+                (str(time.time()),),
+            )
+            conn.commit()
+            def _run_stats_backfill():
+                try:
+                    bg_conn = _get_conn()
+                    _backfill_listen_stats_events(bg_conn)
+                except Exception:
+                    pass
+            threading.Thread(target=_run_stats_backfill, daemon=True, name="listen-stats-backfill").start()
     except Exception:
         pass
 
@@ -368,12 +573,16 @@ def _backfill_saved_playlist_taste(conn: sqlite3.Connection) -> int:
             if not track_key or track_key in seen:
                 continue
             seen.add(track_key)
+            title = str(track.get("title") or "").strip()
+            artist = str(track.get("artist") or "").strip()
+            if _is_unknown_text(title) or _is_unknown_text(artist):
+                continue
             event_id = f"saved-playlist-taste:{track_key}"
             payload = {
                 "event_id": event_id,
                 "track_key": track_key,
-                "title": track.get("title") or "",
-                "artist": track.get("artist") or "",
+                "title": title,
+                "artist": artist,
                 "album": track.get("album") or "",
                 "duration_ms": int(track.get("duration_ms") or 0),
                 "source_engine": track.get("source_engine") or track.get("source") or "saved_playlist",
@@ -395,6 +604,34 @@ def _backfill_saved_playlist_taste(conn: sqlite3.Connection) -> int:
                     added += 1
             except Exception:
                 continue
+    return added
+
+
+def _backfill_genre_affinity(conn: sqlite3.Connection) -> int:
+    rows = conn.execute("""
+        SELECT event_id, track_key, title, artist, album, source_engine, source_service, resolved_url,
+               started_at, ended_at, listened_ms, duration_ms, listened_percent, event_type, reason, metadata_json, created_at
+        FROM listening_events
+        ORDER BY started_at ASC, created_at ASC
+    """).fetchall()
+    added = 0
+    for row in rows:
+        event = dict(row)
+        title = str(event.get("title") or "").strip()
+        artist = str(event.get("artist") or "").strip()
+        if _is_unknown_text(title) or _is_unknown_text(artist):
+            continue
+        if not isinstance(event.get("metadata"), dict):
+            try:
+                event["metadata"] = json.loads(event.get("metadata_json") or "{}") or {}
+            except Exception:
+                event["metadata"] = {}
+        genre_aff = update_genre_affinity(event)
+        if genre_aff:
+            added += 1
+            if added % 50 == 0:
+                conn.commit()
+    conn.commit()
     return added
 
 
@@ -764,10 +1001,299 @@ def _track_identity_from_metadata(track_key: str, metadata: dict | None = None) 
     return merged
 
 
+def _is_unknown_text(value: str | None) -> bool:
+    normalized = _normalize_key(value or "")
+    return not normalized or normalized in {"unknown", "unknown artist", "unknown album", "unknown track", "n/a"}
+
+
+_MUSICBRAINZ_JSON_CACHE: dict[str, dict] = {}
+
+def _musicbrainz_json(url: str) -> dict:
+    cached = _MUSICBRAINZ_JSON_CACHE.get(url)
+    if cached is not None:
+        return cached
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mindinguflac/1.1.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            if isinstance(data, dict) and data:
+                _MUSICBRAINZ_JSON_CACHE[url] = data
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _musicbrainz_collect_genres(raw: object) -> list[str]:
+    genres: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                genres.append(item)
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("genre") or item.get("title")
+                if isinstance(name, str) and name:
+                    genres.append(name)
+    elif isinstance(raw, dict):
+        for item in raw.values():
+            if isinstance(item, str):
+                genres.append(item)
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("genre") or item.get("title")
+                if isinstance(name, str) and name:
+                    genres.append(name)
+    seen: set[str] = set()
+    out: list[str] = []
+    for genre in genres:
+        key = _normalize_key(genre)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(genre)
+    return out
+
+
+_MUSICBRAINZ_GENRE_IDENTITY_CACHE: dict[tuple, list] = {}
+
+def _musicbrainz_genres_for_track_identity(artist: str, title: str, album: str = "", duration_ms: int = 0) -> list[str]:
+    artist = str(artist or "").strip()
+    title = str(title or "").strip()
+    album = str(album or "").strip()
+    if not artist or not title or _is_unknown_text(artist) or _is_unknown_text(title):
+        return []
+    _cache_key = (artist.lower(), title.lower(), album.lower(), duration_ms)
+    if _cache_key in _MUSICBRAINZ_GENRE_IDENTITY_CACHE:
+        return _MUSICBRAINZ_GENRE_IDENTITY_CACHE[_cache_key]
+    album_candidates = []
+    for candidate in (album, re.sub(r"\s*\([^)]*\)", "", album).strip()):
+        if candidate and candidate not in album_candidates:
+            album_candidates.append(candidate)
+    if not album_candidates:
+        album_candidates.append("")
+
+    for album_candidate in album_candidates:
+        terms = [f'recording:"{title}"', f'artist:"{artist}"']
+        if album_candidate:
+            terms.append(f'release:"{album_candidate}"')
+        try:
+            url = "https://musicbrainz.org/ws/2/recording/?" + urllib.parse.urlencode({
+                "query": " AND ".join(terms),
+                "limit": "20",
+                "fmt": "json",
+                "inc": "isrcs+artist-credits",
+            })
+            candidates = _musicbrainz_json(url).get("recordings", [])
+        except Exception:
+            continue
+        exact = [
+            recording for recording in candidates
+            if _normalize_key(recording.get("title", "")) == _normalize_key(title)
+            and any(_normalize_key(credit.get("name", "")) == _normalize_key(artist) for credit in recording.get("artist-credit", []))
+        ]
+        if not exact:
+            continue
+        if duration_ms:
+            exact.sort(key=lambda item: abs(int(item.get("length") or 0) - duration_ms) if item.get("length") else 10**12)
+            selected = exact[0]
+            selected_length = int(selected.get("length") or 0)
+            tolerance = max(5000, int(duration_ms * 0.03))
+            if selected_length and abs(selected_length - duration_ms) > tolerance:
+                continue
+        else:
+            selected = exact[0]
+        recording_id = str(selected.get("id") or "").strip()
+        if not recording_id:
+            continue
+        recording_data = _musicbrainz_json(
+            f"https://musicbrainz.org/ws/2/recording/{urllib.parse.quote(recording_id)}?"
+            + urllib.parse.urlencode({"inc": "genres", "fmt": "json"})
+        )
+        genres = _musicbrainz_collect_genres(recording_data.get("genres") or recording_data.get("genre") or [])
+        if genres:
+            _MUSICBRAINZ_GENRE_IDENTITY_CACHE[_cache_key] = genres
+            return genres
+    return []
+
+
+def _musicbrainz_genres_for_metadata(metadata: dict) -> list[str]:
+    if not isinstance(metadata, dict):
+        return []
+    title = str(metadata.get("title") or "").strip()
+    artist = str(metadata.get("artist") or metadata.get("album_artist") or "").strip()
+    album = str(metadata.get("album") or metadata.get("release_title") or "").strip()
+    duration_ms = int(metadata.get("duration_ms") or 0)
+    if (_is_unknown_text(title) or _is_unknown_text(artist)) and not any(
+        str(metadata.get(key) or "").strip() for key in ("musicbrainz_release_id", "musicbrainz_recording_id")
+    ):
+        return []
+    genres: list[str] = []
+    for key in ("genres", "genre", "primary_genre", "secondary_genres", "style", "styles"):
+        raw = metadata.get(key)
+        if isinstance(raw, str):
+            genres.extend([part.strip() for part in re.split(r"[,/;|]", raw) if part.strip()])
+        elif isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                if isinstance(item, str):
+                    genres.extend([part.strip() for part in re.split(r"[,/;|]", item) if part.strip()])
+    if genres:
+        seen: set[str] = set()
+        out: list[str] = []
+        for genre in genres:
+            key = _normalize_key(genre)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(genre)
+        return out
+
+    mb_ids = []
+    for key in ("musicbrainz_release_id", "musicbrainz_recording_id"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            mb_ids.append((key, value))
+    for key, value in mb_ids:
+        if key == "musicbrainz_release_id":
+            data = _musicbrainz_json(f"https://musicbrainz.org/ws/2/release/{urllib.parse.quote(value)}?inc=genres&fmt=json")
+        else:
+            data = _musicbrainz_json(f"https://musicbrainz.org/ws/2/recording/{urllib.parse.quote(value)}?inc=genres&fmt=json")
+        out = _musicbrainz_collect_genres(data.get("genres") or data.get("genre") or [])
+        if out:
+            return out
+    if artist and title:
+        out = _musicbrainz_genres_for_track_identity(artist, title, album, duration_ms)
+        if out:
+            return out
+    return []
+
+
 def _same_day_bounds(ts: float) -> tuple[float, float]:
     tm = time.localtime(ts)
     start = time.mktime((tm.tm_year, tm.tm_mon, tm.tm_mday, 0, 0, 0, tm.tm_wday, tm.tm_yday, tm.tm_isdst))
     return start, start + 86400.0
+
+
+def normalize_stats_period(period: str | None) -> str:
+    value = str(period or "").strip().lower()
+    return value if value in {"today", "week", "month", "year", "all"} else "month"
+
+
+def _period_start(period: str | None) -> float | None:
+    period = normalize_stats_period(period)
+    if period == "all":
+        return None
+    now = _dt.datetime.now()
+    if period == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "week":
+        start = (now - _dt.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "month":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif period == "year":
+        start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start.timestamp()
+
+
+def _period_sql_clause(period: str | None, column: str = "started_at") -> tuple[str, list]:
+    start = _period_start(period)
+    if start is None:
+        return "", []
+    return f" AND {column} >= ?", [start]
+
+
+def _stats_range_clause(period: str | None, year: int | None = None, month: int | None = None, column: str = "started_at", months: list[int] | None = None) -> tuple[str, list]:
+    period = normalize_stats_period(period)
+    try:
+        year = int(year) if year not in (None, "", 0) else None
+    except Exception:
+        year = None
+    try:
+        month = int(month) if month not in (None, "", 0) else None
+    except Exception:
+        month = None
+    if month is not None and not 1 <= month <= 12:
+        month = None
+    # Multi-month OR clause (e.g., months=[1,2,3] with a year)
+    if months and year:
+        valid = [m for m in months if isinstance(m, int) and 1 <= m <= 12]
+        if valid:
+            parts, params = [], []
+            for m in valid:
+                s = _dt.datetime(year, m, 1)
+                e = _dt.datetime(year + 1, 1, 1) if m == 12 else _dt.datetime(year, m + 1, 1)
+                parts.append(f"({column} >= ? AND {column} < ?)")
+                params.extend([s.timestamp(), e.timestamp()])
+            return f" AND ({' OR '.join(parts)})", params
+    if year is not None and month is not None:
+        start = _dt.datetime(year, month, 1)
+        if month == 12:
+            end = _dt.datetime(year + 1, 1, 1)
+        else:
+            end = _dt.datetime(year, month + 1, 1)
+        return f" AND {column} >= ? AND {column} < ?", [start.timestamp(), end.timestamp()]
+    if year is not None:
+        start = _dt.datetime(year, 1, 1)
+        end = _dt.datetime(year + 1, 1, 1)
+        return f" AND {column} >= ? AND {column} < ?", [start.timestamp(), end.timestamp()]
+    return _period_sql_clause(period, column)
+
+
+def _effective_listened_ms_sql(prefix: str = "") -> str:
+    p = f"{prefix}." if prefix else ""
+    return f"""
+        CASE
+            WHEN COALESCE({p}listened_ms, 0) > 0 THEN COALESCE({p}listened_ms, 0)
+            WHEN COALESCE({p}duration_ms, 0) > 0 AND COALESCE({p}listened_percent, 0) > 0
+                THEN CAST(COALESCE({p}duration_ms, 0) * COALESCE({p}listened_percent, 0) / 100.0 AS INTEGER)
+            WHEN COALESCE({p}ended_at, 0) > COALESCE({p}started_at, 0)
+                THEN CAST((COALESCE({p}ended_at, 0) - COALESCE({p}started_at, 0)) * 1000 AS INTEGER)
+            WHEN LOWER(COALESCE({p}event_type, '')) = 'complete' THEN COALESCE({p}duration_ms, 0)
+            ELSE 0
+        END
+    """
+
+
+def _track_metadata_fallback(track_key: str, title: str = "", artist: str = "", album: str = "", no_mb: bool = False) -> dict:
+    # no_mb=True skips MusicBrainz HTTP calls — use in stats hot paths to avoid timeouts.
+    # See plans/mindinguflac_per_listen_stats_refactor.md
+    md = get_track_metadata(track_key) or {}
+    lookup = {**md}
+    if title and not lookup.get("title"):
+        lookup["title"] = title
+    if artist and not lookup.get("artist"):
+        lookup["artist"] = artist
+    if album and not lookup.get("album"):
+        lookup["album"] = album
+    if no_mb:
+        genres = []
+    else:
+        genres = _musicbrainz_genres_for_metadata(lookup)
+    if genres:
+        md = {**md, **lookup, "genres": genres, "genre": genres[0]}
+    artwork_url = md.get("artwork_url") or md.get("album_artwork_url") or ""
+    if not artwork_url and track_key:
+        try:
+            conn = _get_conn()
+            row = conn.execute(
+                "SELECT metadata_json FROM listening_events WHERE track_key = ? AND metadata_json IS NOT NULL AND metadata_json != '{}' ORDER BY started_at DESC LIMIT 1",
+                (track_key,),
+            ).fetchone()
+            if row:
+                evt_meta = json.loads(row["metadata_json"] or "{}")
+                artwork_url = evt_meta.get("artwork_url") or evt_meta.get("album_artwork_url") or ""
+        except Exception:
+            pass
+    return {
+        "track_key": track_key,
+        "title": title or md.get("title") or md.get("name") or "",
+        "artist": artist or md.get("artist") or md.get("album_artist") or "",
+        "album": album or md.get("album") or md.get("release_title") or "",
+        "artwork_url": artwork_url,
+        "duration_ms": int(md.get("duration_ms") or 0),
+        "year": md.get("year") or md.get("release_year") or "",
+        "spotify_id": md.get("spotify_id") or track_key,
+        "genre": md.get("genre") or md.get("genres") or "",
+        "genres": md.get("genres") or ([md.get("genre")] if md.get("genre") else []),
+    }
 
 
 def _normalize_key(value: str) -> str:
@@ -776,11 +1302,20 @@ def _normalize_key(value: str) -> str:
 
 def _extract_metadata_bundle(event: dict, track_key: str) -> dict:
     metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    if not metadata and event.get("metadata_json"):
+        try:
+            metadata = json.loads(event["metadata_json"]) or {}
+        except Exception:
+            metadata = {}
     merged = _track_identity_from_metadata(track_key, metadata)
-    for key in ("title", "artist", "album", "source_engine", "source_service", "resolved_url", "duration_ms"):
+    for key in ("title", "artist", "album", "source_engine", "source_service", "resolved_url", "duration_ms", "genre", "genres", "primary_genre", "secondary_genres", "style", "styles"):
         value = event.get(key)
         if value not in (None, "") and not merged.get(key):
             merged[key] = value
+    genres = _musicbrainz_genres_for_metadata(merged)
+    if genres:
+        merged.setdefault("genres", genres)
+        merged.setdefault("genre", genres[0])
     return merged
 
 
@@ -894,9 +1429,23 @@ def _update_affinity_row(
     return get_track_affinity(key) if table == "track_affinity" else (get_artist_affinity(name or key) if table == "artist_affinity" else get_genre_affinity(name or key))
 
 
+_KEY_PREFIXES = {"spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_track_id", "deezer_id", "tidal_id"}
+
+
+def _normalize_track_key(raw: str) -> str:
+    """Strip key-type prefix added by frontend trackKey() (e.g., 'spotify_id:xxx' → 'xxx').
+    Bare IDs (no colon) and text '||' keys pass through unchanged."""
+    raw = raw.strip()
+    if ":" in raw and not raw.startswith("http"):
+        prefix, _, bare = raw.partition(":")
+        if prefix in _KEY_PREFIXES:
+            return bare
+    return raw
+
+
 def save_listening_event(event: dict) -> dict:
     event = dict(event or {})
-    track_key = (event.get("track_key") or "").strip()
+    track_key = _normalize_track_key((event.get("track_key") or "").strip())
     if not track_key:
         return {"ok": False, "error": "Missing track_key"}
     conn = _get_conn()
@@ -957,6 +1506,8 @@ def update_track_affinity(event: dict) -> dict:
     artist = (metadata.get("artist") or event.get("artist") or "").strip()
     title = (metadata.get("title") or event.get("title") or "").strip()
     album = (metadata.get("album") or event.get("album") or "").strip()
+    if _is_unknown_text(title) or _is_unknown_text(artist):
+        return {}
     listened_ms = int(event.get("listened_ms") or 0)
     listened_percent = float(event.get("listened_percent") or 0.0)
     event_type = str(event.get("event_type") or "play").strip().lower()
@@ -1056,7 +1607,7 @@ def update_artist_affinity(event: dict) -> dict:
     conn = _get_conn()
     metadata = _extract_metadata_bundle(event, (event.get("track_key") or "").strip())
     artist = (event.get("artist") or metadata.get("artist") or "").strip()
-    if not artist:
+    if not artist or _is_unknown_text(artist):
         return {}
     from taste_profile import calculate_score_delta, derive_status, normalize_artist_key
     event_type = str(event.get("event_type") or "play").strip().lower()
@@ -1076,20 +1627,26 @@ def update_artist_affinity(event: dict) -> dict:
     total_skips = int(current.get("total_skips") or 0) + (1 if event_type in {"skip", "manual_dislike"} else 0)
     total_completed = int(current.get("total_completed") or 0) + (1 if event_type == "complete" else 0)
     total_listened_ms = int(current.get("total_listened_ms") or 0) + int(event.get("listened_ms") or 0)
+    # Save spotify_artist_id in artist_affinity when available (plans/mindinguflac_per_listen_stats_refactor.md)
+    spotify_artist_id = str((event.get("artist_id") or metadata.get("artist_id") or
+                             event.get("spotify_artist_id") or metadata.get("spotify_artist_id") or "")).strip()
     if row:
         conn.execute("""
             UPDATE artist_affinity
-            SET artist_name = ?, score = ?, status = ?, total_plays = ?, total_skips = ?, total_completed = ?,
+            SET artist_name = ?, spotify_artist_id = COALESCE(NULLIF(?, ''), spotify_artist_id),
+                score = ?, status = ?, total_plays = ?, total_skips = ?, total_completed = ?,
                 total_listened_ms = ?, last_listened_at = ?, updated_at = ?
             WHERE artist_key = ?
-        """, (artist, score, status, total_plays, total_skips, total_completed, total_listened_ms, time.time(), time.time(), key))
+        """, (artist, spotify_artist_id, score, status, total_plays, total_skips, total_completed,
+              total_listened_ms, time.time(), time.time(), key))
     else:
         conn.execute("""
             INSERT INTO artist_affinity
-                (artist_key, artist_name, score, status, total_plays, total_skips, total_completed,
-                 total_listened_ms, last_listened_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (key, artist, score, status, total_plays, total_skips, total_completed, total_listened_ms, time.time(), time.time()))
+                (artist_key, artist_name, spotify_artist_id, score, status,
+                 total_plays, total_skips, total_completed, total_listened_ms, last_listened_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (key, artist, spotify_artist_id, score, status,
+              total_plays, total_skips, total_completed, total_listened_ms, time.time(), time.time()))
     conn.commit()
     return get_artist_affinity(artist) or {}
 
@@ -1135,6 +1692,226 @@ def update_genre_affinity(event: dict) -> dict:
     return get_genre_affinity(genres[0]) or {}
 
 
+# ── Per-listen stats event writers ─────────────────────────────────────────
+# Part of the refactor in plans/mindinguflac_per_listen_stats_refactor.md
+# One row per playback session per track/artist/album/genre (append-only).
+# Stats are computed by SUM over rows, never by overwriting totals.
+
+def _stats_event_counts(event_type: str) -> tuple[int, int, int]:
+    """Return (play_count, complete_count, skip_count) for a given event_type."""
+    is_skip = event_type in {"skip", "manual_dislike"}
+    is_complete = event_type == "complete"
+    is_play = not is_skip
+    return (1 if is_play else 0, 1 if is_complete else 0, 1 if is_skip else 0)
+
+
+def _save_track_listen_stats_event(conn: sqlite3.Connection, event: dict, md: dict) -> None:
+    """Insert one row into track_listen_stats_events for this playback session.
+    Called from process_listening_event (plans/mindinguflac_per_listen_stats_refactor.md)."""
+    event_type = str(event.get("event_type") or "play").lower()
+    play_c, complete_c, skip_c = _stats_event_counts(event_type)
+    conn.execute("""
+        INSERT OR IGNORE INTO track_listen_stats_events
+            (event_id, track_key, title, artist, album, album_key, artwork_url,
+             spotify_track_id, spotify_artist_id, isrc, musicbrainz_recording_id,
+             musicbrainz_artist_id, deezer_track_id, tidal_track_id,
+             listened_ms, duration_ms, listened_percent,
+             play_count, complete_count, skip_count,
+             event_type, event_timestamp, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        str(event.get("event_id") or ""),
+        str(event.get("track_key") or ""),
+        str(md.get("title") or event.get("title") or ""),
+        str(md.get("artist") or event.get("artist") or ""),
+        str(md.get("album") or event.get("album") or ""),
+        _normalize_key(str(md.get("album") or event.get("album") or "")),
+        str(md.get("artwork_url") or ""),
+        str(md.get("spotify_id") or md.get("spotify_track_id") or ""),
+        str(md.get("artist_id") or md.get("spotify_artist_id") or ""),
+        str(md.get("isrc") or ""),
+        str(md.get("musicbrainz_recording_id") or ""),
+        str(md.get("musicbrainz_artist_id") or ""),
+        str(md.get("deezer_id") or md.get("deezer_track_id") or ""),
+        str(md.get("tidal_id") or md.get("tidal_track_id") or ""),
+        int(event.get("listened_ms") or 0),
+        int(md.get("duration_ms") or event.get("duration_ms") or 0),
+        float(event.get("listened_percent") or 0.0),
+        play_c, complete_c, skip_c,
+        event_type,
+        float(event.get("started_at") or event.get("created_at") or time.time()),
+        float(event.get("created_at") or time.time()),
+    ))
+
+
+def _save_artist_listen_stats_events(conn: sqlite3.Connection, event: dict, md: dict) -> None:
+    """Insert one row per artist into artist_listen_stats_events.
+    artist_key = spotify_artist_id when available (avoids same-name collisions),
+    else normalize_artist_key(name). See plans/mindinguflac_per_listen_stats_refactor.md Part 5."""
+    from taste_profile import normalize_artist_key
+    artist_name = str(md.get("artist") or event.get("artist") or "").strip()
+    if not artist_name or _is_unknown_text(artist_name):
+        return
+    event_type = str(event.get("event_type") or "play").lower()
+    play_c, complete_c, skip_c = _stats_event_counts(event_type)
+    spotify_artist_id = str(md.get("artist_id") or md.get("spotify_artist_id") or "").strip()
+    artist_normalized_key = normalize_artist_key(artist_name)
+    # Use Spotify artist ID as key when available — prevents collisions between same-named artists.
+    artist_key = spotify_artist_id if spotify_artist_id else artist_normalized_key
+    album_name = str(md.get("album") or event.get("album") or "")
+    # album_key is composite artist+album for disambiguation (see _save_album_listen_stats_event)
+    album_key = f"{artist_normalized_key}_{_normalize_key(album_name)}" if album_name else artist_normalized_key
+    conn.execute("""
+        INSERT OR IGNORE INTO artist_listen_stats_events
+            (event_id, artist_key, artist_normalized_key, artist_name,
+             spotify_artist_id, musicbrainz_artist_id,
+             track_key, spotify_track_id, isrc, title, album, album_key,
+             listened_ms, play_count, complete_count, skip_count,
+             event_type, event_timestamp, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        str(event.get("event_id") or ""),
+        artist_key, artist_normalized_key, artist_name,
+        spotify_artist_id,
+        str(md.get("musicbrainz_artist_id") or ""),
+        str(event.get("track_key") or ""),
+        str(md.get("spotify_id") or md.get("spotify_track_id") or ""),
+        str(md.get("isrc") or ""),
+        str(md.get("title") or event.get("title") or ""),
+        album_name, album_key,
+        int(event.get("listened_ms") or 0),
+        play_c, complete_c, skip_c,
+        event_type,
+        float(event.get("started_at") or event.get("created_at") or time.time()),
+        float(event.get("created_at") or time.time()),
+    ))
+
+
+def _save_album_listen_stats_event(conn: sqlite3.Connection, event: dict, md: dict) -> None:
+    """Insert one row per album into album_listen_stats_events.
+    album_key = "{artist_normalized_key}_{normalized_album}" composite — prevents collisions
+    when two different artists have same-named albums (e.g., "Greatest Hits").
+    See plans/mindinguflac_per_listen_stats_refactor.md Part 5."""
+    from taste_profile import normalize_artist_key
+    album = str(md.get("album") or event.get("album") or "").strip()
+    if not album or _is_unknown_text(album):
+        return
+    artist_name = str(md.get("artist") or event.get("artist") or "").strip()
+    spotify_artist_id = str(md.get("artist_id") or md.get("spotify_artist_id") or "").strip()
+    artist_normalized_key = normalize_artist_key(artist_name) if artist_name else ""
+    # artist_key = Spotify ID when available; else normalized name
+    artist_key = spotify_artist_id if spotify_artist_id else artist_normalized_key
+    # Composite album_key = artist_key + normalized album name — unique per artist+album pair
+    album_key = f"{artist_key}_{_normalize_key(album)}"
+    event_type = str(event.get("event_type") or "play").lower()
+    play_c, complete_c, skip_c = _stats_event_counts(event_type)
+    conn.execute("""
+        INSERT OR IGNORE INTO album_listen_stats_events
+            (event_id, album_key, album, artist_key, artist_normalized_key, artist_name,
+             spotify_album_id, track_key, spotify_track_id, isrc, title, artwork_url,
+             listened_ms, play_count, complete_count, skip_count,
+             event_type, event_timestamp, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        str(event.get("event_id") or ""),
+        album_key, album,
+        artist_key, artist_normalized_key, artist_name,
+        str(md.get("spotify_album_id") or ""),
+        str(event.get("track_key") or ""),
+        str(md.get("spotify_id") or md.get("spotify_track_id") or ""),
+        str(md.get("isrc") or ""),
+        str(md.get("title") or event.get("title") or ""),
+        str(md.get("artwork_url") or ""),
+        int(event.get("listened_ms") or 0),
+        play_c, complete_c, skip_c,
+        event_type,
+        float(event.get("started_at") or event.get("created_at") or time.time()),
+        float(event.get("created_at") or time.time()),
+    ))
+
+
+def _save_genre_listen_stats_events(conn: sqlite3.Connection, event: dict, md: dict, genres: list[str]) -> None:
+    """Insert one row per genre into genre_listen_stats_events.
+    Called from process_listening_event (plans/mindinguflac_per_listen_stats_refactor.md)."""
+    from taste_profile import normalize_genre_key
+    if not genres:
+        return
+    event_type = str(event.get("event_type") or "play").lower()
+    play_c, complete_c, skip_c = _stats_event_counts(event_type)
+    for genre_name in genres:
+        genre_key = normalize_genre_key(genre_name)
+        if not genre_key:
+            continue
+        conn.execute("""
+            INSERT OR IGNORE INTO genre_listen_stats_events
+                (event_id, genre_key, genre_name, track_key, spotify_track_id, isrc,
+                 title, artist, album, album_key,
+                 listened_ms, play_count, complete_count, skip_count,
+                 event_type, event_timestamp, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            str(event.get("event_id") or ""),
+            genre_key, genre_name,
+            str(event.get("track_key") or ""),
+            str(md.get("spotify_id") or md.get("spotify_track_id") or ""),
+            str(md.get("isrc") or ""),
+            str(md.get("title") or event.get("title") or ""),
+            str(md.get("artist") or event.get("artist") or ""),
+            str(md.get("album") or event.get("album") or ""),
+            _normalize_key(str(md.get("album") or event.get("album") or "")),
+            int(event.get("listened_ms") or 0),
+            play_c, complete_c, skip_c,
+            event_type,
+            float(event.get("started_at") or event.get("created_at") or time.time()),
+            float(event.get("created_at") or time.time()),
+        ))
+
+
+def _backfill_listen_stats_events(conn: sqlite3.Connection) -> int:
+    """Populate per-listen stats tables from existing listening_events rows.
+    Idempotent: uses INSERT OR IGNORE so re-running is safe.
+    Part of plans/mindinguflac_per_listen_stats_refactor.md"""
+    from taste_profile import extract_genres_from_metadata
+    rows = conn.execute("""
+        SELECT event_id, track_key, title, artist, album,
+               started_at, ended_at, listened_ms, duration_ms, listened_percent,
+               event_type, reason, metadata_json, created_at
+        FROM listening_events
+        ORDER BY started_at ASC
+    """).fetchall()
+    added = 0
+    for row in rows:
+        event = dict(row)
+        if not event.get("event_id") or not event.get("track_key"):
+            continue
+        title = str(event.get("title") or "").strip()
+        artist = str(event.get("artist") or "").strip()
+        if _is_unknown_text(title) or _is_unknown_text(artist):
+            continue
+        md: dict = {}
+        if event.get("metadata_json"):
+            try:
+                md = json.loads(event["metadata_json"]) or {}
+            except Exception:
+                md = {}
+        if not md.get("title"):
+            md["title"] = title
+        if not md.get("artist"):
+            md["artist"] = artist
+        if not md.get("album"):
+            md["album"] = event.get("album") or ""
+        genres = _musicbrainz_genres_for_metadata(md)
+        _save_track_listen_stats_event(conn, event, md)
+        _save_artist_listen_stats_events(conn, event, md)
+        _save_album_listen_stats_event(conn, event, md)
+        _save_genre_listen_stats_events(conn, event, md, genres)
+        added += 1
+        if added % 50 == 0:
+            conn.commit()
+    conn.commit()
+    return added
+
+
 def process_listening_event(event: dict) -> dict:
     event = dict(event or {})
     track_key = (event.get("track_key") or "").strip()
@@ -1157,9 +1934,24 @@ def process_listening_event(event: dict) -> dict:
     saved = save_listening_event(event)
     if not saved or saved.get("ok") is False:
         return saved
+    # update_genre_affinity calls _extract_metadata_bundle which includes MusicBrainz lookup
+    # for genres; reuse its metadata to also populate the per-listen stats tables.
+    # See plans/mindinguflac_per_listen_stats_refactor.md
     affinity = update_track_affinity({**event, "created_at": saved.get("created_at"), "event_id": saved.get("event_id")})
     artist_aff = update_artist_affinity(event)
     genre_aff = update_genre_affinity(event)
+    # Write per-listen stats event rows (append-only, one row per session per dimension).
+    try:
+        from taste_profile import extract_genres_from_metadata
+        stats_md = _extract_metadata_bundle(event, track_key)
+        genres_list = extract_genres_from_metadata(stats_md)
+        _save_track_listen_stats_event(conn, saved, stats_md)
+        _save_artist_listen_stats_events(conn, saved, stats_md)
+        _save_album_listen_stats_event(conn, saved, stats_md)
+        _save_genre_listen_stats_events(conn, saved, stats_md, genres_list)
+        conn.commit()
+    except Exception:
+        pass
     return {
         "ok": True,
         "event": saved,
@@ -1226,7 +2018,7 @@ def get_recently_recovered_tracks(limit: int = 50) -> list[dict]:
 def get_listened_time(track_key: str | None, artist: str | None, period: str) -> dict:
     conn = _get_conn()
     now = time.time()
-    period = (period or "all").lower()
+    period = normalize_stats_period(period)
     if period == "today":
         start, end = _same_day_bounds(now)
     elif period == "week":
@@ -1259,6 +2051,322 @@ def get_listened_time(track_key: str | None, artist: str | None, period: str) ->
         "duration_ms": int(row["duration_ms"] or 0) if row else 0,
         "events": int(row["events"] or 0) if row else 0,
     }
+
+
+def get_stats_summary(period: str, year: int | None = None, month: int | None = None, months: list[int] | None = None) -> dict:
+    conn = _get_conn()
+    period = normalize_stats_period(period)
+    clause, params = _stats_range_clause(period, year=year, month=month, months=months)
+    row = conn.execute(f"""
+        SELECT
+            COALESCE(SUM({_effective_listened_ms_sql()}), 0) AS total_listened_ms,
+            COUNT(*) AS tracks_played,
+            COUNT(DISTINCT track_key) AS tracks_heard,
+            COUNT(DISTINCT artist) AS artists_heard,
+            COUNT(DISTINCT album) AS albums_heard
+        FROM listening_events
+        WHERE 1=1{clause}
+    """, params).fetchone()
+    top_track = conn.execute(f"""
+        SELECT track_key, title, artist, album,
+               COALESCE(SUM({_effective_listened_ms_sql()}), 0) AS listened_ms,
+               COUNT(*) AS plays
+        FROM listening_events
+        WHERE 1=1{clause}
+        GROUP BY track_key, title, artist, album
+        ORDER BY listened_ms DESC, plays DESC
+        LIMIT 1
+    """, params).fetchone()
+    top_artist = conn.execute(f"""
+        SELECT artist AS artist_name,
+               COALESCE(SUM({_effective_listened_ms_sql()}), 0) AS listened_ms,
+               COUNT(*) AS plays
+        FROM listening_events
+        WHERE 1=1{clause}
+        GROUP BY artist
+        ORDER BY listened_ms DESC, plays DESC
+        LIMIT 1
+    """, params).fetchone()
+    top_album = conn.execute(f"""
+        SELECT album, artist,
+               COALESCE(SUM({_effective_listened_ms_sql()}), 0) AS listened_ms,
+               COUNT(*) AS plays
+        FROM listening_events
+        WHERE 1=1{clause}
+        GROUP BY album, artist
+        ORDER BY listened_ms DESC, plays DESC
+        LIMIT 1
+    """, params).fetchone()
+    return {
+        "period": period,
+        "total_listened_ms": int((row["total_listened_ms"] if row else 0) or 0),
+        "tracks_played": int((row["tracks_played"] if row else 0) or 0),
+        "artists_heard": int((row["artists_heard"] if row else 0) or 0),
+        "albums_heard": int((row["albums_heard"] if row else 0) or 0),
+        "top_artist": dict(top_artist) if top_artist else {},
+        "top_album": dict(top_album) if top_album else {},
+        "top_track": dict(top_track) if top_track else {},
+    }
+
+
+def get_top_listened_tracks(period: str, limit: int = 10, offset: int = 0, year: int | None = None, month: int | None = None, months: list[int] | None = None) -> dict:
+    conn = _get_conn()
+    period = normalize_stats_period(period)
+    clause, params = _stats_range_clause(period, year=year, month=month, months=months)
+    rows = conn.execute(f"""
+        SELECT track_key, title, artist, album,
+               COALESCE(SUM({_effective_listened_ms_sql()}), 0) AS listened_ms,
+               COUNT(*) AS plays,
+               SUM(CASE WHEN event_type = 'complete' THEN 1 ELSE 0 END) AS completed,
+               SUM(CASE WHEN event_type IN ('skip', 'manual_dislike') THEN 1 ELSE 0 END) AS skips
+        FROM listening_events
+        WHERE 1=1{clause}
+        GROUP BY track_key, title, artist, album
+        ORDER BY listened_ms DESC, plays DESC, title ASC
+        LIMIT ? OFFSET ?
+    """, params + [int(limit), int(offset)]).fetchall()
+    total_row = conn.execute(f"""
+        SELECT COUNT(DISTINCT track_key) AS total
+        FROM listening_events
+        WHERE 1=1{clause}
+    """, params).fetchone()
+    items = []
+    for row in rows:
+        track_key = str(row["track_key"] or "")
+        # no_mb=True: skip MusicBrainz HTTP calls in this hot path (plans/mindinguflac_per_listen_stats_refactor.md)
+        meta = _track_metadata_fallback(track_key, row["title"] or "", row["artist"] or "", row["album"] or "", no_mb=True)
+        aff = get_track_affinity(track_key) or {}
+        items.append({
+            "track_key": track_key,
+            "title": meta["title"],
+            "artist": meta["artist"],
+            "album": meta["album"],
+            "artwork_url": meta["artwork_url"],
+            "listened_ms": int(row["listened_ms"] or 0),
+            "plays": int(row["plays"] or 0),
+            "completed": int(row["completed"] or 0),
+            "skips": int(row["skips"] or 0),
+            "taste_score": float(aff.get("score") or 0.0),
+            "status": aff.get("status") or "neutral",
+        })
+    return {"period": period, "items": items, "total": int((total_row["total"] if total_row else 0) or 0)}
+
+
+def get_top_listened_artists(period: str, limit: int = 10, offset: int = 0, year: int | None = None, month: int | None = None, months: list[int] | None = None) -> dict:
+    # Queries artist_listen_stats_events (Spotify ID keys) — plans/mindinguflac_per_listen_stats_refactor.md Part 3
+    conn = _get_conn()
+    period = normalize_stats_period(period)
+    clause, params = _stats_range_clause(period, year=year, month=month, column="event_timestamp", months=months)
+    rows = conn.execute(f"""
+        SELECT artist_key, spotify_artist_id,
+               MAX(artist_name) AS artist_name,
+               COALESCE(SUM(listened_ms), 0) AS listened_ms,
+               SUM(play_count) AS plays,
+               SUM(complete_count) AS completed,
+               SUM(skip_count) AS skips,
+               MAX(track_key) AS sample_track_key
+        FROM artist_listen_stats_events
+        WHERE 1=1{clause}
+        GROUP BY artist_key
+        ORDER BY listened_ms DESC, plays DESC, artist_name ASC
+        LIMIT ? OFFSET ?
+    """, params + [int(limit), int(offset)]).fetchall()
+    total_row = conn.execute(f"""
+        SELECT COUNT(DISTINCT artist_key) AS total
+        FROM artist_listen_stats_events
+        WHERE 1=1{clause}
+    """, params).fetchone()
+    items = []
+    for row in rows:
+        artist_name = row["artist_name"] or ""
+        # no_mb=True: skip MusicBrainz HTTP calls in this hot path (plans/mindinguflac_per_listen_stats_refactor.md)
+        meta = _track_metadata_fallback(
+            str(row["sample_track_key"] or ""), artist_name, artist_name, "", no_mb=True,
+        ) if row["sample_track_key"] else {}
+        aff = get_artist_affinity(artist_name) or {}
+        items.append({
+            "artist_key": row["artist_key"] or "",
+            "spotify_artist_id": row["spotify_artist_id"] or "",
+            "artist_name": artist_name,
+            "artwork_url": meta.get("artwork_url") or "",
+            "listened_ms": int(row["listened_ms"] or 0),
+            "plays": int(row["plays"] or 0),
+            "completed": int(row["completed"] or 0),
+            "skips": int(row["skips"] or 0),
+            "taste_score": float(aff.get("score") or 0.0),
+            "status": aff.get("status") or "neutral",
+        })
+    return {"period": period, "items": items, "total": int((total_row["total"] if total_row else 0) or 0)}
+
+
+def get_top_listened_albums(period: str, limit: int = 10, offset: int = 0, year: int | None = None, month: int | None = None, months: list[int] | None = None) -> dict:
+    # Queries album_listen_stats_events (composite artist+album keys) — plans/mindinguflac_per_listen_stats_refactor.md Part 3
+    conn = _get_conn()
+    period = normalize_stats_period(period)
+    clause, params = _stats_range_clause(period, year=year, month=month, column="event_timestamp", months=months)
+    rows = conn.execute(f"""
+        SELECT album_key, artist_key,
+               MAX(album) AS album, MAX(artist_name) AS artist,
+               MAX(artwork_url) AS artwork_url,
+               COALESCE(SUM(listened_ms), 0) AS listened_ms,
+               SUM(play_count) AS plays,
+               SUM(complete_count) AS completed,
+               SUM(skip_count) AS skips,
+               COUNT(DISTINCT track_key) AS tracks_heard
+        FROM album_listen_stats_events
+        WHERE 1=1{clause}
+        GROUP BY album_key
+        ORDER BY listened_ms DESC, plays DESC, album ASC
+        LIMIT ? OFFSET ?
+    """, params + [int(limit), int(offset)]).fetchall()
+    total_row = conn.execute(f"""
+        SELECT COUNT(DISTINCT album_key) AS total
+        FROM album_listen_stats_events
+        WHERE 1=1{clause}
+    """, params).fetchone()
+    items = []
+    for row in rows:
+        plays = int(row["plays"] or 0)
+        completed = int(row["completed"] or 0)
+        items.append({
+            "album_key": row["album_key"] or "",
+            "artist_key": row["artist_key"] or "",
+            "album": row["album"] or "",
+            "artist": row["artist"] or "",
+            "artwork_url": row["artwork_url"] or "",
+            "listened_ms": int(row["listened_ms"] or 0),
+            "plays": plays,
+            "tracks_heard": int(row["tracks_heard"] or 0),
+            "completed": completed,
+            "skips": int(row["skips"] or 0),
+            "completion_rate": (completed / max(plays, 1)) * 100.0,
+        })
+    return {"period": period, "items": items, "total": int((total_row["total"] if total_row else 0) or 0)}
+
+
+_MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+_DAY_ABBR   = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+
+
+def get_listening_over_time(period: str, bucket: str | None = None, year: int | None = None,
+                             month: int | None = None, months: list[int] | None = None) -> dict:
+    conn = _get_conn()
+    period = normalize_stats_period(period)
+    clause, params = _stats_range_clause(period, year=year, month=month, months=months)
+    rows = conn.execute(f"""
+        SELECT started_at, {_effective_listened_ms_sql()} AS effective_listened_ms
+        FROM listening_events
+        WHERE 1=1{clause}
+        ORDER BY started_at ASC
+    """, params).fetchall()
+    bucket = (bucket or "").strip().lower()
+    multi_month = months and len(months) > 1
+    if bucket not in {"hour", "day", "month", "year"}:
+        if period == "today":
+            bucket = "hour"
+        elif period == "week":
+            bucket = "day"
+        elif period == "month" or (months and len(months) == 1):
+            bucket = "day"
+        elif multi_month:
+            bucket = "month"
+        elif period == "year":
+            bucket = "month"
+        else:
+            bucket = "month"
+    # Determine whether to show year in month labels (when spanning multiple years or all-time)
+    show_year_in_month = period not in {"year", "month", "week", "today"} and not (months and year)
+    items: dict[str, dict] = {}
+    for row in rows:
+        ts = float(row["started_at"] or 0)
+        lt = time.localtime(ts)
+        if bucket == "hour":
+            label = f"{lt.tm_hour:02d}:00"
+        elif bucket == "day":
+            if period == "week":
+                label = _DAY_ABBR[lt.tm_wday]
+            else:
+                label = f"{_MONTH_ABBR[lt.tm_mon - 1]} {lt.tm_mday}"
+        elif bucket == "month":
+            if show_year_in_month:
+                label = f"{_MONTH_ABBR[lt.tm_mon - 1]} {lt.tm_year}"
+            else:
+                label = _MONTH_ABBR[lt.tm_mon - 1]
+        else:
+            label = f"{lt.tm_year:04d}"
+        item = items.setdefault(label, {"label": label, "listened_ms": 0, "plays": 0})
+        item["listened_ms"] += int(row["effective_listened_ms"] or 0)
+        item["plays"] += 1
+    return {"period": period, "bucket": bucket, "items": list(items.values())}
+
+
+def get_top_genres(period: str, limit: int = 10, offset: int = 0, year: int | None = None, month: int | None = None, months: list[int] | None = None) -> dict:
+    # Per plans/mindinguflac_per_listen_stats_refactor.md:
+    # Phase 1: use genre_listen_stats_events when populated (period-accurate).
+    # Phase 0 (now): genre_listen_stats_events may be empty; fall back to genre_affinity
+    # which holds cumulative all-time data. This shows real genre data even before backfill completes.
+    conn = _get_conn()
+    period = normalize_stats_period(period)
+    clause, params = _stats_range_clause(period, year=year, month=month, months=months)
+
+    # Try period-specific data from genre_listen_stats_events first
+    try:
+        period_rows = conn.execute(f"""
+            SELECT genre_key, genre_name,
+                   SUM(listened_ms) AS listened_ms,
+                   SUM(play_count) AS plays,
+                   SUM(complete_count) AS completed,
+                   SUM(skip_count) AS skips
+            FROM genre_listen_stats_events
+            WHERE 1=1{clause.replace('started_at', 'event_timestamp')}
+            GROUP BY genre_key, genre_name
+            ORDER BY listened_ms DESC, plays DESC
+        """, params).fetchall()
+    except Exception:
+        period_rows = []
+
+    if period_rows:
+        items = []
+        for row in period_rows:
+            aff = get_genre_affinity(row["genre_name"] or row["genre_key"] or "") or {}
+            items.append({
+                "genre_key": row["genre_key"],
+                "genre": row["genre_name"] or row["genre_key"],
+                "listened_ms": int(row["listened_ms"] or 0),
+                "plays": int(row["plays"] or 0),
+                "completed": int(row["completed"] or 0),
+                "skips": int(row["skips"] or 0),
+                "affinity_score": float(aff.get("score") or 0.0),
+                "taste_score": float(aff.get("score") or 0.0),
+                "status": aff.get("status") or "neutral",
+            })
+        total = len(items)
+        return {"period": period, "items": items[offset:offset + limit], "total": total}
+
+    # Fallback: genre_affinity has cumulative all-time genre data (populated by backfill).
+    # It is not period-filtered but shows real genre data.
+    # Once genre_listen_stats_events backfill completes, this path won't be reached.
+    aff_rows = conn.execute("""
+        SELECT genre_key, genre_name, score, total_plays, total_listened_ms, total_skips, total_completed
+        FROM genre_affinity
+        ORDER BY total_listened_ms DESC, score DESC
+        LIMIT ? OFFSET ?
+    """, [limit, offset]).fetchall()
+    total_row = conn.execute("SELECT COUNT(*) AS c FROM genre_affinity").fetchone()
+    items = []
+    for row in aff_rows:
+        items.append({
+            "genre_key": row["genre_key"],
+            "genre": row["genre_name"] or row["genre_key"],
+            "listened_ms": int(row["total_listened_ms"] or 0),
+            "plays": int(row["total_plays"] or 0),
+            "completed": int(row["total_completed"] or 0),
+            "skips": int(row["total_skips"] or 0),
+            "affinity_score": float(row["score"] or 0.0),
+            "taste_score": float(row["score"] or 0.0),
+            "status": "neutral",
+        })
+    return {"period": period, "items": items, "total": int((total_row["c"] if total_row else 0) or 0)}
 
 
 def get_taste_score_for_track(track_key: str) -> float:

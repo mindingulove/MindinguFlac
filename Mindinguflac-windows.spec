@@ -15,7 +15,6 @@ hiddenimports = [
     'music_metadata',
     'isrc_resolver',
     'discogs_metadata',
-    'spotify_web_metadata',
     'backend_torrent',
     'backend_spotiflac',
     'backend_tidal_hifi',

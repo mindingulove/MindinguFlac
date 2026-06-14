@@ -15,7 +15,11 @@ claude.md
 build/
 dist/
 *.spec
-Mindinguflac-macos-arm64.zip\n# Build artifacts\nMindinguflac-macos-arm64.zip\ndist/\nbuild/\n*.spec
+Mindinguflac-macos-arm64.zip
 !Mindinguflac.spec
 !Mindinguflac-windows.spec
 test_output/
+plans/
+debug_*.py
+run_stats_backfill*.py
+torrent_catalog.json
