@@ -80,7 +80,15 @@ private final class NowPlayingBridge {
             if let newArt = message.artwork_url, newArt != self.artworkURL {
                 self.artworkURL = newArt
                 self.artworkImage = nil
-                if let parsed = URL(string: newArt) {
+                
+                let artURL: URL?
+                if newArt.hasPrefix("http") {
+                    artURL = URL(string: newArt)
+                } else {
+                    artURL = URL(string: newArt, relativeTo: baseURL)
+                }
+
+                if let parsed = artURL {
                     URLSession.shared.dataTask(with: parsed) { [weak self] data, _, _ in
                         guard let self = self, let data = data, let image = NSImage(data: data) else { return }
                         DispatchQueue.main.async {

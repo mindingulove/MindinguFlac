@@ -2414,6 +2414,7 @@ function seekAfterMetadata(audio, position) {
 
 async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library", startAt = 0) {
   if (requestId !== state.playbackRequestId) return;
+  console.log(`[Player] playFromLibraryPath: ${filePath} (startAt: ${startAt})`);
   state.currentLibraryPath = filePath;
   state.pendingNativeStartAt = 0;
   const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}`;
@@ -2457,6 +2458,7 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
 
 async function resumeBrowserAudioFromStableSource(audio) {
   if (!audio) return;
+  console.log("[Player] resumeBrowserAudioFromStableSource, current src:", audio.src);
   state.manualPauseRequested = false;
   const hasMissingSource = !audio.src || audio.src === window.location.href;
   const shouldUseFinishedFile = state.currentLibraryPath && (
@@ -2481,7 +2483,14 @@ async function resumeBrowserAudioFromStableSource(audio) {
   state.autoplayWanted = true;
   audio.play().catch((error) => {
     console.error("[Player] Play failed:", error);
+    const key = trackKey(state.currentTrack);
     if (state.currentTrack && error.name !== "NotAllowedError" && error.name !== "AbortError") {
+      if (state.lastAutoRetryKey === key) {
+          console.warn("[Player] Already tried re-resolving this track, stopping loop.");
+          setPlayerStatus("Playback failed", state.currentTrack);
+          return;
+      }
+      state.lastAutoRetryKey = key;
       console.log("[Player] Attempting to re-resolve track after play failure...");
       selectMusicItem(state.currentTrack, "stream", null, state.queueContext);
     } else if (state.currentTrack) {
@@ -2683,6 +2692,7 @@ function prepareSelectedTrackUi(track, status = "Opening stream...") {
   audio.pause();
   audio.removeAttribute("src");
   audio.src = "";
+  state.currentStreamUrl = "";
   try {
     audio.load();
   } catch (e) {}
@@ -5266,8 +5276,6 @@ function absoluteUrl(url) {
 }
 
 function _callNowPlaying(fnName, arg) {
-  if (!state.nativeAudio.active && fnName !== "clear_now_playing") return;
-  
   if (fnName === "set_now_playing") {
     api("/api/now_playing", { method: "POST", body: JSON.stringify(arg) }).catch(() => {});
   } else if (fnName === "set_playback_state") {
@@ -5305,40 +5313,39 @@ function updateMediaSession(track) {
     ? state.nativeAudio.position
     : (($("audioPlayer") && isFinite($("audioPlayer").currentTime)) ? $("audioPlayer").currentTime : 0);
 
-  if (state.nativeAudio.active) {
-    // Native audio output: use the Swift helper, clear the browser media session
+  const payload = {
+    title: track.title || "Unknown",
+    artist: track.artist || "",
+    album: track.album || "",
+    duration: durSec,
+    position,
+    artwork_url: art,
+  };
+
+  if (state.settings?.native_now_playing_active) {
+    // If the desktop native helper is active, use it as the primary source.
+    _callNowPlaying("set_now_playing", payload);
+    // Clear browser media session to avoid duplicate widgets on macOS.
     if ("mediaSession" in navigator) {
       navigator.mediaSession.metadata = null;
-      navigator.mediaSession.playbackState = "none";
     }
-    _callNowPlaying("set_now_playing", {
-      title: track.title || "Unknown",
-      artist: track.artist || "",
-      album: track.album || "",
-      duration: durSec,
-      position,
-      artwork_url: art,
+  } else if ("mediaSession" in navigator) {
+    // Fallback for standard browsers: use navigator.mediaSession
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: payload.title,
+      artist: payload.artist,
+      album: payload.album,
+      artwork: art ? [
+        { src: art, sizes: "96x96", type: "image/png" },
+        { src: art, sizes: "128x128", type: "image/png" },
+        { src: art, sizes: "256x256", type: "image/png" },
+        { src: art, sizes: "512x512", type: "image/png" },
+      ] : []
     });
-  } else {
-    // Browser audio output: use the browser media session, clear the Swift helper
-    _callNowPlaying("clear_now_playing");
-    if ("mediaSession" in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: track.title || "Unknown",
-        artist: track.artist || "",
-        album: track.album || "",
-        artwork: art ? [
-          { src: art, sizes: "96x96", type: "image/png" },
-          { src: art, sizes: "128x128", type: "image/png" },
-          { src: art, sizes: "256x256", type: "image/png" },
-          { src: art, sizes: "512x512", type: "image/png" },
-        ] : []
-      });
-      navigator.mediaSession.setActionHandler('play', () => $("playPause")?.click());
-      navigator.mediaSession.setActionHandler('pause', () => $("playPause")?.click());
-      navigator.mediaSession.setActionHandler('previoustrack', () => $("btnPrev")?.click());
-      navigator.mediaSession.setActionHandler('nexttrack', () => $("btnNext")?.click());
-    }
+    navigator.mediaSession.setActionHandler('play', () => $("playPause")?.click());
+    navigator.mediaSession.setActionHandler('pause', () => $("playPause")?.click());
+    navigator.mediaSession.setActionHandler('previoustrack', () => $("btnPrev")?.click());
+    navigator.mediaSession.setActionHandler('nexttrack', () => $("btnNext")?.click());
   }
 }
 
@@ -5407,8 +5414,8 @@ function bindPlayer() {
     api("/api/dock/playing-state", { method: "POST", body: JSON.stringify({ playing: !audio.paused }) }).catch(() => {});
     if (audio.paused) {
       if (state.currentTrack) {
-        _callNowPlaying("set_now_playing", { position: audio.currentTime });
         _callNowPlaying("set_playback_state", 2);
+        updateMediaSession(state.currentTrack);
       } else {
         _callNowPlaying("clear_now_playing");
       }
@@ -5483,6 +5490,8 @@ function bindPlayer() {
     if (state.currentTrack) {
         const isCache = isLibraryStreamUrl(state.currentStreamUrl);
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
+        _callNowPlaying("set_playback_state", 1);
+        updateMediaSession(state.currentTrack);
     }
   };
   audio.onerror = () => {
@@ -5531,6 +5540,14 @@ function bindPlayer() {
         console.error("[Player] Media error:", error.code, error.message);
         // Error codes: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED
         if (error.code === 2 || error.code === 3) {
+            const key = trackKey(state.currentTrack);
+            if (state.lastAutoRetryKey === key) {
+                console.warn("[Player] Already tried re-resolving this track, stopping loop.");
+                setPlayerStatusIcon("error");
+                setPlayerStatus(`Playback failed (${error.code})`, state.currentTrack);
+                return;
+            }
+            state.lastAutoRetryKey = key;
             console.log("[Player] Fatal media error, attempting to re-resolve track...");
             selectMusicItem(state.currentTrack, "stream", null, state.queueContext);
         } else {
