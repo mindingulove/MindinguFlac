@@ -1,4 +1,4 @@
 # TODO List
 
+- [ ] Smart Shuffle
 - [ ] Implement Lyrics Interface
-- [ ] Add Spotify-style track suggestions

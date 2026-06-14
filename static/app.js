@@ -6513,15 +6513,17 @@ async function boot() {
     if (!prev || !next) return;
     const SCROLL_BY = 160;
     const _update = () => {
-      const canScrollLeft = row.scrollLeft > 4;
-      const canScrollRight = row.scrollLeft < row.scrollWidth - row.clientWidth - 4;
+      const canScrollLeft = row.scrollLeft > 1;
+      const canScrollRight = row.scrollWidth - row.clientWidth - row.scrollLeft > 1;
       prev.hidden = !canScrollLeft;
       next.hidden = !canScrollRight;
     };
     row.addEventListener("scroll", _update, { passive: true });
+    window.addEventListener("resize", _update, { passive: true });
     prev.onclick = () => { row.scrollBy({ left: -SCROLL_BY, behavior: "smooth" }); };
     next.onclick = () => { row.scrollBy({ left: SCROLL_BY, behavior: "smooth" }); };
-    _update();
+    // Defer initial check until after layout is complete
+    requestAnimationFrame(_update);
   })();
 
   document.querySelectorAll("[data-view-jump]").forEach(el => {

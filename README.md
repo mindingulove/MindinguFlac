@@ -13,26 +13,26 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - Stats month picker rebuilt as a proper dropdown overlay; home pill shows a house icon.
 - Fixed SQLite database lock storms caused by background migration threads cascading on startup.
 
-## v1.0.0 Preview
+## v1.1.0 Preview
 
 <p align="center">
-  <img src="docs/screenshots/sidebar_about_tour.png" width="800" alt="Artist sidebar with about, credits, and tour dates">
-  <br><i>Rich artist sidebar with biography, credits, live tour dates, and queue context</i>
+  <img src="docs/screenshots/stats_1.png" width="800" alt="Your Listening Stats with period picker and monthly breakdown">
+  <br><i>Personal listening stats with time-based filtering and listening-over-time chart</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/sidebar_queue.png" width="800" alt="Queue and now playing panel">
-  <br><i>Queue-first playback with now-playing context and upcoming tracks</i>
+  <img src="docs/screenshots/stats_2.png" width="800" alt="Top listened tracks and top listened artists">
+  <br><i>Top tracks ranked by play count and listened time, with top artists discovery</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/settings_hyperbor_ai_place.png" width="800" alt="Settings screen with download engine, AI advisor, and tour options">
-  <br><i>Settings for download engines, AI advisor backends, tour source, and location</i>
+  <img src="docs/screenshots/recomended-right_click_new_sidebar.png" width="800" alt="Playlist with Recommended section and context menu">
+  <br><i>Playlist recommendations based on listening taste with quick-action context menu</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/cache_every_start_close.png" width="800" alt="Cache maintenance with cleanup schedule and live cache activity">
-  <br><i>Cache maintenance: cleanup schedule (e.g. on every close or restart) and live cache activity</i>
+  <img src="docs/screenshots/stats_3.png" width="800" alt="Top listened albums and top genres with bar chart">
+  <br><i>Genre affinity chart and top albums derived from real listening history</i>
 </p>
 
 ## Core Philosophy
