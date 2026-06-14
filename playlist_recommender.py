@@ -39,15 +39,32 @@ def _track_key(item: dict) -> str:
     return f"{artist}||{title}"
 
 
+def _canonical_track_signature(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+    artist = _normalize_text(item.get("artist") or item.get("metadata", {}).get("artist") or "")
+    title = _normalize_text(item.get("title") or item.get("name") or item.get("metadata", {}).get("title") or "")
+    title = re.sub(r"\s*[-–—]?\s*(remaster(ed)?|remix|live|radio edit|edit|version|mono|stereo|deluxe|anniversary|expanded edition)(?:\s+\d{4})?\s*$", "", title, flags=re.I).strip()
+    title = re.sub(r"\s*\((remaster(ed)?|remix|live|radio edit|edit|version|mono|stereo|deluxe|anniversary|expanded edition)(?:\s+\d{4})?\)\s*$", "", title, flags=re.I).strip()
+    if not artist and not title:
+        return ""
+    return f"{artist}||{title}"
+
+
 def _candidate_to_item(item: dict, source: str = "local_cache") -> dict:
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    plays = item.get("plays")
+    if plays is None:
+        plays = metadata.get("plays")
     candidate = {
         "track_key": _track_key(item),
+        "canonical_key": _canonical_track_signature(item),
         "title": item.get("title") or item.get("name") or metadata.get("title") or "",
         "artist": item.get("artist") or metadata.get("artist") or "",
         "album": item.get("album") or metadata.get("album") or "",
         "artwork_url": item.get("artwork_url") or metadata.get("artwork_url") or "",
         "duration_ms": int(item.get("duration_ms") or metadata.get("duration_ms") or 0),
+        "plays": int(plays or 0),
         "metadata": metadata,
         "source": source,
         "artist_id": item.get("artist_id") or metadata.get("artist_id") or "",
@@ -65,6 +82,18 @@ def get_playlist_track_keys(playlist_id: str) -> set[str]:
     keys = set()
     for track in playlist.get("tracks") or []:
         key = _track_key(track)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def get_playlist_track_signatures(playlist_id: str) -> set[str]:
+    playlist = next((pl for pl in _load_playlists() if pl.get("id") == playlist_id), None)
+    if not playlist:
+        return set()
+    keys = set()
+    for track in playlist.get("tracks") or []:
+        key = _canonical_track_signature(track)
         if key:
             keys.add(key)
     return keys
@@ -91,6 +120,7 @@ def build_playlist_seed_profile(playlist_id: str) -> dict:
     years: list[int] = []
     title_words: set[str] = set()
     track_keys: set[str] = set()
+    track_signatures: set[str] = set()
 
     for track in tracks:
         if not isinstance(track, dict):
@@ -98,6 +128,9 @@ def build_playlist_seed_profile(playlist_id: str) -> dict:
         key = _track_key(track)
         if key:
             track_keys.add(key)
+        sig = _canonical_track_signature(track)
+        if sig:
+            track_signatures.add(sig)
         artist = _normalize_text(track.get("artist") or track.get("name") or "")
         album = _normalize_text(track.get("album") or "")
         if artist:
@@ -144,12 +177,13 @@ def build_playlist_seed_profile(playlist_id: str) -> dict:
         "decade": decade,
         "title_words": sorted(title_words),
         "track_keys": track_keys,
+        "track_signatures": track_signatures,
         "is_artist_specific": is_artist_specific,
     }
 
 
 def _expand_catalog_items() -> list[dict]:
-    cfg = load_config()
+    cfg = load_config(app_data_dir() / "config.json")
     catalog = discover_catalog(cfg)
     out: list[dict] = []
     for key in ("personal_tracks", "recent_tracks", "top_tracks", "artists", "albums"):
@@ -215,7 +249,6 @@ def score_recommendation_candidate(candidate: dict, seed_profile: dict, taste_pr
                 score += 2.0
 
     track_key = candidate.get("track_key") or _track_key(candidate)
-    score += float(db.get_taste_score_for_track(track_key) or 0.0) * 0.8
     score += float(db.get_taste_score_for_artist(candidate.get("artist") or "") or 0.0) * 0.35
     if genres:
         for genre in genres:
@@ -238,11 +271,17 @@ def score_recommendation_candidate(candidate: dict, seed_profile: dict, taste_pr
     return score
 
 
-def _hard_excluded(candidate: dict, playlist_keys: set[str], queue_keys: set[str], exclude_track_keys: set[str], session_id: str | None) -> bool:
+def _hard_excluded(candidate: dict, playlist_keys: set[str], playlist_signatures: set[str], queue_keys: set[str], exclude_track_keys: set[str], session_id: str | None) -> bool:
     key = candidate.get("track_key") or _track_key(candidate)
+    signature = candidate.get("canonical_key") or _canonical_track_signature(candidate)
     if not key:
         return True
     if key in playlist_keys or key in queue_keys or key in exclude_track_keys:
+        return True
+    if signature and (signature in playlist_signatures or signature in exclude_track_keys):
+        return True
+    track_affinity = db.get_track_affinity(key) or {}
+    if track_affinity and track_affinity.get("status") == "liked":
         return True
     if db.is_track_taste_hard_blacklisted(key):
         return True
@@ -268,7 +307,12 @@ def weighted_random_sample(candidates: list[dict], limit: int, session_id: str |
         weights = [max(float(item.get("score") or 0.0) - min_score + 0.01, 0.01) for item in pool]
         selected = rng.choices(pool, weights=weights, k=1)[0]
         chosen.append(selected)
-        pool = [item for item in pool if item.get("track_key") != selected.get("track_key")]
+        selected_signature = selected.get("canonical_key") or _canonical_track_signature(selected)
+        pool = [
+            item for item in pool
+            if item.get("track_key") != selected.get("track_key")
+            and (not selected_signature or (item.get("canonical_key") or _canonical_track_signature(item)) != selected_signature)
+        ]
     return chosen
 
 
@@ -312,8 +356,9 @@ def generate_playlist_recommendations(
 ) -> dict:
     seed_profile = build_playlist_seed_profile(playlist_id)
     playlist_keys = set(seed_profile.get("track_keys") or set())
+    playlist_signatures = set(seed_profile.get("track_signatures") or set())
     queue_keys = get_current_queue_track_keys(queue_track_keys)
-    excluded = set(exclude_track_keys or set()) | playlist_keys | queue_keys
+    excluded = set(exclude_track_keys or set()) | playlist_keys | playlist_signatures | queue_keys
     if refresh or not session_id:
         session_id = str(uuid.uuid4())
         db.save_playlist_recommendation_session(session_id, playlist_id)
@@ -332,7 +377,7 @@ def generate_playlist_recommendations(
     for raw in _expand_catalog_items():
         candidate = dict(raw)
         candidate["track_key"] = candidate.get("track_key") or _track_key(candidate)
-        if _hard_excluded(candidate, playlist_keys, queue_keys, excluded, session_id):
+        if _hard_excluded(candidate, playlist_keys, playlist_signatures, queue_keys, excluded, session_id):
             continue
         candidate["score"] = score_recommendation_candidate(candidate, seed_profile, taste_snapshot)
         if candidate["score"] <= -50:
@@ -353,6 +398,7 @@ def generate_playlist_recommendations(
             "album": candidate.get("album", ""),
             "artwork_url": candidate.get("artwork_url", ""),
             "duration_ms": int(candidate.get("duration_ms") or 0),
+            "plays": int(candidate.get("plays") or 0),
             "score": float(candidate.get("score") or 0.0),
             "reason": _candidate_reason(candidate, seed_profile),
             "source": candidate.get("source", "local_cache"),
@@ -362,6 +408,7 @@ def generate_playlist_recommendations(
         db.record_playlist_recommendation_feedback(playlist_id, item["track_key"], "shown", session_id)
         db.save_playlist_recommendation_cache(item, playlist_id, item["score"], item["reason"])
         items.append(item)
+    items.sort(key=lambda item: (int(item.get("plays") or 0), float(item.get("score") or 0.0), str(item.get("title") or "").lower()), reverse=True)
     return {"playlist_id": playlist_id, "session_id": session_id, "items": items}
 
 

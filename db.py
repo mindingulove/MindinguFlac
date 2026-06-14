@@ -271,6 +271,16 @@ def _run_one_time_migrations(conn: sqlite3.Connection):
                 (str(time.time()),),
             )
             conn.commit()
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'saved_playlist_taste_backfill_v1'"
+        ).fetchone()
+        if not done:
+            _backfill_saved_playlist_taste(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('saved_playlist_taste_backfill_v1', ?)",
+                (str(time.time()),),
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -324,6 +334,84 @@ def _backfill_listening_event_sources(conn: sqlite3.Connection) -> int:
         changed += 1
     conn.commit()
     return changed
+
+
+def _backfill_saved_playlist_taste(conn: sqlite3.Connection) -> int:
+    try:
+        from config import app_data_dir
+        playlists_path = app_data_dir() / "playlists.json"
+        if not playlists_path.exists():
+            return 0
+        playlists = json.loads(playlists_path.read_text("utf-8"))
+    except Exception:
+        return 0
+
+    from taste_profile import normalize_artist_key, normalize_genre_key  # noqa: F401
+
+    seen: set[str] = set()
+    added = 0
+    for playlist in playlists if isinstance(playlists, list) else []:
+        if not isinstance(playlist, dict):
+            continue
+        origin = str(playlist.get("playlist_origin") or "").strip().lower()
+        if origin not in {"manual", "album"}:
+            continue
+        for track in playlist.get("tracks") or []:
+            if not isinstance(track, dict):
+                continue
+            track_key = str(track.get("track_key") or track.get("spotify_id") or track.get("isrc") or "").strip()
+            if not track_key:
+                title = str(track.get("title") or "").strip().lower()
+                artist = str(track.get("artist") or "").strip().lower()
+                album = str(track.get("album") or "").strip().lower()
+                track_key = "||".join([artist, title, album])
+            if not track_key or track_key in seen:
+                continue
+            seen.add(track_key)
+            event_id = f"saved-playlist-taste:{track_key}"
+            payload = {
+                "event_id": event_id,
+                "track_key": track_key,
+                "title": track.get("title") or "",
+                "artist": track.get("artist") or "",
+                "album": track.get("album") or "",
+                "duration_ms": int(track.get("duration_ms") or 0),
+                "source_engine": track.get("source_engine") or track.get("source") or "saved_playlist",
+                "source_service": track.get("source_service") or track.get("source") or "saved_playlist",
+                "resolved_url": track.get("resolved_url") or track.get("spotify_url") or track.get("url") or "",
+                "metadata": track.get("metadata") if isinstance(track.get("metadata"), dict) else dict(track),
+                "event_type": "manual_like",
+                "created_at": float(track.get("created_at") or time.time()),
+                "started_at": float(track.get("created_at") or time.time()),
+                "ended_at": float(track.get("created_at") or time.time()),
+                "listened_ms": 0,
+                "duration_ms": int(track.get("duration_ms") or 0),
+                "listened_percent": 0.0,
+                "reason": "saved playlist seed",
+            }
+            try:
+                result = process_listening_event(payload)
+                if result.get("ok"):
+                    added += 1
+            except Exception:
+                continue
+    return added
+
+
+def backfill_saved_playlist_taste() -> int:
+    conn = _get_conn()
+    done = conn.execute(
+        "SELECT value FROM meta WHERE key = 'saved_playlist_taste_backfill_v1'"
+    ).fetchone()
+    if done:
+        return 0
+    count = _backfill_saved_playlist_taste(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('saved_playlist_taste_backfill_v1', ?)",
+        (str(time.time()),),
+    )
+    conn.commit()
+    return count
 
 
 def save_source_alias(alias_key: str, track_key: str, alias_type: str = ""):
@@ -606,8 +694,11 @@ def is_blacklisted_for_alias(alias_key: str, url: str = "") -> bool:
 
 
 def remove_from_blacklist(url: str):
+    if not url:
+        return
     conn = _get_conn()
     conn.execute("DELETE FROM blacklist WHERE url = ?", (url,))
+    conn.execute("DELETE FROM blacklist_aliases WHERE url = ?", (url,))
     conn.commit()
 
 
@@ -869,6 +960,10 @@ def update_track_affinity(event: dict) -> dict:
     listened_ms = int(event.get("listened_ms") or 0)
     listened_percent = float(event.get("listened_percent") or 0.0)
     event_type = str(event.get("event_type") or "play").strip().lower()
+    row = conn.execute("SELECT * FROM track_affinity WHERE track_key = ?", (track_key,)).fetchone()
+    current = dict(row) if row else {}
+    old_status = current.get("status", "neutral")
+    old_score = float(current.get("score") or 0.0)
     score_delta = 0.0
     hard_blacklisted = False
     reason = str(event.get("reason") or "")
@@ -877,8 +972,11 @@ def update_track_affinity(event: dict) -> dict:
         score_delta = 20.0
     elif event_type == "manual_dislike":
         score_delta = -20.0
+    elif event_type == "manual_remove_taste_profile":
+        score_delta = -old_score
     elif event_type == "manual_hard_blacklist":
         hard_blacklisted = True
+        score_delta = -old_score
     elif event_type == "manual_remove_hard_blacklist":
         score_delta = 0.0
     else:
@@ -887,11 +985,7 @@ def update_track_affinity(event: dict) -> dict:
             repeat_count = _count_same_day_completions(conn, track_key, float(event.get("started_at") or event.get("created_at") or time.time()))
             if repeat_count:
                 score_delta += 2.0
-    row = conn.execute("SELECT * FROM track_affinity WHERE track_key = ?", (track_key,)).fetchone()
-    current = dict(row) if row else {}
-    old_status = current.get("status", "neutral")
-    old_score = float(current.get("score") or 0.0)
-    preserve_hard = old_status == "hard_blacklisted" and event_type != "manual_remove_hard_blacklist"
+    preserve_hard = old_status == "hard_blacklisted" and event_type not in {"manual_remove_hard_blacklist", "manual_like"}
     if row:
         score = old_score + float(score_delta)
         status = "hard_blacklisted" if hard_blacklisted or preserve_hard else derive_status(score)
@@ -902,7 +996,7 @@ def update_track_affinity(event: dict) -> dict:
         if event_type in {"skip", "manual_dislike"}:
             total_skips += 1
             current["last_skipped_at"] = time.time()
-        else:
+        elif event_type not in {"manual_remove_taste_profile", "manual_remove_hard_blacklist", "manual_hard_blacklist"}:
             total_plays += 1
         if event_type == "complete":
             total_completed += 1
@@ -944,7 +1038,7 @@ def update_track_affinity(event: dict) -> dict:
             album,
             score,
             status,
-            1 if event_type not in {"skip", "manual_dislike"} else 0,
+            1 if event_type not in {"skip", "manual_dislike", "manual_hard_blacklist"} else 0,
             1 if event_type in {"skip", "manual_dislike"} else 0,
             1 if event_type == "complete" else 0,
             listened_ms,
@@ -967,16 +1061,18 @@ def update_artist_affinity(event: dict) -> dict:
     from taste_profile import calculate_score_delta, derive_status, normalize_artist_key
     event_type = str(event.get("event_type") or "play").strip().lower()
     listened_percent = float(event.get("listened_percent") or 0.0)
-    if event_type in {"manual_hard_blacklist", "manual_remove_hard_blacklist"}:
-        score_delta = 0.0
-    else:
-        score_delta = 20.0 if event_type == "manual_like" else -20.0 if event_type == "manual_dislike" else calculate_score_delta(event_type, listened_percent)
     key = normalize_artist_key(artist)
     row = conn.execute("SELECT * FROM artist_affinity WHERE artist_key = ?", (key,)).fetchone()
     current = dict(row) if row else {}
+    if event_type in {"manual_hard_blacklist", "manual_remove_hard_blacklist"}:
+        score_delta = 0.0
+    elif event_type == "manual_remove_taste_profile":
+        score_delta = -float(current.get("score") or 0.0)
+    else:
+        score_delta = 20.0 if event_type == "manual_like" else -20.0 if event_type == "manual_dislike" else calculate_score_delta(event_type, listened_percent)
     score = float(current.get("score") or 0.0) + float(score_delta)
     status = "hard_blacklisted" if current.get("status") == "hard_blacklisted" else derive_status(score)
-    total_plays = int(current.get("total_plays") or 0) + (0 if event_type in {"skip", "manual_dislike"} else 1)
+    total_plays = int(current.get("total_plays") or 0) + (0 if event_type in {"skip", "manual_dislike", "manual_remove_taste_profile", "manual_remove_hard_blacklist", "manual_hard_blacklist"} else 1)
     total_skips = int(current.get("total_skips") or 0) + (1 if event_type in {"skip", "manual_dislike"} else 0)
     total_completed = int(current.get("total_completed") or 0) + (1 if event_type == "complete" else 0)
     total_listened_ms = int(current.get("total_listened_ms") or 0) + int(event.get("listened_ms") or 0)
@@ -1007,6 +1103,7 @@ def update_genre_affinity(event: dict) -> dict:
         return {}
     event_type = str(event.get("event_type") or "play").strip().lower()
     listened_percent = float(event.get("listened_percent") or 0.0)
+    no_count_events = {"manual_remove_taste_profile", "manual_remove_hard_blacklist", "manual_hard_blacklist"}
     if event_type in {"manual_hard_blacklist", "manual_remove_hard_blacklist"}:
         score_delta = 0.0
     else:
@@ -1015,8 +1112,9 @@ def update_genre_affinity(event: dict) -> dict:
         key = normalize_genre_key(genre)
         row = conn.execute("SELECT * FROM genre_affinity WHERE genre_key = ?", (key,)).fetchone()
         current = dict(row) if row else {}
-        score = float(current.get("score") or 0.0) + float(score_delta)
-        total_plays = int(current.get("total_plays") or 0) + (0 if event_type in {"skip", "manual_dislike"} else 1)
+        effective_delta = -float(current.get("score") or 0.0) if event_type == "manual_remove_taste_profile" else float(score_delta)
+        score = float(current.get("score") or 0.0) + float(effective_delta)
+        total_plays = int(current.get("total_plays") or 0) + (0 if event_type in {"skip", "manual_dislike"} | no_count_events else 1)
         total_skips = int(current.get("total_skips") or 0) + (1 if event_type in {"skip", "manual_dislike"} else 0)
         total_completed = int(current.get("total_completed") or 0) + (1 if event_type == "complete" else 0)
         total_listened_ms = int(current.get("total_listened_ms") or 0) + int(event.get("listened_ms") or 0)

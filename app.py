@@ -243,6 +243,8 @@ service_downloader = ServiceDownloadManager(app_config)
 
 
 playlists_lock = threading.Lock()
+album_playlist_backfill_lock = threading.Lock()
+album_playlist_backfill_in_progress: set[str] = set()
 dock_recent_items_lock = threading.Lock()
 _dock_recent_items: list[dict] = []
 
@@ -376,6 +378,98 @@ def merge_nonempty_track_metadata(saved: dict, enriched: dict) -> dict:
         elif key not in merged:
             merged[key] = value
     return merged
+
+
+def _track_match_key(track: dict) -> str:
+    spotify_id = str(track.get("spotify_id") or track.get("track_key") or "").strip()
+    if spotify_id:
+        return spotify_id
+    artist = str(track.get("artist") or "").strip().lower()
+    title = str(track.get("title") or track.get("name") or "").strip().lower()
+    album = str(track.get("album") or "").strip().lower()
+    return "||".join([artist, title, album])
+
+
+def _refresh_album_playlist_metadata(playlist: dict) -> bool:
+    if not playlist or str(playlist.get("playlist_origin") or "").strip().lower() != "album":
+        return False
+
+    tracks = list(playlist.get("tracks") or [])
+    seed = next(
+        (
+            track
+            for track in tracks
+            if isinstance(track, dict) and (track.get("artist") or track.get("album") or track.get("title") or track.get("spotify_id"))
+        ),
+        {},
+    )
+    artist = str(seed.get("artist") or playlist.get("owner") or "").strip()
+    album = str(seed.get("album") or playlist.get("name") or "").strip()
+    release_id = str(seed.get("musicbrainz_release_id") or "").strip()
+    spotify_id = str(seed.get("spotify_id") or "").strip()
+    if not artist or not album:
+        return False
+
+    refreshed = album_tracks(app_config, artist, album, release_id, spotify_id)
+    hydrated_tracks = list(refreshed.get("tracks") or [])
+    if not hydrated_tracks:
+        return False
+
+    merged_tracks = []
+    used_keys = set()
+    for track in hydrated_tracks:
+        key = _track_match_key(track)
+        used_keys.add(key)
+        existing = next((saved for saved in tracks if _track_match_key(saved) == key), None)
+        merged = merge_nonempty_track_metadata(existing or {}, track)
+        if not str(merged.get("album") or "").strip():
+            merged["album"] = album
+        if not str(merged.get("artist") or "").strip():
+            merged["artist"] = artist
+        merged_tracks.append(merged)
+    for saved in tracks:
+        key = _track_match_key(saved)
+        if key and key not in used_keys:
+            saved = dict(saved)
+            if not str(saved.get("album") or "").strip():
+                saved["album"] = album
+            if not str(saved.get("artist") or "").strip():
+                saved["artist"] = artist
+            merged_tracks.append(saved)
+
+    playlist["tracks"] = merged_tracks
+    if refreshed.get("artwork_url"):
+        playlist["artwork_url"] = refreshed["artwork_url"]
+    if refreshed.get("artist"):
+        playlist["owner"] = refreshed["artist"]
+    playlist["metadata_fetched"] = True
+    return True
+
+
+def start_album_playlist_backfill(playlist_id: str) -> None:
+    playlist_id = str(playlist_id or "").strip()
+    if not playlist_id:
+        return
+    with album_playlist_backfill_lock:
+        if playlist_id in album_playlist_backfill_in_progress:
+            return
+        album_playlist_backfill_in_progress.add(playlist_id)
+
+    def run() -> None:
+        try:
+            with playlists_lock:
+                data = load_playlists()
+                playlist = next((entry for entry in data if entry.get("id") == playlist_id), None)
+                if not playlist:
+                    return
+                if not _refresh_album_playlist_metadata(playlist):
+                    return
+                save_playlists(data)
+        finally:
+            with album_playlist_backfill_lock:
+                album_playlist_backfill_in_progress.discard(playlist_id)
+
+    threading.Thread(target=run, daemon=True, name=f"album-playlist-backfill-{playlist_id}").start()
 
 
 def enrich_and_persist_track(track: dict) -> dict:
@@ -774,6 +868,18 @@ def quick_music_suggestions(term: str, limit: int = 24) -> list[dict]:
     return results[:limit]
 
 
+def _is_strong_music_suggestion(term: str, item: dict) -> bool:
+    score, _, _, _ = search_relevance(term, item)
+    wanted = term.strip().lower()
+    if not wanted:
+        return False
+    tokens = [token for token in re.findall(r"[a-z0-9]+", wanted) if len(token) > 1]
+    haystack = " ".join(str(item.get(key, "")) for key in ("artist", "album", "title", "name")).lower()
+    if tokens and all(token in haystack for token in tokens):
+        return score >= 55
+    return score >= 80
+
+
 def log_taste_cache_event(action: str, payload: dict) -> None:
     title = str(payload.get("title") or payload.get("artist") or payload.get("track_key") or "Taste").strip()
     artist = str(payload.get("artist") or "").strip()
@@ -781,8 +887,8 @@ def log_taste_cache_event(action: str, payload: dict) -> None:
     label = track or artist or title
     prefix = {
         "manual_like": "Taste: like",
-        "manual_dislike": "Taste: dislike",
-        "manual_hard_blacklist": "Taste: hard blacklist",
+        "manual_remove_taste_profile": "Taste: remove profile",
+        "manual_hard_blacklist": "Taste: blacklist",
         "manual_remove_hard_blacklist": "Taste: remove blacklist",
         "play": "Taste: listening",
         "skip": "Taste: skip",
@@ -792,6 +898,30 @@ def log_taste_cache_event(action: str, payload: dict) -> None:
     if artist and track and label != artist:
         message = f"{prefix} - {track} by {artist}"
     service_downloader.append_cache_event("taste", message, title=label)
+
+
+def _seed_saved_track_taste(track: dict, playlist_origin: str) -> None:
+    origin = str(playlist_origin or "").strip().lower()
+    if origin not in {"manual", "album"} or not isinstance(track, dict):
+        return
+    payload = {
+        "track_key": track.get("track_key") or "",
+        "title": track.get("title") or track.get("name") or "",
+        "artist": track.get("artist") or "",
+        "album": track.get("album") or "",
+        "duration_ms": int(track.get("duration_ms") or 0),
+        "source_engine": track.get("source_engine") or track.get("source") or "",
+        "source_service": track.get("source_service") or track.get("source") or "",
+        "resolved_url": track.get("resolved_url") or track.get("url") or track.get("spotify_url") or "",
+        "metadata": track.get("metadata") if isinstance(track.get("metadata"), dict) else dict(track),
+        "event_type": "manual_like",
+    }
+    try:
+        result = db.process_listening_event(payload)
+        if result.get("ok"):
+            log_taste_cache_event("manual_like", payload)
+    except Exception:
+        pass
 
 
 def json_bytes(value: object) -> bytes:
@@ -1076,7 +1206,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/playlists":
                 with playlists_lock:
-                    self.send_json(load_playlists())
+                    playlists = load_playlists()
+                for playlist in playlists:
+                    if str(playlist.get("playlist_origin") or "").strip().lower() == "album":
+                        tracks = list(playlist.get("tracks") or [])
+                        needs_backfill = not playlist.get("metadata_fetched") or any(
+                            not (track.get("plays") or track.get("album") or track.get("artist"))
+                            for track in tracks
+                            if isinstance(track, dict)
+                        )
+                        if needs_backfill:
+                            start_album_playlist_backfill(playlist.get("id", ""))
+                self.send_json(playlists)
                 return
             m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations", path)
             if m:
@@ -1341,15 +1482,18 @@ class Handler(BaseHTTPRequestHandler):
                 payload["event_type"] = "manual_like"
                 result = db.process_listening_event(payload)
                 if result.get("ok"):
+                    resolved_url = str(payload.get("resolved_url") or payload.get("spotify_url") or payload.get("url") or "").strip()
+                    if resolved_url:
+                        db.remove_from_blacklist(resolved_url)
                     log_taste_cache_event("manual_like", payload)
                 self.send_json(result)
                 return
-            if path == "/api/taste/manual-dislike":
+            if path == "/api/taste/remove-from-taste-profile":
                 payload = dict(body or {})
-                payload["event_type"] = "manual_dislike"
+                payload["event_type"] = "manual_remove_taste_profile"
                 result = db.process_listening_event(payload)
                 if result.get("ok"):
-                    log_taste_cache_event("manual_dislike", payload)
+                    log_taste_cache_event("manual_remove_taste_profile", payload)
                 self.send_json(result)
                 return
             if path == "/api/taste/manual-hard-blacklist":
@@ -1357,15 +1501,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload["event_type"] = "manual_hard_blacklist"
                 result = db.process_listening_event(payload)
                 if result.get("ok"):
+                    resolved_url = str(payload.get("resolved_url") or payload.get("spotify_url") or payload.get("url") or "").strip()
+                    if resolved_url:
+                        db.add_to_blacklist(resolved_url, "manual taste blacklist", [str(payload.get("track_key") or "").strip()])
                     log_taste_cache_event("manual_hard_blacklist", payload)
-                self.send_json(result)
-                return
-            if path == "/api/taste/remove-hard-blacklist":
-                payload = dict(body or {})
-                payload["event_type"] = "manual_remove_hard_blacklist"
-                result = db.process_listening_event(payload)
-                if result.get("ok"):
-                    log_taste_cache_event("manual_remove_hard_blacklist", payload)
                 self.send_json(result)
                 return
             m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations/replacement", path)
@@ -1506,24 +1645,39 @@ class Handler(BaseHTTPRequestHandler):
                     if not pl:
                         self.send_error_json("Playlist not found", HTTPStatus.NOT_FOUND)
                         return
-                    
-                    seen_keys = set()
-                    def track_key(t):
-                        return f"{str(t.get('artist') or '').strip().lower()}||{str(t.get('title') or '').strip().lower()}"
-                    
-                    for t in pl.get("tracks", []):
-                        seen_keys.add(track_key(t))
-                    
+
+                    seen_keys = {_track_match_key(t) for t in pl.get("tracks", [])}
                     added_count = 0
+                    changed_existing = False
+                    added_tracks: list[dict] = []
                     for t in tracks_to_add:
-                        if track_key(t) not in seen_keys:
-                            pl["tracks"].append(t)
-                            seen_keys.add(track_key(t))
+                        enriched = enrich_track_identifiers(dict(t))
+                        key = _track_match_key(enriched)
+                        existing = next((saved for saved in pl.get("tracks", []) if _track_match_key(saved) == key), None)
+                        if existing:
+                            merged = merge_nonempty_track_metadata(existing, enriched)
+                            if merged != existing:
+                                idx = pl["tracks"].index(existing)
+                                pl["tracks"][idx] = merged
+                                changed_existing = True
+                            seen_keys.add(key)
+                            continue
+                        if key not in seen_keys:
+                            pl["tracks"].append(enriched)
+                            seen_keys.add(key)
+                            added_tracks.append(enriched)
                             added_count += 1
-                    
-                    if added_count > 0:
+                    if str(pl.get("playlist_origin") or "").strip().lower() == "album":
+                        _refresh_album_playlist_metadata(pl)
+                    if added_count > 0 or changed_existing or str(pl.get("playlist_origin") or "").strip().lower() == "album":
                         save_playlists(data)
-                        start_playlist_identifier_enrichment(playlist_id)
+                if added_count > 0:
+                    origin = str(pl.get("playlist_origin") or "").strip().lower()
+                    if origin in {"manual", "album"}:
+                        for enriched in added_tracks:
+                            _seed_saved_track_taste(enriched, origin)
+                if added_count > 0:
+                    start_playlist_identifier_enrichment(playlist_id)
                 
                 self.send_json({"ok": True, "added": added_count})
                 return
@@ -1562,6 +1716,9 @@ class Handler(BaseHTTPRequestHandler):
                     data = load_playlists()
                     data.append(playlist)
                     save_playlists(data)
+                if imported["tracks"] and origin in {"manual", "album"}:
+                    for track in imported["tracks"]:
+                        _seed_saved_track_taste(track, origin)
                 if imported["tracks"]:
                     start_playlist_identifier_enrichment(playlist["id"])
                 self.send_json({**playlist, "imported": bool(imported["tracks"])}, 201)
@@ -1622,6 +1779,8 @@ class Handler(BaseHTTPRequestHandler):
                             pl["tracks"].append(track)
                         in_playlist = True
                     save_playlists(data)
+                if in_playlist and not existing:
+                    _seed_saved_track_taste(track, pl.get("playlist_origin") or "")
                 if in_playlist and not existing:
                     threading.Thread(
                         target=enrich_and_persist_track,

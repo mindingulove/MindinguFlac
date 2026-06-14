@@ -1011,10 +1011,11 @@ function renderGlobalTracksPage() {
   enrichBatch(tracks, "fullGlobalTracks");
 }
 
-function renderTrackList(containerId, items, context = "general", playbackContext = null) {
+function renderTrackList(containerId, items, context = "general", playbackContext = null, queueItems = null) {
   const container = $(containerId);
   if (!container) return;
   const current = state.currentTrack;
+  const playbackQueueItems = Array.isArray(queueItems) && queueItems.length ? queueItems : items;
 
   function makeLibraryBtn(idx, status) {
     const isDownloaded = !!(status && status.in_library);
@@ -1040,6 +1041,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
                       (item.title === current.title && item.artist === current.artist));
     const typeLabel = { track: "Song", artist: "Artist", album: "Album" }[item.type] || (item.type || "Song");
     const col6 = isTrack ? makeLibraryBtn(idx, null) : "";
+    const playsValue = trackPlaysValue(item);
 
     let col2 = `<strong>${isTrack ? albumLinkHtml(item, item.title || item.name || item.artist) : esc(item.title || item.name || item.artist)}</strong>`;
     let col3 = "", col4 = "";
@@ -1058,11 +1060,11 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       col3 = `<span class="pill">${esc(typeLabel)}</span>`;
       col4 = isTrack ? albumLinkHtml(item, item.album || "", "album-link") : "";
     } else if (context === "artist") {
-      col3 = item.plays ? `<span class="views-count">${item.plays.toLocaleString()}</span>` : "";
+      col3 = playsValue ? `<span class="views-count">${playsValue.toLocaleString()}</span>` : "";
       col4 = albumLinkHtml(item, item.album || "", "album-link");
     } else if (context === "album") {
       col2 += `<span>${artistLinkHtml(item)}</span>`;
-      col3 = `<span class="views-count unavailable">${item.plays ? item.plays.toLocaleString() : "-"}</span>`;
+      col3 = `<span class="views-count unavailable">${playsValue ? playsValue.toLocaleString() : "-"}</span>`;
     } else {
       col2 += `<span>${artistLinkHtml(item)}</span>`;
       col4 = albumLinkHtml(item, item.album || "", "album-link");
@@ -1085,7 +1087,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       button.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
-        toggleTrackLibrary(items[Number(button.dataset.libraryAction)], button, () => renderTrackList(containerId, items, context, playbackContext));
+        toggleTrackLibrary(items[Number(button.dataset.libraryAction)], button, () => renderTrackList(containerId, items, context, playbackContext, playbackQueueItems));
       };
     });
   }
@@ -1095,7 +1097,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
     const item = items[Number(el.dataset.itemIdx)];
     el.onclick = (event) => {
       if (event.target.closest("[data-library-action]")) return;
-      selectMusicItem(item, "stream", items, playbackContext);
+      selectMusicItem(item, "stream", playbackQueueItems, playbackContext);
     };
     if (playableQueueItem(item)) {
       el.oncontextmenu = (event) => {
@@ -1234,7 +1236,8 @@ async function renderArtistPage(artist) {
       "artistTopTracks",
       tracksExpanded ? artistTracks : artistTracks.slice(0, ARTIST_TRACK_PREVIEW_COUNT),
       "artist",
-      artistPlaybackContext()
+      artistPlaybackContext(),
+      artistTracks
     );
     updateSectionToggle("artistTracksToggle", tracksExpanded, artistTracks.length > ARTIST_TRACK_PREVIEW_COUNT, () => {
       tracksExpanded = !tracksExpanded;
@@ -5152,8 +5155,16 @@ function renderPlaylistPage(playlist) {
     allow_playlist_continuation: playlistOrigin === "manual",
   };
   _renderPlaylistContent(pl, playlistPlaybackContext);
+  if (playlistOrigin === "album") {
+    hydrateAlbumPlaylistTracks(pl, playlistPlaybackContext).catch(() => {});
+  }
   if (playlistOrigin === "manual") {
-    loadPlaylistRecommendations(pl, true).catch(() => {});
+    const cached = state.playlistRecommendationState[pl.id]?.items || [];
+    if (cached.length >= 10) {
+      renderPlaylistRecommendations(pl.id, cached);
+    } else {
+      loadPlaylistRecommendations(pl, true).catch(() => {});
+    }
   }
 
   // Auto-refresh once if imported from Spotify but metadata not yet fetched
@@ -5171,8 +5182,19 @@ function renderPlaylistPage(playlist) {
           origin: updatedOrigin,
           allow_playlist_continuation: updatedOrigin === "manual",
         });
+        if (updatedOrigin === "album") {
+          hydrateAlbumPlaylistTracks(updated, {
+            kind: "playlist",
+            id: updated.id,
+            name: updated.name,
+            origin: updatedOrigin,
+            allow_playlist_continuation: false,
+          }).catch(() => {});
+        }
         if (updatedOrigin === "manual") {
-          loadPlaylistRecommendations(updated, true).catch(() => {});
+          const cached = state.playlistRecommendationState[updated.id]?.items || [];
+          if (cached.length >= 10) renderPlaylistRecommendations(updated.id, cached);
+          else loadPlaylistRecommendations(updated, true).catch(() => {});
         }
         document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
           el.classList.toggle("active", el.dataset.playlistId === pl.id);
@@ -5241,7 +5263,6 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
           <h2>Recommended</h2>
           <p>Based on this playlist and your listening taste</p>
         </div>
-        <button class="playlist-recommendations-refresh" id="playlistRecommendationsRefresh" type="button">Refresh</button>
       </div>
       <div id="playlistRecommendations" class="playlist-recommendations" ${isAlbumPlaylist ? 'style="display:none"' : ""}></div>
     </div>
@@ -5269,10 +5290,6 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
       })));
     }
   }
-  const recRefresh = $("playlistRecommendationsRefresh");
-  if (recRefresh) {
-    recRefresh.onclick = () => loadPlaylistRecommendations(pl, true).catch(() => {});
-  }
 }
 
 function playlistTrackKeys(playlist = {}) {
@@ -5286,6 +5303,87 @@ function queueTrackKeys() {
 function inferPlaylistOrigin(pl = {}) {
   const origin = String(pl.playlist_origin || "").trim().toLowerCase();
   return origin === "album" ? "album" : "manual";
+}
+
+function trackPlaysValue(item) {
+  const direct = Number(item?.plays);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const popularity = Number(item?.spotify_popularity || item?.popularity || 0);
+  if (Number.isFinite(popularity) && popularity > 0) return popularity * 10000;
+  return null;
+}
+
+function mergeAlbumPlaylistTrack(base, hydrated, albumTitle = "") {
+  const plays = trackPlaysValue(hydrated) ?? trackPlaysValue(base);
+  return {
+    ...base,
+    ...hydrated,
+    album: hydrated?.album || base?.album || albumTitle,
+    artist: hydrated?.artist || base?.artist || "",
+    title: hydrated?.title || base?.title || "",
+    plays: plays || base?.plays || 0,
+  };
+}
+
+async function hydrateAlbumPlaylistTracks(playlist, playbackContext = null) {
+  if (!playlist || inferPlaylistOrigin(playlist) !== "album") return playlist;
+  const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+  const seed = tracks.find(track => track && (track.artist || track.album || track.title || track.spotify_id || track.musicbrainz_release_id)) || {};
+  const artistName = seed.artist || playlist.owner || "";
+  const albumTitle = seed.album || playlist.name || "";
+  const releaseId = seed.musicbrainz_release_id || "";
+  const spotifyId = seed.spotify_id || "";
+  if (!artistName || !albumTitle) return playlist;
+
+  try {
+    const params = new URLSearchParams({
+      artist: artistName,
+      album: albumTitle,
+      release_id: releaseId,
+      spotify_id: spotifyId,
+    });
+    const data = await api(`/api/music/album_tracks?${params.toString()}`);
+    const hydratedTracks = Array.isArray(data.tracks) ? data.tracks : [];
+    if (!hydratedTracks.length) return playlist;
+
+    const mergedTracks = tracks.map(track => {
+      const key = trackKey(track);
+      const hydrated = hydratedTracks.find(candidate => {
+        if (!candidate) return false;
+        if (key && trackKey(candidate) === key) return true;
+        return (
+          String(candidate.title || "").trim().toLowerCase() === String(track.title || "").trim().toLowerCase() &&
+          String(candidate.artist || "").trim().toLowerCase() === String(track.artist || "").trim().toLowerCase()
+        );
+      });
+      return hydrated ? mergeAlbumPlaylistTrack(track, hydrated, data.album || albumTitle) : track;
+    });
+
+    const updated = {
+      ...playlist,
+      tracks: mergedTracks,
+      artwork_url: data.artwork_url || playlist.artwork_url || "",
+      owner: data.artist || playlist.owner || "",
+      metadata_fetched: true,
+    };
+
+    const idx = state.playlists.findIndex(entry => entry.id === playlist.id);
+    if (idx !== -1) state.playlists[idx] = updated;
+    renderSidebarPlaylists();
+    if (state.activePlaylistId === playlist.id) {
+      _renderPlaylistContent(updated, playbackContext || {
+        kind: "playlist",
+        id: updated.id,
+        name: updated.name,
+        origin: "album",
+        allow_playlist_continuation: false,
+      });
+    }
+    return updated;
+  } catch (error) {
+    console.warn("Failed to hydrate album playlist tracks", error);
+    return playlist;
+  }
 }
 
 function currentPlaylistContext() {
@@ -5369,24 +5467,6 @@ function renderPlaylistRecommendationsLoading() {
   `;
 }
 
-function playlistRecommendationRow(item, playlistId) {
-  const art = item.artwork_url ? `style="background-image:url('${esc(item.artwork_url)}')"` : "";
-  const sessionId = state.playlistRecommendationSessions[playlistId] || "";
-  return `
-    <div class="playlist-recommendation-row" data-rec-key="${esc(item.track_key)}">
-      <div class="playlist-recommendation-art" ${art}></div>
-      <div class="playlist-recommendation-info">
-        <strong>${esc(item.title || "Unknown Track")}</strong>
-        <span>${esc(item.artist || "")}${item.album ? ` • ${esc(item.album)}` : ""}</span>
-        ${item.reason ? `<small>${esc(item.reason)}</small>` : ""}
-      </div>
-      <button class="playlist-recommendation-add" type="button"
-        data-rec-add="${esc(item.track_key)}"
-        data-rec-session="${esc(sessionId)}">Add</button>
-    </div>
-  `;
-}
-
 function renderPlaylistRecommendations(playlistId, items = []) {
   const box = $("playlistRecommendations");
   if (!box) return;
@@ -5394,11 +5474,51 @@ function renderPlaylistRecommendations(playlistId, items = []) {
     box.innerHTML = `<div class="playlist-recommendation-empty">No recommendations right now.</div>`;
     return;
   }
-  box.innerHTML = items.map(item => playlistRecommendationRow(item, playlistId)).join("");
+  box.innerHTML = items.map((item, idx) => {
+    const art = item.artwork_url ? `background-image: url('${esc(item.artwork_url)}')` : "";
+    const duration = item.duration_ms ? formatTime(Math.floor(Number(item.duration_ms) / 1000)) : "";
+    return `
+      <div class="track-row recommendation-track-row" data-item-idx="${idx}" data-item-data='${JSON.stringify(item).replace(/'/g, "&apos;")}'>
+        <div class="track-art" style="${art}"></div>
+        <div class="track-main">
+          <strong>${esc(item.title || "Unknown Track")}</strong>
+          <span>${esc(item.artist || "")}</span>
+        </div>
+        <div class="track-center"></div>
+        <div class="track-extra">${item.album ? albumLinkHtml(item, item.album, "album-link") : ""}</div>
+        <div class="track-time">${esc(duration)}</div>
+        <div class="track-status-icon">
+          <button class="track-library-btn recommendation-add" type="button" title="Add to playlist" aria-label="Add to playlist" data-rec-add="${idx}">
+            <i class="bi bi-plus-circle"></i>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join("");
+  box.querySelectorAll(".track-row").forEach(el => {
+    const item = items[Number(el.dataset.itemIdx)];
+    el.onclick = (event) => {
+      if (event.target.closest("[data-rec-add]")) return;
+      selectMusicItem(item, "stream", null, { kind: "playlist", id: playlistId, name: "Recommended", allow_playlist_continuation: false });
+    };
+    if (playableQueueItem(item)) {
+      el.oncontextmenu = (event) => {
+        event.preventDefault();
+        if (typeof showTrackContextMenu === "function") {
+          showTrackContextMenu(event, item);
+        }
+      };
+    }
+  });
   box.querySelectorAll("[data-rec-add]").forEach((button) => {
-    button.onclick = () => addPlaylistRecommendation(playlistId, button.dataset.recKey || "", button).catch((error) => {
-      alert(error.message || "Failed to add recommendation");
-    });
+    const item = items[Number(button.dataset.recAdd)];
+    button.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      addPlaylistRecommendation(playlistId, item, button).catch((error) => {
+        alert(error.message || "Failed to add recommendation");
+      });
+    };
   });
 }
 
@@ -5427,13 +5547,12 @@ async function loadPlaylistRecommendations(playlist, refresh = false) {
   renderPlaylistRecommendations(playlist.id, items);
 }
 
-async function addPlaylistRecommendation(playlistId, trackKeyValue, button) {
+async function addPlaylistRecommendation(playlistId, item, button) {
   const playlist = state.playlists.find(p => p.id === playlistId);
   if (!playlist) throw new Error("Playlist not found");
-  const recState = state.playlistRecommendationState[playlistId] || { items: [] };
-  const item = (recState.items || []).find(entry => entry.track_key === trackKeyValue);
   if (!item) throw new Error("Recommendation not found");
-  const row = button.closest(".playlist-recommendation-row");
+  const recState = state.playlistRecommendationState[playlistId] || { items: [] };
+  const row = button.closest(".track-row");
   const parent = row?.parentElement || null;
   const nextSibling = row?.nextElementSibling || null;
   const snapshot = row ? row.cloneNode(true) : null;
@@ -5474,9 +5593,32 @@ async function addPlaylistRecommendation(playlistId, trackKeyValue, button) {
       }),
     });
     const current = state.playlistRecommendationState[playlistId] || { items: [], itemsByKey: {} };
-    current.items = (current.items || []).filter(entry => entry.track_key !== trackKeyValue);
+    current.items = (current.items || []).filter(entry => entry.track_key !== item.track_key);
     if (replacement && replacement.item) {
       current.items.push(replacement.item);
+    }
+    current.items.sort((a, b) => {
+      const byPlays = Number(b?.plays || 0) - Number(a?.plays || 0);
+      if (byPlays) return byPlays;
+      const byScore = Number(b?.score || 0) - Number(a?.score || 0);
+      if (byScore) return byScore;
+      return String(a?.title || "").localeCompare(String(b?.title || ""));
+    });
+    if (current.items.length < 10) {
+      const refilled = await api(`/api/playlists/${encodeURIComponent(playlistId)}/recommendations?${new URLSearchParams({
+        limit: "10",
+        refresh: "1",
+        exclude: [...new Set([...playlistTrackKeys(playlist), ...queueTrackKeys(), ...current.items.map(entry => entry.track_key)])].join(","),
+        queue_track_keys: [...queueTrackKeys()].join(","),
+      }).toString()}`);
+      current.items = Array.isArray(refilled.items) && refilled.items.length ? refilled.items : current.items;
+      current.items.sort((a, b) => {
+        const byPlays = Number(b?.plays || 0) - Number(a?.plays || 0);
+        if (byPlays) return byPlays;
+        const byScore = Number(b?.score || 0) - Number(a?.score || 0);
+        if (byScore) return byScore;
+        return String(a?.title || "").localeCompare(String(b?.title || ""));
+      });
     }
     current.itemsByKey = Object.fromEntries((current.items || []).map(entry => [entry.track_key, entry]));
     state.playlistRecommendationState[playlistId] = current;
@@ -6612,40 +6754,49 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
     title: track.title || track.name || "",
     artist: track.artist || "",
     album: track.album || "",
+    resolved_url: track.resolved_url || track.spotify_url || track.url || track.metadata?.resolved_url || track.metadata?.spotify_url || track.metadata?.url || "",
     metadata: track.metadata || track,
   });
 
-  const btnLike = $("ctxLikeTrack");
-  if (btnLike) {
-    btnLike.onclick = async () => {
-      await api("/api/taste/manual-like", { method: "POST", body: JSON.stringify(tastePayload()) });
+  const btnTaste = $("ctxTasteTrack");
+  const btnBlacklist = $("ctxBlacklistTrack");
+
+  const applyTasteState = (liked = false, blacklisted = false) => {
+    if (btnTaste) {
+      btnTaste.innerHTML = liked
+        ? '<i class="bi bi-heart-fill" style="color:var(--muted);"></i> Remove from taste profile'
+        : '<i class="bi bi-heart" style="color:var(--muted);"></i> Add to taste profile';
+    }
+    if (btnBlacklist) {
+      btnBlacklist.innerHTML = blacklisted
+        ? '<i class="bi bi-slash-circle-fill" style="color:var(--muted);"></i> Blacklisted'
+        : '<i class="bi bi-slash-circle" style="color:var(--muted);"></i> Blacklist';
+    }
+  };
+
+  applyTasteState(false, false);
+
+  if (btnTaste) {
+    btnTaste.onclick = async () => {
+      const affinity = await api(`/api/taste/track?track_key=${encodeURIComponent(trackKey(track))}`).catch(() => ({}));
+      const liked = String(affinity.status || "") === "liked";
+      const endpoint = liked ? "/api/taste/remove-from-taste-profile" : "/api/taste/manual-like";
+      await api(endpoint, { method: "POST", body: JSON.stringify(tastePayload()) });
       menu.hidden = true;
     };
   }
 
-  const btnDislike = $("ctxDislikeTrack");
-  if (btnDislike) {
-    btnDislike.onclick = async () => {
-      await api("/api/taste/manual-dislike", { method: "POST", body: JSON.stringify(tastePayload()) });
-      menu.hidden = true;
-    };
-  }
-
-  const btnHardBlacklist = $("ctxHardBlacklistTrack");
-  if (btnHardBlacklist) {
-    btnHardBlacklist.onclick = async () => {
+  if (btnBlacklist) {
+    btnBlacklist.onclick = async () => {
       await api("/api/taste/manual-hard-blacklist", { method: "POST", body: JSON.stringify(tastePayload()) });
       menu.hidden = true;
     };
   }
 
-  const btnRemoveHardBlacklist = $("ctxRemoveHardBlacklistTrack");
-  if (btnRemoveHardBlacklist) {
-    btnRemoveHardBlacklist.onclick = async () => {
-      await api("/api/taste/remove-hard-blacklist", { method: "POST", body: JSON.stringify(tastePayload()) });
-      menu.hidden = true;
-    };
-  }
+  api(`/api/taste/track?track_key=${encodeURIComponent(trackKey(track))}`).then((affinity) => {
+    const status = String(affinity?.status || "");
+    applyTasteState(status === "liked", status === "hard_blacklisted");
+  }).catch(() => {});
 
   // Share buttons
   const btnCopySpotify = $("ctxCopySpotify");
