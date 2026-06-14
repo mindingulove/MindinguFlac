@@ -594,6 +594,19 @@ class ServiceDownloadManager:
             if len(self._cache_events) > 200:
                 del self._cache_events[:-200]
 
+    def append_cache_event(self, kind: str, message: str, title: str = "", job_id: str = "") -> None:
+        event = {
+            "timestamp": time.time(),
+            "job_id": job_id,
+            "title": title,
+            "kind": kind,
+            "message": message,
+        }
+        with self._lock:
+            self._cache_events.append(event)
+            if len(self._cache_events) > 200:
+                del self._cache_events[:-200]
+
     @staticmethod
     def _cache_size_text(size: int) -> str:
         if size < 1024:

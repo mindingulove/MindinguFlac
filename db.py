@@ -261,6 +261,16 @@ def _run_one_time_migrations(conn: sqlite3.Connection):
                 (str(time.time()),),
             )
             conn.commit()
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'listening_event_source_backfill_v1'"
+        ).fetchone()
+        if not done:
+            _backfill_listening_event_sources(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('listening_event_source_backfill_v1', ?)",
+                (str(time.time()),),
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -272,6 +282,48 @@ def save_resolved_source(track_key: str, engine: str, service: str, quality: str
         VALUES (?, ?, ?, ?, ?, ?)
     """, (track_key, engine, service, quality, resolved_url, time.time()))
     conn.commit()
+
+
+def _backfill_listening_event_sources(conn: sqlite3.Connection) -> int:
+    rows = conn.execute("""
+        SELECT id, source_engine, source_service, resolved_url, metadata_json
+        FROM listening_events
+    """).fetchall()
+    changed = 0
+    for row in rows:
+        source_engine = str(row["source_engine"] or "").strip()
+        source_service = str(row["source_service"] or "").strip()
+        resolved_url = str(row["resolved_url"] or "").strip()
+        if source_engine and source_service and resolved_url:
+            continue
+        metadata = _json_load_maybe(row["metadata_json"])
+        if not metadata:
+            continue
+        next_source = str(metadata.get("source_engine") or metadata.get("source") or "").strip()
+        next_service = str(metadata.get("source_service") or metadata.get("source") or "").strip()
+        next_url = str(metadata.get("resolved_url") or metadata.get("spotify_url") or metadata.get("url") or "").strip()
+        updated = {
+            "source_engine": source_engine or next_source,
+            "source_service": source_service or next_service,
+            "resolved_url": resolved_url or next_url,
+        }
+        if updated["source_engine"] == source_engine and updated["source_service"] == source_service and updated["resolved_url"] == resolved_url:
+            continue
+        conn.execute("""
+            UPDATE listening_events
+            SET source_engine = COALESCE(NULLIF(source_engine, ''), ?),
+                source_service = COALESCE(NULLIF(source_service, ''), ?),
+                resolved_url = COALESCE(NULLIF(resolved_url, ''), ?)
+            WHERE id = ?
+        """, (
+            updated["source_engine"],
+            updated["source_service"],
+            updated["resolved_url"],
+            row["id"],
+        ))
+        changed += 1
+    conn.commit()
+    return changed
 
 
 def save_source_alias(alias_key: str, track_key: str, alias_type: str = ""):

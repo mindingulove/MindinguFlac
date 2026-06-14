@@ -3485,21 +3485,27 @@ function recentTrackKey(item) {
 }
 
 function listeningTrackPayload(track) {
+  const sourceEngine = track?.source_engine || track?.metadata?.source_engine || track?.source || state.settings.download_engine || "";
+  const sourceService = track?.source_service || track?.metadata?.source_service || track?.source || state.settings.download_service || "";
+  const resolvedUrl = track?.resolved_url || track?.metadata?.resolved_url || track?.spotify_url || track?.url || "";
   return {
     track_key: trackKey(track),
     title: track?.title || track?.name || "",
     artist: track?.artist || "",
     album: track?.album || "",
     duration_ms: Number(track?.duration_ms || track?.metadata?.duration_ms || 0),
-    source_engine: track?.source_engine || state.settings.download_engine || "",
-    source_service: track?.source_service || state.settings.download_service || "",
-    resolved_url: track?.resolved_url || track?.spotify_url || track?.url || "",
+    source_engine: sourceEngine,
+    source_service: sourceService,
+    resolved_url: resolvedUrl,
     metadata: track?.metadata || track || {},
   };
 }
 
 function startListeningSession(track, playbackContext = null) {
   if (!track) return;
+  const sourceEngine = track?.source_engine || track?.metadata?.source_engine || track?.source || state.settings.download_engine || "";
+  const sourceService = track?.source_service || track?.metadata?.source_service || track?.source || state.settings.download_service || "";
+  const resolvedUrl = track?.resolved_url || track?.metadata?.resolved_url || track?.spotify_url || track?.url || "";
   state.listeningSession = {
     event_id: crypto.randomUUID(),
     started_at: Date.now() / 1000,
@@ -3508,6 +3514,9 @@ function startListeningSession(track, playbackContext = null) {
     artist: track.artist || "",
     album: track.album || "",
     duration_ms: Number(track.duration_ms || track.metadata?.duration_ms || 0),
+    source_engine: sourceEngine,
+    source_service: sourceService,
+    resolved_url: resolvedUrl,
     listened_ms: 0,
     max_position_ms: 0,
     metadata: track.metadata || track || {},
@@ -3537,6 +3546,9 @@ async function finalizeListeningSession(eventType = "", reason = "") {
     title: session.title,
     artist: session.artist,
     album: session.album,
+    source_engine: session.source_engine || "",
+    source_service: session.source_service || "",
+    resolved_url: session.resolved_url || "",
     duration_ms: durationMs,
     listened_ms: listenedMs,
     listened_percent: listenedPercent,
@@ -3570,6 +3582,9 @@ function beaconListeningSession(eventType = "", reason = "") {
     title: session.title,
     artist: session.artist,
     album: session.album,
+    source_engine: session.source_engine || "",
+    source_service: session.source_service || "",
+    resolved_url: session.resolved_url || "",
     duration_ms: durationMs,
     listened_ms: listenedMs,
     listened_percent: listenedPercent,
@@ -5137,7 +5152,9 @@ function renderPlaylistPage(playlist) {
     allow_playlist_continuation: playlistOrigin === "manual",
   };
   _renderPlaylistContent(pl, playlistPlaybackContext);
-  loadPlaylistRecommendations(pl, true).catch(() => {});
+  if (playlistOrigin === "manual") {
+    loadPlaylistRecommendations(pl, true).catch(() => {});
+  }
 
   // Auto-refresh once if imported from Spotify but metadata not yet fetched
   if (pl.spotify_url && !pl.metadata_fetched) {
@@ -5154,7 +5171,9 @@ function renderPlaylistPage(playlist) {
           origin: updatedOrigin,
           allow_playlist_continuation: updatedOrigin === "manual",
         });
-        loadPlaylistRecommendations(updated, true).catch(() => {});
+        if (updatedOrigin === "manual") {
+          loadPlaylistRecommendations(updated, true).catch(() => {});
+        }
         document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
           el.classList.toggle("active", el.dataset.playlistId === pl.id);
         });
@@ -5167,42 +5186,64 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
   const artStyle = heroArt ? `background-image: url('${heroArt}')` : "";
   const artIcon = artStyle ? "" : `<i class="bi bi-music-note-list"></i>`;
   const duration = formatDuration(pl.tracks);
-  const metaParts = [];
-  if (pl.owner) metaParts.push(esc(pl.owner));
-  if (pl.followers) metaParts.push(`${pl.followers.toLocaleString()} saves`);
-  metaParts.push(`${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}${duration ? ", " + duration : ""}`);
+  const playlistOrigin = String(pl.playlist_origin || "").trim().toLowerCase();
+  const isAlbumPlaylist = playlistOrigin === "album";
+  const primaryTrack = (pl.tracks || []).find(track => track && (track.artist || track.album)) || (pl.tracks || [])[0] || {};
+  const heroArtist = primaryTrack.artist || pl.owner || "";
+  const heroYear = primaryTrack.year || "";
+  const heroTrackCount = pl.tracks.length;
+  const heroMeta = [];
+  if (isAlbumPlaylist) {
+    if (heroArtist) heroMeta.push(heroArtist);
+    if (heroYear) heroMeta.push(heroYear);
+    heroMeta.push(`${heroTrackCount} track${heroTrackCount !== 1 ? "s" : ""}`);
+    if (duration) heroMeta.push(duration);
+  } else {
+    if (pl.owner) heroMeta.push(esc(pl.owner));
+    if (pl.followers) heroMeta.push(`${pl.followers.toLocaleString()} saves`);
+    heroMeta.push(`${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}${duration ? ", " + duration : ""}`);
+  }
 
   $("pageContent").innerHTML = `
     <div class="scroll-area">
       <div class="playlist-hero">
         <div class="playlist-hero-art" style="${artStyle}">${artIcon}</div>
         <div class="playlist-hero-info">
-          <span class="eyebrow">Playlist</span>
+          <span class="eyebrow">${isAlbumPlaylist ? "Album" : "Playlist"}</span>
           <h1>${esc(pl.name)}</h1>
-          ${pl.description ? `<div class="playlist-hero-desc">${esc(pl.description)}</div>` : ""}
-          <div class="playlist-hero-meta">${metaParts.join(" · ")}</div>
+          ${isAlbumPlaylist ? `
+            <div class="hero-meta-row">
+              <button class="hero-artist-link" id="playlistHeroArtistLink" title="${esc(heroArtist)}">
+                ${primaryTrack.artwork_url ? `<div class="mini-art" style="background-image: url('${esc(primaryTrack.artwork_url)}')"></div>` : ""}
+                ${esc(heroArtist)}
+              </button>
+              ${heroYear ? `<span class="dot">•</span><span>${esc(heroYear)}</span>` : ""}
+              <span class="dot">•</span><span>${heroTrackCount} tracks</span>
+              ${duration ? `<span class="dot">•</span><span>${esc(duration)}</span>` : ""}
+            </div>
+          ` : `
+            ${pl.description ? `<div class="playlist-hero-desc">${esc(pl.description)}</div>` : ""}
+            <div class="playlist-hero-meta">${heroMeta.join(" · ")}</div>
+          `}
         </div>
       </div>
 
       <div class="track-list-header" style="margin-top: 24px">
         <div>#</div>
         <div>Title</div>
-        <div></div>
-        <div>Album</div>
-        <div><i class="bi bi-clock"></i></div>
-        <div></div>
+        ${isAlbumPlaylist ? `<div>Plays</div><div></div><div><i class="bi bi-clock"></i></div><div></div>` : `<div></div><div>Album</div><div><i class="bi bi-clock"></i></div><div></div>`}
       </div>
 
       <div id="playlistTrackList" class="track-list"></div>
 
-      <div class="playlist-recommendations-head">
+      <div class="playlist-recommendations-head" ${isAlbumPlaylist ? 'style="display:none"' : ""}>
         <div>
           <h2>Recommended</h2>
           <p>Based on this playlist and your listening taste</p>
         </div>
         <button class="playlist-recommendations-refresh" id="playlistRecommendationsRefresh" type="button">Refresh</button>
       </div>
-      <div id="playlistRecommendations" class="playlist-recommendations"></div>
+      <div id="playlistRecommendations" class="playlist-recommendations" ${isAlbumPlaylist ? 'style="display:none"' : ""}></div>
     </div>
   `;
 
@@ -5210,13 +5251,28 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
     renderTrackList(
       "playlistTrackList",
       pl.tracks,
-      "general",
+      isAlbumPlaylist ? "album" : "general",
       playlistPlaybackContext || { kind: "playlist", id: pl.id, name: pl.name, allow_playlist_continuation: false }
     );
   } else {
     $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">No songs yet — click the status icon while a track is playing to add it.</div>`;
   }
-  $("playlistRecommendationsRefresh").onclick = () => loadPlaylistRecommendations(pl, true).catch(() => {});
+  if (isAlbumPlaylist && heroArtist) {
+    const artistBtn = $("playlistHeroArtistLink");
+    if (artistBtn) {
+      artistBtn.onclick = () => pushPage(() => renderArtistPage(artistTarget({
+        name: heroArtist,
+        artist: heroArtist,
+        artist_id: primaryTrack.artist_id || primaryTrack.spotify_artist_id || "",
+        spotify_id: primaryTrack.artist_id || primaryTrack.spotify_artist_id || "",
+        artwork_url: primaryTrack.artwork_url || "",
+      })));
+    }
+  }
+  const recRefresh = $("playlistRecommendationsRefresh");
+  if (recRefresh) {
+    recRefresh.onclick = () => loadPlaylistRecommendations(pl, true).catch(() => {});
+  }
 }
 
 function playlistTrackKeys(playlist = {}) {

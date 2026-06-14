@@ -774,6 +774,26 @@ def quick_music_suggestions(term: str, limit: int = 24) -> list[dict]:
     return results[:limit]
 
 
+def log_taste_cache_event(action: str, payload: dict) -> None:
+    title = str(payload.get("title") or payload.get("artist") or payload.get("track_key") or "Taste").strip()
+    artist = str(payload.get("artist") or "").strip()
+    track = str(payload.get("title") or "").strip()
+    label = track or artist or title
+    prefix = {
+        "manual_like": "Taste: like",
+        "manual_dislike": "Taste: dislike",
+        "manual_hard_blacklist": "Taste: hard blacklist",
+        "manual_remove_hard_blacklist": "Taste: remove blacklist",
+        "play": "Taste: listening",
+        "skip": "Taste: skip",
+        "complete": "Taste: complete",
+    }.get(action, f"Taste: {action}")
+    message = f"{prefix} - {label}"
+    if artist and track and label != artist:
+        message = f"{prefix} - {track} by {artist}"
+    service_downloader.append_cache_event("taste", message, title=label)
+
+
 def json_bytes(value: object) -> bytes:
     return json.dumps(value, indent=2).encode("utf-8")
 
@@ -1311,27 +1331,42 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": not error, "error": error})
                 return
             if path == "/api/listening/event":
-                self.send_json(db.process_listening_event(body))
+                result = db.process_listening_event(body)
+                if result.get("ok"):
+                    log_taste_cache_event(str(body.get("event_type") or "play"), body)
+                self.send_json(result)
                 return
             if path == "/api/taste/manual-like":
                 payload = dict(body or {})
                 payload["event_type"] = "manual_like"
-                self.send_json(db.process_listening_event(payload))
+                result = db.process_listening_event(payload)
+                if result.get("ok"):
+                    log_taste_cache_event("manual_like", payload)
+                self.send_json(result)
                 return
             if path == "/api/taste/manual-dislike":
                 payload = dict(body or {})
                 payload["event_type"] = "manual_dislike"
-                self.send_json(db.process_listening_event(payload))
+                result = db.process_listening_event(payload)
+                if result.get("ok"):
+                    log_taste_cache_event("manual_dislike", payload)
+                self.send_json(result)
                 return
             if path == "/api/taste/manual-hard-blacklist":
                 payload = dict(body or {})
                 payload["event_type"] = "manual_hard_blacklist"
-                self.send_json(db.process_listening_event(payload))
+                result = db.process_listening_event(payload)
+                if result.get("ok"):
+                    log_taste_cache_event("manual_hard_blacklist", payload)
+                self.send_json(result)
                 return
             if path == "/api/taste/remove-hard-blacklist":
                 payload = dict(body or {})
                 payload["event_type"] = "manual_remove_hard_blacklist"
-                self.send_json(db.process_listening_event(payload))
+                result = db.process_listening_event(payload)
+                if result.get("ok"):
+                    log_taste_cache_event("manual_remove_hard_blacklist", payload)
+                self.send_json(result)
                 return
             m = re.fullmatch(r"/api/playlists/([^/]+)/recommendations/replacement", path)
             if m:
