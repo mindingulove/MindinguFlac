@@ -202,8 +202,6 @@ def install_now_playing(window: webview.Window, base_url: str) -> None:
         return
     try:
         import app as _app
-        from AppKit import NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification
-        from Foundation import NSNotificationCenter, NSObject
 
         _start_macos_now_playing_helper(base_url)
 
@@ -246,21 +244,25 @@ def install_now_playing(window: webview.Window, base_url: str) -> None:
         _app._np_clear_fn = clear_now_playing
         _app._macos_media_command_fn = handle_media_command
 
-        class _AppStateObserver(NSObject):
-            def appStateChanged_(self, notification):
-                try:
-                    from AppKit import NSApplication
+        try:
+            from AppKit import NSApplicationDidBecomeActiveNotification, NSApplicationDidResignActiveNotification, NSApplication
+            from Foundation import NSNotificationCenter, NSObject
 
-                    send_app_active(NSApplication.sharedApplication().isActive())
-                except Exception as exc:
-                    print(f"appStateChanged error: {exc}", file=sys.stderr)
+            class _AppStateObserver(NSObject):
+                def appStateChanged_(self, notification):
+                    try:
+                        send_app_active(NSApplication.sharedApplication().isActive())
+                    except Exception as exc:
+                        print(f"appStateChanged error: {exc}", file=sys.stderr)
 
-        _observer = _AppStateObserver.alloc().init()
-        nc = NSNotificationCenter.defaultCenter()
-        nc.addObserver_selector_name_object_(_observer, "appStateChanged:", NSApplicationDidBecomeActiveNotification, None)
-        nc.addObserver_selector_name_object_(_observer, "appStateChanged:", NSApplicationDidResignActiveNotification, None)
-        from AppKit import NSApplication
-        send_app_active(NSApplication.sharedApplication().isActive())
+            _observer = _AppStateObserver.alloc().init()
+            nc = NSNotificationCenter.defaultCenter()
+            nc.addObserver_selector_name_object_(_observer, "appStateChanged:", NSApplicationDidBecomeActiveNotification, None)
+            nc.addObserver_selector_name_object_(_observer, "appStateChanged:", NSApplicationDidResignActiveNotification, None)
+            
+            send_app_active(NSApplication.sharedApplication().isActive())
+        except ImportError:
+            pass
 
     except Exception as exc:
         print(f"Unable to install Now Playing: {exc}", file=sys.stderr)

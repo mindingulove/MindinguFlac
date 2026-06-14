@@ -24,3 +24,5 @@
 - Fixed SQLite "database is locked" storms caused by background migration threads spawning additional migration threads on each new connection. Sentinel is now committed before the background thread starts.
 - Background listen-stats and genre-affinity backfill jobs now commit every 50 rows instead of holding a single write transaction for the entire backfill, preventing other writes from timing out.
 - Server suspended (Ctrl+Z) state no longer silently blocks all recommendations — connection state is now properly cleared on restart.
+- Fixed an issue where the main page track list column headers (e.g. "Album") would visually bleed through and cover the global search dropdown suggestions.
+- Fixed a bug where the macOS native Now Playing widget would fail to start if the Python AppKit environment wasn't fully initialized.
