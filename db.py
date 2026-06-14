@@ -403,12 +403,12 @@ def _run_one_time_migrations(conn: sqlite3.Connection):
             )
             conn.commit()
         done = conn.execute(
-            "SELECT value FROM meta WHERE key = 'saved_playlist_taste_backfill_v1'"
+            "SELECT value FROM meta WHERE key = 'saved_playlist_taste_backfill_v2'"
         ).fetchone()
         if not done:
             _backfill_saved_playlist_taste(conn)
             conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('saved_playlist_taste_backfill_v1', ?)",
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('saved_playlist_taste_backfill_v2', ?)",
                 (str(time.time()),),
             )
             conn.commit()
@@ -638,13 +638,13 @@ def _backfill_genre_affinity(conn: sqlite3.Connection) -> int:
 def backfill_saved_playlist_taste() -> int:
     conn = _get_conn()
     done = conn.execute(
-        "SELECT value FROM meta WHERE key = 'saved_playlist_taste_backfill_v1'"
+        "SELECT value FROM meta WHERE key = 'saved_playlist_taste_backfill_v2'"
     ).fetchone()
     if done:
         return 0
     count = _backfill_saved_playlist_taste(conn)
     conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('saved_playlist_taste_backfill_v1', ?)",
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('saved_playlist_taste_backfill_v2', ?)",
         (str(time.time()),),
     )
     conn.commit()
