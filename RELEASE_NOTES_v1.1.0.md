@@ -6,11 +6,6 @@
 - Stored playlist origin explicitly so album-derived playlists remain separate from user-created playlists.
 - Improved taste-aware ranking across search, artist views, and playlist recommendations.
 
-## AI Advisor
-- Optional AI ranking can use Gemini or DuckDuckGo/Duck.ai for clean torrent and YouTube candidates.
-- The local filters still decide what is allowed; AI ranking remains advisory only.
-- Duck.ai requests are handled through the existing browser-worker flow so anti-bot challenges can be completed reliably.
-
 ## Playlist Recommendations
 - Recommendation panel now appears below the track list on user-created playlists.
 - Recommendations are seeded from the playlist's artists, albums, genres, and decade profile.
