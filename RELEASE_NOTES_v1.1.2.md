@@ -8,3 +8,4 @@
 ## Bug Fixes
 - Fixed artist pages falling back to generic search results for top songs even when a Spotify artist ID was available.
 - Fixed the Duran Duran popular-track path to resolve the live Spotify artist identity and return ID-backed top tracks.
+- Fixed the in-app footer and backend user-agent version strings to report `1.1.2`.
