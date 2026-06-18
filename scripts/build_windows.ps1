@@ -343,7 +343,7 @@ $python = $venvPython
 Write-Host "Using Python: $python"
 Invoke-Checked { & $python -m pip install --upgrade pip }
 Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
-Invoke-Checked { & $python -m pip install --upgrade "git+https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version.git@v1.1.0" }
+Invoke-Checked { & $python -m pip install --upgrade "git+https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version.git@v1.1.8" }
 Invoke-Checked { & $python -m pip install --only-binary=libtorrent libtorrent }
 # libtorrent's win_amd64 wheel links OpenSSL 1.1 (libssl-1_1-x64.dll /
 # libcrypto-1_1-x64.dll), which Python 3.12 (OpenSSL 3, libcrypto-3.dll) does
