@@ -10,8 +10,8 @@ from pathlib import Path
 
 OWNER = "mindingulove"
 REPO = "MindinguFlac"
-TAG = "v1.1.1"
-NOTES_PATH = Path("RELEASE_NOTES_v1.1.1.md")
+TAG = "v1.1.2"
+NOTES_PATH = Path("RELEASE_NOTES_v1.1.2.md")
 ENV_PATH = Path(".env")
 
 
