@@ -276,6 +276,61 @@ def _raw_artist_discography_items(client: object, artist_id: str) -> list[dict]:
     return results
 
 
+def _raw_artist_top_track_items(client: object, artist_id: str, limit: int = 20) -> list[dict]:
+    web_client = getattr(client, "web_client", None)
+    if not web_client or not artist_id:
+        return []
+    payload = {
+        "operationName": "queryArtistOverview",
+        "variables": {"uri": f"spotify:artist:{artist_id}", "locale": ""},
+        "extensions": {"persistedQuery": {
+            "version": 1,
+            "sha256Hash": "446130b4a0aa6522a686aafccddb0ae849165b5e0436fd802f96e0243617b5d8",
+        }},
+    }
+    try:
+        artist_data = web_client.query(payload).get("data", {}).get("artistUnion", {})
+    except Exception:
+        return []
+    items = (
+        artist_data.get("discography", {})
+        .get("topTracks", {})
+        .get("items", [])
+    )
+    results = []
+    for wrapper in items[:limit]:
+        track = wrapper.get("track") if isinstance(wrapper, dict) else None
+        if not isinstance(track, dict):
+            continue
+        uri = track.get("uri", "")
+        spotify_id = track.get("id", "") or (uri.rsplit(":", 1)[-1] if uri else "")
+        if not spotify_id:
+            continue
+        album = track.get("albumOfTrack", {}) or {}
+        artists = []
+        artist_items = (track.get("artists", {}) or {}).get("items", [])
+        for item in artist_items:
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("profile") or {}).get("name", "")
+            if name:
+                artists.append({"name": name})
+        results.append({
+            "id": spotify_id,
+            "name": track.get("name", ""),
+            "artists": artists,
+            "album": {
+                "name": album.get("name", ""),
+                "images": [{"url": _best_raw_image(album.get("coverArt", {}))}] if album.get("coverArt") else [],
+            },
+            "duration_ms": (track.get("duration") or {}).get("totalMilliseconds", 0) or 0,
+            "external_urls": {"spotify": f"https://open.spotify.com/track/{spotify_id}"},
+            "external_ids": {"isrc": ""},
+            "popularity": _numeric_plays(track.get("playcount")) // 10000,
+        })
+    return results
+
+
 def _best_raw_image(image: dict | None) -> str:
     sources = (image or {}).get("sources", [])
     if not sources:
@@ -317,9 +372,14 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
 
     artist_top_match = re.fullmatch(r"artists/([^/]+)/top-tracks", endpoint)
     if artist_top_match and hasattr(client, "get_artist_profile"):
-        profile = client.get_artist_profile(artist_top_match.group(1))
+        artist_id = artist_top_match.group(1)
+        limit = int(params.get("limit", 20) or 20)
+        tracks = _raw_artist_top_track_items(client, artist_id, limit=limit)
+        if tracks:
+            return {"tracks": tracks}
+        profile = client.get_artist_profile(artist_id)
         artist = profile.get("profile", {}).get("name", "")
-        tracks = client.search_tracks(artist, limit=20) if artist else []
+        tracks = client.search_tracks(artist, limit=limit) if artist else []
         return {"tracks": [_legacy_track_item(item) for item in tracks]}
 
     return {}

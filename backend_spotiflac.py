@@ -18,6 +18,8 @@ _STREAM_CAPTURE_INSTALLED = False
 # Thread-safe httpx client management for parallel SpotiFLAC runs
 _sf_clients_lock = threading.Lock()
 _sf_clients: dict[str | None, object] = {}
+_sf_async_clients_lock = threading.Lock()
+_sf_async_clients: dict[str | None, object] = {}
 
 def _get_sf_client(proxy: str | None = None):
     import httpx
@@ -29,10 +31,23 @@ def _get_sf_client(proxy: str | None = None):
             _sf_clients[proxy] = httpx.Client(limits=limits, timeout=300.0, proxy=proxy)
         return _sf_clients[proxy]
 
+def _get_sf_async_client(proxy: str | None = None):
+    import httpx
+    with _sf_async_clients_lock:
+        if proxy not in _sf_async_clients:
+            limits = httpx.Limits(max_keepalive_connections=30, max_connections=100)
+            _sf_async_clients[proxy] = httpx.AsyncClient(limits=limits, timeout=300.0, proxy=proxy)
+        return _sf_async_clients[proxy]
+
 def _patched_get_sync_client(cls):
     # Returns a client configured with the current thread's proxy
     proxy = getattr(_spotiflac_job_local, "proxy", None)
     return _get_sf_client(proxy)
+
+def _patched_get_async_client(cls):
+    # Returns an async client configured with the current thread's proxy
+    proxy = getattr(_spotiflac_job_local, "proxy", None)
+    return _get_sf_async_client(proxy)
 
 _SPOTIFLAC_SERVICE_MAP: dict[str, str] = {
     "apple_music": "apple",
@@ -289,6 +304,8 @@ def _ensure_spotiflac_metadata_patch() -> None:
             # Also patch the NetworkManager to return our proxy-aware clients
             from SpotiFLAC.core.http import NetworkManager  # type: ignore
             NetworkManager.get_sync_client = classmethod(_patched_get_sync_client)
+            if hasattr(NetworkManager, "get_async_client"):
+                NetworkManager.get_async_client = classmethod(_patched_get_async_client)
 
             _spotiflac_patch_installed = True
         except Exception:

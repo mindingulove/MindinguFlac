@@ -194,6 +194,34 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(tracks[0]["title"], "Beat It")
 
+    def test_spotify_artist_top_tracks_uses_artist_overview_before_search_fallback(self):
+        class ArtistOverviewClient(FakePublicSpotifyClient):
+            def __init__(self):
+                self.web_client = self
+
+            def query(self, payload):
+                return {"data": {"artistUnion": {"discography": {"topTracks": {"items": [{
+                    "track": {
+                        "id": "ordinary-world-id",
+                        "name": "Ordinary World",
+                        "uri": "spotify:track:ordinary-world-id",
+                        "artists": {"items": [{"profile": {"name": "Duran Duran"}}]},
+                        "albumOfTrack": {"coverArt": {"sources": [{"url": "https://images.example/rio.jpg", "width": 640}]}},
+                        "duration": {"totalMilliseconds": 340200},
+                        "playcount": "570788822",
+                    }
+                }]}}}}}
+
+            def search_tracks(self, query, limit=20):
+                raise AssertionError("artist top tracks should come from the artist ID overview first")
+
+        with patch.object(music_metadata, "_get_spotify_client", return_value=ArtistOverviewClient()):
+            tracks = music_metadata.spotify_artist_top_tracks("Duran Duran", artist_id="artist-id")
+
+        self.assertEqual(tracks[0]["title"], "Ordinary World")
+        self.assertEqual(tracks[0]["spotify_id"], "ordinary-world-id")
+        self.assertEqual(tracks[0]["plays"], 570780000)
+
     def test_spotify_artist_id_uses_cached_discovery_identity(self):
         with patch("catalog.load_discovery_cache", return_value={
             "artist_identities": {
