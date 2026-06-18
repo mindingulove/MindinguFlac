@@ -2,7 +2,7 @@
 
 ## Highlights
 - Upgraded the packaged SpotiFLAC integration to the `v1.1.8` module line.
-- Artist Popular Tracks now uses Spotify's artist overview data by Spotify artist ID before falling back to text search.
+- Artist Popular Tracks improved and fixed a bug with Spotify's artist overview data by Spotify artist ID before falling back to text search.
 - Added proxy-aware async HTTP client patching for newer SpotiFLAC network paths.
 
 ## Bug Fixes
