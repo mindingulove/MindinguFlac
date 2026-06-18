@@ -183,6 +183,7 @@ button, input, select { font: inherit; }
 
 .settings-shortcut {
   justify-self: end;
+  position: relative;
   background: transparent;
   border: 0;
   color: #b3b3b3;
@@ -193,6 +194,32 @@ button, input, select { font: inherit; }
 }
 
 .settings-shortcut:hover { color: #fff; }
+
+.settings-shortcut::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #282828;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.settings-shortcut:hover::after,
+.settings-shortcut:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
 
 .hidden { display: none !important; }
 
