@@ -998,8 +998,27 @@ def spotify_artist_id(artist_name: str) -> str:
         if attempt == 0:
             _reset_spotify_client_cache()
             continue
+        try:
+            from catalog import load_discovery_cache
+            cached_identity = (load_discovery_cache().get("artist_identities") or {}).get(key, {})
+            cached_id = str(cached_identity.get("spotify_id") or "").strip()
+            if cached_id:
+                with _spotify_artist_id_cache_lock:
+                    _spotify_artist_id_cache[key] = cached_id
+                    _spotify_artist_id_cache.move_to_end(key)
+                    while len(_spotify_artist_id_cache) > _SPOTIFY_ARTIST_CACHE_SIZE:
+                        _spotify_artist_id_cache.popitem(last=False)
+                return cached_id
+        except Exception:
+            pass
         return ""
     return ""
+
+
+def _resolve_spotify_artist_id(artist_name: str, artist_id: str = "") -> str:
+    supplied_id = str(artist_id or "").strip()
+    resolved_id = spotify_artist_id(artist_name)
+    return resolved_id or supplied_id
 
 
 def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str = "") -> list[dict]:
@@ -1016,24 +1035,33 @@ def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str 
             return []
         data = _sp(f"artists/{sp_artist_id}/top-tracks", market="US")
         sp_tracks = (data.get("tracks") or [])[:limit]
+        if not sp_tracks:
+            client = _get_spotify_client(force_refresh=attempt > 0)
+            search_tracks = getattr(client, "search_tracks", None)
+            if search_tracks:
+                try:
+                    sp_tracks = list(search_tracks(artist_name, limit=limit) or [])[:limit]
+                except Exception:
+                    sp_tracks = []
         results = []
         for t in sp_tracks:
-            images = (t.get("album") or {}).get("images") or []
+            legacy_track = _legacy_track_item(t)
+            images = (legacy_track.get("album") or {}).get("images") or []
             art = proxy_artwork_url(images[0]["url"]) if images else ""
-            album_name = (t.get("album") or {}).get("name", "")
+            album_name = (legacy_track.get("album") or {}).get("name", "")
             if not art and album_name:
                 art = spotify_album_artwork(artist_name, album_name)
             results.append({
-                "title": t.get("name", ""),
+                "title": legacy_track.get("name", ""),
                 "artist": artist_name,
                 "album": album_name,
                 "artwork_url": art,
-                "duration": format_duration_ms(t.get("duration_ms", 0)),
-                "length": t.get("duration_ms", 0),
-                "plays": t.get("popularity", 0) * 10000,
-                "spotify_url": (t.get("external_urls") or {}).get("spotify", ""),
-                "spotify_id": t.get("id", ""),
-                "isrc": (t.get("external_ids") or {}).get("isrc", ""),
+                "duration": format_duration_ms(legacy_track.get("duration_ms", 0)),
+                "length": legacy_track.get("duration_ms", 0),
+                "plays": legacy_track.get("popularity", 0) * 10000,
+                "spotify_url": (legacy_track.get("external_urls") or {}).get("spotify", ""),
+                "spotify_id": legacy_track.get("id", ""),
+                "isrc": (legacy_track.get("external_ids") or {}).get("isrc", ""),
                 "source": "Spotify",
             })
         if results:
@@ -1047,6 +1075,10 @@ def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str 
         if attempt == 0:
             _reset_spotify_client_cache()
             continue
+        if artist_id:
+            resolved_id = spotify_artist_id(artist_name)
+            if resolved_id and resolved_id != artist_id:
+                return spotify_artist_top_tracks(artist_name, limit=limit, artist_id=resolved_id)
         return []
     return []
 
@@ -1314,7 +1346,7 @@ def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:
 
 
 def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
-    resolved_artist_id = artist_id or spotify_artist_id(artist)
+    resolved_artist_id = _resolve_spotify_artist_id(artist, artist_id)
     art = ""
     if resolved_artist_id:
         art = spotify_artist_artwork(artist, resolved_artist_id)

@@ -4,6 +4,11 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
 
+## v1.1.1
+
+- Artist pages now recover live Spotify top tracks again when the direct artist top-tracks endpoint is empty.
+- Artist identity resolution prefers the live Spotify lookup path and only falls back to cached discovery data if needed.
+
 ## v1.1.0
 
 - Local taste profiles now learn from actual listening, likes, dislikes, and blacklists.

@@ -113,7 +113,8 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
         if hasattr(music_metadata, "clear_spotify_artist_caches"):
             music_metadata.clear_spotify_artist_caches()
         music_metadata.spotify_search_track.cache_clear()
-        music_metadata.spotify_artist_artwork.cache_clear()
+        if hasattr(music_metadata.spotify_artist_artwork, "cache_clear"):
+            music_metadata.spotify_artist_artwork.cache_clear()
 
     def test_search_music_does_not_cache_empty_results(self):
         class EmptyIndexer:
@@ -176,6 +177,32 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
             tracks = music_metadata.spotify_artist_top_tracks("Michael Jackson", artist_id="artist-id")
 
         self.assertEqual(tracks[0]["title"], "Beat It")
+
+    def test_spotify_artist_top_tracks_falls_back_to_search_tracks_when_top_tracks_empty(self):
+        class EmptyTopTracksClient(FakePublicSpotifyClient):
+            def __init__(self):
+                self.web_client = self
+
+            def _get(self, endpoint, params=None):
+                return {}
+
+            def search_tracks(self, query, limit=20):
+                return [FakeTrack()]
+
+        with patch.object(music_metadata, "_get_spotify_client", return_value=EmptyTopTracksClient()):
+            tracks = music_metadata.spotify_artist_top_tracks("Duran Duran", artist_id="3DMO3orHyVwheG0Adbg8Ox")
+
+        self.assertEqual(tracks[0]["title"], "Beat It")
+
+    def test_spotify_artist_id_uses_cached_discovery_identity(self):
+        with patch("catalog.load_discovery_cache", return_value={
+            "artist_identities": {
+                "duran duran": {"spotify_id": "3DMO3orHyVwheG0Adbg8Ox", "artwork_url": "/api/image?url=https%3A%2F%2Fi.scdn.co%2Fimage%2Fab6761610000e5eb899b5cf79062868a01429bc7"},
+            }
+        }):
+            artist_id = music_metadata.spotify_artist_id("Duran Duran")
+
+        self.assertEqual(artist_id, "3DMO3orHyVwheG0Adbg8Ox")
 
     def test_artist_page_retries_album_discography_after_transient_client_failure(self):
         class BrokenClient(FakePublicSpotifyClient):
@@ -250,14 +277,15 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
         artwork.assert_called_once_with("Michael Jackson", "Thriller")
 
     def test_artist_page_resolves_invalid_card_id_and_uses_discography(self):
-        with patch.object(music_metadata, "_spotify_client_cache", FakeDiscographyClient()):
-            parts = list(music_metadata.artist_page(None, "Michael Jackson", artist_id="track-id"))
+        with patch.object(music_metadata, "spotify_artist_artwork", return_value=""):
+            with patch.object(music_metadata, "_spotify_client_cache", FakeDiscographyClient()):
+                parts = list(music_metadata.artist_page(None, "Michael Jackson", artist_id="track-id"))
 
-        albums = parts[-1]["albums"]
+        albums = next(part["albums"] for part in parts if part.get("type") == "albums")
         self.assertEqual(parts[0]["artist_id"], "artist-id")
         self.assertEqual(len(parts[1]["tracks"]), 1)
-        self.assertEqual([item["title"] for item in albums], ["First Album", "Second Album"])
-        self.assertEqual(albums[0]["spotify_id"], "album-one")
+        self.assertEqual([item["title"] for item in albums], ["Second Album", "First Album"])
+        self.assertEqual(albums[0]["spotify_id"], "album-two")
         self.assertTrue(albums[0]["artwork_url"])
 
     def test_album_gallery_preserves_spotify_cover_before_discogs_images(self):
