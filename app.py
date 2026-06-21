@@ -1452,7 +1452,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 is_finished = job.get("status") == "finished"
-                self.stream_local_path(candidate, is_active_job=not is_finished)
+                # If the candidate file is already fully on disk, serve it with
+                # Content-Length + Accept-Ranges instead of chunked encoding.
+                # Chunked encoding confuses WebKit's <audio> element for FLAC
+                # files (it buffers indefinitely without ever starting playback).
+                try:
+                    active_audio_size = int(job.get("active_audio_size") or 0)
+                    file_complete = active_audio_size > 0 and candidate.stat().st_size >= active_audio_size
+                except OSError:
+                    file_complete = False
+                self.stream_local_path(candidate, is_active_job=not is_finished and not file_complete)
                 return
 
             if path == "/api/tidal_proxy":
