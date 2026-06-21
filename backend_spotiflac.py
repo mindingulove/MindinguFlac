@@ -265,7 +265,7 @@ def _install_stream_capture() -> None:
 
     original = HttpClient.stream_to_file
 
-    def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None):
+    def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None):
         manager = getattr(_STREAM_CAPTURE, "manager", None)
         job_id = getattr(_STREAM_CAPTURE, "job_id", "")
         if manager and job_id:
@@ -275,7 +275,7 @@ def _install_stream_capture() -> None:
                     job["active_stream_url"] = url
                     job["active_stream_dest_path"] = str(dest_path)
                     job["active_stream_headers"] = extra_headers or {}
-        return original(self, url, dest_path, progress_cb, chunk_size, extra_headers)
+        return original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event)
 
     HttpClient.stream_to_file = wrapped_stream_to_file
     _STREAM_CAPTURE_INSTALLED = True

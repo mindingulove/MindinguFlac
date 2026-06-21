@@ -2392,6 +2392,18 @@ def _query_contract(script_url: str) -> dict[str, str]:
     return contracts
 
 
+@functools.lru_cache(maxsize=16)
+def _query_artist_hash(script_url: str) -> str:
+    """Extract only the queryArtistOverview persisted-query hash from the JS bundle.
+    Does not attempt TOTP secret extraction — that inline format no longer exists."""
+    try:
+        javascript = _web_request_text(script_url)
+        m = re.search(r'queryArtistOverview","query","([0-9a-f]{64})"', javascript)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
 def _anonymous_token(server_time: int, secret: bytes, token_version: str) -> str:
     query = urllib.parse.urlencode({
         "reason": "init",
@@ -2445,23 +2457,37 @@ def spotify_album_playcounts(album_id: str) -> dict[str, int]:
 
 
 def _load_artist_about(artist_id: str) -> dict:
-    server_time, script_url = _web_player_config(artist_id, is_artist=True)
-    contract = _query_contract(script_url)
-    if "artist" not in contract:
+    # Use SpotiFLAC's SpotifyWebClient — it handles TOTP via the community secrets
+    # repo and adds the required Client-Token header. The old approach of extracting
+    # the TOTP secret from Spotify's JS bundle (let eU=[{secret:...}]) no longer
+    # works because Spotify removed that inline format.
+    sf_client = _get_spotify_client()
+    web_client = getattr(sf_client, "web_client", None) if sf_client else None
+    if not web_client:
         return {}
-    token = _anonymous_token(server_time, contract["secret"], contract["token_version"])
-    if not token:
-        return {}
+
+    # Try to pull the live queryArtistOverview hash from Spotify's JS bundle so we
+    # always use the current persisted-query document (which includes relatedContent).
+    # Fall back to a known working hash if the JS scrape fails.
+    artist_hash = "446130b4a0aa6522a686aafccddb0ae849165b5e0243617b5d8"
+    try:
+        _, script_url = _web_player_config(artist_id, is_artist=True)
+        live_hash = _query_artist_hash(script_url)
+        if live_hash:
+            artist_hash = live_hash
+    except Exception:
+        pass
+
     body = {
         "operationName": "queryArtistOverview",
         "variables": {"uri": f"spotify:artist:{artist_id}", "locale": "", "includePrerelease": True},
-        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": contract["artist"]}},
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": artist_hash}},
     }
-    response = json.loads(_web_request_text(
-        _WEB_QUERY_URL,
-        {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "spotify-app-version": _WEB_APP_VERSION},
-        json.dumps(body).encode("utf-8"),
-    ))
+    try:
+        response = web_client.query(body)
+    except Exception as e:
+        print(f"[SpotifyWeb] queryArtistOverview failed for {artist_id}: {e}")
+        return {}
     data = response.get("data", {})
     artist = data.get("artistUnion") or data.get("artist") or {}
     stats = artist.get("stats") or {}
