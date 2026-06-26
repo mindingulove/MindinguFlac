@@ -442,6 +442,8 @@ def _refresh_album_playlist_metadata(playlist: dict) -> bool:
         playlist["artwork_url"] = refreshed["artwork_url"]
     if refreshed.get("artist"):
         playlist["owner"] = refreshed["artist"]
+    if refreshed.get("year"):
+        playlist["year"] = refreshed["year"]
     playlist["metadata_fetched"] = True
     return True
 

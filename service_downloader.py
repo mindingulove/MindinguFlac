@@ -568,8 +568,25 @@ class ServiceDownloadManager:
             self._cache_events.clear()
             self._cache_file_sizes.clear()
 
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir, ignore_errors=True)
+        # Force unregistering any torrent handles active for the jobs we are clearing.
+        # This releases the files from the libtorrent session immediately so they can be deleted.
+        try:
+            import backend_torrent
+            for j_id in stream_job_ids:
+                backend_torrent._unregister_all_for_job(j_id, delete_files=True)
+        except Exception:
+            pass
+
+        # Give libtorrent / OS a small window to release file descriptors and close files,
+        # retrying shutil.rmtree to make sure the cache directory is completely emptied.
+        import time
+        for _ in range(10):
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            if not cache_dir.exists() or not any(cache_dir.iterdir()):
+                break
+            time.sleep(0.1)
+
         cache_dir.mkdir(parents=True, exist_ok=True)
         self._save_jobs()
         return {
@@ -696,15 +713,24 @@ class ServiceDownloadManager:
             job["status"] = "error"
             job["error"] = "Cancelled by user"
             job["library_requested"] = False
-
             output_dir = job.get("output_dir")
-            if output_dir:
-                try:
-                    p = Path(output_dir)
-                    if p.exists():
-                        shutil.rmtree(p, ignore_errors=True)
-                except Exception:
-                    pass
+
+        # Unregister all active torrents for this cancelled job to release files
+        try:
+            import backend_torrent
+            backend_torrent._unregister_all_for_job(job_id, delete_files=True)
+        except Exception:
+            pass
+
+        if output_dir:
+            import time
+            p = Path(output_dir)
+            for _ in range(10):
+                if p.exists():
+                    shutil.rmtree(p, ignore_errors=True)
+                if not p.exists() or not any(p.iterdir()):
+                    break
+                time.sleep(0.1)
 
         self._append_cache_event(job, "cancelled", "Cache download cancelled and partial files removed")
         self._save_jobs()
@@ -1221,6 +1247,8 @@ class ServiceDownloadManager:
             self._save_jobs()
 
     def _sync_progress_from_files(self, job: dict) -> bool:
+        if job.get("status") in ("finished", "error"):
+            return False
         output_dir = job.get("output_dir")
         if not output_dir:
             return False
@@ -1240,11 +1268,11 @@ class ServiceDownloadManager:
         engine = str(job.get("engine") or "").lower()
         engine_bytes = int(job.get("active_audio_ready_bytes") or 0)
         engine_total = int(job.get("active_audio_size") or 0)
-        use_engine_progress = engine == "torrent" and engine_bytes > 0 and engine_total > 0
+        use_engine_progress = engine == "torrent"
 
         if use_engine_progress:
-            progress_bytes = min(engine_bytes, engine_total)
-            total_bytes = engine_total
+            progress_bytes = min(engine_bytes, engine_total) if engine_total > 0 else 0
+            total_bytes = engine_total if engine_total > 0 else 1
         else:
             progress_bytes = downloaded_bytes
             total_bytes = max(int(job.get("estimated_total_bytes") or 0), _estimated_total_bytes(job, detected_ext))

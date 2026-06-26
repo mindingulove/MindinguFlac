@@ -339,6 +339,8 @@ def _register_job_to_torrent(magnet: str, job_id: str, output_dir: Path, manager
         if key in _ACTIVE_SESSIONS:
             entry = _ACTIVE_SESSIONS[key]
             entry["refs"].add(job_id)
+            if "magnet" not in entry:
+                entry["magnet"] = magnet
             handle = entry["handle"]
             if handle.is_valid():
                 handle.resume()
@@ -357,7 +359,12 @@ def _register_job_to_torrent(magnet: str, job_id: str, output_dir: Path, manager
             handle = _GLOBAL_SES.add_torrent(add_params)
         else:
             handle = lt.add_magnet_uri(_GLOBAL_SES, magnet, params)
-        _ACTIVE_SESSIONS[key] = {"handle": handle, "refs": {job_id}, "save_path": str(output_dir)}
+        _ACTIVE_SESSIONS[key] = {
+            "handle": handle,
+            "refs": {job_id},
+            "save_path": str(output_dir),
+            "magnet": magnet
+        }
         return handle, output_dir
 
 def _unregister_job_from_torrent(magnet: str, job_id: str) -> bool:
@@ -377,6 +384,29 @@ def _unregister_job_from_torrent(magnet: str, job_id: str) -> bool:
             del _ACTIVE_SESSIONS[key]
             return True
         return False
+
+def _unregister_all_for_job(job_id: str, delete_files: bool = True) -> None:
+    """Drop all references this job holds to any active torrent sessions,
+    and optionally delete their files if this was the last job referencing them."""
+    with _SESSIONS_LOCK:
+        to_unregister = []
+        for key, entry in list(_ACTIVE_SESSIONS.items()):
+            if job_id in entry.get("refs", set()):
+                magnet = entry.get("magnet") or ""
+                save_path = entry.get("save_path")
+                to_unregister.append((magnet, save_path))
+    
+    for magnet, save_path in to_unregister:
+        if not magnet:
+            continue
+        fully_removed = _unregister_job_from_torrent(magnet, job_id)
+        if delete_files and fully_removed and save_path:
+            try:
+                p_path = Path(save_path).resolve()
+                if "_race" in p_path.parts:
+                    shutil.rmtree(p_path, ignore_errors=True)
+            except Exception:
+                pass
 
 def _get_catalog_path(manager) -> Path:
     return Path(manager.config.cache_dir) / "torrent_catalog.json"
@@ -940,14 +970,31 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 if best_f_idx == -1 or best_f_score < 60:
                     return False
 
+                def update_shared_priorities():
+                    try:
+                        file_count = _torrent_num_files(torrent_info)
+                        if file_count <= 0:
+                            return
+                        priorities = [0] * file_count
+                        with manager._lock:
+                            for other_job in list(manager.jobs.values()):
+                                if other_job.get("status") in ("starting", "running"):
+                                    other_mag = other_job.get("resolved_url")
+                                    if other_mag and _torrent_key(other_mag) == _torrent_key(magnet):
+                                        fidx = other_job.get("active_file_idx")
+                                        if fidx is not None and 0 <= fidx < file_count:
+                                            is_pref = other_job.get("prefetch", False)
+                                            priorities[fidx] = 2 if is_pref else 7
+                        handle.prioritize_files(priorities)
+                    except Exception:
+                        pass
+
                 try:
                     handle.set_sequential_download(True)
-                    file_count = _torrent_num_files(torrent_info)
-                    if file_count <= 0:
-                        return False
-                    priorities = [0] * file_count
-                    priorities[best_f_idx] = 7
-                    handle.prioritize_files(priorities)
+                    with manager._lock:
+                        job["active_file_idx"] = best_f_idx
+                        job["resolved_url"] = magnet
+                    update_shared_priorities()
                 except Exception as exc:
                     manager._append_cache_event(job, "trying", f"Source could not be prioritized, trying next: {exc}")
                     return False
@@ -1070,6 +1117,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     elif s.download_payload_rate > 100 * 1024: # > 100 KB/s overall is "healthy enough" to wait
                         last_progress_time = time.time()
 
+                    update_shared_priorities()
                     prog = (done / total) * 100 if total > 0 else 0
                     with manager._lock:
                         job["progress"] = int(prog)
@@ -1663,22 +1711,31 @@ def run(output_dir: Path, job: dict, manager) -> None:
             if cached_magnet and not db.is_blacklisted(cached_magnet):
                 handle, torrent_save_path = _register_job_to_torrent(cached_magnet, job_id, output_dir, manager)
                 current_magnet = cached_magnet
-                time.sleep(0.5)
-                if handle.status().num_peers > 0:
+                
+                # Wait for metadata to resolve (up to 8 seconds)
+                meta_start = time.time()
+                has_meta = False
+                while time.time() - meta_start < 8.0:
+                    if job_id in manager._cancel_flags:
+                        raise RuntimeError("Cancelled")
+                    if handle.is_valid() and handle.status().has_metadata:
+                        has_meta = True
+                        break
+                    time.sleep(0.5)
+                
+                if has_meta:
                     manager._append_cache_event(job, "trying", f"Step 0: Reusing swarm for: {album}")
                     _scr = stream_to_completion(handle, current_magnet, torrent_save_path, is_artist_verified=True)
                     if _scr:
                         return
-                    # Only blacklist on a hard failure; a stalled-with-progress
-                    # cache magnet (None) stays retryable so a later phase resumes.
+                    # Only blacklist/delete on a hard failure
                     if _scr is False:
                         db.add_to_blacklist(cached_magnet, "cached source failed")
                         db.delete_resolved_source(job.get("track_key") or "")
                         db.delete_album_source(album_key)
                 else:
-                    db.add_to_blacklist(cached_magnet, "cached source has no peers")
-                    db.delete_resolved_source(job.get("track_key") or "")
-                    db.delete_album_source(album_key)
+                    manager._append_cache_event(job, "trying", "Cached source metadata not resolved yet; falling back to discovery search...")
+                
                 _unregister_job_from_torrent(current_magnet, job_id)
                 handle = None
                 current_magnet = None
@@ -1859,4 +1916,4 @@ def run(output_dir: Path, job: dict, manager) -> None:
             
             raise RuntimeError("All sources failed or stalled.")
     finally:
-        if current_magnet: _unregister_job_from_torrent(current_magnet, job_id)
+        _unregister_all_for_job(job_id, delete_files=True)

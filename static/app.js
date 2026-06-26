@@ -5715,7 +5715,8 @@ function renderSidebarPlaylists() {
   list.querySelectorAll("[data-delete-playlist]").forEach(btn => {
     btn.onclick = (event) => {
       event.stopPropagation();
-      deletePlaylist(btn.dataset.deletePlaylist);
+      btn.classList.add("clicked");
+      deletePlaylist(btn.dataset.deletePlaylist).finally(() => btn.classList.remove("clicked"));
     };
   });
 }
@@ -5814,7 +5815,7 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
   const isAlbumPlaylist = playlistOrigin === "album";
   const primaryTrack = (pl.tracks || []).find(track => track && (track.artist || track.album)) || (pl.tracks || [])[0] || {};
   const heroArtist = primaryTrack.artist || pl.owner || "";
-  const heroYear = primaryTrack.year || "";
+  const heroYear = primaryTrack.year || pl.year || "";
   const heroTrackCount = pl.tracks.length;
   const heroMeta = [];
   if (isAlbumPlaylist) {
@@ -5966,6 +5967,7 @@ async function hydrateAlbumPlaylistTracks(playlist, playbackContext = null) {
       tracks: mergedTracks,
       artwork_url: data.artwork_url || playlist.artwork_url || "",
       owner: data.artist || playlist.owner || "",
+      year: data.year || playlist.year || "",
       metadata_fetched: true,
     };
 

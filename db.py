@@ -1013,7 +1013,7 @@ def _musicbrainz_json(url: str) -> dict:
     if cached is not None:
         return cached
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mindinguflac/1.1.2"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mindinguflac/1.1.3"})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             if isinstance(data, dict) and data:

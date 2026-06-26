@@ -10,8 +10,8 @@ from pathlib import Path
 
 OWNER = "mindingulove"
 REPO = "MindinguFlac"
-TAG = "v1.1.2"
-NOTES_PATH = Path("RELEASE_NOTES_v1.1.2.md")
+TAG = "v1.1.3"
+NOTES_PATH = Path("RELEASE_NOTES_v1.1.3.md")
 ENV_PATH = Path(".env")
 
 
@@ -103,9 +103,10 @@ def delete_asset(token: str, asset_id: int) -> None:
 
 def candidate_assets() -> list[tuple[Path, str]]:
     candidates: list[tuple[Path, str]] = []
-    mac_path = Path("Mindinguflac-macos-arm64.zip")
-    if mac_path.exists():
-        candidates.append((mac_path, "Mindinguflac-macos-arm64.zip"))
+    for mac_name in ("Mindinguflac-macos-arm64.zip", "Mindinguflac-macos-x86_64.zip"):
+        mac_path = Path(mac_name)
+        if mac_path.exists():
+            candidates.append((mac_path, mac_name))
     for pattern in ("Mindinguflac-windows*.zip", "dist/Mindinguflac-windows*.zip"):
         for path_str in sorted(glob.glob(pattern)):
             path = Path(path_str)
