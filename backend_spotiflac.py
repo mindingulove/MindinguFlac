@@ -4,6 +4,7 @@ import logging
 import os
 import threading
 import time
+import inspect
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,12 @@ def _patched_get_sync_client(cls):
 
 def _patched_get_async_client(cls):
     # Returns an async client configured with the current thread's proxy
+    proxy = getattr(_spotiflac_job_local, "proxy", None)
+    return _get_sf_async_client(proxy)
+
+
+async def _patched_get_async_client_safe(cls):
+    # SpotiFLAC 1.2.6+ routes provider traffic through this async-only accessor.
     proxy = getattr(_spotiflac_job_local, "proxy", None)
     return _get_sf_async_client(proxy)
 
@@ -258,14 +265,20 @@ def _install_stream_capture() -> None:
     global _STREAM_CAPTURE_INSTALLED
     if _STREAM_CAPTURE_INSTALLED:
         return
+    http_client_cls = None
     try:
         from SpotiFLAC.core.http import HttpClient  # type: ignore
+        http_client_cls = HttpClient
     except Exception:
-        return
+        try:
+            from SpotiFLAC.core.http import AsyncHttpClient  # type: ignore
+            http_client_cls = AsyncHttpClient
+        except Exception:
+            return
 
-    original = HttpClient.stream_to_file
+    original = http_client_cls.stream_to_file
 
-    def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None):
+    def _capture(url, dest_path, extra_headers):
         manager = getattr(_STREAM_CAPTURE, "manager", None)
         job_id = getattr(_STREAM_CAPTURE, "job_id", "")
         if manager and job_id:
@@ -275,9 +288,17 @@ def _install_stream_capture() -> None:
                     job["active_stream_url"] = url
                     job["active_stream_dest_path"] = str(dest_path)
                     job["active_stream_headers"] = extra_headers or {}
-        return original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event)
 
-    HttpClient.stream_to_file = wrapped_stream_to_file
+    if inspect.iscoroutinefunction(original):
+        async def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None):
+            _capture(url, dest_path, extra_headers)
+            return await original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event)
+    else:
+        def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None):
+            _capture(url, dest_path, extra_headers)
+            return original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event)
+
+    http_client_cls.stream_to_file = wrapped_stream_to_file
     _STREAM_CAPTURE_INSTALLED = True
 
 
@@ -290,22 +311,38 @@ def _ensure_spotiflac_metadata_patch() -> None:
             return
         try:
             from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
-            _original_get_track = SpotifyMetadataClient.get_track
+            if hasattr(SpotifyMetadataClient, "get_track"):
+                _original_get_track = SpotifyMetadataClient.get_track
 
-            def _thread_local_get_track(client, track_id):
-                job = getattr(_spotiflac_job_local, "current_job", None)
-                track = _original_get_track(client, track_id)
-                if job is None:
-                    return track
-                return requested_spotiflac_track_metadata(track, job)
+                def _thread_local_get_track(client, track_id):
+                    job = getattr(_spotiflac_job_local, "current_job", None)
+                    track = _original_get_track(client, track_id)
+                    if job is None:
+                        return track
+                    return requested_spotiflac_track_metadata(track, job)
 
-            SpotifyMetadataClient.get_track = _thread_local_get_track
+                SpotifyMetadataClient.get_track = _thread_local_get_track
+
+            if hasattr(SpotifyMetadataClient, "get_track_async"):
+                _original_get_track_async = SpotifyMetadataClient.get_track_async
+
+                async def _thread_local_get_track_async(client, track_id):
+                    job = getattr(_spotiflac_job_local, "current_job", None)
+                    track = await _original_get_track_async(client, track_id)
+                    if job is None:
+                        return track
+                    return requested_spotiflac_track_metadata(track, job)
+
+                SpotifyMetadataClient.get_track_async = _thread_local_get_track_async
 
             # Also patch the NetworkManager to return our proxy-aware clients
             from SpotiFLAC.core.http import NetworkManager  # type: ignore
-            NetworkManager.get_sync_client = classmethod(_patched_get_sync_client)
+            if hasattr(NetworkManager, "get_sync_client"):
+                NetworkManager.get_sync_client = classmethod(_patched_get_sync_client)
             if hasattr(NetworkManager, "get_async_client"):
                 NetworkManager.get_async_client = classmethod(_patched_get_async_client)
+            if hasattr(NetworkManager, "get_async_client_safe"):
+                NetworkManager.get_async_client_safe = classmethod(_patched_get_async_client_safe)
 
             _spotiflac_patch_installed = True
         except Exception:

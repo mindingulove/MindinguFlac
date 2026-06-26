@@ -340,10 +340,12 @@ def _best_raw_image(image: dict | None) -> str:
 
 def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
     """Expose SpotiFLAC 0.6.1 public methods in the legacy response shape."""
+    from spotiflac_compat import call_sync_or_async
+
     if endpoint == "search":
         query = params.get("q", "")
         limit = int(params.get("limit", 20))
-        results = client.search(query, limit=limit)
+        results = call_sync_or_async(client, "search", "search_async", query, limit=limit)
         albums = results.get("albums", []) or _raw_search_simple_items(client, query, limit, "album")
         artists = results.get("artists", []) or _raw_search_simple_items(client, query, limit, "artist")
         return {
@@ -354,14 +356,18 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
 
     playlist_match = re.fullmatch(r"playlists/([^/]+)/tracks", endpoint)
     if playlist_match:
-        playlist_result = client.get_playlist_tracks(playlist_match.group(1))
+        playlist_result = call_sync_or_async(
+            client, "get_playlist_tracks", "get_playlist_tracks_async", playlist_match.group(1)
+        )
         tracks = playlist_result[1] if len(playlist_result) > 1 else []
         limit = int(params.get("limit", len(tracks)))
         return {"items": [{"track": _legacy_track_item(item)} for item in tracks[:limit]]}
 
     album_match = re.fullmatch(r"albums/([^/]+)", endpoint)
     if album_match:
-        info, tracks = client.get_album_tracks(album_match.group(1))
+        info, tracks = call_sync_or_async(
+            client, "get_album_tracks", "get_album_tracks_async", album_match.group(1)
+        )
         cover_url = info.get("cover_url", "")
         return {
             "id": album_match.group(1),

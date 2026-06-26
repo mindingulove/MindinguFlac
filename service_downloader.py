@@ -178,6 +178,7 @@ def _resolve_platform_url(candidate_url: str, service: str) -> str:
 def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "track", isrc: str = "") -> str:
     try:
         from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
 
         queries = []
@@ -192,7 +193,7 @@ def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "t
 
         for q in queries:
             if not hasattr(client, "_get"):
-                data = client.search(q, limit=3)
+                data = call_sync_or_async(client, "search", "search_async", q, limit=3)
                 items = data.get("albums" if kind == "album" else "tracks", [])
                 for item in items:
                     url = item.get("external_url", "") if isinstance(item, dict) else getattr(item, "external_url", "")

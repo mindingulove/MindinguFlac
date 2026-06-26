@@ -708,11 +708,14 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
     
     try:
         from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
         
         if playlist_m:
             playlist_id = playlist_m.group(1)
-            info, imported_tracks, playlist_cover = client.get_playlist_tracks(playlist_id)
+            info, imported_tracks, playlist_cover = call_sync_or_async(
+                client, "get_playlist_tracks", "get_playlist_tracks_async", playlist_id
+            )
             pl_name = info.get("name", "")
             pl_artwork = info.get("cover_url", "") or playlist_cover
             pl_description = info.get("description", "") or ""
@@ -720,7 +723,9 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
             pl_followers = info.get("followers", 0) or 0
         elif album_m:
             album_id = album_m.group(1)
-            info, imported_tracks = client.get_album_tracks(album_id)
+            info, imported_tracks = call_sync_or_async(
+                client, "get_album_tracks", "get_album_tracks_async", album_id
+            )
             pl_name = info.get("name", "")
             pl_artwork = info.get("cover_url", "")
             pl_owner = info.get("artist") or info.get("artists") or ""
