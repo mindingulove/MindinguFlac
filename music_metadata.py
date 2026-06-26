@@ -130,6 +130,9 @@ def _get_spotify_client(force_refresh: bool = False):
         except ImportError:
             _spotify_client_cache = False
             return None
+        except Exception:
+            _spotify_client_cache = None
+            return None
 
 
 def _reset_spotify_client_cache() -> None:
@@ -377,15 +380,27 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
         }
 
     artist_top_match = re.fullmatch(r"artists/([^/]+)/top-tracks", endpoint)
-    if artist_top_match and hasattr(client, "get_artist_profile"):
+    if artist_top_match and (
+        hasattr(client, "get_artist_profile")
+        or hasattr(client, "get_artist_profile_async")
+        or getattr(client, "web_client", None)
+    ):
+        from spotiflac_compat import call_sync_or_async
+
         artist_id = artist_top_match.group(1)
         limit = int(params.get("limit", 20) or 20)
         tracks = _raw_artist_top_track_items(client, artist_id, limit=limit)
         if tracks:
             return {"tracks": tracks}
-        profile = client.get_artist_profile(artist_id)
+        profile = call_sync_or_async(
+            client, "get_artist_profile", "get_artist_profile_async", artist_id
+        )
         artist = profile.get("profile", {}).get("name", "")
-        tracks = client.search_tracks(artist, limit=limit) if artist else []
+        tracks = (
+            call_sync_or_async(client, "search_tracks", "search_tracks_async", artist, limit=limit)
+            if artist
+            else []
+        )
         return {"tracks": [_legacy_track_item(item) for item in tracks]}
 
     return {}

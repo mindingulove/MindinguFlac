@@ -194,6 +194,25 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(tracks[0]["title"], "Beat It")
 
+    def test_spotify_artist_top_tracks_supports_async_only_client(self):
+        class AsyncOnlyClient:
+            def __init__(self):
+                self.web_client = self
+
+            def query(self, payload):
+                return {"data": {"artistUnion": {"discography": {"topTracks": {"items": []}}}}}
+
+            async def get_artist_profile_async(self, artist_id):
+                return {"profile": {"name": "Michael Jackson"}}
+
+            async def search_tracks_async(self, query, limit=20):
+                return [FakeTrack()]
+
+        with patch.object(music_metadata, "_get_spotify_client", return_value=AsyncOnlyClient()):
+            tracks = music_metadata.spotify_artist_top_tracks("Michael Jackson", artist_id="artist-id")
+
+        self.assertEqual(tracks[0]["title"], "Beat It")
+
     def test_spotify_artist_top_tracks_uses_artist_overview_before_search_fallback(self):
         class ArtistOverviewClient(FakePublicSpotifyClient):
             def __init__(self):
