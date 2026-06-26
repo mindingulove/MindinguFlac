@@ -236,7 +236,7 @@ def spotiflac_download_options(output_dir: Path, job: dict, track_max_retries: i
         "lyrics_providers": ["spotify", "apple", "musixmatch", "lrclib", "amazon"],
         "enrich_metadata": True,
         "enrich_providers": ["deezer", "apple", "qobuz", "tidal", "soundcloud"],
-        "allow_fallback": True,
+        "allow_fallback": False,
         "use_artist_subfolders": False,
         "use_album_subfolders": False,
     }
@@ -503,8 +503,9 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
         _STREAM_CAPTURE.manager = manager
         _STREAM_CAPTURE.job_id = job["id"]
         success = False
-        # Allow internal fallback so SpotiFLAC can try its other mirrors if one is 503
-        kwargs["allow_fallback"] = True
+        # Keep provider fallback under this backend's control so the configured
+        # service is tried first instead of a provider silently jumping ahead.
+        kwargs["allow_fallback"] = False
         immediate_tor = manager.config.track_max_retries == 0
         max_direct = manager.config.track_max_retries
 
