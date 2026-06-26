@@ -5,7 +5,10 @@ import os
 import threading
 import time
 import inspect
+from dataclasses import fields
 from pathlib import Path
+
+from spotiflac_compat import run_async_blocking
 
 # ---------------------------------------------------------------------------
 # SpotiFLAC state
@@ -218,6 +221,10 @@ def spotiflac_download_options(output_dir: Path, job: dict, track_max_retries: i
     from service_downloader import clean_part
     title = clean_part(job.get("title") or "Unknown Track")
     artist = clean_part(job.get("artist") or "Unknown Artist")
+    metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    include_featuring = bool(
+        job.get("include_featuring") or metadata.get("include_featuring")
+    )
     options = {
         "url": job.get("resolved_url") or job.get("url") or "",
         "output_dir": str(output_dir),
@@ -233,9 +240,48 @@ def spotiflac_download_options(output_dir: Path, job: dict, track_max_retries: i
         "use_artist_subfolders": False,
         "use_album_subfolders": False,
     }
+    if include_featuring:
+        options["include_featuring"] = True
     if job.get("quality"):
         options["quality"] = job["quality"]
     return options
+
+
+def _spotiflac_url_for_options(url: str, include_featuring: bool) -> str:
+    if not include_featuring:
+        return url
+    try:
+        from SpotiFLAC.providers.spotify_metadata import parse_spotify_url  # type: ignore
+
+        parsed = parse_spotify_url(url)
+    except Exception:
+        return url
+    if parsed.get("type") not in {"artist", "artist_discography"}:
+        return url
+    artist_id = parsed.get("id")
+    if not artist_id:
+        return url
+    return f"spotify:artist:{artist_id}:discography:all"
+
+
+def _run_spotiflac_download(kwargs: dict) -> None:
+    try:
+        from SpotiFLAC.downloader import DownloadOptions, SpotiflacDownloader  # type: ignore
+    except Exception:
+        from SpotiFLAC import SpotiFLAC  # type: ignore
+
+        SpotiFLAC(**kwargs)
+        return
+
+    option_fields = {field.name for field in fields(DownloadOptions)}
+    options_kwargs = {
+        key: value for key, value in kwargs.items() if key in option_fields
+    }
+    include_featuring = bool(options_kwargs.get("include_featuring"))
+    url = _spotiflac_url_for_options(str(kwargs.get("url") or ""), include_featuring)
+    loop_minutes = kwargs.get("loop")
+    downloader = SpotiflacDownloader(DownloadOptions(**options_kwargs))
+    run_async_blocking(downloader.run_async(url, loop_minutes=loop_minutes))
 
 
 def requested_spotiflac_track_metadata(track, job: dict):
@@ -388,9 +434,9 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
             if job["id"] in manager._cancel_flags:
                 raise RuntimeError("Download cancelled")
             
-            # SpotiFLAC uses documented constructor parameters.
-            # Parallel runs are handled by our patches to NetworkManager and SpotifyMetadataClient.
-            SpotiFLAC(**kwargs)
+            # Use DownloadOptions directly so newer SpotiFLAC fields are not
+            # dropped by the compatibility constructor.
+            _run_spotiflac_download(kwargs)
             
             tor_needed = False
             for msg in captured:
