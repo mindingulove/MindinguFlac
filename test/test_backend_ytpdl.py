@@ -68,6 +68,41 @@ class TestBackendYtpDl(unittest.TestCase):
             "ytsearch15:Antonio Vivaldi L'Olimpiade, RV 725: Mentre dormi amor fomenti (Licida) Vivaldi: L'Olimpiade, RV 725 official audio",
         )
 
+    def test_youtube_query_falls_back_to_title_when_artist_is_missing(self):
+        self.assertEqual(
+            backend_ytpdl._youtube_search_query({
+                "artist": "",
+                "title": "Lamento della ninfa, SV 163 Amor, amor",
+                "metadata": {},
+            }),
+            "ytsearch15:Lamento della ninfa, SV 163 Amor, amor official audio",
+        )
+        self.assertEqual(
+            backend_ytpdl._youtube_search_query({
+                "artist": "",
+                "title": "Ciaccona (Antonio Falconiero ca. 1585-1656)",
+                "metadata": {},
+            }, clean=True),
+            "ytsearch15:Ciaccona official audio",
+        )
+
+    def test_title_only_scoring_does_not_reject_missing_artist_metadata(self):
+        job = {
+            "artist": "",
+            "title": "Lamento della ninfa, SV 163 Amor, amor",
+            "metadata": {"duration_ms": 250000},
+        }
+        score, details = backend_ytpdl._score_youtube_candidate({
+            "title": "Lamento della ninfa, SV 163: Amor, amor",
+            "uploader": "Early Music Channel",
+            "duration": 250,
+            "webpage_url": "https://www.youtube.com/watch?v=match",
+        }, job)
+
+        self.assertGreaterEqual(score, 55)
+        self.assertGreaterEqual(details["artist_score"], 50)
+        self.assertEqual(details["artist_coverage"], 100)
+
     def test_classical_scoring_rejects_wrong_catalog_number(self):
         job = {
             "artist": "Antonio Vivaldi",

@@ -256,6 +256,8 @@ def _youtube_search_query(job: dict, clean: bool = False) -> str:
             query_parts.append(album)
         query_parts.extend(["official", "audio"])
         return "ytsearch15:" + " ".join(query_parts)
+    if title:
+        return "ytsearch15:" + " ".join([title, "official", "audio"])
     return ""
 
 
@@ -499,7 +501,7 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     uploader = _norm_text(raw_uploader)
     combined = _norm_text(f"{candidate_title} {uploader}")
 
-    if not wanted_artist or not wanted_title or not candidate_title:
+    if not wanted_title or not candidate_title:
         return 0, {"reason": "missing title metadata"}
     if _candidate_has_drm(entry) or _candidate_requires_auth(entry):
         reason = "drm" if _candidate_has_drm(entry) else "auth_required"
@@ -521,8 +523,8 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     wanted_title_tokens = _tokens(wanted_title)
     wanted_artist_tokens = _tokens(wanted_artist)
     title_coverage = _token_coverage(wanted_title_tokens, candidate_title)
-    artist_coverage = _token_coverage(wanted_artist_tokens, combined)
-    source_score = _source_score(wanted_artist, uploader, candidate_title)
+    artist_coverage = _token_coverage(wanted_artist_tokens, combined) if wanted_artist else 100
+    source_score = _source_score(wanted_artist, uploader, candidate_title) if wanted_artist else 50
 
     title_score = max(
         fuzz.WRatio(wanted_title, candidate_title),
@@ -531,7 +533,7 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     )
     
     # Use token_set_ratio for artist to handle variations like "Artist - Topic" or "ArtistVEVO"
-    artist_score = max(artist_coverage, fuzz.token_set_ratio(wanted_artist, combined))
+    artist_score = max(artist_coverage, fuzz.token_set_ratio(wanted_artist, combined)) if wanted_artist else 70
 
     expected_duration = int(wanted.get("duration") or 0)
     candidate_duration = _parse_duration_seconds(entry.get("duration"))
@@ -560,7 +562,7 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
 
     if title_coverage < 70:
         penalty += 35
-    if artist_coverage < 70:
+    if wanted_artist and artist_coverage < 70:
         penalty += 40
     if source_score < 45 and any(term in candidate_text for term in (" background music ", " compilation ", " gaming ", " sound fx ")):
         penalty += 60
