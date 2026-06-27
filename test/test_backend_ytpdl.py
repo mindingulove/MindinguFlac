@@ -27,6 +27,67 @@ class TestBackendYtpDl(unittest.TestCase):
             "ytsearch15:Pink Floyd See Emily Play Relics official audio",
         )
 
+    def test_classical_profile_uses_existing_genre_metadata_only(self):
+        classical_job = {
+            "artist": "Antonio Vivaldi",
+            "title": "L'Olimpiade, RV 725: Mentre dormi amor fomenti",
+            "metadata": {"genres": ["Classical", "Baroque"]},
+        }
+        unclassified_job = {
+            "artist": "Antonio Vivaldi",
+            "title": "L'Olimpiade, RV 725: Mentre dormi amor fomenti",
+            "metadata": {},
+        }
+
+        self.assertEqual(backend_ytpdl._ytpdl_search_profile(classical_job), "classical")
+        self.assertEqual(backend_ytpdl._ytpdl_search_profile(unclassified_job), "default")
+
+    def test_classical_youtube_query_uses_catalog_and_distinctive_terms(self):
+        job = {
+            "artist": "Antonio Vivaldi",
+            "title": "L'Olimpiade, RV 725: Mentre dormi amor fomenti (Licida)",
+            "album": "Vivaldi: L'Olimpiade, RV 725",
+            "metadata": {"genre": "Classical"},
+        }
+
+        self.assertEqual(
+            backend_ytpdl._youtube_search_query(job),
+            "ytsearch15:Antonio Vivaldi 725 rv olimpiade mentre dormi amor fomenti licida 725 rv olimpiade",
+        )
+
+    def test_default_youtube_query_unchanged_for_unclassified_catalog_title(self):
+        job = {
+            "artist": "Antonio Vivaldi",
+            "title": "L'Olimpiade, RV 725: Mentre dormi amor fomenti (Licida)",
+            "album": "Vivaldi: L'Olimpiade, RV 725",
+            "metadata": {},
+        }
+
+        self.assertEqual(
+            backend_ytpdl._youtube_search_query(job),
+            "ytsearch15:Antonio Vivaldi L'Olimpiade, RV 725: Mentre dormi amor fomenti (Licida) Vivaldi: L'Olimpiade, RV 725 official audio",
+        )
+
+    def test_classical_scoring_rejects_wrong_catalog_number(self):
+        job = {
+            "artist": "Antonio Vivaldi",
+            "title": "L'Olimpiade, RV 725: Mentre dormi amor fomenti (Licida)",
+            "metadata": {"genre": "Classical"},
+        }
+        search_info = {
+            "entries": [
+                {
+                    "title": "La verità in cimento, RV 739: Mi vuoi tradir, lo so. Melindo, aria.",
+                    "uploader": "Classical Archive",
+                    "duration": 220,
+                    "webpage_url": "https://www.youtube.com/watch?v=wrong",
+                },
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "confident YouTube match"):
+            backend_ytpdl._best_youtube_search_match(search_info, job)
+
     def test_best_youtube_search_match_scores_candidates(self):
         job = {
             "artist": "Pink Floyd",
@@ -262,7 +323,9 @@ class TestBackendYtpDl(unittest.TestCase):
     @patch("backend_ytpdl._get_yt_dlp")
     @patch("backend_ytpdl._resolved_youtube_url", return_value="ytsearch15:Pink Floyd See Emily Play official audio")
     @patch("service_downloader._find_audio_files", return_value=[Path("/tmp/out/song.webm")])
-    def test_run_falls_back_when_first_candidate_unavailable(self, find_audio_files, resolved_url, get_yt_dlp):
+    @patch("db.add_to_blacklist")
+    @patch("db.is_blacklisted", return_value=False)
+    def test_run_falls_back_when_first_candidate_unavailable(self, is_blacklisted, add_to_blacklist, find_audio_files, resolved_url, get_yt_dlp):
         manager = MagicMock()
         manager._cancel_flags = set()
         manager._append_cache_event = MagicMock()

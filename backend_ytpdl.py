@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import threading
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -141,7 +142,105 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+def _extract_catalog_ids(value: object) -> set[str]:
+    text = str(value or "").casefold()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    ids: set[str] = set()
+    # Keep this intentionally conservative. These catalogue numbers are strong
+    # classical identifiers; looser forms like "op. 3" are too common for
+    # YouTube matching and can make pop searches less strict.
+    for prefix, number in re.findall(r"\b(rv|bwv|hwv|kv|k)\s*\.?\s*(\d{1,5}[a-z]?)\b", text, flags=re.IGNORECASE):
+        ids.add(f"{prefix.casefold()}{number.casefold()}")
+    for number in re.findall(r"\bhob\s*\.?\s*(?:[ivxlcdm]+:)?\s*(\d{1,4}[a-z]?)\b", text, flags=re.IGNORECASE):
+        ids.add(f"hob{number.casefold()}")
+    return ids
+
+
+def _classical_search_terms(title: str) -> str:
+    catalog_ids = _extract_catalog_ids(title)
+    if not catalog_ids:
+        return ""
+    tokens = _tokens(title)
+    ignored = {
+        "vivaldi", "bach", "handel", "haendel", "mozart", "haydn",
+        "beethoven", "schubert", "chopin", "liszt", "verdi", "puccini",
+        "concerto", "symphony", "sonata", "opera", "aria", "major", "minor",
+        "op", "no", "nr", "act", "scene", "i", "ii", "iii", "iv", "v",
+        "vi", "vii", "viii", "ix", "x",
+    }
+    catalog_tokens = set()
+    for catalog_id in catalog_ids:
+        match = re.match(r"([a-z]+)(\d.*)", catalog_id)
+        if match:
+            catalog_tokens.update(match.groups())
+    distinctive = [
+        token for token in tokens
+        if token not in ignored and token not in catalog_tokens and len(token) > 1
+    ]
+    return " ".join([*sorted(catalog_tokens), *distinctive[:6]]).strip()
+
+
+_CLASSICAL_GENRE_TERMS = {
+    "classical",
+    "baroque",
+    "opera",
+    "oratorio",
+    "chamber music",
+    "concerto",
+    "symphony",
+}
+
+
+def _metadata_values_for_keys(data: dict, keys: tuple[str, ...]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        raw = data.get(key)
+        if isinstance(raw, str):
+            values.extend(part.strip() for part in re.split(r"[,/;|]", raw) if part.strip())
+        elif isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                if isinstance(item, str):
+                    values.extend(part.strip() for part in re.split(r"[,/;|]", item) if part.strip())
+                elif isinstance(item, dict):
+                    name = item.get("name") or item.get("genre") or item.get("title")
+                    if name:
+                        values.append(str(name).strip())
+    return [value for value in values if value]
+
+
+def _ytpdl_search_profile(job: dict) -> str:
+    merged = _job_metadata(job)
+    genre_values = _metadata_values_for_keys(
+        merged,
+        ("genre", "genres", "primary_genre", "secondary_genres", "style", "styles"),
+    )
+    genre_text = _norm_text(" ".join(genre_values))
+    if any(term in genre_text for term in _CLASSICAL_GENRE_TERMS):
+        return "classical"
+    return "default"
+
+
+def _classical_youtube_search_query(job: dict, clean: bool = False) -> str:
+    wanted = _expected_track(job)
+    artist = wanted["artist"]
+    title = _clean_text(wanted["title"]) if clean else wanted["title"]
+    terms = _classical_search_terms(title)
+    if not terms:
+        return ""
+    parts = [artist, terms] if artist else [terms]
+    if not clean and wanted["album"]:
+        album_terms = _classical_search_terms(wanted["album"])
+        if album_terms:
+            parts.append(album_terms)
+    return "ytsearch15:" + " ".join(part for part in parts if part)
+
+
 def _youtube_search_query(job: dict, clean: bool = False) -> str:
+    if _ytpdl_search_profile(job) == "classical":
+        query = _classical_youtube_search_query(job, clean=clean)
+        if query:
+            return query
+
     wanted = _expected_track(job)
     artist = wanted["artist"]
     title = wanted["title"]
@@ -218,7 +317,8 @@ def _prepend_current_youtube_candidate(
 
 
 def _norm_text(value: object) -> str:
-    text = str(value or "").casefold()
+    text = unicodedata.normalize("NFKD", str(value or "").casefold())
+    text = text.encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"https?://\S+", " ", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -269,6 +369,30 @@ def _token_coverage(needles: list[str], haystack: str) -> int:
         return 0
     matched = sum(1 for token in needles if token in hay_tokens)
     return int((matched / len(needles)) * 100)
+
+
+def _classical_match_adjustment(wanted: dict, raw_title: str, raw_uploader: str) -> tuple[int, dict]:
+    wanted_text = f"{wanted.get('artist', '')} {wanted.get('title', '')} {wanted.get('album', '')}"
+    candidate_text = f"{raw_title} {raw_uploader}"
+    wanted_catalog = _extract_catalog_ids(wanted_text)
+    if not wanted_catalog:
+        return 0, {}
+    candidate_catalog = _extract_catalog_ids(candidate_text)
+    if not candidate_catalog:
+        return 0, {"classical_catalog": "missing"}
+    if wanted_catalog.isdisjoint(candidate_catalog):
+        return -90, {"classical_catalog": "mismatch"}
+
+    wanted_terms = _classical_search_terms(str(wanted.get("title") or ""))
+    candidate_norm = _norm_text(candidate_text)
+    wanted_tokens = [
+        token for token in _tokens(wanted_terms)
+        if not token.isdigit() and not re.fullmatch(r"[a-z]{1,4}", token)
+    ]
+    term_coverage = _token_coverage(wanted_tokens, candidate_norm)
+    if term_coverage < 60:
+        return -45, {"classical_catalog": "matched", "classical_term_coverage": term_coverage}
+    return 28, {"classical_catalog": "matched", "classical_term_coverage": term_coverage}
 
 
 def _candidate_url(entry: dict) -> str:
@@ -435,12 +559,18 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     if source_score < 45 and any(term in candidate_text for term in (" background music ", " compilation ", " gaming ", " sound fx ")):
         penalty += 60
 
+    classical_adjustment = 0
+    classical_details = {}
+    if _ytpdl_search_profile(job) == "classical":
+        classical_adjustment, classical_details = _classical_match_adjustment(wanted, raw_title, raw_uploader)
+
     score = int(
         (title_score * 0.42)
         + (artist_score * 0.18)
         + (source_score * 0.22)
         + (duration_score * 0.12)
         + (title_coverage * 0.06)
+        + classical_adjustment
         - penalty
         - duration_penalty
     )
@@ -456,6 +586,7 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
         "duration_score": int(duration_score),
         "score": score,
         "drm": False,
+        **classical_details,
     }
     return score, details
 

@@ -9,10 +9,12 @@ All notable changes to Mindinguflac are documented here.
 ### Fixed
 - Artist popular tracks now load through the async SpotiFLAC client path.
 - Saved SpotiFLAC provider selections are honored before inherited defaults.
+- Finalized cache playback now clears stale red error status icons left by earlier failed stream attempts.
 
 ### Updated
 - SpotiFLAC → 1.2.8.
 - Download requests now pass SpotiFLAC 1.2.8 options directly.
+- ytp-dl and torrent searches now use a metadata-driven classical search path for classical genre/style tracks, with catalog-number safeguards so normal music searches keep the existing stricter behavior.
 - Visible Settings footer, backend user-agent, and macOS About/bundle versions now report `1.1.4`.
 
 ---

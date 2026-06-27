@@ -5493,6 +5493,9 @@ function bindPlayer() {
     state.activeJobPhase = "";
     if (state.currentTrack) {
         const isCache = isLibraryStreamUrl(state.currentStreamUrl);
+        if (isCache || (state.currentLibraryPath && !isActiveJobStreamUrl(state.currentStreamUrl))) {
+          setPlayerStatusIcon("ready");
+        }
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
         _callNowPlaying("set_playback_state", 1);
         updateMediaSession(state.currentTrack);
@@ -5500,9 +5503,21 @@ function bindPlayer() {
   };
   audio.onerror = () => {
     const error = audio.error;
+    const erroredSrc = audio.currentSrc || audio.src || "";
     // Ignore errors if we don't have a source (common when using native output)
     if (!audio.src || audio.src === window.location.href) return;
     if (state.manualPauseRequested) return;
+    // WebKit can still dispatch an error for a previous active-job URL after
+    // the player has already switched to the finalized cache file. Do not let
+    // that stale failure repaint a currently selected cache source as failed.
+    if (
+      state.currentLibraryPath &&
+      isLibraryStreamUrl(state.currentStreamUrl) &&
+      erroredSrc &&
+      erroredSrc !== state.currentStreamUrl
+    ) {
+      return;
+    }
 
     if (state.currentLibraryPath && isActiveJobStreamUrl(state.currentStreamUrl) && state.currentTrack) {
         const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;

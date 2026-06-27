@@ -481,6 +481,51 @@ def run(output_dir: Path, job: dict, manager) -> None:
     track_num = str(job.get("metadata", {}).get("track_number") or job.get("track_number") or "")
     disc_num = str(job.get("metadata", {}).get("disc_number") or job.get("disc_number") or "1")
     metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    try:
+        from backend_ytpdl import (
+            _classical_match_adjustment,
+            _classical_search_terms,
+            _extract_catalog_ids,
+            _norm_text,
+            _token_coverage,
+            _tokens,
+            _ytpdl_search_profile,
+        )
+    except Exception:
+        _classical_match_adjustment = None
+        _classical_search_terms = None
+        _extract_catalog_ids = None
+        _norm_text = None
+        _token_coverage = None
+        _tokens = None
+        _ytpdl_search_profile = None
+    is_classical_search = bool(_ytpdl_search_profile and _ytpdl_search_profile(job) == "classical")
+
+    def classical_query_terms(text: str) -> str:
+        if not is_classical_search or not _classical_search_terms:
+            return ""
+        terms = _classical_search_terms(text)
+        if terms:
+            return terms
+        if not _tokens:
+            return clean_term(text)
+        ignored = {
+            "the", "and", "with", "feat", "official", "audio", "video",
+            "concerto", "symphony", "sonata", "major", "minor", "op", "no",
+            "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+        }
+        tokens = [token for token in _tokens(text) if len(token) > 1 and token not in ignored]
+        return " ".join(tokens[:8])
+
+    def classical_candidate_adjustment(candidate_text: str) -> tuple[int, str]:
+        if not is_classical_search or not _classical_match_adjustment:
+            return 0, ""
+        wanted = {"artist": primary_artist, "title": raw_title, "album": album_clean or album}
+        adjustment, details = _classical_match_adjustment(wanted, candidate_text, "")
+        catalog_state = str(details.get("classical_catalog") or "")
+        if adjustment < 0:
+            return adjustment, catalog_state
+        return adjustment * 3, catalog_state
 
     def album_looks_like_primary_artist_release() -> bool:
         album_artist = (
@@ -544,20 +589,29 @@ def run(output_dir: Path, job: dict, manager) -> None:
             # Words that MUST appear for the match to be considered valid.
             # We filter out common noise that might be in Spotify title but not filename.
             noise_words = {"remastered", "remaster", "live", "edit", "version", "mono", "stereo", "mix", "remix", "single", "digitally", "trilogy", "beginning", "part", "vol", "volume", "ost"}
-            title_tokens = set(re.findall(r'\w+', title_clean.lower()))
+            title_for_tokens = classical_query_terms(raw_title) if is_classical_search else title_clean
+            title_tokens = set(re.findall(r'\w+', title_for_tokens.lower()))
             meaningful_tokens = {t for t in title_tokens if len(t) > 2 and t not in {"the", "and", "feat", "with"} and t not in noise_words}
             if not meaningful_tokens: meaningful_tokens = title_tokens
 
             for i in range(_torrent_num_files(torrent_info)):
                 f_path = Path(torrent_info.file_at(i).path)
                 path_text = str(f_path)
+                try:
+                    torrent_name = str(torrent_info.name())
+                except Exception:
+                    torrent_name = ""
                 if _has_video_torrent_marker(path_text) or _has_disallowed_adult_content(path_text, allowed_adult_terms, adult_filter_terms):
                     continue
                 if f_path.suffix.lower() in AUDIO_SUFFIXES:
                     f_name_lower = f_path.name.lower()
+                    classical_adj, classical_catalog_state = classical_candidate_adjustment(f"{torrent_name} {path_text}")
+                    if is_classical_search and classical_catalog_state == "mismatch":
+                        continue
                     title_score = max(
                         rapidfuzz.fuzz.token_set_ratio(raw_title, f_path.name),
                         rapidfuzz.fuzz.token_set_ratio(title_clean, f_path.stem),
+                        rapidfuzz.fuzz.token_set_ratio(title_for_tokens, path_text) if is_classical_search else 0,
                     )
                     
                     # If artist is not verified in the torrent title, we MUST have a strong filename match
@@ -580,7 +634,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     match_count = sum(1 for t in meaningful_tokens if t in filename_tokens)
                     match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
                     
-                    required_ratio = 0.65 if len(meaningful_tokens) > 2 else 0.85
+                    required_ratio = 0.50 if is_classical_search and len(meaningful_tokens) > 2 else (0.65 if len(meaningful_tokens) > 2 else 0.85)
                     if match_ratio < required_ratio:
                         # Fallback: if the filename is very short (e.g. "01.flac"), check the immediate parent folder too
                         parent_tokens = set(re.findall(r'\w+', f_path.parent.name.lower())) if f_path.parent.name else set()
@@ -594,6 +648,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         continue
                     
                     score = title_score
+                    score += classical_adj
                     is_track_match = any(p in f_path.name for p in track_pats)
                     if track_num:
                         if is_track_match:
@@ -785,6 +840,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 if category and category != "unknown" and not any(k in category for k in ["audio", "music"]):
                     return -1
                 
+                classical_adj, classical_catalog_state = classical_candidate_adjustment(str(r.get("title") or ""))
+                if is_classical_search and classical_catalog_state == "mismatch":
+                    return -1
+
                 artist_tokens = set(re.findall(r'\w+', target_artist.lower()))
                 title_tokens = set(re.findall(r'\w+', torrent_title))
                 meaningful_artist = {t for t in artist_tokens if len(t) >= 2 and t not in {"the","and","feat","with"}}
@@ -808,7 +867,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 if target_album and target_album != "unknown":
                     if rapidfuzz.fuzz.token_set_ratio(target_album.lower(), torrent_title) > 85: album_verified = True
                 
-                title_score = rapidfuzz.fuzz.token_set_ratio(target_title.lower(), torrent_title)
+                target_title_for_score = classical_query_terms(target_title) if is_classical_search else target_title
+                title_score = max(
+                    rapidfuzz.fuzz.token_set_ratio(target_title.lower(), torrent_title),
+                    rapidfuzz.fuzz.token_set_ratio(target_title_for_score.lower(), torrent_title) if target_title_for_score else 0,
+                )
                 album_tokens = set(re.findall(r'\w+', target_album.lower()))
                 generic_album_tokens = {
                     "get", "here", "there", "this", "that", "the", "a", "an", "to", "from",
@@ -822,6 +885,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     len(token) >= 4 and token not in generic_album_tokens
                     for token in album_tokens
                 )
+                if is_classical_search and classical_catalog_state == "matched":
+                    artist_verified = True
+                    allow_album_miss = True
+
                 if target_album:
                     # Generic album names (like 'Trilogy') are accepted IF the artist is confirmed.
                     if not artist_verified and not album_verified:
@@ -839,6 +906,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     return -1
                 
                 score = title_score
+                score += classical_adj
                 score += 40 if artist_verified else 0
                 score += 60 if album_verified else 20
                 collection_result = any(
@@ -908,6 +976,12 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 album_name = clean_term(album_name)
                 if not album_name:
                     return []
+                if is_classical_search:
+                    album_terms = classical_query_terms(album_name)
+                    if album_terms:
+                        queries = [f"{art} {album_terms}".strip() for art in artist_variations if art]
+                        queries.append(album_terms)
+                        return list(dict.fromkeys(queries))
                 # Lead with "<artist> <album>" so a short/generic artist name
                 # (e.g. "Skank") doesn't pull unrelated junk; keep the bare
                 # album as a fallback for releases credited to another artist.
@@ -917,6 +991,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
             def candidate_inventory_queries() -> list[str]:
                 queries = []
+                if is_classical_search:
+                    # Classical torrents are usually work/recording-specific;
+                    # broad discography/collection searches create too much
+                    # cross-work noise, so keep inventory narrow.
+                    terms = classical_query_terms(raw_title)
+                    if terms:
+                        for art_var in artist_variations:
+                            queries.append(f"{art_var} {terms} lossless".strip())
+                            queries.append(f"{art_var} {terms} flac".strip())
+                    return list(dict.fromkeys(queries))
                 suffixes = ["", "albums", "collection", "discography", "FLAC", "lossless"]
                 for art_var in artist_variations:
                     for suffix in suffixes:
@@ -926,6 +1010,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
             def candidate_track_queries() -> list[str]:
                 if not title_clean:
                     return []
+                if is_classical_search:
+                    terms = classical_query_terms(raw_title) or title_clean
+                    queries = [f"{art_var} {terms}".strip() for art_var in artist_variations if art_var]
+                    queries.append(terms)
+                    return list(dict.fromkeys(queries))
                 queries = [f"{art_var} {title_clean}".strip() for art_var in artist_variations if art_var]
                 queries.append(title_clean)
                 return list(dict.fromkeys(queries))
