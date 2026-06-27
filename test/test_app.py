@@ -70,6 +70,28 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
         self.assertEqual(payload["isrc"], "ISRC")
         self.assertEqual(stored["deezer_id"], "deezer-id")
 
+    def test_download_enrichment_recovers_spotify_id_from_track_key(self):
+        enriched = {
+            "type": "track",
+            "title": "Mentre dormi amor fomenti",
+            "artist": "Antonio Vivaldi",
+            "spotify_id": "7DZb1nzqvKMVcN8KEfu6kk",
+            "genre": "Classical",
+        }
+        with patch.object(app, "enrich_track_identifiers", return_value=enriched) as enrich:
+            payload = app.enrich_download_payload({
+                "track": {
+                    "track_key": "spotify_id:7DZb1nzqvKMVcN8KEfu6kk",
+                    "title": "Mentre dormi amor fomenti",
+                    "artist": "Antonio Vivaldi",
+                }
+            })
+
+        enrich.assert_called_once()
+        self.assertEqual(enrich.call_args.args[0]["spotify_id"], "7DZb1nzqvKMVcN8KEfu6kk")
+        self.assertEqual(payload["spotify_id"], "7DZb1nzqvKMVcN8KEfu6kk")
+        self.assertEqual(payload["metadata"]["genre"], "Classical")
+
     def test_playlist_identifier_enrichment_updates_imported_tracks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             playlist_path = Path(tmpdir) / "playlists.json"

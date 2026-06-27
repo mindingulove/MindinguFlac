@@ -630,6 +630,11 @@ def enrich_download_payload(body: dict) -> dict:
     track = body.get("track") if isinstance(body.get("track"), dict) else {}
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else track
     source = {**metadata, **track}
+    track_key = str(source.get("track_key") or body.get("track_key") or "").strip()
+    if track_key:
+        prefix, sep, value = track_key.partition(":")
+        if sep and prefix in _TRACK_KEY_PREFIXES and value and not source.get(prefix):
+            source[prefix] = value
     enriched = enrich_and_persist_track(source)
     if not enriched:
         return body

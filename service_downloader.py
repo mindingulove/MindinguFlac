@@ -392,7 +392,20 @@ def _norm(value: object) -> str:
 def _payload_metadata(payload: dict) -> dict:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     track = payload.get("track") if isinstance(payload.get("track"), dict) else {}
-    return {**metadata, **track, **payload}
+    return _metadata_with_identity_from_track_key({**metadata, **track, **payload})
+
+
+def _metadata_with_identity_from_track_key(metadata: dict) -> dict:
+    if not isinstance(metadata, dict):
+        return {}
+    merged = dict(metadata)
+    track_key = str(merged.get("track_key") or "").strip()
+    if ":" not in track_key:
+        return merged
+    prefix, _, value = track_key.partition(":")
+    if prefix in IDENTIFIER_FIELDS and value and not merged.get(prefix):
+        merged[prefix] = value
+    return merged
 
 
 def _merge_nonempty_metadata(saved: dict, incoming: dict) -> dict:
@@ -421,14 +434,14 @@ def _enrich_download_metadata_for_search(payload: dict, engine: str, metadata: d
         from music_metadata import enrich_track_identifiers
 
         track = payload.get("track") if isinstance(payload.get("track"), dict) else {}
-        lookup = {
+        lookup = _metadata_with_identity_from_track_key({
             **metadata,
             **track,
             "artist": payload.get("artist") or track.get("artist") or metadata.get("artist") or "",
             "title": payload.get("title") or track.get("title") or metadata.get("title") or "",
             "album": payload.get("album") or track.get("album") or metadata.get("album") or "",
             "duration_ms": payload.get("duration_ms") or track.get("duration_ms") or metadata.get("duration_ms") or 0,
-        }
+        })
         enriched = enrich_track_identifiers(lookup)
         if isinstance(enriched, dict):
             return _merge_nonempty_metadata(metadata, enriched)

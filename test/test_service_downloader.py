@@ -228,6 +228,47 @@ class PlaybackSourceTests(unittest.TestCase):
         fake_music_metadata.enrich_track_identifiers.assert_called_once()
         thread.assert_called_once()
 
+    def test_ytpdl_job_recovers_spotify_id_from_track_key_before_enrichment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="youtube",
+                default_quality="LOSSLESS",
+                download_engine="ytp-dl",
+            )
+            fake_db = SimpleNamespace(get_resolved_source_for_keys=Mock(return_value=None))
+            fake_music_metadata = SimpleNamespace(
+                enrich_track_identifiers=Mock(return_value={
+                    "spotify_id": "7DZb1nzqvKMVcN8KEfu6kk",
+                    "artist": "Antonio Vivaldi",
+                    "title": "Mentre dormi amor fomenti",
+                    "genre": "Classical",
+                })
+            )
+
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                with patch.object(service_downloader.threading, "Thread") as thread:
+                    with patch.dict(sys.modules, {"db": fake_db, "music_metadata": fake_music_metadata}):
+                        manager = service_downloader.ServiceDownloadManager(config)
+                        job = manager.start_job({
+                            "mode": "stream",
+                            "engine": "ytp-dl",
+                            "title": "Mentre dormi amor fomenti",
+                            "artist": "Antonio Vivaldi",
+                            "metadata": {"track_key": "spotify_id:7DZb1nzqvKMVcN8KEfu6kk"},
+                        })
+
+        fake_music_metadata.enrich_track_identifiers.assert_called_once()
+        self.assertEqual(
+            fake_music_metadata.enrich_track_identifiers.call_args.args[0]["spotify_id"],
+            "7DZb1nzqvKMVcN8KEfu6kk",
+        )
+        self.assertEqual(job["metadata"]["spotify_id"], "7DZb1nzqvKMVcN8KEfu6kk")
+        self.assertEqual(job["metadata"]["genre"], "Classical")
+        thread.assert_called_once()
+
     def test_ignores_deleted_finished_cache_job(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

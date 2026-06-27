@@ -4026,6 +4026,8 @@ async function sortNearTourEvents(groupedEvents, location = {}) {
 }
 
 function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
+  const spotifyId = trackIdentityValue(track, "spotify_id");
+  const isrc = trackIdentityValue(track, "isrc");
   return {
     kind: "track",
     mode,
@@ -4038,6 +4040,9 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
     engine: state.settings.download_engine || "spotiflac",
     track,
     metadata: track.metadata || track,
+    spotify_id: spotifyId,
+    isrc,
+    track_key: trackKey(track),
   };
 }
 
