@@ -405,6 +405,38 @@ def _merge_nonempty_metadata(saved: dict, incoming: dict) -> dict:
     return merged
 
 
+def _has_genre_metadata(metadata: dict) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    for key in ("genre", "genres", "primary_genre", "secondary_genres", "style", "styles"):
+        if metadata.get(key) not in ("", None, [], {}):
+            return True
+    return False
+
+
+def _enrich_download_metadata_for_search(payload: dict, engine: str, metadata: dict) -> dict:
+    if engine not in {"ytp-dl", "torrent"} or _has_genre_metadata(metadata):
+        return metadata
+    try:
+        from music_metadata import enrich_track_identifiers
+
+        track = payload.get("track") if isinstance(payload.get("track"), dict) else {}
+        lookup = {
+            **metadata,
+            **track,
+            "artist": payload.get("artist") or track.get("artist") or metadata.get("artist") or "",
+            "title": payload.get("title") or track.get("title") or metadata.get("title") or "",
+            "album": payload.get("album") or track.get("album") or metadata.get("album") or "",
+            "duration_ms": payload.get("duration_ms") or track.get("duration_ms") or metadata.get("duration_ms") or 0,
+        }
+        enriched = enrich_track_identifiers(lookup)
+        if isinstance(enriched, dict):
+            return _merge_nonempty_metadata(metadata, enriched)
+    except Exception:
+        pass
+    return metadata
+
+
 def _audio_path_matches_track(path: Path, title: str, artist: str = "") -> bool:
     expected_stems = {_norm(title)}
     if artist:
@@ -1361,6 +1393,8 @@ class ServiceDownloadManager:
 
         engine = (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower()
         service = (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower()
+        metadata = _enrich_download_metadata_for_search(payload, engine, metadata)
+        payload = {**payload, "metadata": metadata}
         resolved_url = ""
         fallback_resolved_url = ""
 

@@ -191,6 +191,43 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=abc123")
         thread.assert_called_once()
 
+    def test_ytpdl_job_enriches_genre_metadata_before_backend_search(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="youtube",
+                default_quality="LOSSLESS",
+                download_engine="ytp-dl",
+            )
+            fake_db = SimpleNamespace(get_resolved_source_for_keys=Mock(return_value=None))
+            fake_music_metadata = SimpleNamespace(
+                enrich_track_identifiers=Mock(return_value={
+                    "artist": "Antonio Vivaldi",
+                    "title": "L'Olimpiade, RV 725: Mentre dormi amor fomenti",
+                    "genres": ["Classical", "Baroque"],
+                    "genre": "Classical",
+                })
+            )
+
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                with patch.object(service_downloader.threading, "Thread") as thread:
+                    with patch.dict(sys.modules, {"db": fake_db, "music_metadata": fake_music_metadata}):
+                        manager = service_downloader.ServiceDownloadManager(config)
+                        job = manager.start_job({
+                            "mode": "stream",
+                            "engine": "ytp-dl",
+                            "title": "L'Olimpiade, RV 725: Mentre dormi amor fomenti",
+                            "artist": "Antonio Vivaldi",
+                            "metadata": {},
+                        })
+
+        self.assertEqual(job["metadata"]["genre"], "Classical")
+        self.assertEqual(job["metadata"]["genres"], ["Classical", "Baroque"])
+        fake_music_metadata.enrich_track_identifiers.assert_called_once()
+        thread.assert_called_once()
+
     def test_ignores_deleted_finished_cache_job(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
