@@ -525,6 +525,43 @@ def musicbrainz_recording_identifiers(artist: str, title: str, album: str = "", 
     return {key: value for key, value in identifiers.items() if value}
 
 
+@functools.lru_cache(maxsize=2048)
+def musicbrainz_recording_identifiers_by_isrc(isrc: str, title: str = "", artist: str = "", duration_ms: int = 0) -> dict:
+    isrc = str(isrc or "").strip()
+    if not isrc:
+        return {}
+    try:
+        url = "https://musicbrainz.org/ws/2/recording/?" + urllib.parse.urlencode({
+            "query": f'isrc:"{isrc}"',
+            "limit": "10",
+            "fmt": "json",
+            "inc": "isrcs+artist-credits",
+        })
+        candidates = get_json(url).get("recordings", [])
+    except Exception:
+        return {}
+    if not candidates:
+        return {}
+
+    exact = [
+        item for item in candidates
+        if (not title or norm_name(item.get("title", "")) == norm_name(title))
+        and (not artist or any(norm_name(c.get("name", "")) == norm_name(artist) for c in item.get("artist-credit") or []))
+    ]
+    pool = exact or candidates
+    if duration_ms:
+        pool.sort(key=lambda item: abs(int(item.get("length") or 0) - duration_ms) if item.get("length") else 10**12)
+    selected = pool[0]
+
+    identifiers = {"musicbrainz_recording_id": selected.get("id", ""), "isrc": isrc}
+    isrcs = selected.get("isrcs") or []
+    if isrcs:
+        identifiers["isrc"] = isrcs[0]
+    artist_fields = _ac_fields(selected.get("artist-credit") or [])
+    identifiers.update({key: value for key, value in artist_fields.items() if value})
+    return {key: value for key, value in identifiers.items() if value}
+
+
 def _musicbrainz_unique_genres(raw: object) -> list[str]:
     genres: list[str] = []
     if isinstance(raw, list):
@@ -567,9 +604,9 @@ def musicbrainz_genres_for_release(release_id: str) -> list[str]:
     try:
         data = get_json(
             f"https://musicbrainz.org/ws/2/release/{urllib.parse.quote(release_id)}?"
-            + urllib.parse.urlencode({"inc": "genres", "fmt": "json"})
+            + urllib.parse.urlencode({"inc": "genres+tags", "fmt": "json"})
         )
-        result = _musicbrainz_unique_genres(data.get("genres") or data.get("genre") or [])
+        result = _musicbrainz_unique_genres(data.get("genres") or data.get("genre") or data.get("tags") or [])
     except Exception:
         result = []
     if result:
@@ -586,9 +623,9 @@ def musicbrainz_genres_for_recording(recording_id: str) -> list[str]:
     try:
         data = get_json(
             f"https://musicbrainz.org/ws/2/recording/{urllib.parse.quote(recording_id)}?"
-            + urllib.parse.urlencode({"inc": "genres", "fmt": "json"})
+            + urllib.parse.urlencode({"inc": "genres+tags", "fmt": "json"})
         )
-        result = _musicbrainz_unique_genres(data.get("genres") or data.get("genre") or [])
+        result = _musicbrainz_unique_genres(data.get("genres") or data.get("genre") or data.get("tags") or [])
     except Exception:
         result = []
     if result:
@@ -798,12 +835,32 @@ def enrich_track_identifiers(track: dict) -> dict:
     ).items():
         if value and not enriched.get(key):
             enriched[key] = value
-    mb_ids = musicbrainz_recording_identifiers(
-        enriched.get("artist", ""),
-        enriched.get("title", ""),
-        enriched.get("album", ""),
-        duration_ms,
-    )
+
+    if not enriched.get("isrc"):
+        from isrc_resolver import resolve_isrc
+        isrc = resolve_isrc(
+            enriched.get("title", ""),
+            enriched.get("artist", ""),
+            spotify_id=enriched.get("spotify_id", ""),
+        )
+        if isrc:
+            enriched["isrc"] = isrc
+
+    mb_ids = {}
+    if enriched.get("isrc"):
+        mb_ids = musicbrainz_recording_identifiers_by_isrc(
+            enriched.get("isrc", ""),
+            enriched.get("title", ""),
+            enriched.get("artist", ""),
+            duration_ms,
+        )
+    if not mb_ids:
+        mb_ids = musicbrainz_recording_identifiers(
+            enriched.get("artist", ""),
+            enriched.get("title", ""),
+            enriched.get("album", ""),
+            duration_ms,
+        )
     for key, value in mb_ids.items():
         if value and not enriched.get(key):
             enriched[key] = value
@@ -833,16 +890,6 @@ def enrich_track_identifiers(track: dict) -> dict:
         if genres:
             enriched["genres"] = genres
             enriched["genre"] = genres[0]
-
-    if not enriched.get("isrc"):
-        from isrc_resolver import resolve_isrc
-        isrc = resolve_isrc(
-            enriched.get("title", ""),
-            enriched.get("artist", ""),
-            spotify_id=enriched.get("spotify_id", ""),
-        )
-        if isrc:
-            enriched["isrc"] = isrc
 
     # Final result!
     import db

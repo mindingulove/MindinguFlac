@@ -460,6 +460,51 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
         self.assertEqual(identifiers["musicbrainz_recording_id"], "matched-version")
         self.assertEqual(lookup.call_count, 2)
 
+    def test_identifier_enrichment_uses_isrc_musicbrainz_genre_before_download_search(self):
+        class FakeDb:
+            saved = {}
+
+            @staticmethod
+            def get_track_metadata(key):
+                return None
+
+            @classmethod
+            def save_track_metadata(cls, key, data):
+                cls.saved = {"key": key, "data": dict(data)}
+
+        with patch.dict("sys.modules", {"db": FakeDb}):
+            with patch.object(music_metadata, "spotify_track_metadata", return_value={
+                "spotify_id": "7DZb1nzqvKMVcN8KEfu6kk",
+                "title": "Mentre dormi amor fomenti",
+                "artist": "Antonio Vivaldi",
+                "album": "Vivaldi: L'Olimpiade, RV 725",
+                "duration_ms": 254000,
+            }):
+                with patch.object(music_metadata, "odesli_lookup", return_value={}):
+                    with patch.object(music_metadata, "deezer_track_identifiers", return_value={}):
+                        with patch("isrc_resolver.resolve_isrc", return_value="FRZ131725070"):
+                            with patch.object(music_metadata, "musicbrainz_recording_identifiers_by_isrc", return_value={
+                                "isrc": "FRZ131725070",
+                                "musicbrainz_recording_id": "mb-recording-id",
+                            }) as mb_by_isrc:
+                                with patch.object(music_metadata, "musicbrainz_genres_for_recording", return_value=["Classical"]):
+                                    enriched = music_metadata.enrich_track_identifiers({
+                                        "type": "track",
+                                        "spotify_id": "7DZb1nzqvKMVcN8KEfu6kk",
+                                    })
+
+        mb_by_isrc.assert_called_once()
+        self.assertEqual(enriched["isrc"], "FRZ131725070")
+        self.assertEqual(enriched["musicbrainz_recording_id"], "mb-recording-id")
+        self.assertEqual(enriched["genre"], "Classical")
+        self.assertEqual(enriched["genres"], ["Classical"])
+        self.assertEqual(FakeDb.saved["data"]["genre"], "Classical")
+
+    def test_musicbrainz_recording_genres_fall_back_to_tags(self):
+        music_metadata._MB_GENRE_RECORDING_CACHE.clear()
+        with patch.object(music_metadata, "get_json", return_value={"tags": [{"name": "Classical"}]}):
+            self.assertEqual(music_metadata.musicbrainz_genres_for_recording("recording-id"), ["Classical"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -259,6 +259,12 @@ def _youtube_search_query(job: dict, clean: bool = False) -> str:
     return ""
 
 
+def _youtube_search_profile_label(job: dict, query: str) -> str:
+    profile = _ytpdl_search_profile(job)
+    kind = "classical" if profile == "classical" and query.startswith("ytsearch") else profile
+    return f"{kind} search"
+
+
 def _resolved_youtube_url(job: dict) -> str:
     merged = _job_metadata(job)
 
@@ -884,14 +890,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 # Phase 2: Full Search (Artist + Title + Album)
                 search_query = _youtube_search_query(job, clean=False)
                 if search_query and search_query != url:
-                    manager._append_cache_event(job, "trying", "Falling back to full YouTube search...")
+                    manager._append_cache_event(job, "trying", f"Falling back to full YouTube search ({_youtube_search_profile_label(job, search_query)})...")
                     worked_url = _try_download(search_query)
             
             if not worked_url:
                 # Phase 3: Clean Search (Artist + Base Title, stripping Remastered/Deluxe/etc.)
                 clean_query = _youtube_search_query(job, clean=True)
                 if clean_query and clean_query != url:
-                    manager._append_cache_event(job, "trying", "Falling back to clean YouTube search (stripping version suffixes)...")
+                    manager._append_cache_event(job, "trying", f"Falling back to clean YouTube search ({_youtube_search_profile_label(job, clean_query)}, stripping version suffixes)...")
                     worked_url = _try_download(clean_query)
 
             if not worked_url:
