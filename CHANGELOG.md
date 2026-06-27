@@ -4,6 +4,19 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.1.4] — 2026-06-27
+
+### Fixed
+- Artist popular tracks now load through the async SpotiFLAC client path.
+- Saved SpotiFLAC provider selections are honored before inherited defaults.
+
+### Updated
+- SpotiFLAC → 1.2.8.
+- Download requests now pass SpotiFLAC 1.2.8 options directly.
+- Visible Settings footer, backend user-agent, and macOS About/bundle versions now report `1.1.4`.
+
+---
+
 ## [1.1.3] — 2026-06-21
 
 ### Fixed
