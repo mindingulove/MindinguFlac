@@ -1042,10 +1042,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         add(query, album_clean or "complete")
                 return queries
 
-            def stream_to_completion(handle, magnet, save_path: Path | None = None, is_artist_verified: bool = True) -> bool:
+            def stream_to_completion(handle, magnet, save_path: Path | None = None, is_artist_verified: bool = True, cached_reuse: bool = False) -> bool | None:
                 # Download the best matching file to completion. Returns True on
-                # success (file placed in output_dir), False if the swarm stalls
-                # so the caller can fall back to the next candidate torrent.
+                # success (file placed in output_dir), False on hard source
+                # failure, or None on a soft stall so the caller can fall back
+                # without blacklisting a cached album source.
                 if not handle.is_valid():
                     manager._append_cache_event(job, "trying", "Source handle expired before streaming, trying next...")
                     return False
@@ -1243,7 +1244,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if last_done > 0:
                             key = _torrent_key(magnet)
                             stall_retry_counts[key] = stall_retry_counts.get(key, 0) + 1
-                            limit = 4
+                            limit = 2 if cached_reuse and s.num_peers == 0 else 4
                             if stall_retry_counts[key] <= limit:
                                 # A winning source that already produced real bytes is
                                 # worth keeping: a slow FLAC swarm delivers in bursts.
@@ -1266,6 +1267,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                 continue
                         if s.num_peers == 0 and last_done == 0:
                             manager._append_cache_event(job, "trying", f"Source has metadata but no connected peers after {int(since_progress)}s; moving to next candidate.")
+                        elif cached_reuse and s.num_peers == 0:
+                            manager._append_cache_event(job, "trying", f"Cached album source stalled at {int(prog)}% with no connected peers; trying discovery/fallback instead.")
+                            return None
                         else:
                             manager._append_cache_event(job, "trying", f"Source stalled after {int(since_progress)}s; moving to next candidate.")
                         return False
@@ -1670,6 +1674,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                             start_done = h.file_progress()[file_idx]
                                         except Exception:
                                             start_done = 0
+                                        file_entry = torrent_info.file_at(file_idx)
+                                        file_path = save_path / file_entry.path
                                         race_state.append({
                                             "score": _score,
                                             "handle": h,
@@ -1679,6 +1685,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                             "save_path": save_path,
                                             "meta": selected_meta,
                                             "file_idx": file_idx,
+                                            "file_path": str(file_path),
+                                            "file_size": int(file_entry.size),
                                             "start_done": start_done,
                                         })
                                     except Exception:
@@ -1706,11 +1714,20 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                             cleanup_candidate(state["magnet"], state["save_path"], delete_files=True)
                                             race_state.remove(state)
                                             continue
+                                        state["last_done"] = int(done)
                                         delta = max(0, int(done) - int(state["start_done"]))
                                         total_peers += int(getattr(status, "num_peers", 0) or 0)
                                         if delta > best_delta or (delta == best_delta and best_state is None):
                                             best_delta = delta
                                             best_state = state
+                                    race_progress = {
+                                        str(state["file_path"]): {
+                                            "ready": max(0, int(state.get("last_done", state.get("start_done", 0)))),
+                                            "total": int(state.get("file_size") or 0),
+                                        }
+                                        for state in race_state
+                                        if state.get("file_path")
+                                    }
                                     # Winner = the FASTEST source (most bytes pulled so far),
                                     # not the first in list order. Decide once any source has
                                     # clearly started (16 KB) or after a short grace window so
@@ -1730,6 +1747,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                         race_reannounced = True
                                         manager._append_cache_event(job, "trying", f"Race has no byte progress yet ({total_peers}p); re-announcing candidates...")
                                     with manager._lock:
+                                        job["race_audio_progress"] = race_progress
                                         job["last_status"] = f"Racing sources: {best_delta} bytes, {total_peers}p"
                                     time.sleep(1.0)
 
@@ -1814,7 +1832,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 
                 if has_meta:
                     manager._append_cache_event(job, "trying", f"Step 0: Reusing swarm for: {album}")
-                    _scr = stream_to_completion(handle, current_magnet, torrent_save_path, is_artist_verified=True)
+                    _scr = stream_to_completion(handle, current_magnet, torrent_save_path, is_artist_verified=True, cached_reuse=True)
                     if _scr:
                         return
                     # Only blacklist/delete on a hard failure

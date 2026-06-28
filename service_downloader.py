@@ -678,6 +678,16 @@ class ServiceDownloadManager:
             return f"{size / 1024:.1f} KB"
         return f"{size / (1024 * 1024):.1f} MB"
 
+    @staticmethod
+    def _allocated_size(path: Path) -> int | None:
+        try:
+            blocks = getattr(path.stat(), "st_blocks", None)
+            if blocks is None:
+                return None
+            return max(0, int(blocks) * 512)
+        except OSError:
+            return None
+
     def _capture_cache_activity(self, job: dict) -> None:
         if job.get("mode", "stream") != "stream" or not job.get("output_dir"):
             return
@@ -690,6 +700,37 @@ class ServiceDownloadManager:
         seen: set[str] = set()
         changes: list[tuple[str, str]] = []
         with self._lock:
+            active_audio_path = str(job.get("active_audio_path") or "")
+            active_audio_ready_bytes = int(job.get("active_audio_ready_bytes") or 0)
+            race_audio_progress = job.get("race_audio_progress") or {}
+
+            def describe_file_event(action: str, path: Path, relative: str, size: int) -> str:
+                if active_audio_path and str(path) == active_audio_path and active_audio_ready_bytes > 0:
+                    pct = (active_audio_ready_bytes / size) * 100 if size > 0 else 0
+                    return (
+                        f"{action} {relative} "
+                        f"({pct:.1f}%, {self._cache_size_text(active_audio_ready_bytes)} ready of {self._cache_size_text(size)})"
+                    )
+                if "_race" in path.relative_to(root).parts:
+                    progress = race_audio_progress.get(str(path)) if isinstance(race_audio_progress, dict) else None
+                    if isinstance(progress, dict):
+                        ready = int(progress.get("ready") or 0)
+                        total = int(progress.get("total") or size or 0)
+                        if total > 0:
+                            pct = (ready / total) * 100
+                            return (
+                                f"{action} candidate {relative} "
+                                f"({pct:.1f}%, {self._cache_size_text(ready)} ready of {self._cache_size_text(total)})"
+                            )
+                    allocated = self._allocated_size(path)
+                    if allocated is not None and allocated < size:
+                        return (
+                            f"{action} candidate placeholder {relative} "
+                            f"({self._cache_size_text(allocated)} on disk of {self._cache_size_text(size)})"
+                        )
+                    return f"{action} candidate file {relative} ({self._cache_size_text(size)})"
+                return f"{action} {relative} ({self._cache_size_text(size)})"
+
             for path in files:
                 path_text = str(path)
                 seen.add(path_text)
@@ -702,9 +743,9 @@ class ServiceDownloadManager:
                 self._cache_file_sizes[key] = size
                 relative = str(path.relative_to(root))
                 if previous is None:
-                    changes.append(("created", f"Created {relative} ({self._cache_size_text(size)})"))
+                    changes.append(("created", describe_file_event("Created", path, relative, size)))
                 elif previous != size:
-                    changes.append(("updated", f"Updated {relative} ({self._cache_size_text(size)})"))
+                    changes.append(("updated", describe_file_event("Updated", path, relative, size)))
 
             tracked = [
                 key for key in self._cache_file_sizes

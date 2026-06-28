@@ -1470,8 +1470,9 @@ class Handler(BaseHTTPRequestHandler):
                 # files (it buffers indefinitely without ever starting playback).
                 try:
                     active_audio_size = int(job.get("active_audio_size") or 0)
-                    file_complete = active_audio_size > 0 and candidate.stat().st_size >= active_audio_size
-                except OSError:
+                    active_audio_ready = int(job.get("active_audio_ready_bytes") or 0)
+                    file_complete = active_audio_size > 0 and active_audio_ready >= active_audio_size
+                except (OSError, TypeError, ValueError):
                     file_complete = False
                 self.stream_local_path(candidate, is_active_job=not is_finished and not file_complete)
                 return

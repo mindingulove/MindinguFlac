@@ -2393,6 +2393,34 @@ function isLibraryStreamUrl(url) {
   }
 }
 
+async function activeJobStillRunning(jobId) {
+  if (!jobId) return false;
+  const data = await api("/api/service/downloads").catch(() => null);
+  if (!data) return true;
+  const job = data && Array.isArray(data.jobs) ? data.jobs.find(item => item.id === jobId) : null;
+  return !!job && (job.status === "starting" || job.status === "running");
+}
+
+async function reconnectActiveJobStream(audio, requestId, jobId, position = 0) {
+  if (!audio || requestId !== state.playbackRequestId || state.activeJobId !== jobId || !jobId) return;
+  const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${jobId}&t=${Date.now()}`;
+  state.currentStreamUrl = streamUrl;
+  state.currentPlayableReady = true;
+  state.autoplayWanted = !state.manualPauseRequested;
+  audio.src = streamUrl;
+  audio.load();
+  if (Number.isFinite(position) && position > 0) {
+    const applyResume = () => {
+      seekAfterMetadata(audio, position);
+      audio.removeEventListener("loadedmetadata", applyResume);
+    };
+    audio.addEventListener("loadedmetadata", applyResume);
+  }
+  if (!state.manualPauseRequested && state.currentTrack) {
+    tryStartAudio(audio, state.currentTrack, requestId, jobId);
+  }
+}
+
 function seekAfterMetadata(audio, position) {
   const target = Number(position);
   if (!Number.isFinite(target) || target <= 0) return;
@@ -5432,12 +5460,23 @@ function bindPlayer() {
       }
     }
   };
-  audio.onended = () => {
+  audio.onended = async () => {
     // A user-paused stream must never auto-advance. A growing-file active-job
     // stream can fire "ended" when playback reaches the current download head;
     // if the user paused, that would wrap a length-1 queue back onto the same
     // track and replay it from the start.
     if (state.manualPauseRequested) return;
+    const endedRequestId = state.playbackRequestId;
+    const endedJobId = state.activeJobId;
+    if (isActiveJobStreamUrl(state.currentStreamUrl) && endedJobId) {
+      const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+      if (await activeJobStillRunning(endedJobId)) {
+        setPlayerStatus("Buffering...", state.currentTrack);
+        await reconnectActiveJobStream(audio, endedRequestId, endedJobId, resumeAt);
+        return;
+      }
+      if (endedRequestId !== state.playbackRequestId || state.activeJobId !== endedJobId) return;
+    }
     finalizeListeningSession("complete", "audio_ended").catch(() => {});
     clearMediaSession();
     const playlistCtx = currentPlaylistContext();
