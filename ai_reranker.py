@@ -237,12 +237,24 @@ def _parse_magnet(uri: str) -> dict[str, Any]:
         return {}
 
 
-def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], duck_model: str = "1", ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> list[int]:
+def _is_youtube_url(url: str) -> bool:
+    return bool(url) and ("youtube.com/watch" in url or "youtu.be/" in url)
+
+
+def rank_candidates(
+    target: dict[str, str],
+    candidates: list[dict[str, Any]],
+    duck_model: str = "1",
+    ai_provider: str = "duckai",
+    gemini_model: str = "gemini-1.5-flash",
+    include_urls: bool = False,
+    video_mode: bool = False,
+) -> list[int] | dict[str, list[Any]]:
     if not is_enabled(ai_provider) or not candidates:
-        return []
-    
+        return {"ranked_ids": [], "ranked_urls": []} if include_urls else []
+
     is_youtube = any("youtube" in str(c.get("query", "")).lower() or "youtube" in str(c.get("source", "")).lower() for c in candidates)
-    
+
     compact_candidates = []
     for item in candidates[:20]:
         if is_youtube:
@@ -251,6 +263,7 @@ def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], du
                 "title": str(item.get("title") or "")[:160],
                 "channel": str(item.get("source") or "YouTube")[:60],
                 "local_score": int(float(item.get("score") or 0)),
+                "url": str(item.get("url") or item.get("webpage_url") or "")[:300],
             })
         else:
             magnet_data = _parse_magnet(item.get("magnet") or "")
@@ -263,13 +276,25 @@ def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], du
                 "trackers": magnet_data.get("trackers", [])[:6],
             })
 
-    if is_youtube:
+    if is_youtube and video_mode:
+        task_desc = (
+            "Find the official standalone MUSIC VIDEO (real filmed video content) on YouTube for the requested track. "
+            "First, try to recall the exact VEVO YouTube URL (e.g. from ArtistNameVEVO channel) from your training data and return it as 'suggested_url' — this takes absolute priority over all candidates. "
+            "If no VEVO URL is known, try the Official Artist Channel URL instead. "
+            "Only leave 'suggested_url' empty if you have no confident knowledge of the official video URL. "
+            "PRIORITIZE: VEVO channels, Official Artist Channels, actual standalone filmed music videos. "
+            "STRICTLY AVOID: 'Official Audio' videos (just album art), lyric videos, visualizers, covers, tributes, fan-made, reactions, live performances, auto-generated Topic channel uploads, "
+            "movie trailers, documentary clips, concert films, compilation albums, soundtracks, 'This Is It', or any video that is part of a movie/film project. "
+            "Return {\"suggested_url\":\"<full youtube url or empty string>\",\"ranked_ids\":[...],\"ranked_urls\":[...]}."
+        )
+    elif is_youtube:
         task_desc = (
             "Rank YouTube candidate IDs for the requested music. "
             "PRIORITIZE: Official Artist Channels and '- Topic' channels. "
             "IDENTIFY: High-fidelity metadata (Remastered, Official Audio). "
             "AVOID: Music videos with long intros/outros, live performances (unless requested), and covers. "
-            "Return {\"ranked_ids\":[...]} in order of highest confidence audio match."
+            "Return {\"ranked_ids\":[...],\"ranked_urls\":[...]} in order of highest confidence audio match. "
+            "Use only URLs from the provided candidate list."
         )
     else:
         task_desc = (
@@ -291,7 +316,7 @@ def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], du
     result = _request(prompt, duck_model, ai_provider, gemini_model)
     ranked = result.get("ranked_ids") if isinstance(result, dict) else None
     if not isinstance(ranked, list):
-        return []
+        return {"ranked_ids": [], "ranked_urls": [], "suggested_url": ""} if include_urls and is_youtube else []
     valid_ids = {int(item["id"]) for item in compact_candidates}
     out: list[int] = []
     for value in ranked:
@@ -301,4 +326,30 @@ def rank_candidates(target: dict[str, str], candidates: list[dict[str, Any]], du
             continue
         if candidate_id in valid_ids and candidate_id not in out:
             out.append(candidate_id)
-    return out
+
+    if not (include_urls and is_youtube):
+        return out
+
+    id_to_url = {
+        int(item["id"]): str(item.get("url") or "").strip()
+        for item in compact_candidates
+        if str(item.get("url") or "").strip()
+    }
+    ranked_urls = result.get("ranked_urls") if isinstance(result, dict) else None
+    url_out: list[str] = []
+    if isinstance(ranked_urls, list):
+        valid_urls = set(id_to_url.values())
+        for value in ranked_urls:
+            url = str(value or "").strip()
+            if url and url in valid_urls and url not in url_out:
+                url_out.append(url)
+    if not url_out:
+        url_out = [id_to_url[candidate_id] for candidate_id in out if candidate_id in id_to_url]
+
+    suggested_url = ""
+    if video_mode and isinstance(result, dict):
+        raw = str(result.get("suggested_url") or "").strip()
+        if _is_youtube_url(raw):
+            suggested_url = raw
+
+    return {"ranked_ids": out, "ranked_urls": url_out, "suggested_url": suggested_url}

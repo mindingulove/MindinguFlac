@@ -63,6 +63,26 @@ const state = {
   activeLibraryPill: "home",
   statsPeriod: "month",
   playlistContinuationLoads: new Set(),
+  videoMode: false,
+  sideVideoTrackKey: "",
+  videoFetch: {
+    trackKey: "",
+    status: "",   // ""|"downloading"|"ready"|"not_found"
+    path: "",
+  },
+  lyrics: {
+    open: false,
+    loading: false,
+    trackKey: "",
+    source: "",
+    provider: "",
+    lines: [],
+    raw: "",
+    synced: true,
+    activeIndex: -1,
+    programmaticScroll: false,
+    lastScrollAt: 0,
+  },
 };
 
 const SERVICE_LABELS = {
@@ -128,6 +148,7 @@ const ENGINE_PROVIDERS = {
 
 const ENGINE_QUALITIES = {
   "ytp-dl": [
+    { value: "video", label: "Music video (MP4/WebM)" },
     { value: "best", label: "Best available" },
     { value: "m4a",  label: "M4A / AAC" },
     { value: "mp3",  label: "MP3" },
@@ -188,6 +209,8 @@ function updateEngineControls(engine, currentService, currentQuality) {
     qualitySel.innerHTML = engineQualities.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
     if (currentQuality && engineQualities.some(o => o.value === currentQuality)) {
       qualitySel.value = currentQuality;
+    } else if (engine === "ytp-dl" && engineQualities.some(o => o.value === "video")) {
+      qualitySel.value = "video";
     } else {
       qualitySel.value = engineQualities[0].value;
     }
@@ -2297,6 +2320,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   state.activeJobId = null;
   state.currentTrack = item;
   state.currentLibraryPath = ""; // Clear path for new selection
+  state.videoFetch = { trackKey: trackKey(item), status: "", path: "" };
   startListeningSession(item, playbackContext);
   recordDockRecentSelection(item, playbackContext);
   
@@ -2444,8 +2468,11 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
   if (requestId !== state.playbackRequestId) return;
   console.log(`[Player] playFromLibraryPath: ${filePath} (startAt: ${startAt})`);
   state.currentLibraryPath = filePath;
+  if (state.videoMode && isVideoLibraryPath(filePath)) {
+    renderSideCover(track || state.currentTrack);
+  }
   state.pendingNativeStartAt = 0;
-  const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}`;
+  const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}&audio=1`;
   state.currentStreamUrl = streamUrl;
   const audio = $("audioPlayer");
   if (isNativeAudioSelected()) {
@@ -2753,6 +2780,11 @@ function setPlayerStatus(msg, track, job = null) {
     $("playerArtist").innerHTML = artistLinkHtml(track);
     updateDetailsPanel(track, job);
     updateMediaSession(track);
+    if (!canSwitchToLocalVideo(track)) fetchVideoForTrack(track).catch(() => {});
+    prefetchLyricsForTrack(track);
+    if (state.lyrics.open && state.lyrics.trackKey !== trackKey(track)) {
+      loadLyricsForTrack(track, { force: true }).catch(() => {});
+    }
     bindEntityLinks($("playerTitle").parentElement);
   }
 }
@@ -2775,15 +2807,155 @@ function activeJobHasPlayableAudio(job) {
   return Number(job?.active_audio_ready_bytes || 0) > 512 * 1024;
 }
 
-function updateDetailsPanel(track, job = null) {
-  const url = track.artwork_url || "";
-  const containers = [document.querySelector(".player-cover"), $("sideCover")];
-  containers.forEach(c => {
-    if (c) {
-      c.style.backgroundImage = url ? `url('${url}')` : "";
-      c.innerHTML = url ? "" : `<i class="bi bi-music-note"></i>`;
-    }
+function isVideoLibraryPath(path) {
+  const ext = String(path || "").split("?")[0].split(".").pop().toLowerCase();
+  return ["mp4", "webm", "mov", "mkv", "ogv"].includes(ext);
+}
+
+function canSwitchToLocalVideo(track = state.currentTrack) {
+  if (!track || !state.currentLibraryPath || !isVideoLibraryPath(state.currentLibraryPath)) return false;
+  // ytp-dl downloads audio as .mp4 containers — only treat them as real video
+  // when the quality is explicitly set to the music-video mode.
+  if ((state.settings.download_engine || "") === "ytp-dl" &&
+      (state.settings.default_quality || "") !== "video") return false;
+  return true;
+}
+
+function canSwitchToVideo(track = state.currentTrack) {
+  return canSwitchToLocalVideo(track) ||
+    state.videoFetch.status === "ready" ||
+    state.videoFetch.status === "downloading";
+}
+
+function localMediaStreamUrl(filePath) {
+  return `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}`;
+}
+
+
+async function fetchVideoForTrack(track, { force = false } = {}) {
+  const key = trackKey(track || {});
+  if (!track) return state.videoFetch;
+  if (!force && state.videoFetch.trackKey === key) {
+    const s = state.videoFetch.status;
+    if (s === "ready" || s === "not_found" || s === "downloading") return state.videoFetch;
+  }
+  state.videoFetch = { trackKey: key, status: "downloading", path: "" };
+  renderSideVideoButton();
+  const params = new URLSearchParams({
+    artist: track.artist || "",
+    title: track.title || "",
+    album: track.album || "",
+    track_key: key,
+    ...(force ? { force: "1" } : {}),
   });
+  for (let attempt = 0; attempt < 60; attempt++) {
+    if (state.videoFetch.trackKey !== key) return state.videoFetch;
+    // Only send force=1 on the first poll; subsequent retries are normal checks
+    if (attempt === 1) params.delete("force");
+    try {
+      const data = await api(`/api/video/fetch?${params.toString()}`);
+      if (state.videoFetch.trackKey !== key) return state.videoFetch;
+      state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "" };
+      renderSideVideoButton();
+      if (data.status === "ready" || data.status === "not_found") {
+        if (state.videoMode && state.sideVideoTrackKey === key && data.status === "ready") {
+          renderSideCover(track);
+        }
+        return state.videoFetch;
+      }
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  // Timed out — treat as not found so the button disappears
+  if (state.videoFetch.trackKey === key) {
+    state.videoFetch = { trackKey: key, status: "not_found", path: "" };
+    renderSideVideoButton();
+  }
+  return state.videoFetch;
+}
+
+function renderSideVideoButton() {
+  const button = $("sideVideoSwitch");
+  const refresh = $("sideVideoRefresh");
+  if (!button) return;
+  const available = state.videoMode || canSwitchToVideo();
+  button.hidden = !available;
+  button.classList.toggle("active", !!state.videoMode);
+  if (state.videoMode) {
+    button.innerHTML = '<i class="bi bi-music-note-beamed"></i><span>Switch to audio</span>';
+  } else if (state.videoFetch.status === "downloading") {
+    button.innerHTML = '<i class="bi bi-hourglass-split"></i><span>Loading video…</span>';
+  } else {
+    button.innerHTML = '<i class="bi bi-play-btn"></i><span>Switch to video</span>';
+  }
+  if (refresh) refresh.hidden = !state.videoMode;
+}
+
+function renderSideCover(track) {
+  const cover = $("sideCover");
+  const media = $("sideCoverMedia");
+  const playerCover = document.querySelector(".player-cover");
+  const url = track?.artwork_url || "";
+  if (playerCover) {
+    playerCover.style.backgroundImage = url ? `url('${url}')` : "";
+    playerCover.innerHTML = url ? "" : `<i class="bi bi-music-note"></i>`;
+  }
+  if (!cover) return;
+  if (media) {
+    const currentTime = currentPlaybackSeconds();
+    const hasLocalVideo = canSwitchToLocalVideo(track);
+    const hasFetchedVideo = !hasLocalVideo && state.videoFetch.status === "ready" && !!state.videoFetch.path;
+    const videoFilePath = hasLocalVideo ? state.currentLibraryPath : (hasFetchedVideo ? state.videoFetch.path : "");
+    if (state.videoMode && videoFilePath) {
+      const existingVideo = $("sideVideoPlayer");
+      const existingSrc = existingVideo && existingVideo.tagName === "VIDEO" ? existingVideo.dataset.filePath || "" : "";
+      cover.classList.add("video-mode");
+      if (existingSrc !== videoFilePath) {
+        const videoSrc = localMediaStreamUrl(videoFilePath);
+        media.style.backgroundImage = "";
+        media.innerHTML = `<video id="sideVideoPlayer" playsinline muted src="${esc(videoSrc)}" data-file-path="${esc(videoFilePath)}"></video>`;
+        const video = $("sideVideoPlayer");
+        if (video) {
+          video.addEventListener("loadedmetadata", () => {
+            syncLocalVideoOverlay(currentTime, false, { allowSeek: true });
+          }, { once: true });
+          // canplay fires after the seek from loadedmetadata completes and the
+          // video actually has data to render — more reliable than loadedmetadata
+          // for starting playback, especially when re-entering video mode mid-song.
+          video.addEventListener("canplay", () => {
+            const audio = $("audioPlayer");
+            if (!state.manualPauseRequested && audio && !audio.paused) {
+              video.play().catch(() => {});
+            }
+          }, { once: true });
+        }
+      }
+    } else {
+      cover.classList.remove("video-mode");
+      media.innerHTML = url ? "" : `<i class="bi bi-music-note"></i>`;
+      media.style.backgroundImage = url ? `url('${url}')` : "";
+    }
+  } else {
+    cover.classList.remove("video-mode");
+    cover.style.backgroundImage = url ? `url('${url}')` : "";
+    cover.innerHTML = url ? "" : `<i class="bi bi-music-note"></i>`;
+  }
+  renderSideVideoButton();
+}
+
+function switchSideVideoMode(enabled) {
+  state.videoMode = !!enabled;
+  state.sideVideoTrackKey = state.videoMode ? trackKey(state.currentTrack) : "";
+  if (state.videoMode && state.currentTrack && !canSwitchToLocalVideo()) {
+    fetchVideoForTrack(state.currentTrack, { force: false }).catch(() => {});
+  }
+  renderSideCover(state.currentTrack);
+}
+
+function updateDetailsPanel(track, job = null) {
+  if (state.videoMode) state.sideVideoTrackKey = trackKey(track);
+  renderSideCover(track);
+  if (!canSwitchToLocalVideo(track)) fetchVideoForTrack(track).catch(() => {});
   $("sideTitle").innerHTML = albumLinkHtml(track, track.title || "No track selected");
   const qualityLabel = qualityLabelForTrack(track, job);
   const qualityHtml = qualityLabel ? `<span class="quality-pill">${qualityLabel}</span>` : "";
@@ -4090,6 +4262,272 @@ function trackKey(item) {
   ].map(value => String(value).trim().toLowerCase()).join("||");
 }
 
+function lyricsPayload(track) {
+  const payload = serviceDownloadPayload(track || {}, "stream");
+  const durationMs = track?.duration_ms || track?.metadata?.duration_ms || track?.duration || track?.metadata?.duration || 0;
+  return {
+    artist: payload.artist || "",
+    album: payload.album || "",
+    title: payload.title || "",
+    spotify_id: payload.spotify_id || "",
+    isrc: payload.isrc || "",
+    track_key: payload.track_key || "",
+    duration_s: durationMs > 1000 ? Math.round(Number(durationMs) / 1000) : Number(durationMs || 0),
+  };
+}
+
+function parseLrcTimestamp(value) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?$/);
+  if (!match) return null;
+  const minutes = Number(match[1] || 0);
+  const seconds = Number(match[2] || 0);
+  const fraction = match[3] ? Number(`0.${match[3].padEnd(3, "0").slice(0, 3)}`) : 0;
+  return minutes * 60 + seconds + fraction;
+}
+
+function parseLyrics(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return [];
+  const lines = [];
+  text.split(/\r?\n/).forEach((line) => {
+    const stamps = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g)]
+      .map(match => parseLrcTimestamp(match[1]))
+      .filter(value => value !== null);
+    if (!stamps.length) return;
+    const content = line.replace(/\[[^\]]+\]/g, "").trim();
+    stamps.forEach(time => lines.push({ time, text: content, instrumental: !content }));
+  });
+  return lines.sort((a, b) => a.time - b.time);
+}
+
+function proxiedImageUrl(url) {
+  if (!url) return "";
+  try {
+    const parsed = new URL(url, window.location.href);
+    if (parsed.origin === window.location.origin) return parsed.href;
+    return `/api/image?url=${encodeURIComponent(parsed.href)}`;
+  } catch (_) {
+    return url;
+  }
+}
+
+function setLyricsFallbackPalette() {
+  const panel = $("lyricsPanel");
+  if (!panel) return;
+  panel.style.setProperty("--lyrics-bg", "#06445a");
+  panel.style.setProperty("--lyrics-bg-2", "#062b3b");
+  panel.style.setProperty("--lyrics-muted", "rgba(178, 226, 246, 0.58)");
+  panel.style.setProperty("--lyrics-active", "#ffffff");
+}
+
+function applyLyricsPalette(track) {
+  const panel = $("lyricsPanel");
+  if (!panel) return;
+  setLyricsFallbackPalette();
+  const url = proxiedImageUrl(track?.artwork_url || track?.metadata?.artwork_url || "");
+  if (!url) return;
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => {
+    try {
+      const canvas = document.createElement("canvas");
+      const size = 32;
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, size, size);
+      const data = ctx.getImageData(0, 0, size, size).data;
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let i = 0; i < data.length; i += 16) {
+        const alpha = data[i + 3];
+        if (alpha < 128) continue;
+        r += data[i]; g += data[i + 1]; b += data[i + 2]; count++;
+      }
+      if (!count) return;
+      r = Math.round(r / count); g = Math.round(g / count); b = Math.round(b / count);
+      const dark = `rgb(${Math.max(18, Math.round(r * 0.42))}, ${Math.max(24, Math.round(g * 0.42))}, ${Math.max(28, Math.round(b * 0.42))})`;
+      const darker = `rgb(${Math.max(8, Math.round(r * 0.25))}, ${Math.max(10, Math.round(g * 0.25))}, ${Math.max(12, Math.round(b * 0.25))})`;
+      const muted = `rgba(${Math.min(255, Math.round(r * 1.5 + 50))}, ${Math.min(255, Math.round(g * 1.5 + 50))}, ${Math.min(255, Math.round(b * 1.5 + 50))}, 0.58)`;
+      panel.style.setProperty("--lyrics-bg", dark);
+      panel.style.setProperty("--lyrics-bg-2", darker);
+      panel.style.setProperty("--lyrics-muted", muted);
+    } catch (_) {
+      setLyricsFallbackPalette();
+    }
+  };
+  img.onerror = setLyricsFallbackPalette;
+  img.src = url;
+}
+
+function currentPlaybackSeconds() {
+  if (state.nativeAudio.active) return Number(state.nativeAudio.position || 0);
+  const audio = $("audioPlayer");
+  return audio && isFinite(audio.currentTime) ? Number(audio.currentTime || 0) : 0;
+}
+
+function syncLocalVideoOverlay(position = currentPlaybackSeconds(), forcePlay = false, options = {}) {
+  if (!state.videoMode) return;
+  if (!canSwitchToLocalVideo() && state.videoFetch.status !== "ready") return;
+  const video = $("sideVideoPlayer");
+  if (!video || video.tagName !== "VIDEO") return;
+  const audio = $("audioPlayer");
+  const audioDuration = state.nativeAudio.active
+    ? Number(state.nativeAudio.duration || 0)
+    : (audio && Number.isFinite(audio.duration) ? Number(audio.duration || 0) : 0);
+  if (options.allowSeek && Number.isFinite(position) && position >= 0 && Number.isFinite(video.duration) && video.duration > 0) {
+    let target;
+    const isYoutube = (state.settings.download_engine || "") === "ytp-dl";
+    if (!isYoutube && audioDuration > 0) {
+      // Only use percentage mapping for deliberate seek/start sync. Doing this
+      // on every timeupdate constantly re-seeks different masters and drops frames.
+      target = (position / audioDuration) * video.duration;
+    } else {
+      // YouTube engine: audio and video are from the same download — sync by seconds.
+      target = position;
+    }
+    target = Math.min(target, Math.max(0, video.duration - 0.25));
+    if (Math.abs((video.currentTime || 0) - target) > 0.4) {
+      video.currentTime = target;
+    }
+  }
+  if (forcePlay && !state.manualPauseRequested && audio && !audio.paused) {
+    video.play().catch(() => {});
+  }
+}
+
+function currentLyricsIndex(position) {
+  const lines = state.lyrics.lines || [];
+  if (!lines.length) return -1;
+  let lo = 0, hi = lines.length - 1, best = -1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (lines[mid].time <= position + 0.08) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+function renderLyricsContent(message = "") {
+  const content = $("lyricsContent");
+  if (!content) return;
+  if (message) {
+    content.innerHTML = `<div class="lyrics-empty">${esc(message)}</div>`;
+    return;
+  }
+  const lines = state.lyrics.lines || [];
+  if (lines.length) {
+    content.innerHTML = lines.map((line, index) => {
+      const text = line.instrumental ? '<i class="bi bi-music-note-beamed"></i>' : esc(line.text);
+      return `<div class="lyrics-line${line.instrumental ? " instrumental" : ""}" data-lyrics-index="${index}">${text}</div>`;
+    }).join("");
+    updateLyricsPosition(currentPlaybackSeconds(), true);
+    return;
+  }
+  if (state.lyrics.raw) {
+    content.innerHTML = `<div class="lyrics-line unsynced">${esc(state.lyrics.raw)}</div>`;
+  } else {
+    content.innerHTML = '<div class="lyrics-empty">No synced lyrics found</div>';
+  }
+}
+
+function setLyricsSynced(value) {
+  state.lyrics.synced = !!value;
+  const sync = $("lyricsSync");
+  if (sync) sync.hidden = state.lyrics.synced;
+  if (state.lyrics.synced) scrollActiveLyricsLine(true);
+}
+
+function scrollActiveLyricsLine(force = false) {
+  if (!state.lyrics.open || !state.lyrics.synced) return;
+  const idx = state.lyrics.activeIndex;
+  if (idx < 0) return;
+  const line = document.querySelector(`.lyrics-line[data-lyrics-index="${idx}"]`);
+  if (!line) return;
+  state.lyrics.programmaticScroll = true;
+  line.scrollIntoView({ block: "center", behavior: force ? "smooth" : "smooth" });
+  setTimeout(() => { state.lyrics.programmaticScroll = false; }, 450);
+}
+
+function updateLyricsPosition(position = currentPlaybackSeconds(), forceScroll = false) {
+  if (!state.lyrics.open || !(state.lyrics.lines || []).length) return;
+  const idx = currentLyricsIndex(position);
+  if (idx === state.lyrics.activeIndex && !forceScroll) return;
+  document.querySelectorAll(".lyrics-line.active").forEach(el => el.classList.remove("active"));
+  state.lyrics.activeIndex = idx;
+  if (idx >= 0) {
+    document.querySelector(`.lyrics-line[data-lyrics-index="${idx}"]`)?.classList.add("active");
+    if (state.lyrics.synced) scrollActiveLyricsLine(forceScroll);
+  }
+}
+
+async function loadLyricsForTrack(track, { force = false } = {}) {
+  const key = trackKey(track || {});
+  if (!track || (!force && state.lyrics.trackKey === key && (state.lyrics.lines.length || state.lyrics.raw))) return;
+  state.lyrics.loading = true;
+  state.lyrics.trackKey = key;
+  state.lyrics.lines = [];
+  state.lyrics.raw = "";
+  state.lyrics.activeIndex = -1;
+  renderLyricsContent("Loading lyrics...");
+  applyLyricsPalette(track);
+  try {
+    const params = new URLSearchParams(lyricsPayload(track));
+    const data = await api(`/api/lyrics?${params.toString()}`);
+    if (state.lyrics.trackKey !== key) return;
+    state.lyrics.provider = data.provider || "";
+    state.lyrics.source = data.source || "";
+    state.lyrics.raw = data.lyrics || "";
+    state.lyrics.lines = data.synced ? parseLyrics(data.lyrics || "") : [];
+    renderLyricsContent(data.found ? "" : "No synced lyrics found");
+    setLyricsSynced(true);
+  } catch (error) {
+    if (state.lyrics.trackKey === key) renderLyricsContent("Lyrics unavailable");
+  } finally {
+    state.lyrics.loading = false;
+  }
+}
+
+function prefetchLyricsForTrack(track) {
+  if (!track) return;
+  api("/api/lyrics/prefetch", {
+    method: "POST",
+    body: JSON.stringify(lyricsPayload(track)),
+  }).catch(() => {});
+}
+
+function openLyricsPanel() {
+  const panel = $("lyricsPanel");
+  if (!panel) return;
+  state.lyrics.open = true;
+  panel.hidden = false;
+  $("btnLyrics")?.classList.add("active");
+  if (!state.currentTrack) {
+    renderLyricsContent("Play a song to see lyrics");
+    return;
+  }
+  applyLyricsPalette(state.currentTrack);
+  setLyricsSynced(true);
+  loadLyricsForTrack(state.currentTrack, { force: false }).catch(() => {});
+  updateLyricsPosition(currentPlaybackSeconds(), true);
+}
+
+function closeLyricsPanel() {
+  const panel = $("lyricsPanel");
+  if (!panel) return;
+  state.lyrics.open = false;
+  panel.hidden = true;
+  $("btnLyrics")?.classList.remove("active");
+}
+
+function toggleLyricsPanel() {
+  if (state.lyrics.open) closeLyricsPanel();
+  else openLyricsPanel();
+}
+
 function recentTrackKey(item) {
   return trackKey(item) || [
     item?.title || item?.metadata?.title || "",
@@ -4376,6 +4814,7 @@ async function toggleTrackLibrary(track, button, refresh) {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
     });
+    prefetchLyricsForTrack(track);
     const activeJobId = (result.job && result.job.id) || result.active_job_id || "";
     if (activeJobId) button.dataset.activeJobId = activeJobId;
     if (result.action === "started" || result.action === "queued") {
@@ -4542,6 +4981,9 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         if (mode === "stream" && job.library_path) {
           state.currentLibraryPath = job.library_path;
           state.currentPlayableReady = true;
+          if (state.videoMode && isVideoLibraryPath(job.library_path)) {
+            renderSideCover(track);
+          }
         }
         setPlayerStatusIcon("ready");
         setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track, job);
@@ -5052,6 +5494,7 @@ function startNativeAudioPolling(requestId) {
     };
     updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
     syncNativeAudioUi();
+    updateLyricsPosition(state.nativeAudio.position || 0);
     // Prefetch the next track once playback is underway. The <audio> element's
     // ontimeupdate never fires on the native path, so trigger it here too.
     if (state.nativeAudio.position >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
@@ -5105,7 +5548,7 @@ async function toggleNativeAudioPlayback() {
         const forced = await api("/api/native_audio/status").catch(() => null);
         if (forced) state.nativeAudio.playing = !!forced.playing;
     }
-    _callNowPlaying("set_playback_state", 2);
+    publishNowPlayingState(2);
   } else {
     if (!state.currentLibraryPath) {
         console.log("[Player] Native audio has no path to resume, doing nothing.");
@@ -5124,7 +5567,7 @@ async function toggleNativeAudioPlayback() {
     } else {
         state.nativeAudio.playing = !!status.playing;
     }
-    _callNowPlaying("set_playback_state", 1);
+    publishNowPlayingState(1);
   }
   syncPlayPauseButton();
 }
@@ -5280,7 +5723,6 @@ function bindKeyboardControls() {
   window.addEventListener("blur", () => {
     stopSeekHold();
     stopVolumeHold();
-    clearMediaSession();
   });
 }
 
@@ -5383,6 +5825,14 @@ function updateMediaSession(track) {
   }
 }
 
+function publishNowPlayingState(stateValue = null) {
+  if (!state.currentTrack || !shouldExposeNowPlaying()) return;
+  updateMediaSession(state.currentTrack);
+  if (stateValue !== null) {
+    _callNowPlaying("set_playback_state", stateValue);
+  }
+}
+
 function bindMediaSessionActions() {
   // Intentionally do not register global media-session action handlers.
   // macOS should keep using its own control-center routing so the selected app
@@ -5446,18 +5896,19 @@ function bindPlayer() {
     syncPlayPauseButton();
     syncActiveTrackRows();
     api("/api/dock/playing-state", { method: "POST", body: JSON.stringify({ playing: !audio.paused }) }).catch(() => {});
+    const vid = $("sideVideoPlayer");
+    if (vid && vid.tagName === "VIDEO") {
+      if (audio.paused) vid.pause();
+      else vid.play().catch(() => {});
+    }
     if (audio.paused) {
       if (state.currentTrack) {
-        _callNowPlaying("set_playback_state", 2);
-        updateMediaSession(state.currentTrack);
+        publishNowPlayingState(2);
       } else {
         _callNowPlaying("clear_now_playing");
       }
     } else if (shouldExposeNowPlaying()) {
-      _callNowPlaying("set_playback_state", 1);
-      if (state.currentTrack) {
-        updateMediaSession(state.currentTrack);
-      }
+      publishNowPlayingState(1);
     }
   };
   audio.onended = async () => {
@@ -5498,6 +5949,8 @@ function bindPlayer() {
     $("currentTime").textContent = formatTime(audio.currentTime);
     $("durationTime").textContent = formatTime(audio.duration);
     $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
+    syncLocalVideoOverlay(audio.currentTime);
+    updateLyricsPosition(audio.currentTime);
     // Only prefetch from a stable browser source. Live active-job streams can
     // still be growing, and starting background downloads against them can
     // race the stream handoff and trigger an early advance.
@@ -5506,21 +5959,24 @@ function bindPlayer() {
       prefetchNextTracks().catch(() => {});
     }
   };
+  audio.onseeked = () => {
+    syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
+  };
   audio.onloadedmetadata = () => {
     if (state.currentTrack && shouldExposeNowPlaying()) {
-      _callNowPlaying("set_now_playing", {
-        duration: audio.duration || 0,
-        position: audio.currentTime || 0,
-      });
+      updateMediaSession(state.currentTrack);
     }
     if (audio.duration) {
       updateListeningSessionPosition(audio.currentTime || 0, audio.duration);
+      updateLyricsPosition(audio.currentTime || 0, true);
+      syncLocalVideoOverlay(audio.currentTime || 0, false, { allowSeek: true });
     }
   };
   audio.oncanplay = () => {
     if (state.autoplayWanted && !state.manualPauseRequested && audio.paused) {
       audio.play().catch(() => {});
     }
+    syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
   };
   audio.onwaiting = () => {
     if (state.currentTrack) {
@@ -5541,8 +5997,7 @@ function bindPlayer() {
           setPlayerStatusIcon("ready");
         }
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
-        _callNowPlaying("set_playback_state", 1);
-        updateMediaSession(state.currentTrack);
+        publishNowPlayingState(1);
     }
   };
   audio.onerror = () => {
@@ -5625,8 +6080,9 @@ function bindPlayer() {
         const position = ($("seekBar").value / 1000) * duration;
         state.nativeAudio.position = position;
         api("/api/native_audio/seek", { method: "POST", body: JSON.stringify({ position }) }).catch(() => {});
+        syncLocalVideoOverlay(position, true, { allowSeek: true });
         if (shouldExposeNowPlaying()) {
-          _callNowPlaying("set_now_playing", { position });
+          updateMediaSession(state.currentTrack);
         }
       }
       return;
@@ -5634,7 +6090,7 @@ function bindPlayer() {
     if (audio.duration) {
       audio.currentTime = ($("seekBar").value / 1000) * audio.duration;
       if (shouldExposeNowPlaying()) {
-        _callNowPlaying("set_now_playing", { position: audio.currentTime });
+        updateMediaSession(state.currentTrack);
       }
     }
   };
@@ -5655,14 +6111,12 @@ function bindPlayer() {
   };
   window.addEventListener("focus", () => {
     if (state.currentTrack && !audio.paused) {
-      _callNowPlaying("set_playback_state", 1);
-      updateMediaSession(state.currentTrack);
+      publishNowPlayingState(1);
     }
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !audio.paused && state.currentTrack) {
-      _callNowPlaying("set_playback_state", 1);
-      updateMediaSession(state.currentTrack);
+      publishNowPlayingState(1);
     }
   });
   $("btnNext").onclick = () => playQueueOffset(1);
@@ -5915,7 +6369,7 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
       <div class="track-list-header" style="margin-top: 24px">
         <div>#</div>
         <div>Title</div>
-        ${isAlbumPlaylist ? `<div>Plays</div><div></div><div><i class="bi bi-clock"></i></div><div></div>` : `<div></div><div>Album</div><div><i class="bi bi-clock"></i></div><div></div>`}
+        ${isAlbumPlaylist ? `<div class="plays-column">Plays</div><div></div><div class="time-column"><i class="bi bi-clock"></i></div><div></div>` : `<div></div><div>Album</div><div class="time-column"><i class="bi bi-clock"></i></div><div></div>`}
       </div>
 
       <div id="playlistTrackList" class="track-list"></div>
@@ -7296,6 +7750,25 @@ $("btnQueue").onclick = () => {
   else closeQueuePanel();
 };
 $("queuePanelClose").onclick = closeQueuePanel;
+
+$("btnLyrics").onclick = toggleLyricsPanel;
+$("lyricsSync").onclick = () => {
+  setLyricsSynced(true);
+  updateLyricsPosition(currentPlaybackSeconds(), true);
+};
+$("lyricsScroll").addEventListener("scroll", () => {
+  if (!state.lyrics.open || state.lyrics.programmaticScroll) return;
+  state.lyrics.lastScrollAt = Date.now();
+  setLyricsSynced(false);
+}, { passive: true });
+$("sideVideoSwitch").onclick = () => switchSideVideoMode(!state.videoMode);
+$("sideVideoRefresh").onclick = () => {
+  if (!state.currentTrack) return;
+  state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };
+  renderSideVideoButton();
+  renderSideCover(state.currentTrack);
+  fetchVideoForTrack(state.currentTrack, { force: true }).catch(() => {});
+};
 
 window.addEventListener("resize", () => {
   if (!$("queuePanel")?.hidden || !$("connectPanel")?.hidden) {

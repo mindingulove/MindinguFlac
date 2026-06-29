@@ -276,7 +276,11 @@
       <strong id="sideTitle">No track selected</strong>
       <div id="sideMeta">Search or choose from the library</div>
     </div>
-    <div id="sideCover" class="details-cover"></div>
+    <div id="sideCover" class="details-cover">
+      <div id="sideCoverMedia" class="details-cover-media"></div>
+      <button id="sideVideoSwitch" class="side-video-switch" type="button" hidden><i class="bi bi-play-btn"></i><span>Switch to video</span></button>
+      <button id="sideVideoRefresh" class="side-video-refresh" type="button" hidden title="Refresh video"><i class="bi bi-arrow-clockwise"></i></button>
+    </div>
     <div id="sideRichContent" class="details-rich-content"></div>
 
     <!-- Connect to device panel - overlays the details panel -->
@@ -310,6 +314,13 @@
     </div>
   </aside>
 
+  <section id="lyricsPanel" class="lyrics-panel" hidden>
+    <div class="lyrics-scroll" id="lyricsScroll">
+      <div id="lyricsContent" class="lyrics-content"></div>
+    </div>
+    <button id="lyricsSync" class="lyrics-sync" type="button" hidden><i class="bi bi-soundwave"></i><span>Sync</span></button>
+  </section>
+
   <footer class="player">
     <div class="player-track">
       <div class="player-cover"></div>
@@ -335,6 +346,7 @@
       </div>
     </div>
     <div class="player-tools">
+      <button id="btnLyrics" class="transport-btn" type="button" aria-label="Lyrics"><i class="bi bi-mic"></i></button>
       <button id="btnQueue" class="transport-btn" type="button" aria-label="Queue"><i class="bi bi-list-ul"></i></button>
       <button id="btnConnectDevice" class="transport-btn" type="button" aria-label="Connect to a device"><i class="bi bi-cast"></i></button>
       <button id="muteToggle" class="transport-btn" type="button" aria-label="Mute"><i class="bi bi-volume-up"></i></button>

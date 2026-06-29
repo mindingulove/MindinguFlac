@@ -16,18 +16,37 @@ class TestAiReranker(unittest.TestCase):
 
     def test_rank_candidates_uses_valid_provider_ids_only(self):
         candidates = [
-            {"id": 1, "title": "Artist - Song.flac", "source": "test", "seeders": 1, "score": 100},
-            {"id": 2, "title": "Artist - Album - Song.flac", "source": "test", "seeders": 0, "score": 90},
+            {"id": 1, "title": "Artist - Song.flac", "source": "youtube", "seeders": 1, "score": 100, "url": "https://www.youtube.com/watch?v=one"},
+            {"id": 2, "title": "Artist - Album - Song.flac", "source": "youtube", "seeders": 0, "score": 90, "url": "https://www.youtube.com/watch?v=two"},
         ]
 
         with patch.dict(os.environ, {"MINDINGUFLAC_AI_RERANK_PROVIDER": "duck_chat"}):
-            with patch("ai_reranker._request", return_value={"ranked_ids": [2, "1", 99, "bad", 2]}):
+            with patch("ai_reranker._request", return_value={"ranked_ids": [2, "1", 99, "bad", 2], "ranked_urls": ["https://www.youtube.com/watch?v=two", "https://www.youtube.com/watch?v=one"]}):
                 ranked = ai_reranker.rank_candidates(
                     {"artist": "Artist", "title": "Song", "album": "Album"},
                     candidates,
+                    include_urls=True,
                 )
 
-        self.assertEqual(ranked, [2, 1])
+        self.assertEqual(ranked["ranked_ids"], [2, 1])
+        self.assertEqual(ranked["ranked_urls"], ["https://www.youtube.com/watch?v=two", "https://www.youtube.com/watch?v=one"])
+
+    def test_rank_candidates_youtube_falls_back_to_ids_when_urls_missing(self):
+        candidates = [
+            {"id": 1, "title": "Artist - Song", "source": "youtube", "seeders": 0, "score": 100, "url": "https://www.youtube.com/watch?v=one"},
+            {"id": 2, "title": "Artist - Song", "source": "youtube", "seeders": 0, "score": 90, "url": "https://www.youtube.com/watch?v=two"},
+        ]
+
+        with patch.dict(os.environ, {"MINDINGUFLAC_AI_RERANK_PROVIDER": "duck_chat"}):
+            with patch("ai_reranker._request", return_value={"ranked_ids": [2, 1]}):
+                ranked = ai_reranker.rank_candidates(
+                    {"artist": "Artist", "title": "Song", "album": "Album"},
+                    candidates,
+                    include_urls=True,
+                )
+
+        self.assertEqual(ranked["ranked_ids"], [2, 1])
+        self.assertEqual(ranked["ranked_urls"], ["https://www.youtube.com/watch?v=two", "https://www.youtube.com/watch?v=one"])
 
     def test_selected_provider_prefers_setting_over_env(self):
         with patch.dict(os.environ, {"MINDINGUFLAC_AI_RERANK_PROVIDER": "duckai"}, clear=True):

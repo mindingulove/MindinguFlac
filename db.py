@@ -939,6 +939,13 @@ def remove_from_blacklist(url: str):
     conn.commit()
 
 
+def clear_youtube_blacklist():
+    """Remove all YouTube URLs from the blacklist (transient 403/bot-detection blocks)."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM blacklist WHERE url LIKE '%youtube%' OR url LIKE '%youtu.be%'")
+    conn.commit()
+
+
 def seed_adult_filter_terms(terms: list[str] | set[str], source: str = "builtin"):
     normalized = sorted({
         str(term).strip().lower()

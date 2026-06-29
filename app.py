@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import hashlib
 import mimetypes
 import socket
 
@@ -16,6 +18,8 @@ mimetypes.add_type("image/jpeg", ".jpg")
 mimetypes.add_type("image/svg+xml", ".svg")
 mimetypes.add_type("audio/flac", ".flac")
 mimetypes.add_type("audio/mp4", ".m4a")
+mimetypes.add_type("video/mp4", ".mp4")
+mimetypes.add_type("video/webm", ".webm")
 mimetypes.add_type("audio/ogg", ".ogg")
 mimetypes.add_type("audio/ogg", ".opus")
 mimetypes.add_type("application/javascript", ".js")
@@ -39,7 +43,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, load_config, save_config
 import db
-from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, search_music, search_relevance, track_credits
+from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, release_year, search_music, search_relevance, track_credits
 from playlist_recommender import generate_one_replacement_recommendation, generate_playlist_recommendations, get_playlist_track_keys, record_recommendation_feedback
 from native_audio import native_audio
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
@@ -200,8 +204,16 @@ DATA = app_data_dir()
 CONFIG_PATH = DATA / "config.json"
 PLAYLISTS_PATH = DATA / "playlists.json"
 DOCK_RECENTS_PATH = DATA / "dock_recents.json"
+LYRICS_DIR = DATA / "lyrics"
+VIDEO_CACHE_PATH = DATA / "video_cache.json"
+VIDEO_FILES_DIR = DATA / "video_files"
 
 config_lock = threading.Lock()
+lyrics_prefetch_lock = threading.Lock()
+lyrics_prefetch_inflight: set[str] = set()
+video_cache_lock = threading.Lock()
+_video_fetch_jobs: dict[str, str] = {}   # cache_key -> "downloading"|"ready"|"failed"
+_video_fetch_lock = threading.Lock()
 
 
 def _is_writable_directory(path: Path) -> bool:
@@ -715,6 +727,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
         from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
         from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
+        pl_year = ""
         
         if playlist_m:
             playlist_id = playlist_m.group(1)
@@ -738,6 +751,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
                 pl_owner = pl_owner[0]
             pl_description = f"Album by {pl_owner}" if pl_owner else ""
             pl_followers = 0
+            pl_year = release_year(str(info.get("release_date") or info.get("date") or info.get("year") or ""))
         else:
             return {"name": "", "artwork_url": "", "description": "", "owner": "", "followers": 0, "tracks": []}
 
@@ -759,6 +773,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
                 "artist": get_val(track, "artists") or get_val(track, "artist"),
                 "artist_id": get_val(track, "artist_id"),
                 "album": get_val(track, "album"),
+                "year": get_val(track, "year") or (pl_year if album_m else ""),
                 "artwork_url": get_val(track, "cover_url") or get_val(track, "artwork_url"),
                 "spotify_id": t_id,
                 "spotify_url": get_val(track, "external_url") or f"https://open.spotify.com/track/{t_id}",
@@ -768,7 +783,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
 
         return {
             "name": pl_name, "artwork_url": pl_artwork, "description": pl_description,
-            "owner": pl_owner, "followers": pl_followers, "tracks": tracks,
+            "owner": pl_owner, "followers": pl_followers, "year": pl_year if album_m else "", "tracks": tracks,
         }
     except Exception as e:
         print(f"[Spotify import] Error importing {spotify_url}: {e}")
@@ -958,6 +973,508 @@ def read_body(handler: BaseHTTPRequestHandler) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 
+def _lyrics_field(payload: dict, key: str) -> str:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    track = payload.get("track") if isinstance(payload.get("track"), dict) else {}
+    value = payload.get(key)
+    if value in (None, ""):
+        value = metadata.get(key)
+    if value in (None, ""):
+        value = track.get(key)
+    return str(value or "").strip()
+
+
+def _lyrics_duration_s(payload: dict) -> int:
+    for key in ("duration_s", "duration", "duration_seconds"):
+        value = _lyrics_field(payload, key)
+        if value:
+            try:
+                return max(0, int(float(value)))
+            except (TypeError, ValueError):
+                pass
+    for key in ("duration_ms", "durationMillis", "duration_millis"):
+        value = _lyrics_field(payload, key)
+        if value:
+            try:
+                return max(0, int(float(value) / 1000))
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
+def _lyrics_identity(payload: dict) -> dict:
+    title = _lyrics_field(payload, "title") or _lyrics_field(payload, "name")
+    artist = _lyrics_field(payload, "artist") or _lyrics_field(payload, "artists")
+    album = _lyrics_field(payload, "album")
+    spotify_id = _lyrics_field(payload, "spotify_id") or _lyrics_field(payload, "track_id")
+    isrc = _lyrics_field(payload, "isrc")
+    return {
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "duration_s": _lyrics_duration_s(payload),
+        "spotify_id": spotify_id,
+        "isrc": isrc,
+        "track_key": _lyrics_field(payload, "track_key"),
+    }
+
+
+def _lyrics_cache_key(identity: dict) -> str:
+    preferred = {
+        "spotify_id": identity.get("spotify_id") or "",
+        "isrc": identity.get("isrc") or "",
+        "title": (identity.get("title") or "").casefold(),
+        "artist": (identity.get("artist") or "").casefold(),
+        "album": (identity.get("album") or "").casefold(),
+        "duration_s": int(identity.get("duration_s") or 0),
+    }
+    return hashlib.sha1(json.dumps(preferred, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _lyrics_is_synced(text: str) -> bool:
+    return bool(re.search(r"\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]", text or ""))
+
+
+def _lyrics_cache_paths(identity: dict) -> tuple[Path, Path]:
+    key = _lyrics_cache_key(identity)
+    return LYRICS_DIR / f"{key}.lrc", LYRICS_DIR / f"{key}.json"
+
+
+def _read_cached_lyrics(identity: dict) -> dict | None:
+    lyrics_path, meta_path = _lyrics_cache_paths(identity)
+    if not lyrics_path.exists():
+        return None
+    try:
+        lyrics = lyrics_path.read_text(encoding="utf-8")
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        return {
+            "ok": True,
+            "found": bool(lyrics.strip()),
+            "lyrics": lyrics,
+            "provider": meta.get("provider") or "",
+            "synced": bool(meta.get("synced")) or _lyrics_is_synced(lyrics),
+            "source": "cache",
+            "identity": identity,
+        }
+    except Exception:
+        return None
+
+
+def _write_cached_lyrics(identity: dict, lyrics: str, provider: str) -> None:
+    LYRICS_DIR.mkdir(parents=True, exist_ok=True)
+    lyrics_path, meta_path = _lyrics_cache_paths(identity)
+    lyrics_path.write_text(lyrics, encoding="utf-8")
+    meta_path.write_text(json.dumps({
+        "provider": provider,
+        "synced": _lyrics_is_synced(lyrics),
+        "identity": identity,
+        "updated_at": int(time.time()),
+    }, indent=2), encoding="utf-8")
+
+
+def _fetch_lyrics(identity: dict) -> dict:
+    cached = _read_cached_lyrics(identity)
+    if cached:
+        return cached
+    if not identity.get("title") or not identity.get("artist"):
+        return {"ok": False, "found": False, "error": "Missing title or artist", "identity": identity}
+    try:
+        from SpotiFLAC.core.lyrics import fetch_lyrics_async
+        lyrics, provider = asyncio.run(fetch_lyrics_async(
+            track_name=identity.get("title") or "",
+            artist_name=identity.get("artist") or "",
+            album_name=identity.get("album") or "",
+            duration_s=int(identity.get("duration_s") or 0),
+            track_id=identity.get("spotify_id") or "",
+            isrc=identity.get("isrc") or "",
+            providers=["spotify", "apple", "musixmatch", "lrclib", "amazon"],
+        ))
+        if lyrics and lyrics.strip():
+            _write_cached_lyrics(identity, lyrics.strip(), provider or "")
+            return {
+                "ok": True,
+                "found": True,
+                "lyrics": lyrics.strip(),
+                "provider": provider or "",
+                "synced": _lyrics_is_synced(lyrics),
+                "source": "fetch",
+                "identity": identity,
+            }
+        return {"ok": True, "found": False, "lyrics": "", "provider": "", "synced": False, "source": "fetch", "identity": identity}
+    except Exception as exc:
+        return {"ok": False, "found": False, "error": str(exc), "identity": identity}
+
+
+def _start_lyrics_prefetch(payload: dict) -> dict:
+    identity = _lyrics_identity(payload)
+    key = _lyrics_cache_key(identity)
+    cached = _read_cached_lyrics(identity)
+    if cached:
+        return {"ok": True, "queued": False, "cached": True, "identity": identity}
+    with lyrics_prefetch_lock:
+        if key in lyrics_prefetch_inflight:
+            return {"ok": True, "queued": True, "cached": False, "identity": identity}
+        lyrics_prefetch_inflight.add(key)
+
+    def _worker() -> None:
+        try:
+            _fetch_lyrics(identity)
+        finally:
+            with lyrics_prefetch_lock:
+                lyrics_prefetch_inflight.discard(key)
+
+    threading.Thread(target=_worker, name=f"lyrics-prefetch-{key[:8]}", daemon=True).start()
+    return {"ok": True, "queued": True, "cached": False, "identity": identity}
+
+
+def _video_norm(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _video_tokens(value: str) -> set[str]:
+    ignored = {"a", "an", "and", "the", "feat", "ft", "official", "music", "video", "audio", "lyrics", "remaster", "hd"}
+    return {part for part in _video_norm(value).split() if len(part) > 1 and part not in ignored}
+
+
+def _video_identity(payload: dict) -> dict:
+    return {
+        "artist": _lyrics_field(payload, "artist"),
+        "title": _lyrics_field(payload, "title") or _lyrics_field(payload, "name"),
+        "album": _lyrics_field(payload, "album"),
+        "track_key": _lyrics_field(payload, "track_key"),
+    }
+
+
+def _video_cache_key(identity: dict) -> str:
+    value = {
+        "artist": _video_norm(identity.get("artist") or ""),
+        "title": _video_norm(identity.get("title") or ""),
+        "album": _video_norm(identity.get("album") or ""),
+    }
+    return hashlib.sha1(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _load_video_cache() -> dict:
+    try:
+        return json.loads(VIDEO_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_video_cache(cache: dict) -> None:
+    try:
+        VIDEO_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        VIDEO_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _youtube_embed_url(webpage_url: str, video_id: str = "") -> str:
+    vid = video_id
+    if not vid:
+        parsed = urlparse(webpage_url or "")
+        if "youtu.be" in (parsed.netloc or ""):
+            vid = parsed.path.strip("/")
+        else:
+            vid = parse_qs(parsed.query).get("v", [""])[0]
+    return f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0" if vid else ""
+
+
+def _score_video_candidate(entry: dict, identity: dict) -> int:
+    title_raw = str(entry.get("title") or "")
+    channel_raw = str(entry.get("uploader") or entry.get("channel") or "")
+    haystack = " ".join([title_raw, channel_raw])
+    hay_norm = _video_norm(haystack)
+    title_norm = _video_norm(title_raw)
+    channel_norm = _video_norm(channel_raw)
+    artist_tokens = _video_tokens(identity.get("artist") or "")
+    title_tokens = _video_tokens(identity.get("title") or "")
+    score = 0
+    if title_tokens:
+        score += int(55 * (len(title_tokens & _video_tokens(title_raw)) / max(1, len(title_tokens))))
+    if artist_tokens:
+        score += int(30 * (len(artist_tokens & _video_tokens(haystack)) / max(1, len(artist_tokens))))
+        # Bonus when the channel itself is the artist (e.g. "DireStraitsOfficial", "MichaelJacksonVEVO")
+        if artist_tokens and artist_tokens <= _video_tokens(channel_norm):
+            score += 20
+    if "official" in hay_norm:
+        score += 14
+    if "music video" in hay_norm or "official video" in hay_norm:
+        score += 16
+    if "vevo" in channel_norm:
+        score += 20
+    # Non-official content — penalise hard so covers/tributes never beat the real thing
+    if "cover" in title_norm:
+        score -= 50
+    if any(t in hay_norm for t in ("tribute", "reaction", "parody", "remix", "fan made", "fan video")):
+        score -= 40
+    # Static-image / audio-only uploads — no real video content
+    if any(token in hay_norm for token in ("official audio", "audio only", "provided to youtube", "auto-generated", "topic")):
+        score -= 40
+    if any(token in hay_norm for token in ("lyrics", "lyric video", "visualizer", "karaoke")):
+        score -= 24
+    if any(token in hay_norm for token in ("live", "concert")):
+        score -= 10
+    # Movie / documentary / compilation — wrong content type
+    if any(token in hay_norm for token in ("this is it", "documentary", "soundtrack", "the movie", "film", "trailer", "teaser", "short film")):
+        score -= 50
+    duration = entry.get("duration")
+    if isinstance(duration, (int, float)) and duration:
+        if 90 <= duration <= 720:
+            score += 8
+        elif duration > 1200:
+            score -= 22
+    return score
+
+
+def _lookup_youtube_video(identity: dict) -> dict:
+    if not identity.get("title") or not identity.get("artist"):
+        return {"ok": False, "found": False, "error": "Missing title or artist", "identity": identity}
+    key = _video_cache_key(identity)
+    with video_cache_lock:
+        cached = _load_video_cache().get(key)
+    if cached:
+        return {**cached, "source": "cache", "identity": identity}
+
+    query = f'{identity["artist"]} {identity["title"]} official music video'
+    try:
+        import yt_dlp
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+            "socket_timeout": 8,
+            "noplaylist": True,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"ytsearch12:{query}", download=False)
+        entries = [entry for entry in (info or {}).get("entries") or [] if isinstance(entry, dict)]
+        scored = sorted(((_score_video_candidate(entry, identity), entry) for entry in entries), key=lambda item: item[0], reverse=True)
+
+        # AI advisor runs in a thread with a timeout so a slow Duck.ai never
+        # stalls the download. It both reranks candidates and can suggest a
+        # known official URL directly from training data.
+        best_entry = None
+        best_score = -1
+        suggested_url = ""
+        try:
+            import ai_reranker
+            ai_provider = getattr(app_config, "ai_provider", "duckai")
+            if ai_reranker.is_enabled(ai_provider) and scored:
+                target = {
+                    "title": identity.get("title") or "",
+                    "artist": identity.get("artist") or "",
+                    "album": identity.get("album") or "",
+                    "duration": 0,
+                }
+                id_to_entry: dict[int, tuple[int, dict]] = {}
+                ai_candidates = []
+                for idx, (sc, entry) in enumerate(scored[:12], start=1):
+                    video_id = str(entry.get("id") or "")
+                    url = entry.get("webpage_url") or entry.get("url") or (f"https://www.youtube.com/watch?v={video_id}" if video_id else "")
+                    id_to_entry[idx] = (sc, entry)
+                    ai_candidates.append({
+                        "id": idx,
+                        "title": entry.get("title") or url,
+                        "source": entry.get("uploader") or entry.get("channel") or "YouTube",
+                        "seeders": 0,
+                        "score": sc,
+                        "query": "youtube",
+                        "url": url,
+                    })
+                duck_model = getattr(app_config, "duck_model", "1")
+                gemini_model = getattr(app_config, "gemini_model", "gemini-1.5-flash")
+                ai_result: dict = {}
+                ai_done = threading.Event()
+
+                def _run_video_ai() -> None:
+                    try:
+                        ranked = ai_reranker.rank_candidates(
+                            target, ai_candidates, duck_model, ai_provider, gemini_model,
+                            include_urls=True, video_mode=True,
+                        )
+                        if isinstance(ranked, dict):
+                            ai_result.update(ranked)
+                        elif isinstance(ranked, list):
+                            ai_result["ranked_ids"] = ranked
+                    except Exception:
+                        pass
+                    finally:
+                        ai_done.set()
+
+                threading.Thread(target=_run_video_ai, daemon=True, name="video-ai-lookup").start()
+                ai_done.wait(timeout=45)
+
+                ranked_ids = ai_result.get("ranked_ids")
+                suggested_url = str(ai_result.get("suggested_url") or "").strip()
+                if not suggested_url and isinstance(ranked_ids, list):
+                    for value in ranked_ids:
+                        try:
+                            item = id_to_entry.get(int(value))
+                        except Exception:
+                            item = None
+                        if item:
+                            best_score, best_entry = item
+                            break
+        except Exception:
+            pass
+
+        if best_entry is None and not suggested_url and scored and scored[0][0] >= 58:
+            best_score, best_entry = scored[0]
+
+        if suggested_url:
+            # AI knows the official URL directly — use it, metadata resolved on download
+            video_id = ""
+            m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", suggested_url)
+            if m:
+                video_id = m.group(1)
+            result = {
+                "ok": True,
+                "found": True,
+                "source": "youtube_ai",
+                "title": "",
+                "uploader": "",
+                "duration": 0,
+                "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else "",
+                "webpage_url": suggested_url,
+                "embed_url": _youtube_embed_url(suggested_url, video_id),
+                "score": 999,
+                "identity": identity,
+            }
+        elif not best_entry or best_score < 40:
+            result = {"ok": True, "found": False, "source": "youtube", "identity": identity}
+        else:
+            video_id = str(best_entry.get("id") or "")
+            url = best_entry.get("webpage_url") or best_entry.get("url") or (f"https://www.youtube.com/watch?v={video_id}" if video_id else "")
+            result = {
+                "ok": True,
+                "found": True,
+                "source": "youtube",
+                "title": best_entry.get("title") or "",
+                "uploader": best_entry.get("uploader") or best_entry.get("channel") or "",
+                "duration": best_entry.get("duration") or 0,
+                "thumbnail": best_entry.get("thumbnail") or "",
+                "webpage_url": url,
+                "embed_url": _youtube_embed_url(url, video_id),
+                "score": best_score,
+                "identity": identity,
+            }
+        with video_cache_lock:
+            cache = _load_video_cache()
+            cache[key] = {k: v for k, v in result.items() if k != "identity"}
+            _save_video_cache(cache)
+        return result
+    except Exception as exc:
+        return {"ok": False, "found": False, "error": str(exc), "source": "youtube", "identity": identity}
+
+
+def _download_youtube_video_bg(identity: dict, key: str) -> None:
+    mp4_path = VIDEO_FILES_DIR / f"{key}.mp4"
+    tmp_path = VIDEO_FILES_DIR / f"{key}.tmp.mp4"
+    try:
+        lookup = _lookup_youtube_video(identity)
+        if not lookup.get("found") or not lookup.get("webpage_url"):
+            with _video_fetch_lock:
+                _video_fetch_jobs[key] = "failed"
+            return
+        url = lookup["webpage_url"]
+        VIDEO_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        import yt_dlp
+        # H.264 + AAC mp4 for Safari/WKWebView compatibility.
+        # Fallback chain: prefer avc≤480p, then any avc, then any mp4, then best.
+        opts = {
+            "format": (
+                "bestvideo[vcodec^=avc][height<=480]+bestaudio[ext=m4a]/"
+                "bestvideo[vcodec^=avc][height<=480]+bestaudio/"
+                "bestvideo[vcodec^=avc]+bestaudio[ext=m4a]/"
+                "bestvideo[vcodec^=avc]+bestaudio/"
+                "bestvideo[height<=480]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=480]+bestaudio/"
+                "bestvideo+bestaudio/"
+                "best"
+            ),
+            "merge_output_format": "mp4",
+            "outtmpl": str(tmp_path),
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "noplaylist": True,
+            "socket_timeout": 15,
+            "retries": 3,
+            "fragment_retries": 3,
+            "http_chunk_size": 10 * 1024 * 1024,  # avoids 416 range errors on retries
+        }
+        from backend_ytpdl import _ffmpeg_location
+        ffmpeg = _ffmpeg_location()
+        if ffmpeg:
+            opts["ffmpeg_location"] = ffmpeg
+
+        # Try with browser cookies first (avoids YouTube 403 bot-detection),
+        # then fall back to no cookies if all browsers fail.
+        def _try_download(download_opts: dict) -> bool:
+            tmp_path.unlink(missing_ok=True)
+            with yt_dlp.YoutubeDL(download_opts) as ydl:
+                ydl.download([url])
+            return tmp_path.exists() and tmp_path.stat().st_size > 65536
+
+        downloaded = False
+        for _browser in ("safari", "chrome", "firefox", None):
+            try:
+                attempt_opts = dict(opts)
+                if _browser:
+                    attempt_opts["cookiesfrombrowser"] = (_browser,)
+                downloaded = _try_download(attempt_opts)
+                if downloaded:
+                    break
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                continue
+
+        if downloaded:
+            tmp_path.rename(mp4_path)
+            with _video_fetch_lock:
+                _video_fetch_jobs[key] = "ready"
+        else:
+            tmp_path.unlink(missing_ok=True)
+            with _video_fetch_lock:
+                _video_fetch_jobs[key] = "failed"
+    except Exception as exc:
+        print(f"[VideoFetch] Download failed for key {key}: {exc}")
+        tmp_path.unlink(missing_ok=True)
+        with _video_fetch_lock:
+            _video_fetch_jobs[key] = "failed"
+
+
+def _get_video_fetch(identity: dict, force: bool = False) -> dict:
+    if not identity.get("title") or not identity.get("artist"):
+        return {"status": "not_found"}
+    key = _video_cache_key(identity)
+    mp4_path = VIDEO_FILES_DIR / f"{key}.mp4"
+    if force:
+        mp4_path.unlink(missing_ok=True)
+        with video_cache_lock:
+            cache = _load_video_cache()
+            cache.pop(key, None)
+            _save_video_cache(cache)
+        with _video_fetch_lock:
+            _video_fetch_jobs.pop(key, None)
+    if mp4_path.exists() and mp4_path.stat().st_size > 65536:
+        return {"status": "ready", "path": str(mp4_path)}
+    with _video_fetch_lock:
+        job_status = _video_fetch_jobs.get(key)
+    if job_status == "ready":
+        return {"status": "ready", "path": str(mp4_path)} if mp4_path.exists() else {"status": "not_found"}
+    if job_status == "downloading":
+        return {"status": "downloading"}
+    if job_status == "failed":
+        return {"status": "not_found"}
+    with _video_fetch_lock:
+        _video_fetch_jobs[key] = "downloading"
+    threading.Thread(target=_download_youtube_video_bg, args=(identity, key), daemon=True).start()
+    return {"status": "downloading"}
+
+
 def safe_static_path(request_path: str) -> Path | None:
     rel = unquote(request_path.lstrip("/"))
     if rel == "":
@@ -1013,7 +1530,11 @@ def _sniff_audio_mime(path: Path) -> str:
         if suffix_name.endswith(suffix):
             suffix_name = suffix_name[: -len(suffix)]
 
-    if b"ftyp" in header[:16] or suffix_name.endswith((".m4a", ".mp4", ".aac")):
+    if suffix_name.endswith((".mp4", ".mov")):
+        return "video/mp4"
+    if suffix_name.endswith(".webm"):
+        return "video/webm"
+    if b"ftyp" in header[:16] or suffix_name.endswith((".m4a", ".aac")):
         return "audio/mp4"
     if b"fLaC" in header or suffix_name.endswith(".flac"):
         return "audio/flac"
@@ -1196,6 +1717,22 @@ class Handler(BaseHTTPRequestHandler):
                 settings_dict = app_config.public_dict()
                 settings_dict["native_now_playing_active"] = bool(_np_update_fn)
                 self.send_json(settings_dict)
+                return
+            if path == "/api/lyrics":
+                payload = {key: values[0] for key, values in query.items() if values}
+                result = _fetch_lyrics(_lyrics_identity(payload))
+                self.send_json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_GATEWAY)
+                return
+            if path == "/api/video/lookup":
+                payload = {key: values[0] for key, values in query.items() if values}
+                result = _lookup_youtube_video(_video_identity(payload))
+                self.send_json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_GATEWAY)
+                return
+            if path == "/api/video/fetch":
+                payload = {key: values[0] for key, values in query.items() if values}
+                force = payload.get("force", "") in ("1", "true")
+                result = _get_video_fetch(_video_identity(payload), force=force)
+                self.send_json(result, HTTPStatus.OK)
                 return
             if path == "/api/image":
                 url = query.get("url", [""])[0].strip()
@@ -1422,7 +1959,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not file_path.exists():
                     self.send_error_json("File not found", HTTPStatus.NOT_FOUND)
                     return
-                self.stream_local_path(file_path)
+                audio_only = query.get("audio", [""])[0] == "1"
+                self.stream_local_path(file_path, audio_hint=audio_only)
                 return
             if path == "/api/library/stream_active_job":
                 job_id = query.get("job_id", [""])[0].strip()
@@ -1474,7 +2012,7 @@ class Handler(BaseHTTPRequestHandler):
                     file_complete = active_audio_size > 0 and active_audio_ready >= active_audio_size
                 except (OSError, TypeError, ValueError):
                     file_complete = False
-                self.stream_local_path(candidate, is_active_job=not is_finished and not file_complete)
+                self.stream_local_path(candidate, is_active_job=not is_finished and not file_complete, audio_hint=True)
                 return
 
             if path == "/api/tidal_proxy":
@@ -1536,6 +2074,11 @@ class Handler(BaseHTTPRequestHandler):
                 if _np_state_fn:
                     _np_state_fn(int(body.get("state", 2)))
                 self.send_json({"ok": True})
+                return
+            if path == "/api/lyrics/prefetch":
+                items = body.get("tracks") if isinstance(body.get("tracks"), list) else [body]
+                results = [_start_lyrics_prefetch(item if isinstance(item, dict) else {}) for item in items[:10]]
+                self.send_json({"ok": True, "results": results})
                 return
             if path == "/api/now_playing/clear":
                 if _np_clear_fn:
@@ -1808,10 +2351,11 @@ class Handler(BaseHTTPRequestHandler):
                     "description": imported.get("description", ""),
                     "owner": imported.get("owner", ""),
                     "followers": imported.get("followers", 0),
+                    "year": imported.get("year", ""),
                     "spotify_url": spotify_url,
                     "playlist_origin": origin,
                     "tracks": imported["tracks"],
-                    "metadata_fetched": bool(spotify_url and imported["tracks"]),
+                    "metadata_fetched": bool(spotify_url and imported["tracks"] and (origin != "album" or imported.get("year"))),
                     "created_at": time.time(),
                 }
                 with playlists_lock:
@@ -1983,6 +2527,21 @@ class Handler(BaseHTTPRequestHandler):
                 result = service_downloader.clear_cache()
                 app_config.last_cache_cleanup = time.time()
                 save_config(CONFIG_PATH, app_config)
+                # Also clear fetched music video files and their lookup cache
+                try:
+                    for _vf in VIDEO_FILES_DIR.glob("*.mp4"):
+                        _vf.unlink(missing_ok=True)
+                    VIDEO_CACHE_PATH.unlink(missing_ok=True)
+                    with _video_fetch_lock:
+                        _video_fetch_jobs.clear()
+                except Exception:
+                    pass
+                # Clear transient YouTube blacklist entries (403/bot-detection blocks
+                # accumulate during a session and poison future searches)
+                try:
+                    db.clear_youtube_blacklist()
+                except Exception:
+                    pass
                 self.send_json({**result, **cache_stats()})
                 return
             self.send_error_json("Not found", HTTPStatus.NOT_FOUND)
@@ -2001,10 +2560,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def stream_local_path(self, path: Path, is_active_job: bool = False) -> None:
+    def stream_local_path(self, path: Path, is_active_job: bool = False, audio_hint: bool = False) -> None:
         try:
             size = path.stat().st_size
-            mime = _sniff_audio_mime(path) if is_active_job else (mimetypes.guess_type(path.name)[0] or "audio/mpeg")
+            if is_active_job:
+                mime = _sniff_audio_mime(path)
+            else:
+                mime = mimetypes.guess_type(path.name)[0] or "audio/mpeg"
+            # <audio> element can't play video/mp4 reliably; use audio/mp4 for audio requests
+            if audio_hint and mime == "video/mp4":
+                mime = "audio/mp4"
 
             if is_active_job and _candidate_is_streamable(path):
                 self.send_response(200)

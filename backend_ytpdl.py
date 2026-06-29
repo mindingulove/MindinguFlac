@@ -49,6 +49,8 @@ def _get_yt_dlp():
 
 def _quality_mode(quality: str) -> str:
     value = str(quality or "").strip().lower()
+    if value in {"video", "mp4-video", "music_video"}:
+        return "video"
     if value in {"mp3", "m4a"}:
         return value
     return "best"
@@ -65,6 +67,14 @@ def _quality_to_codec(quality: str) -> str:
 
 def _format_selector(quality: str) -> str:
     mode = _quality_mode(quality)
+    if mode == "video":
+        # H.264 required — Safari <audio> cannot play AV1-in-mp4 containers
+        return (
+            "bestvideo[vcodec^=avc][height<=480][has_drm!=true]+bestaudio[ext=m4a][has_drm!=true]/"
+            "bestvideo[vcodec^=avc][has_drm!=true]+bestaudio[has_drm!=true]/"
+            "bestvideo[ext=mp4][vcodec!=none][acodec=none][has_drm!=true]+bestaudio[ext=m4a][has_drm!=true]/"
+            "best[vcodec!=none][has_drm!=true]"
+        )
     if mode == "m4a":
         return "bestaudio[ext=m4a][has_drm!=true]/bestaudio[acodec^=mp4a][has_drm!=true]/bestaudio[has_drm!=true]/best[has_drm!=true]"
     if mode == "mp3":
@@ -245,6 +255,7 @@ def _youtube_search_query(job: dict, clean: bool = False) -> str:
     artist = wanted["artist"]
     title = wanted["title"]
     album = wanted["album"]
+    video_mode = _quality_mode(job.get("quality") or "best") == "video"
     
     if clean:
         title = _clean_text(title)
@@ -252,12 +263,29 @@ def _youtube_search_query(job: dict, clean: bool = False) -> str:
     
     if artist and title:
         query_parts = [artist, title]
-        if not clean and album and album.lower() not in {"unknown album", "unknown"}:
+        if not video_mode and not clean and album and album.lower() not in {"unknown album", "unknown"}:
             query_parts.append(album)
-        query_parts.extend(["official", "audio"])
+        query_parts.extend(["official", "video" if video_mode else "audio"])
         return "ytsearch15:" + " ".join(query_parts)
     if title:
-        return "ytsearch15:" + " ".join([title, "official", "audio"])
+        return "ytsearch15:" + " ".join([title, "official", "video" if video_mode else "audio"])
+    return ""
+
+
+def _broad_youtube_search_query(job: dict) -> str:
+    profile = _ytpdl_search_profile(job)
+    if profile == "classical":
+        query = _classical_youtube_search_query(job, clean=True)
+        if query:
+            return query
+
+    wanted = _expected_track(job)
+    artist = wanted["artist"]
+    title = _clean_text(wanted["title"])
+    if artist and title:
+        return "ytsearch15:" + " ".join([artist, title])
+    if title:
+        return "ytsearch15:" + title
     return ""
 
 
@@ -309,6 +337,8 @@ def _prepend_current_youtube_candidate(
 ) -> list[tuple[str, dict]]:
     current_url = _current_track_youtube_url(job)
     if not current_url:
+        return candidates
+    if current_url == job.get("ytpdl_rejected_direct_url"):
         return candidates
     if any(url == current_url for url, _details in candidates):
         return candidates
@@ -446,12 +476,30 @@ def _candidate_requires_auth(entry: dict) -> bool:
     return drm > 0 and playable == 0
 
 
-def _source_score(wanted_artist: str, uploader: str, candidate_title: str) -> int:
+def _candidate_description(entry: dict) -> str:
+    return str(
+        entry.get("description")
+        or entry.get("full_description")
+        or entry.get("short_description")
+        or ""
+    )
+
+
+def _source_score(
+    wanted_artist: str,
+    uploader: str,
+    candidate_title: str,
+    description: str = "",
+    *,
+    verified_source: bool = False,
+    video_mode: bool = False,
+) -> int:
     from rapidfuzz import fuzz
 
     artist_tokens = _tokens(wanted_artist)
     uploader_norm = _norm_text(uploader)
     title_norm = _norm_text(candidate_title)
+    description_norm = _norm_text(description)
     if not artist_tokens:
         return 0
 
@@ -460,10 +508,23 @@ def _source_score(wanted_artist: str, uploader: str, candidate_title: str) -> in
     # title itself as a trust signal when it is clearly an official release that
     # names the artist, e.g. "CeCe Peniston - Finally (Official Music Video)".
     title_artist_coverage = _token_coverage(artist_tokens, title_norm)
-    official_release = "official" in title_norm and any(
-        marker in title_norm for marker in (" video", " audio")
+    description_artist_coverage = _token_coverage(artist_tokens, description_norm)
+    description_official_release = (
+        "official" in description_norm
+        and any(marker in description_norm for marker in (" video", " audio", " music video"))
     )
-    official_titled_by_artist = official_release and title_artist_coverage >= 70
+    music_video_by_artist = (
+        "music video by" in description_norm
+        and description_artist_coverage >= 70
+    )
+    official_release = (
+        "official" in title_norm
+        and any(marker in title_norm for marker in (" video", " audio"))
+    )
+    official_titled_by_artist = (
+        (official_release and title_artist_coverage >= 70)
+        or ((description_official_release or music_video_by_artist) and max(title_artist_coverage, description_artist_coverage) >= 70)
+    )
 
     uploader_coverage = _token_coverage(artist_tokens, uploader_norm)
     source = max(
@@ -481,11 +542,109 @@ def _source_score(wanted_artist: str, uploader: str, candidate_title: str) -> in
         source = 100
     if "vevo" in uploader_norm and uploader_coverage >= 70:
         source = 100
+    elif "vevo" in uploader_norm and max(title_artist_coverage, description_artist_coverage) >= 70:
+        source = max(source, 88)
     if "official" in uploader_norm and uploader_coverage >= 70:
         source = max(source, 95)
     if "official" in title_norm and uploader_coverage >= 70:
         source = max(source, 90)
+    if music_video_by_artist or (description_official_release and description_artist_coverage >= 70):
+        source = max(source, 82)
+    if video_mode and not verified_source and "vevo" not in uploader_norm and uploader_coverage >= 70:
+        source = min(source, 72)
     return int(min(100, source))
+
+
+def _video_match_adjustment(entry: dict, job: dict, wanted_artist: str, candidate_title: str, uploader: str, description: str) -> tuple[int, dict]:
+    if _quality_mode(job.get("quality") or "best") != "video":
+        return 0, {}
+
+    title_text = f" {candidate_title} "
+    uploader_text = f" {uploader} "
+    description_text = f" {description} "
+    combined_text = f"{title_text} {uploader_text} {description_text}"
+    wanted_title = _norm_text(_expected_track(job).get("title") or "")
+    wanted_title_text = f" {wanted_title} "
+
+    adjustment = 0
+    reasons: list[str] = []
+
+    official_video_title = (
+        "official" in title_text
+        and "video" in title_text
+        and "lyric video" not in title_text
+    )
+    music_video_description = " music video " in description_text and " official " in description_text
+    positive_video_signal = any(term in title_text for term in (
+        " music video ",
+        " official video ",
+        " live ",
+        " performance ",
+        " concert ",
+        " hd ",
+    )) or music_video_description
+    audio_or_static = any(term in combined_text for term in (
+        " official audio ",
+        " audio only ",
+        " topic ",
+        " album ",
+    ))
+    autogenerated_audio = " provided to youtube by " in description_text or " auto generated by youtube " in description_text
+    unofficial_recreation = any(term in combined_text for term in (
+        " ai music video ",
+        " ai video ",
+        " fan made ",
+        " fanmade ",
+        " fan video ",
+        " fans made ",
+        " what if ",
+        " unofficial video ",
+        " dance video ",
+    ))
+    official_artist_source = (
+        entry.get("channel_is_verified") is True
+        and wanted_artist
+        and _token_coverage(_tokens(wanted_artist), f"{uploader} {description}") >= 70
+        and not audio_or_static
+        and not autogenerated_audio
+    )
+    if official_video_title:
+        adjustment += 36
+        reasons.append("official_video_title")
+    elif music_video_description:
+        adjustment += 22
+        reasons.append("official_video_description")
+    if official_artist_source:
+        adjustment += 12
+        reasons.append("verified_artist_source")
+
+    if autogenerated_audio:
+        adjustment -= 100
+        reasons.append("auto_generated_audio")
+    elif audio_or_static and " official video " not in title_text:
+        adjustment -= 90
+        reasons.append("audio_or_static_video")
+
+    weaker_video_terms = (" lyric video ", " lyrics ", " visualizer ", " live ")
+    if any(term in title_text for term in weaker_video_terms) and not any(term in wanted_title_text for term in weaker_video_terms):
+        adjustment -= 28
+        reasons.append("weaker_video_variant")
+    if unofficial_recreation:
+        adjustment -= 95
+        reasons.append("unofficial_recreation")
+
+    details = {
+        "video_mode_candidate": True,
+        "video_positive_signal": bool(positive_video_signal),
+    }
+    if reasons:
+        details["video_match_adjustment"] = adjustment
+        details["video_match_reasons"] = reasons
+    if autogenerated_audio or audio_or_static:
+        details["video_static_audio"] = True
+    if unofficial_recreation:
+        details["video_unofficial_recreation"] = True
+    return adjustment, details
 
 
 def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
@@ -497,9 +656,12 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     wanted_full = _norm_text(f"{wanted['artist']} {wanted['title']}")
     raw_title = str(entry.get("title") or "")
     raw_uploader = str(entry.get("uploader") or entry.get("channel") or entry.get("creator") or "")
+    raw_description = _candidate_description(entry)
     candidate_title = _norm_text(raw_title)
     uploader = _norm_text(raw_uploader)
-    combined = _norm_text(f"{candidate_title} {uploader}")
+    description = _norm_text(raw_description)
+    visible_candidate_text = _norm_text(f"{candidate_title} {uploader}")
+    artist_evidence_text = _norm_text(f"{visible_candidate_text} {description}")
 
     if not wanted_title or not candidate_title:
         return 0, {"reason": "missing title metadata"}
@@ -523,8 +685,16 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     wanted_title_tokens = _tokens(wanted_title)
     wanted_artist_tokens = _tokens(wanted_artist)
     title_coverage = _token_coverage(wanted_title_tokens, candidate_title)
-    artist_coverage = _token_coverage(wanted_artist_tokens, combined) if wanted_artist else 100
-    source_score = _source_score(wanted_artist, uploader, candidate_title) if wanted_artist else 50
+    artist_coverage = _token_coverage(wanted_artist_tokens, artist_evidence_text) if wanted_artist else 100
+    description_artist_coverage = _token_coverage(wanted_artist_tokens, description) if wanted_artist else 100
+    source_score = _source_score(
+        wanted_artist,
+        uploader,
+        candidate_title,
+        description,
+        verified_source=entry.get("channel_is_verified") is True,
+        video_mode=_quality_mode(job.get("quality") or "best") == "video",
+    ) if wanted_artist else 50
 
     title_score = max(
         fuzz.WRatio(wanted_title, candidate_title),
@@ -533,7 +703,7 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     )
     
     # Use token_set_ratio for artist to handle variations like "Artist - Topic" or "ArtistVEVO"
-    artist_score = max(artist_coverage, fuzz.token_set_ratio(wanted_artist, combined)) if wanted_artist else 70
+    artist_score = max(artist_coverage, fuzz.token_set_ratio(wanted_artist, artist_evidence_text)) if wanted_artist else 70
 
     expected_duration = int(wanted.get("duration") or 0)
     candidate_duration = _parse_duration_seconds(entry.get("duration"))
@@ -552,7 +722,7 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
             duration_penalty = min(80, diff)
 
     penalty = 0
-    candidate_text = f" {combined} "
+    candidate_text = f" {visible_candidate_text} "
     requested_tokens = f" {wanted_title} "
     for term in _BAD_MATCH_TERMS:
         if f" {term} " in candidate_text and f" {term} " not in requested_tokens:
@@ -571,17 +741,19 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     classical_details = {}
     if _ytpdl_search_profile(job) == "classical":
         classical_adjustment, classical_details = _classical_match_adjustment(wanted, raw_title, raw_uploader)
+    video_adjustment, video_details = _video_match_adjustment(entry, job, wanted_artist, candidate_title, uploader, description)
 
-    score = int(
+    score = min(100, int(
         (title_score * 0.42)
         + (artist_score * 0.18)
         + (source_score * 0.22)
         + (duration_score * 0.12)
         + (title_coverage * 0.06)
         + classical_adjustment
+        + video_adjustment
         - penalty
         - duration_penalty
-    )
+    ))
     details = {
         "title": raw_title,
         "uploader": raw_uploader,
@@ -591,10 +763,12 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
         "source_score": int(source_score),
         "title_coverage": int(title_coverage),
         "artist_coverage": int(artist_coverage),
+        "description_artist_coverage": int(description_artist_coverage),
         "duration_score": int(duration_score),
         "score": score,
         "drm": False,
         **classical_details,
+        **video_details,
     }
     return score, details
 
@@ -617,6 +791,12 @@ def _scored_youtube_candidates(search_info: dict, job: dict) -> list[tuple[int, 
 
 
 def _candidate_is_confident(score: int, details: dict) -> bool:
+    if details.get("video_static_audio"):
+        return False
+    if details.get("video_unofficial_recreation"):
+        return False
+    if details.get("video_mode_candidate") and not details.get("video_positive_signal"):
+        return False
     return not (
         score < 55
         or details.get("title_score", 0) < 55
@@ -659,9 +839,9 @@ def _ranked_youtube_matches(search_info: dict, job: dict) -> list[tuple[str, dic
 
 def _youtube_ai_race_timeout() -> float:
     try:
-        return max(0.0, min(5.0, float(os.environ.get("MINDINGUFLAC_YOUTUBE_AI_RACE_TIMEOUT", "1.25"))))
+        return max(0.0, min(30.0, float(os.environ.get("MINDINGUFLAC_YOUTUBE_AI_RACE_TIMEOUT", "15"))))
     except Exception:
-        return 1.25
+        return 15.0
 
 
 def _ranked_youtube_matches_with_ai(
@@ -700,6 +880,7 @@ def _ranked_youtube_matches_with_ai(
             "seeders": 0,
             "score": details.get("score") or 0,
             "query": "youtube",
+            "url": url,
         })
 
     def run_ai_advisor() -> None:
@@ -709,9 +890,18 @@ def _ranked_youtube_matches_with_ai(
             duck_model = getattr(config, "duck_model", "1")
             ai_provider = getattr(config, "ai_provider", "duckai")
             gemini_model = getattr(config, "gemini_model", "gemini-1.5-flash")
-            ranked_ids = ai_reranker.rank_candidates(target, ai_candidates, duck_model, ai_provider, gemini_model)
-            if ranked_ids:
-                result["ranked_ids"] = ranked_ids
+            ranked = ai_reranker.rank_candidates(
+                target,
+                ai_candidates,
+                duck_model,
+                ai_provider,
+                gemini_model,
+                include_urls=True,
+            )
+            if isinstance(ranked, dict):
+                result.update(ranked)
+            elif ranked:
+                result["ranked_ids"] = ranked
         except Exception as exc:
             result["error"] = str(exc)
         finally:
@@ -728,11 +918,24 @@ def _ranked_youtube_matches_with_ai(
         return candidates
 
     ranked_ids = result.get("ranked_ids")
+    ranked_urls = result.get("ranked_urls")
     if not isinstance(ranked_ids, list):
         return candidates
 
     ordered: list[tuple[str, dict]] = []
     seen_urls: set[str] = set()
+
+    if isinstance(ranked_urls, list):
+        valid_urls = {url for url, _details in candidates}
+        for value in ranked_urls:
+            url = str(value or "").strip()
+            if not url or url not in valid_urls or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            item = next((candidate for candidate in candidates if candidate[0] == url), None)
+            if item:
+                ordered.append(item)
+
     for value in ranked_ids:
         try:
             item = id_to_candidate.get(int(value))
@@ -767,6 +970,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         raise RuntimeError("ytp-dl could not build a YouTube URL or search query from the selected track metadata")
 
     quality = job.get("quality") or "best"
+    video_mode = _quality_mode(quality) == "video"
     codec = _quality_to_codec(quality)
     format_selector = _format_selector(quality)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -797,6 +1001,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "no_warnings": True,
         "noprogress": True,
         "ignoreerrors": True,
+        "noplaylist": True,
         "cachedir": str(output_dir / ".cache"),
         "allow_unplayable_formats": False,
         "progress_hooks": [progress_cb],
@@ -805,10 +1010,23 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "addmetadata": True,
         "postprocessors": postprocessors,
     }
+    if video_mode:
+        ydl_opts["merge_output_format"] = "mp4"
 
     ffmpeg_path = _ffmpeg_location()
     if ffmpeg_path:
         ydl_opts["ffmpeg_location"] = ffmpeg_path
+
+    # Use browser cookies to avoid YouTube 403 bot-detection blocks.
+    yt_dlp = _get_yt_dlp()
+    for _browser in ("safari", "chrome", "firefox"):
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True, "cookiesfrombrowser": (_browser,)}) as _probe:
+                list(_probe.cookiejar)
+            ydl_opts["cookiesfrombrowser"] = (_browser,)
+            break
+        except Exception:
+            continue
 
     with manager._lock:
         job["status"] = "running"
@@ -816,11 +1034,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
         job["resolved_url"] = url
         job["last_status"] = "Searching YouTube..." if url.startswith("ytsearch") else "Downloading from YouTube..."
         job["active_provider"] = "ytp-dl"
-    label = codec.upper() if codec else "best native audio"
+    label = "video" if video_mode else (codec.upper() if codec else "best native audio")
     manager._append_cache_event(job, "trying", f"Downloading via ytp-dl ({label})...")
 
     try:
-        yt_dlp = _get_yt_dlp()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             def _try_download(target_url: str) -> str | None:
                 if target_url.startswith("ytsearch"):
@@ -835,7 +1052,28 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         manager._append_cache_event(job, "trying", f"YouTube search failed: {exc}")
                         return None
                 else:
-                    candidates = [(target_url, None)]
+                    try:
+                        direct_info = ydl.extract_info(target_url, download=False)
+                    except Exception as exc:
+                        manager._append_cache_event(job, "trying", f"Could not verify direct YouTube URL before download ({exc}); trying it anyway")
+                        candidates = [(target_url, None)]
+                    else:
+                        if isinstance(direct_info, dict):
+                            score, selected = _score_youtube_candidate(direct_info, job)
+                            if _candidate_is_confident(score, selected):
+                                selected["score"] = score
+                                candidates = [(_candidate_url(direct_info) or target_url, selected)]
+                            else:
+                                with manager._lock:
+                                    job["ytpdl_rejected_direct_url"] = target_url
+                                manager._append_cache_event(
+                                    job,
+                                    "trying",
+                                    f"Direct YouTube URL did not match this track ({score}%): {selected.get('title', '')[:80]}",
+                                )
+                                return None
+                        else:
+                            candidates = [(target_url, None)]
 
                 # Try up to 8 candidates in order of score
                 attempts = [(u, s) for u, s in candidates if not db.is_blacklisted(u)][:8]
@@ -858,13 +1096,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         )
                     try:
                         result_code = ydl.download([download_url])
-                        
-                        # Verify that a file was actually produced. 
+
+                        # Verify that a file was actually produced.
                         # With ignoreerrors: True, ydl.download might return success-ish codes even if it skipped.
                         if result_code == 0 or _find_audio_files(output_dir):
                             return download_url
-                        
-                        # If we get here, it failed to produce a file
+
+                        # Failed to produce a file — only blacklist for permanent failures,
+                        # NOT for transient bot-detection (403/429). Those URLs are fine,
+                        # just blocked by cookies/rate-limit this session.
                         db.add_to_blacklist(download_url, "ytp-dl produced no file (likely restricted or unplayable)")
                         if index + 1 < len(attempts):
                             manager._append_cache_event(
@@ -872,13 +1112,17 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             )
                         continue
                     except Exception as exc:
-                        db.add_to_blacklist(download_url, f"ytp-dl error: {exc}")
+                        exc_str = str(exc)
+                        # 403/429 = bot detection / rate limit — transient, don't blacklist
+                        transient = any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in"))
+                        if not transient:
+                            db.add_to_blacklist(download_url, f"ytp-dl error: {exc_str[:120]}")
                         if index + 1 < len(attempts):
                             manager._append_cache_event(
-                                job, "trying", f"YouTube candidate unavailable: {exc}"
+                                job, "trying", f"YouTube candidate unavailable ({exc_str[:60]}), trying another..."
                             )
                         else:
-                            manager._append_cache_event(job, "trying", f"YouTube candidate failed: {exc}")
+                            manager._append_cache_event(job, "trying", f"YouTube candidate failed: {exc_str[:80]}")
                 return None
 
             worked_url = None
@@ -887,7 +1131,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
             
             if not worked_url:
                 if url and not url.startswith("ytsearch"):
-                    db.add_to_blacklist(url, "direct url failed")
+                    if job.get("ytpdl_rejected_direct_url") != url:
+                        db.add_to_blacklist(url, "direct url failed")
                 
                 # Phase 2: Full Search (Artist + Title + Album)
                 search_query = _youtube_search_query(job, clean=False)
@@ -901,6 +1146,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 if clean_query and clean_query != url:
                     manager._append_cache_event(job, "trying", f"Falling back to clean YouTube search ({_youtube_search_profile_label(job, clean_query)}, stripping version suffixes)...")
                     worked_url = _try_download(clean_query)
+
+            if not worked_url:
+                # Phase 4: Broad Search (Artist + Base Title, no "official audio" constraint)
+                broad_query = _broad_youtube_search_query(job)
+                if broad_query and broad_query != url:
+                    manager._append_cache_event(job, "trying", f"Falling back to broad YouTube search ({_youtube_search_profile_label(job, broad_query)}, no official/audio constraint)...")
+                    worked_url = _try_download(broad_query)
 
             if not worked_url:
                 raise RuntimeError("All YouTube download attempts failed")

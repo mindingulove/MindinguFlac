@@ -31,7 +31,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
             "/fallback-cover",
         ))
 
-        with patch("backend.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("SpotiFLAC.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("https://open.spotify.com/playlist/playlist-id?si=test")
 
         self.assertEqual(imported["name"], "Imported Playlist")
@@ -42,7 +42,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
     def test_import_accepts_spotify_playlist_uri(self):
         client = SimpleNamespace(get_playlist_tracks=lambda playlist_id: ({"name": playlist_id}, [], ""))
 
-        with patch("backend.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("SpotiFLAC.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M")
 
         self.assertEqual(imported["name"], "37i9dQZF1DXcBWIGoYBM5M")
@@ -180,6 +180,33 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
         self.assertEqual(stored["deezer_id"], "deezer-id")
         self.assertEqual(stored["tidal_id"], "tidal-id")
         self.assertEqual(stored["isrc"], "")
+
+    def test_fetch_lyrics_includes_lrclib_provider(self):
+        captured = {}
+
+        async def fake_fetch_lyrics_async(**kwargs):
+            captured.update(kwargs)
+            return "[00:01.00]Line", "lrclib"
+
+        identity = {
+            "title": "Song",
+            "artist": "Artist",
+            "album": "Album",
+            "duration_s": 123,
+            "spotify_id": "spotify-id",
+            "isrc": "ISRC",
+        }
+
+        with patch.object(app, "_read_cached_lyrics", return_value=None):
+            with patch.object(app, "_write_cached_lyrics") as write_cache:
+                with patch("SpotiFLAC.core.lyrics.fetch_lyrics_async", side_effect=fake_fetch_lyrics_async):
+                    result = app._fetch_lyrics(identity)
+
+        self.assertEqual(captured["providers"], ["spotify", "apple", "musixmatch", "lrclib", "amazon"])
+        self.assertTrue(result["found"])
+        self.assertTrue(result["synced"])
+        self.assertEqual(result["provider"], "lrclib")
+        write_cache.assert_called_once_with(identity, "[00:01.00]Line", "lrclib")
 
 
 if __name__ == "__main__":

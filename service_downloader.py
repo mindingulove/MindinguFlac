@@ -37,13 +37,15 @@ def is_valid_audio_file(path: Path) -> bool:
         return b"ID3" in header or (len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0)
     if suffix in {".m4a", ".aac"}:
         return b"ftyp" in header or b"M4A " in header or suffix == ".aac"
+    if suffix in {".mp4", ".mov"}:
+        return b"ftyp" in header
     if suffix == ".wav":
         return b"RIFF" in header and b"WAVE" in header
     return any(byte != 0 for byte in header)
 
 
 AUDIO_SUFFIXES = {
-    ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".alac", ".webm",
+    ".mp3", ".flac", ".m4a", ".mp4", ".mov", ".ogg", ".opus", ".wav", ".aac", ".alac", ".webm",
     ".wma", ".wv", ".ape", ".mpc", ".m4b", ".m4p", ".m4r",
     ".mp2", ".mp1", ".mpa", ".m2a", ".m3a",
     ".aiff", ".aif", ".aifc",
@@ -527,6 +529,8 @@ def _job_matches_identity(job: dict, identity: dict) -> bool:
 
 
 _QUALITY_RANK = {
+    # Video containers rank 900 only when quality="video" (see _quality_rank below)
+    # Do NOT list .mp4/.webm etc here — a cached video-only mp4 must not beat audio files
     ".flac": 700,
     ".alac": 690,
     ".wav": 650,
@@ -541,7 +545,9 @@ _QUALITY_RANK = {
 def _quality_rank(path: Path, quality: object = "") -> int:
     rank = _QUALITY_RANK.get(path.suffix.lower(), 0)
     text = str(quality or "").casefold()
-    if "lossless" in text or "flac" in text:
+    if "video" in text:
+        rank = max(rank, 900)
+    elif "lossless" in text or "flac" in text:
         rank = max(rank, 700)
     elif "320" in text:
         rank = max(rank, 320)
