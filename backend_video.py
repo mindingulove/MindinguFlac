@@ -254,8 +254,6 @@ def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dic
             return False
         if _adult_terms and any(term in t for term in _adult_terms):
             return False
-        if int(r.get("seeders") or 0) < 1:
-            return False
         if _CLIP_MAX_BYTES > 0 and _parse_bytes(r.get("size_bytes")) > _CLIP_MAX_BYTES:
             return False
         return True
