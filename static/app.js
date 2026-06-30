@@ -82,6 +82,7 @@ const state = {
     activeIndex: -1,
     programmaticScroll: false,
     lastScrollAt: 0,
+    syncOffset: 0.1,  // seconds to delay lyrics display relative to LRC timestamps
   },
 };
 
@@ -4427,7 +4428,7 @@ function currentLyricsIndex(position) {
   let lo = 0, hi = lines.length - 1, best = -1;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if (lines[mid].time <= position) {
+    if (lines[mid].time <= position - state.lyrics.syncOffset) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -4533,6 +4534,8 @@ function openLyricsPanel() {
   const bg = $("lyricsBg");
   if (bg) bg.hidden = false;
   $("btnLyrics")?.classList.add("active");
+  const label = $("lyricsOffsetLabel");
+  if (label) label.textContent = state.lyrics.syncOffset.toFixed(1) + "s";
   if (!state.currentTrack) {
     renderLyricsContent("Play a song to see lyrics");
     return;
@@ -7835,6 +7838,14 @@ $("lyricsSync").onclick = () => {
   setLyricsSynced(true);
   updateLyricsPosition(currentPlaybackSeconds(), true);
 };
+function updateLyricsOffset(delta) {
+  state.lyrics.syncOffset = Math.round((state.lyrics.syncOffset + delta) * 100) / 100;
+  const label = $("lyricsOffsetLabel");
+  if (label) label.textContent = state.lyrics.syncOffset.toFixed(1) + "s";
+  updateLyricsPosition(currentPlaybackSeconds(), true);
+}
+$("lyricsOffsetDown").onclick = () => updateLyricsOffset(-0.25);
+$("lyricsOffsetUp").onclick = () => updateLyricsOffset(0.25);
 $("lyricsScroll").addEventListener("scroll", () => {
   if (!state.lyrics.open || state.lyrics.programmaticScroll) return;
   state.lyrics.lastScrollAt = Date.now();
