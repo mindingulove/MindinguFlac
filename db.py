@@ -268,6 +268,22 @@ def _init_db(conn: sqlite3.Connection):
             value TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_sources (
+            track_key TEXT PRIMARY KEY,
+            magnet    TEXT,
+            youtube_url TEXT,
+            torrent_title TEXT,
+            last_updated REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_blacklist (
+            url     TEXT PRIMARY KEY,
+            reason  TEXT,
+            created_at REAL
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_track_key ON listening_events(track_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_started_at ON listening_events(started_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_event_type ON listening_events(event_type)")
@@ -2721,6 +2737,52 @@ def init_database() -> dict:
         "youtube_videos": "youtube_videos" in tables,
         "track_video_overrides": "track_video_overrides" in tables,
     }
+
+
+# ── Video sources & blacklist ─────────────────────────────────────────────────
+
+def get_video_source(track_key: str) -> dict | None:
+    """Return saved video source for track_key, or None."""
+    if not track_key:
+        return None
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT magnet, youtube_url, torrent_title FROM video_sources WHERE track_key = ?",
+        (track_key,)
+    ).fetchone()
+    if not row:
+        return None
+    return {"magnet": row[0], "youtube_url": row[1], "torrent_title": row[2]}
+
+
+def save_video_source(track_key: str, magnet: str = "", youtube_url: str = "", torrent_title: str = ""):
+    """Persist a working video source for future reuse."""
+    if not track_key or (not magnet and not youtube_url):
+        return
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO video_sources (track_key, magnet, youtube_url, torrent_title, last_updated)
+        VALUES (?, ?, ?, ?, ?)
+    """, (track_key, magnet or "", youtube_url or "", torrent_title or "", time.time()))
+    conn.commit()
+
+
+def add_video_blacklist(url: str, reason: str = ""):
+    """Blacklist a magnet or YouTube URL that failed for video clip download."""
+    if not url:
+        return
+    conn = _get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO video_blacklist (url, reason, created_at) VALUES (?, ?, ?)
+    """, (url, reason, time.time()))
+    conn.commit()
+
+
+def get_video_blacklist() -> set[str]:
+    """Return all blacklisted video URLs as a set."""
+    conn = _get_conn()
+    rows = conn.execute("SELECT url FROM video_blacklist").fetchall()
+    return {r[0] for r in rows}
 
 
 if __name__ == "__main__":

@@ -249,6 +249,7 @@ def rank_candidates(
     gemini_model: str = "gemini-1.5-flash",
     include_urls: bool = False,
     video_mode: bool = False,
+    video_clip_mode: bool = False,
 ) -> list[int] | dict[str, list[Any]]:
     if not is_enabled(ai_provider) or not candidates:
         return {"ranked_ids": [], "ranked_urls": []} if include_urls else []
@@ -295,6 +296,16 @@ def rank_candidates(
             "AVOID: Music videos with long intros/outros, live performances (unless requested), and covers. "
             "Return {\"ranked_ids\":[...],\"ranked_urls\":[...]} in order of highest confidence audio match. "
             "Use only URLs from the provided candidate list."
+        )
+    elif video_clip_mode:
+        task_desc = (
+            "Rank these video torrent candidates for the best official music video clip. "
+            "Prioritize: exact artist+title name match, official/VEVO music videos, "
+            "reasonable file size (under 700 MB), healthy seed/leech count. "
+            "REJECT: audio-only releases (FLAC/MP3/320kbps/lossless), full concerts, "
+            "documentaries, TV episodes, adult content, or unrelated artists. "
+            "Return {\"ranked_ids\":[...]} using only IDs for plausible music VIDEO clip matches, "
+            "best match first."
         )
     else:
         task_desc = (

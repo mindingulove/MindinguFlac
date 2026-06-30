@@ -78,6 +78,9 @@ def _looks_like_clip(title: str) -> bool:
         "season", "episode",
     )):
         return False
+    # Audio-only releases (music files, not video clips)
+    if _re.search(r"\b(320kbps|320 kbps|flac|mp3|aac|wav|lossless|24-bit|24bit)\b", low):
+        return False
     # TV episode pattern: S01E01 / S01E01-E03 etc.
     if _re.search(r"\bS\d{1,3}E\d{1,3}\b", title or "", _re.IGNORECASE):
         return False
@@ -201,35 +204,29 @@ def _search_solid_video(query: str, timeout: int) -> list[dict]:
 def _clip_relevance_score(r: dict, artist: str, title: str) -> float:
     """Score 0–1: how well the torrent title matches the artist+track we want.
 
-    High score → try first. Combines fuzzy similarity, word overlap, and a
-    log-seeders bonus so a spot-on 5-seed match beats a 200-seed discography pack.
+    Uses rapidfuzz token_set_ratio so word order, punctuation, and extra tokens
+    (year, [HQ], 'Official') don't penalise a correct match. Seeder log-bonus
+    breaks ties so a 50-seed exact match beats a 2-seed exact match.
     """
     import math as _math
-    import re as _re
-    from difflib import SequenceMatcher
+    from rapidfuzz import fuzz as _fuzz
     t = (r.get("title") or "").lower()
     a_low = artist.lower()
     ti_low = title.lower()
-    query = f"{a_low} {ti_low}"
 
-    # Fuzzy similarity of the full query against the torrent title (handles typos/punctuation)
-    fuzzy = SequenceMatcher(None, query, t, autojunk=False).ratio()
+    # token_set_ratio: tokenises both strings, takes the set intersection approach.
+    # "Michael Jackson Bad Music Video" vs "Bad [HQ] - Michael Jackson - Music Video" → ~100
+    artist_score  = _fuzz.token_set_ratio(a_low, t) / 100.0   # 0–1
+    title_score   = _fuzz.token_set_ratio(ti_low, t) / 100.0  # 0–1
+    combined_score = _fuzz.token_set_ratio(f"{a_low} {ti_low}", t) / 100.0
 
-    # Word-level overlap between query and result title
-    query_words = set(_re.findall(r"\w+", query)) - {"the", "a", "an", "of", "and", "in"}
-    title_words = set(_re.findall(r"\w+", t))
-    overlap = len(query_words & title_words) / max(len(query_words), 1)
-
-    # Bonus for containing both artist name and track title
-    has_artist = a_low in t or any(w in t for w in a_low.split() if len(w) > 3)
-    has_title  = ti_low in t or all(w in t for w in ti_low.split() if len(w) > 2)
-    bonus = (0.25 if has_artist else 0) + (0.35 if has_title else 0)
+    # Weighted: track title match matters most, then combined, then artist alone
+    fuzzy = title_score * 0.45 + combined_score * 0.35 + artist_score * 0.20
 
     # Small seeder log-bonus (caps at ~0.15 for very high seed counts)
     seed_bonus = min(0.15, _math.log1p(int(r.get("seeders") or 0)) / 40)
 
-    # Fuzzy contributes up to 0.15; word overlap up to 0.10; bonuses dominate for exact matches
-    return min(1.0, fuzzy * 0.15 + overlap * 0.10 + bonus + seed_bonus)
+    return min(1.0, fuzzy + seed_bonus)
 
 
 def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dict]:
@@ -590,32 +587,122 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
         except Exception:
             pass
 
+    import threading as _threading
+
+    track_key = str(identity.get("track_key") or "").strip()
+
+    # --- Phase 0: try DB-persisted source from a previous successful fetch ---
+    if track_key:
+        try:
+            import db as _db
+            saved = _db.get_video_source(track_key)
+            if saved:
+                video_bl = _db.get_video_blacklist()
+                if saved.get("magnet") and saved["magnet"] not in video_bl:
+                    _log(f"Video: reusing saved torrent — {saved.get('torrent_title', '')[:60]}")
+                    if _download_torrent_clip(saved["magnet"], output_path, expected_s=expected_s):
+                        _log(f"Video: clip from saved torrent → {output_path.name}")
+                        return True
+                    _db.add_video_blacklist(saved["magnet"], reason="stalled or no peers on reuse")
+                if saved.get("youtube_url") and saved["youtube_url"] not in video_bl:
+                    _log(f"Video: reusing saved YouTube URL — {saved['youtube_url'][:80]}")
+                    if _download_youtube_clip(saved["youtube_url"], 0, output_path):
+                        if _clip_duration_ok(output_path, expected_s):
+                            _log(f"Video: clip from saved YouTube → {output_path.name}")
+                            return True
+                        output_path.unlink(missing_ok=True)
+                    _db.add_video_blacklist(saved["youtube_url"], reason="failed on reuse")
+        except Exception:
+            pass
+
+    # --- Phase 1: race torrent search vs YouTube lookup ---
     with ThreadPoolExecutor(max_workers=2) as ex:
         ft = ex.submit(_do_torrent_search)
         fy = ex.submit(_do_youtube_lookup)
         ft.result()
         fy.result()
 
+    # Filter any DB-blacklisted magnets from candidates
+    try:
+        import db as _db
+        _vbl = _db.get_video_blacklist()
+        torrent_candidates = [c for c in torrent_candidates if c.get("magnet") not in _vbl]
+    except Exception:
+        _vbl = set()
+
     if torrent_candidates:
         _log(f"Video: {len(torrent_candidates)} torrent clip(s) found, trying best matches...")
     else:
         _log("Video: no torrent clips found, trying YouTube...")
 
+    # --- Phase 1b: AI advisor in parallel (reorders candidates while first download starts) ---
+    ai_ranked_ids: list[int] = []
+    ai_done = _threading.Event()
+
+    def _run_ai_advisor():
+        try:
+            import ai_reranker, config as _cfg
+            ai_provider = getattr(_cfg, "ai_provider", "duckai")
+            if not ai_reranker.is_enabled(ai_provider):
+                return
+            ai_candidates = [
+                {"id": i, "title": r.get("title", ""), "seeders": r.get("seeders", 0),
+                 "magnet": r.get("magnet", ""), "score": int(r.get("_relevance", 0) * 100)}
+                for i, r in enumerate(torrent_candidates[:10])
+            ]
+            duck_model = getattr(_cfg, "duck_model", "1")
+            gemini_model = getattr(_cfg, "gemini_model", "gemini-1.5-flash")
+            ranked = ai_reranker.rank_candidates(
+                {"artist": artist, "title": title},
+                ai_candidates, duck_model, ai_provider, gemini_model,
+                video_clip_mode=True,
+            )
+            if isinstance(ranked, list) and ranked:
+                ai_ranked_ids[:] = ranked
+        except Exception:
+            pass
+        finally:
+            ai_done.set()
+
+    if torrent_candidates:
+        _threading.Thread(target=_run_ai_advisor, daemon=True, name="ai-video-rerank").start()
+        _log("Video: AI advisor running in parallel...")
+        ai_done.wait(timeout=6.0)
+        if ai_ranked_ids:
+            id_map = {i: r for i, r in enumerate(torrent_candidates[:10])}
+            ai_ordered = [id_map[i] for i in ai_ranked_ids if i in id_map]
+            remaining = [r for i, r in id_map.items() if i not in set(ai_ranked_ids)]
+            torrent_candidates = ai_ordered + remaining + torrent_candidates[10:]
+            _log(f"Video: AI advisor reordered top {len(ai_ranked_ids)} candidates")
+        else:
+            _log("Video: AI advisor timed out, using local ranking")
+
     # --- Phase 2: try torrent first (up to 10 ranked candidates), then YouTube ---
-    _MIN_RELEVANCE = 0.15  # below this the result is unrelated to the track
+    _MIN_RELEVANCE = 0.15
     for candidate in torrent_candidates[:10]:
         magnet = candidate.get("magnet") or ""
         if not magnet:
             continue
         rel = candidate.get("_relevance", 0)
         if rel < _MIN_RELEVANCE:
-            _log(f"Video: skipping low-relevance torrent ({rel:.2f}) — {candidate.get('title', '')[:50]}")
+            _log(f"Video: skipping low-relevance ({rel:.2f}) — {candidate.get('title', '')[:50]}")
             continue
         _log(f"Video: trying torrent clip (relevance={rel:.2f}) — {candidate.get('title', '')[:60]} "
              f"({candidate.get('seeders', 0)} seeds)")
         if _download_torrent_clip(magnet, output_path, expected_s=expected_s):
             _log(f"Video: clip saved from torrent → {output_path.name}")
+            if track_key:
+                try:
+                    _db.save_video_source(track_key, magnet=magnet,
+                                          torrent_title=candidate.get("title", ""))
+                except Exception:
+                    pass
             return True
+        # Blacklist this magnet — stalled or no peers
+        try:
+            _db.add_video_blacklist(magnet, reason="stalled or no peers")
+        except Exception:
+            pass
 
     if youtube_result:
         url = youtube_result["webpage_url"]
@@ -623,9 +710,18 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
         if _download_youtube_clip(url, youtube_start_offset, output_path):
             if _clip_duration_ok(output_path, expected_s):
                 _log(f"Video: clip saved from YouTube → {output_path.name}")
+                if track_key:
+                    try:
+                        _db.save_video_source(track_key, youtube_url=url)
+                    except Exception:
+                        pass
                 return True
             output_path.unlink(missing_ok=True)
             _log("Video: YouTube clip rejected (duration out of range)")
+            try:
+                _db.add_video_blacklist(url, reason="duration out of range")
+            except Exception:
+                pass
 
     _log("Video: no clip found")
     return False
