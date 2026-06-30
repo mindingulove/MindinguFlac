@@ -61,10 +61,25 @@ _DOWNLOAD_TIMEOUT_S = 150              # 2.5 minutes max per clip download
 # ── Torrent clip search ──────────────────────────────────────────────────────
 
 def _parse_bytes(value) -> int:
-    try:
-        return int(value or 0)
-    except Exception:
+    """Parse a size value to bytes. Handles int, float, raw byte counts, and human strings (MB/GB)."""
+    import re as _re
+    if value is None:
         return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    s = str(value).strip()
+    try:
+        return int(float(s))
+    except Exception:
+        pass
+    m = _re.search(r"([\d.]+)\s*(k|kb|m|mb|mib|g|gb|gib|t|tb)", s, _re.I)
+    if m:
+        n = float(m.group(1))
+        u = m.group(2).lower()
+        mult = {"k": 1024, "kb": 1024, "m": 1024**2, "mb": 1024**2, "mib": 1024**2,
+                "g": 1024**3, "gb": 1024**3, "gib": 1024**3, "t": 1024**4, "tb": 1024**4}
+        return int(n * mult.get(u, 1))
+    return 0
 
 
 def _looks_like_clip(title: str) -> bool:
@@ -114,101 +129,6 @@ def _looks_like_clip(title: str) -> bool:
     return True
 
 
-def _search_apibay_video(query: str, timeout: int) -> list[dict]:
-    """Pirate Bay official API — category 203 (Music Videos), fallback 200 (All Video)."""
-    import json
-    import urllib.parse
-    out: list[dict] = []
-    try:
-        from torrent_sources import _http, _DEAD_HASH, _magnet
-        for cat in ("203", "200"):
-            url = "https://apibay.org/q.php?" + urllib.parse.urlencode({"q": query, "cat": cat})
-            data = json.loads(_http(url, timeout=timeout))
-            for item in data:
-                info_hash = (item.get("info_hash") or "").strip()
-                name = item.get("name")
-                if not name or not info_hash or info_hash == _DEAD_HASH:
-                    continue
-                out.append({
-                    "title": name,
-                    "magnet": _magnet(info_hash, name),
-                    "size_bytes": _parse_bytes(item.get("size")),
-                    "seeders": int(item.get("seeders") or 0),
-                    "source": f"apibay:{cat}",
-                })
-            if out:
-                break
-    except Exception:
-        pass
-    return out
-
-
-def _search_knaben_video(query: str, timeout: int) -> list[dict]:
-    """Knaben aggregator — video category."""
-    import json
-    out: list[dict] = []
-    try:
-        from torrent_sources import _http, _magnet
-        body = json.dumps({
-            "query": query,
-            "order_by": "seeders",
-            "order_direction": "desc",
-            "size": 30,
-            "hide_unsafe": False,
-            "categories": ["Video"],
-        }).encode()
-        data = json.loads(_http(
-            "https://api.knaben.eu/v1",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            timeout=timeout,
-        ))
-        for item in (data.get("hits") or []):
-            title = item.get("title")
-            magnet = item.get("magnetUrl")
-            info_hash = item.get("hash")
-            if not magnet and info_hash:
-                magnet = _magnet(info_hash, title or "")
-            if not title or not magnet:
-                continue
-            out.append({
-                "title": title,
-                "magnet": magnet,
-                "size_bytes": _parse_bytes(item.get("bytes")),
-                "seeders": int(item.get("seeders") or 0),
-                "source": "knaben_video:" + str(item.get("tracker") or "agg"),
-            })
-    except Exception:
-        pass
-    return out
-
-
-def _search_solid_video(query: str, timeout: int) -> list[dict]:
-    """SolidTorrents — Video category (aggregates 1337x, KAT, etc.)."""
-    import json
-    import urllib.parse
-    out: list[dict] = []
-    try:
-        from torrent_sources import _http
-        url = f"https://solidtorrents.to/api/v1/search?q={urllib.parse.quote(query)}&category=Video"
-        data = json.loads(_http(url, timeout=timeout))
-        for item in data.get("results", []):
-            title = item.get("title")
-            info_hash = item.get("infohash")
-            if not title or not info_hash:
-                continue
-            out.append({
-                "title": title,
-                "magnet": f"magnet:?xt=urn:btih:{info_hash}&dn={urllib.parse.quote(title)}",
-                "size_bytes": _parse_bytes(item.get("size")),
-                "seeders": int(item.get("seeders") or 0),
-                "source": "solid_video",
-            })
-    except Exception:
-        pass
-    return out
-
-
 def _clip_relevance_score(r: dict, artist: str, title: str) -> float:
     """Score 0–1: how well the torrent title matches the artist+track we want.
 
@@ -238,26 +158,91 @@ def _clip_relevance_score(r: dict, artist: str, title: str) -> float:
 
 
 def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dict]:
-    """Search all video sources in parallel; return filtered candidates ranked by relevance."""
+    """Search all providers in parallel; return filtered candidates ranked by relevance.
+
+    Uses every provider from torrent_sources: apibay (cat 203/200), knaben (Video),
+    solid (Video), 1337x, kickass, limetorrents, torlock, torrentdownloads — same
+    breadth as the music torrent backend.
+    """
+    import re as _re
+    import torrent_sources as _ts
+
     query = f"{artist} {title} music video"
+
+    # Normalise raw provider results to {title, magnet, size_bytes, seeders, leechers, source}
+    def _normalise(raw: list[dict], src: str) -> list[dict]:
+        out = []
+        for r in (raw or []):
+            title_r = r.get("title") or ""
+            magnet = r.get("magnet") or ""
+            if not title_r or not magnet:
+                continue
+            # size may be stored as int bytes or human string depending on provider
+            sb = r.get("size_bytes") or r.get("size") or 0
+            if isinstance(sb, str):
+                sb = _parse_bytes(sb)
+            out.append({
+                "title": title_r,
+                "magnet": magnet,
+                "size_bytes": int(sb or 0),
+                "seeders": int(r.get("seeders") or 0),
+                "leechers": int(r.get("leechers") or 0),
+                "source": r.get("source") or src,
+            })
+        return out
+
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futures = [
-            ex.submit(_search_apibay_video, query, timeout),
-            ex.submit(_search_knaben_video, query, timeout),
-            ex.submit(_search_solid_video, query, timeout),
-        ]
-        for fut in as_completed(futures):
-            try:
-                results += fut.result() or []
-            except Exception:
-                pass
+    ex = ThreadPoolExecutor(max_workers=8)
+    try:
+        futures = {
+            ex.submit(_ts._search_apibay_music_video, query, timeout): "apibay",
+            ex.submit(_ts._search_knaben_music_video, query, timeout): "knaben",
+            ex.submit(_ts._search_solid_music_video, query, timeout): "solid",
+            ex.submit(_ts.search_1337x, query, timeout): "1337x",
+            ex.submit(_ts.search_kickass, query, timeout): "kickass",
+            ex.submit(_ts.search_limetorrents, query, timeout): "limetorrents",
+            ex.submit(_ts.search_torlock, query, timeout): "torlock",
+            ex.submit(_ts.search_torrentdownloads, query, timeout): "torrentdownloads",
+        }
+        try:
+            for fut in as_completed(futures, timeout=timeout):
+                src = futures[fut]
+                try:
+                    results += _normalise(fut.result(), src)
+                except Exception:
+                    pass
+        except TimeoutError:
+            pass
+        # Collect any futures that finished during the timeout window
+        for fut, src in futures.items():
+            if fut.done() and fut not in {f for f in futures if not f.done()}:
+                try:
+                    results += _normalise(fut.result(), src)
+                except Exception:
+                    pass
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+    # Deduplicate by info_hash
+    seen_hashes: set[str] = set()
+    unique: list[dict] = []
+    for r in results:
+        m = r.get("magnet") or ""
+        ih_match = _re.search(r"btih:([A-Fa-f0-9]{40})", m, _re.I)
+        ih = ih_match.group(1).upper() if ih_match else ""
+        if ih and ih in seen_hashes:
+            continue
+        if ih:
+            seen_hashes.add(ih)
+        unique.append(r)
 
     try:
         import db as _db
         _adult_terms = _db.get_adult_filter_terms()
+        _vbl = _db.get_video_blacklist()
     except Exception:
         _adult_terms = set()
+        _vbl = set()
 
     def _passes(r: dict) -> bool:
         t = (r.get("title") or "").lower()
@@ -265,12 +250,13 @@ def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dic
             return False
         if _adult_terms and any(term in t for term in _adult_terms):
             return False
-        if _CLIP_MAX_BYTES > 0 and _parse_bytes(r.get("size_bytes")) > _CLIP_MAX_BYTES:
+        if _CLIP_MAX_BYTES > 0 and int(r.get("size_bytes") or 0) > _CLIP_MAX_BYTES:
+            return False
+        if r.get("magnet") in _vbl:
             return False
         return True
 
-    filtered = [r for r in results if _passes(r)]
-    # Score by relevance first; seeders already factored in via log-bonus
+    filtered = [r for r in unique if _passes(r)]
     for r in filtered:
         r["_relevance"] = _clip_relevance_score(r, artist, title)
     filtered.sort(key=lambda r: r["_relevance"], reverse=True)
@@ -629,14 +615,6 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
         fy = ex.submit(_do_youtube_lookup)
         ft.result()
         fy.result()
-
-    # Filter any DB-blacklisted magnets from candidates
-    try:
-        import db as _db
-        _vbl = _db.get_video_blacklist()
-        torrent_candidates = [c for c in torrent_candidates if c.get("magnet") not in _vbl]
-    except Exception:
-        _vbl = set()
 
     if torrent_candidates:
         _log(f"Video: {len(torrent_candidates)} torrent clip(s) found, trying best matches...")
