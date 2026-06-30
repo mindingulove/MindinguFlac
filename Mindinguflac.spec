@@ -21,6 +21,7 @@ hiddenimports = [
     'isrc_resolver',
     'discogs_metadata',
     'backend_torrent',
+    'backend_video',
     'backend_spotiflac',
     'backend_tidal_hifi',
     'backend_monochrome',
@@ -63,6 +64,14 @@ for _pkg in ('httpx', 'httpcore', 'h2', 'hpack', 'hyperframe'):
         datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
     except Exception:
         pass
+
+# Votify is optional; when present it is used before YouTube for Spotify music videos.
+try:
+    tmp_ret = collect_all('votify')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('votify')
+except Exception:
+    pass
 
 # countrystatecity_countries is imported inside a try block (dynamic-ish).
 try:

@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -96,6 +97,68 @@ class TestBackendYtpDl(unittest.TestCase):
                 "metadata": {},
             }),
             "ytsearch15:Simply Red For Your Babies official video",
+        )
+
+    @patch("db.get_youtube_video_override", return_value={"webpage_url": "https://www.youtube.com/watch?v=sOnqjkJTMaA"})
+    def test_resolved_youtube_url_uses_video_override_for_video_quality(self, override):
+        self.assertEqual(
+            backend_ytpdl._resolved_youtube_url({
+                "artist": "Michael Jackson",
+                "title": "Thriller",
+                "quality": "video",
+                "metadata": {"spotify_id": "spotify-track-id"},
+            }),
+            "https://www.youtube.com/watch?v=sOnqjkJTMaA",
+        )
+        override.assert_called_once()
+
+    def test_votify_video_fetch_uses_spotify_id_before_youtube(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            manager = MagicMock()
+            manager._lock = MagicMock()
+            manager._lock.__enter__.return_value = None
+            manager._lock.__exit__.return_value = None
+            job = {
+                "id": "job-1",
+                "quality": "video",
+                "artist": "Jimi Hendrix",
+                "title": "Voodoo Chile",
+                "metadata": {"spotify_id": "7J1uxwnxfQLu4APicE5Rnj"},
+            }
+
+            def fake_run(args, **kwargs):
+                produced = output_dir / "Jimi Hendrix - Voodoo Chile.mp4"
+                produced.write_bytes(b"ftyp" + b"\0" * (128 * 1024))
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch.object(backend_ytpdl, "_votify_command", return_value=["votify"]):
+                with patch("subprocess.run", side_effect=fake_run) as run_cmd:
+                    with patch("db.save_resolved_source"):
+                        final = backend_ytpdl._try_votify_video(output_dir, job, manager)
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final.name, "Jimi Hendrix - Voodoo Chile.mp4")
+        self.assertIn("--prefer-video", run_cmd.call_args.args[0])
+
+    def test_youtube_channel_search_query_uses_channel_filter_operator(self):
+        self.assertEqual(
+            backend_ytpdl._youtube_channel_search_query(
+                "UC12345678901234567890",
+                {
+                    "artist": "Sabrina Carpenter",
+                    "title": "Espresso",
+                    "quality": "video",
+                    "metadata": {},
+                },
+            ),
+            "ytsearch12:Sabrina Carpenter Espresso official video channel:UC12345678901234567890",
+        )
+        self.assertEqual(
+            backend_ytpdl._youtube_search_without_channel_filter(
+                "ytsearch12:Sabrina Carpenter Espresso official video channel:UC12345678901234567890",
+            ),
+            "ytsearch12:Sabrina Carpenter Espresso official video",
         )
 
     def test_broad_youtube_query_drops_official_audio_constraint(self):
@@ -207,6 +270,76 @@ class TestBackendYtpDl(unittest.TestCase):
         self.assertEqual(url, "https://www.youtube.com/watch?v=xv4HOh9uwLc")
         self.assertIn("official_video_title", details["video_match_reasons"])
         self.assertGreater(details["score"], 80)
+
+    def test_video_scoring_accepts_official_4k_video_as_positive_signal(self):
+        job = {
+            "artist": "Michael Jackson",
+            "title": "Thriller",
+            "quality": "video",
+            "metadata": {},
+        }
+        score, details = backend_ytpdl._score_youtube_candidate({
+            "title": "Michael Jackson - Thriller (Official 4K Video)",
+            "uploader": "Michael Jackson",
+            "duration": 822,
+            "webpage_url": "https://www.youtube.com/watch?v=sOnqjkJTMaA",
+        }, job)
+
+        self.assertTrue(backend_ytpdl._candidate_is_confident(score, details))
+        self.assertTrue(details["video_positive_signal"])
+        self.assertIn("official_video_title", details["video_match_reasons"])
+
+    def test_video_scoring_does_not_pre_reject_age_limited_official_video(self):
+        job = {
+            "artist": "Michael Jackson",
+            "title": "Thriller",
+            "quality": "video",
+            "metadata": {},
+        }
+        score, details = backend_ytpdl._score_youtube_candidate({
+            "title": "Michael Jackson - Thriller (Official 4K Video)",
+            "uploader": "Michael Jackson",
+            "duration": 822,
+            "age_limit": 18,
+            "availability": "needs_auth",
+            "webpage_url": "https://www.youtube.com/watch?v=sOnqjkJTMaA",
+        }, job)
+
+        self.assertGreater(score, 0)
+        self.assertFalse(details.get("auth", False))
+        self.assertTrue(backend_ytpdl._candidate_is_confident(score, details))
+
+    def test_video_scoring_marks_mj_thriller_long_form_music_start(self):
+        job = {
+            "artist": "Michael Jackson",
+            "title": "Thriller",
+            "quality": "video",
+            "metadata": {"duration_ms": 357000},
+        }
+        score, details = backend_ytpdl._score_youtube_candidate({
+            "title": "Michael Jackson - Thriller (Official 4K Video)",
+            "uploader": "Michael Jackson",
+            "duration": 822,
+            "description": "Michael Jackson's official 4K music video for Thriller.",
+            "webpage_url": "https://www.youtube.com/watch?v=sOnqjkJTMaA",
+        }, job)
+
+        self.assertTrue(backend_ytpdl._candidate_is_confident(score, details))
+        self.assertEqual(details["video_start_offset"], 252)
+
+    def test_video_download_ranges_use_music_start_and_track_duration(self):
+        job = {
+            "artist": "Michael Jackson",
+            "title": "Thriller",
+            "quality": "video",
+            "metadata": {"duration_ms": 357000},
+        }
+        ranges = backend_ytpdl._video_download_ranges({"video_start_offset": 252}, job)
+
+        self.assertIsNotNone(ranges)
+        sections = list(ranges({"id": "sOnqjkJTMaA", "duration": 822}, MagicMock()))
+        self.assertEqual(sections[0]["start_time"], 252)
+        self.assertEqual(sections[0]["end_time"], 619)
 
     def test_video_scoring_rejects_static_official_audio_when_video_exists(self):
         job = {
@@ -354,6 +487,40 @@ class TestBackendYtpDl(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "confident YouTube match"):
             backend_ytpdl._best_youtube_search_match(search_info, job)
+
+    def test_video_scoring_rejects_movie_length_candidate_even_with_matching_title(self):
+        job = {
+            "artist": "Jimi Hendrix",
+            "title": "Voodoo Chile",
+            "quality": "video",
+            "metadata": {"duration_ms": 313000},
+        }
+        score, details = backend_ytpdl._score_youtube_candidate({
+            "title": "Jimi Hendrix Voodoo Chile - Full Movie",
+            "uploader": "Movie Channel",
+            "duration": 5400,
+            "webpage_url": "https://www.youtube.com/watch?v=movie",
+        }, job)
+
+        self.assertEqual(score, -999)
+        self.assertEqual(details["video_reject_reason"], "movie_or_documentary")
+
+    def test_video_scoring_rejects_overlong_video_duration_without_movie_words(self):
+        job = {
+            "artist": "Jimi Hendrix",
+            "title": "Voodoo Chile",
+            "quality": "video",
+            "metadata": {"duration_ms": 313000},
+        }
+        score, details = backend_ytpdl._score_youtube_candidate({
+            "title": "Jimi Hendrix - Voodoo Chile Official Video",
+            "uploader": "Jimi Hendrix",
+            "duration": 2400,
+            "webpage_url": "https://www.youtube.com/watch?v=longvid",
+        }, job)
+
+        self.assertEqual(score, -999)
+        self.assertEqual(details["video_reject_reason"], "video_duration_mismatch")
 
     def test_best_youtube_search_match_avoids_drm_candidate(self):
         job = {
@@ -518,6 +685,68 @@ class TestBackendYtpDl(unittest.TestCase):
         yt_dlp_instance.download.assert_called_once_with(["https://www.youtube.com/watch?v=official"])
         self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=official")
         self.assertEqual(job["ytpdl_match"]["title"], "Pink Floyd - See Emily Play (Official Audio)")
+
+    @patch("backend_ytpdl._get_yt_dlp")
+    @patch("backend_ytpdl._resolved_youtube_url", return_value="ytsearch15:Sabrina Carpenter Espresso official video")
+    @patch("service_downloader._find_audio_files", return_value=[Path("/tmp/out/video.mp4")])
+    def test_run_video_searches_artist_channel_before_unfiltered_search(self, find_audio_files, resolved_url, get_yt_dlp):
+        manager = MagicMock()
+        manager._cancel_flags = set()
+        manager._append_cache_event = MagicMock()
+
+        job = {
+            "id": "job-1",
+            "quality": "video",
+            "artist": "Sabrina Carpenter",
+            "title": "Espresso",
+            "metadata": {"duration_ms": 176000},
+        }
+        output_dir = Path("/tmp/out")
+
+        yt_dlp_module = MagicMock()
+        yt_dlp_instance = MagicMock()
+
+        def extract_info(target, download=False, **kwargs):
+            if target == "https://www.youtube.com/@sabrinacarpenter/videos":
+                return {"channel_id": "UC12345678901234567890"}
+            if target == "ytsearch12:Sabrina Carpenter Espresso official video":
+                return {
+                    "entries": [
+                        {
+                            "title": "Sabrina Carpenter - Espresso cover",
+                            "uploader": "Cover Channel",
+                            "duration": 176,
+                            "channel_id": "UC00000000000000000000",
+                            "webpage_url": "https://www.youtube.com/watch?v=cover",
+                        },
+                        {
+                            "title": "Sabrina Carpenter - Espresso (Official Video)",
+                            "uploader": "Sabrina Carpenter",
+                            "duration": 176,
+                            "channel_id": "UC12345678901234567890",
+                            "channel_is_verified": True,
+                            "webpage_url": "https://www.youtube.com/watch?v=official",
+                        }
+                    ]
+                }
+            self.fail(f"unexpected YouTube target: {target}")
+
+        yt_dlp_instance.extract_info.side_effect = extract_info
+        yt_dlp_instance.download.return_value = 0
+        yt_dlp_module.YoutubeDL.return_value.__enter__.return_value = yt_dlp_instance
+        get_yt_dlp.return_value = yt_dlp_module
+        backend_ytpdl._YOUTUBE_CHANNEL_ID_CACHE.clear()
+
+        backend_ytpdl.run(output_dir, job, manager)
+
+        searched_targets = [call.args[0] for call in yt_dlp_instance.extract_info.call_args_list]
+        self.assertIn("https://www.youtube.com/@sabrinacarpenter/videos", searched_targets)
+        self.assertIn("ytsearch12:Sabrina Carpenter Espresso official video", searched_targets)
+        self.assertNotIn("ytsearch15:Sabrina Carpenter Espresso official video", searched_targets)
+        ydl_opts = yt_dlp_module.YoutubeDL.call_args.args[0]
+        self.assertEqual(ydl_opts["extractor_args"]["youtube"]["player_client"], ["android", "ios", "web"])
+        yt_dlp_instance.download.assert_called_once_with(["https://www.youtube.com/watch?v=official"])
+        self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=official")
 
     @patch("backend_ytpdl._get_yt_dlp")
     @patch("backend_ytpdl._resolved_youtube_url", return_value="https://www.youtube.com/watch?v=8KWf_-ofYgI&list=PLFAcddgaFN8zqIJrTakvM9qWnR7iIrXnj")

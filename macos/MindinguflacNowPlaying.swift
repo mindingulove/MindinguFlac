@@ -133,7 +133,11 @@ private final class NowPlayingBridge {
     }
 
     private func refresh() {
-        guard playbackState == 1 || playbackState == 2, !title.isEmpty else {
+        guard !title.isEmpty else {
+            return
+        }
+
+        guard playbackState == 1 || playbackState == 2 else {
             DispatchQueue.main.async { self.clearPublishedNowPlaying() }
             return
         }

@@ -2,7 +2,7 @@ import unittest
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import app
 
@@ -207,6 +207,68 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
         self.assertTrue(result["synced"])
         self.assertEqual(result["provider"], "lrclib")
         write_cache.assert_called_once_with(identity, "[00:01.00]Line", "lrclib")
+
+    def test_video_start_offset_uses_database_override_for_selected_video(self):
+        with patch.object(app.db, "get_youtube_video_override", return_value={"start_offset_s": 252}) as lookup:
+            offset = app._music_video_start_offset(
+                {"webpage_url": "https://www.youtube.com/watch?v=sOnqjkJTMaA"},
+                {"spotify_id": "spotify-track-id", "title": "Thriller", "artist": "Michael Jackson"},
+            )
+
+        self.assertEqual(offset, 252)
+        lookup.assert_called_once()
+
+    def test_video_cache_key_uses_stable_track_identifiers(self):
+        first = app._video_cache_key({
+            "spotify_id": "spotify-track-id",
+            "isrc": "USSM18200005",
+            "title": "Thriller",
+            "artist": "Michael Jackson",
+            "album": "Thriller",
+        })
+        second = app._video_cache_key({
+            "spotify_id": "spotify-track-id",
+            "isrc": "USSM18200005",
+            "title": "Thriller - Remastered",
+            "artist": "Michael Jackson",
+            "album": "Number Ones",
+        })
+
+        self.assertEqual(first, second)
+
+    def test_video_candidate_rejects_movie_length_side_video(self):
+        self.assertTrue(app._video_candidate_rejected(
+            {
+                "title": "Jimi Hendrix Voodoo Chile Full Movie",
+                "uploader": "Movie Channel",
+                "duration": 5400,
+                "webpage_url": "https://www.youtube.com/watch?v=movie",
+            },
+            {
+                "artist": "Jimi Hendrix",
+                "title": "Voodoo Chile",
+                "duration_s": 313,
+            },
+        ))
+
+    def test_side_video_votify_fetch_copies_video_to_cache_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            cache_path = output_dir / "cache.mp4"
+
+            def fake_run(args, **kwargs):
+                produced_dir = output_dir / "cache.votify"
+                produced_dir.mkdir(parents=True, exist_ok=True)
+                (produced_dir / "video.mp4").write_bytes(b"ftyp" + b"\0" * (128 * 1024))
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch.object(app, "VIDEO_FILES_DIR", output_dir):
+                with patch("backend_ytpdl._votify_command", return_value=["votify"]):
+                    with patch("subprocess.run", side_effect=fake_run):
+                        ok = app._try_votify_video_fetch({"spotify_id": "7J1uxwnxfQLu4APicE5Rnj"}, cache_path)
+
+            self.assertTrue(ok)
+            self.assertTrue(cache_path.exists())
 
 
 if __name__ == "__main__":

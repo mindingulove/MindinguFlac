@@ -568,3 +568,153 @@ def search_extra(query: str, timeout: int = 12) -> list[dict]:
             except Exception:
                 pass
     return results
+
+
+# ── Music video clip search ──────────────────────────────────────────────────
+
+_VIDEO_CLIP_EXTS = frozenset((".mp4", ".mkv", ".avi", ".webm", ".mov", ".m4v"))
+_VIDEO_CLIP_MAX_BYTES = 2 * 1024 ** 3  # 2 GB; full concerts are usually larger
+
+
+def _looks_like_clip(title: str) -> bool:
+    """True when the torrent name suggests a music video clip rather than a full concert/album."""
+    low = (title or "").lower()
+    if any(w in low for w in ("concert", "live at", "full album", "discography", "dvdrip", "blu-ray", "bluray", "bdrip")):
+        return False
+    if any(w in low for w in ("music video", "official video", "official clip", "video clip", "mv ", " mv", "promo")):
+        return True
+    return True  # accept by default; size filter handles the rest
+
+
+def _parse_size_bytes(value: str | int | None) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _search_apibay_music_video(query: str, timeout: int) -> list[dict]:
+    """Apibay search restricted to TPB category 200 (Video) which includes 203 Music Videos."""
+    out: list[dict] = []
+    try:
+        # cat=200 = All Video; cat=203 = Music Videos specifically
+        for cat in ("203", "200"):
+            url = "https://apibay.org/q.php?" + urllib.parse.urlencode({"q": query, "cat": cat})
+            data = json.loads(_http(url, timeout=timeout))
+            for item in data:
+                info_hash = (item.get("info_hash") or "").strip()
+                name = item.get("name")
+                if not name or not info_hash or info_hash == _DEAD_HASH:
+                    continue
+                out.append({
+                    "title": name,
+                    "magnet": _magnet(info_hash, name),
+                    "size": str(item.get("size") or ""),
+                    "seeders": int(item.get("seeders") or 0),
+                    "leechers": int(item.get("leechers") or 0),
+                    "source": f"apibay_video:{cat}",
+                    "category": "video",
+                })
+            if out:
+                break
+    except Exception:
+        pass
+    return out
+
+
+def _search_knaben_music_video(query: str, timeout: int) -> list[dict]:
+    out: list[dict] = []
+    try:
+        body = json.dumps({
+            "query": query,
+            "order_by": "seeders",
+            "order_direction": "desc",
+            "size": 30,
+            "hide_unsafe": False,
+            "categories": ["Video"],
+        }).encode()
+        data = json.loads(_http(
+            "https://api.knaben.eu/v1",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        ))
+        for item in (data.get("hits") or []):
+            title = item.get("title")
+            magnet = item.get("magnetUrl")
+            info_hash = item.get("hash")
+            if not magnet and info_hash:
+                magnet = _magnet(info_hash, title or "")
+            if not title or not magnet:
+                continue
+            out.append({
+                "title": title,
+                "magnet": magnet,
+                "size": str(item.get("bytes") or ""),
+                "seeders": int(item.get("seeders") or 0),
+                "leechers": int(item.get("peers") or 0),
+                "source": "knaben_video:" + str(item.get("tracker") or "agg"),
+                "category": "video",
+            })
+    except Exception:
+        pass
+    return out
+
+
+def _search_solid_music_video(query: str, timeout: int) -> list[dict]:
+    out: list[dict] = []
+    try:
+        url = f"https://solidtorrents.to/api/v1/search?q={urllib.parse.quote(query)}&category=Video"
+        data = json.loads(_http(url, timeout=timeout))
+        for item in data.get("results", []):
+            title = item.get("title")
+            info_hash = item.get("infohash")
+            if not title or not info_hash:
+                continue
+            out.append({
+                "title": title,
+                "magnet": f"magnet:?xt=urn:btih:{info_hash}&dn={urllib.parse.quote(title)}",
+                "size": str(item.get("size") or ""),
+                "seeders": int(item.get("seeders") or 0),
+                "leechers": int(item.get("leechers") or 0),
+                "source": "solid_video",
+                "category": "video",
+            })
+    except Exception:
+        pass
+    return out
+
+
+def search_music_video_clips(artist: str, title: str, timeout: int = 15) -> list[dict]:
+    """Search torrent sites for a music video clip for the given track.
+
+    Returns results sorted by seeders desc, filtered to plausible clip size.
+    Each result has the standard {title, magnet, size, seeders, source, category} shape.
+    """
+    query = f"{artist} {title} music video"
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(_search_apibay_music_video, query, timeout),
+            executor.submit(_search_knaben_music_video, query, timeout),
+            executor.submit(_search_solid_music_video, query, timeout),
+        ]
+        for future in futures:
+            try:
+                results += future.result() or []
+            except Exception:
+                pass
+
+    filtered: list[dict] = []
+    for r in results:
+        if int(r.get("seeders") or 0) < 1:
+            continue
+        size_bytes = _parse_size_bytes(r.get("size"))
+        if size_bytes > _VIDEO_CLIP_MAX_BYTES:
+            continue
+        if not _looks_like_clip(r.get("title") or ""):
+            continue
+        filtered.append(r)
+
+    filtered.sort(key=lambda r: int(r.get("seeders") or 0), reverse=True)
+    return filtered

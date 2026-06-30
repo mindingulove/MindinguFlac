@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import unicodedata
@@ -11,6 +12,25 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+_YOUTUBE_CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{20,}$")
+_YOUTUBE_CHANNEL_ID_CACHE: dict[str, str] = {}
+
+
+def _youtube_extractor_args() -> dict:
+    return {"youtube": {"player_client": ["android", "ios", "web"]}}
+
+
+def _youtube_metadata_opts(**overrides) -> dict:
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "socket_timeout": 8,
+        "extractor_args": _youtube_extractor_args(),
+    }
+    opts.update(overrides)
+    return opts
 
 
 def _ffmpeg_location() -> str:
@@ -272,6 +292,24 @@ def _youtube_search_query(job: dict, clean: bool = False) -> str:
     return ""
 
 
+def _youtube_video_search_text(job: dict, clean: bool = False) -> str:
+    wanted = _expected_track(job)
+    artist = wanted["artist"]
+    title = _clean_text(wanted["title"]) if clean else wanted["title"]
+    if artist and title:
+        return " ".join([artist, title, "official video"])
+    if title:
+        return " ".join([title, "official video"])
+    return ""
+
+
+def _youtube_channel_search_query(channel_id: str, job: dict, clean: bool = False) -> str:
+    query = _youtube_video_search_text(job, clean=clean)
+    if not channel_id or not query:
+        return ""
+    return f"ytsearch12:{query} channel:{channel_id}"
+
+
 def _broad_youtube_search_query(job: dict) -> str:
     profile = _ytpdl_search_profile(job)
     if profile == "classical":
@@ -287,6 +325,147 @@ def _broad_youtube_search_query(job: dict) -> str:
     if title:
         return "ytsearch15:" + title
     return ""
+
+
+def _is_youtube_search_target(value: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    if value.startswith("ytsearch"):
+        return True
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    return "youtube.com" in host and parsed.path.endswith("/search")
+
+
+def _youtube_search_channel_id(value: str) -> str:
+    if not isinstance(value, str) or not value.startswith("ytsearch"):
+        return ""
+    match = re.search(r"\bchannel:(UC[A-Za-z0-9_-]{20,})\b", value)
+    return match.group(1) if match else ""
+
+
+def _youtube_search_without_channel_filter(value: str) -> str:
+    if not isinstance(value, str) or not value.startswith("ytsearch"):
+        return value
+    return re.sub(r"\s+\bchannel:UC[A-Za-z0-9_-]{20,}\b", "", value).strip()
+
+
+def _filter_youtube_entries_by_channel(search_info: dict, channel_id: str) -> dict:
+    if not channel_id or not isinstance(search_info, dict):
+        return search_info
+    entries = search_info.get("entries")
+    if not isinstance(entries, list):
+        return search_info
+    filtered = [
+        entry for entry in entries
+        if isinstance(entry, dict)
+        and str(entry.get("channel_id") or entry.get("uploader_id") or "").strip() == channel_id
+    ]
+    return {**search_info, "entries": filtered}
+
+
+def _youtube_channel_id_from_info(info: object) -> str:
+    if not isinstance(info, dict):
+        return ""
+    for key in ("channel_id", "uploader_id", "id"):
+        value = str(info.get(key) or "").strip()
+        if _YOUTUBE_CHANNEL_ID_RE.match(value):
+            return value
+    entries = info.get("entries")
+    if isinstance(entries, list):
+        for entry in entries:
+            channel_id = _youtube_channel_id_from_info(entry)
+            if channel_id:
+                return channel_id
+    return ""
+
+
+def _metadata_youtube_channel_ids(job: dict) -> list[tuple[str, str]]:
+    merged = _job_metadata(job)
+    ids: list[tuple[str, str]] = []
+    for key in ("youtube_channel_id", "channel_id", "artist_youtube_channel_id"):
+        value = str(merged.get(key) or "").strip()
+        if _YOUTUBE_CHANNEL_ID_RE.match(value):
+            ids.append((value, key))
+    for key in ("youtube_channel_url", "artist_youtube_url", "channel_url"):
+        value = str(merged.get(key) or "").strip()
+        match = re.search(r"/channel/(UC[A-Za-z0-9_-]{20,})", value)
+        if match:
+            ids.append((match.group(1), key))
+    return ids
+
+
+def _youtube_handle_slug(value: str) -> str:
+    return "".join(_tokens(value))
+
+
+def _youtube_channel_probe_urls(job: dict, group: str) -> list[tuple[str, str]]:
+    artist = _expected_track(job).get("artist") or ""
+    slug = _youtube_handle_slug(artist)
+    if not slug:
+        return []
+    if group == "artist":
+        handles = [slug, f"{slug}official", f"{slug}music"]
+    elif group == "vevo":
+        handles = [f"{slug}vevo", "vevo"]
+    else:
+        handles = ["rhino", "warnerrecords", "sonymusic", "universalmusicgroup"]
+    return [(f"https://www.youtube.com/@{handle}/videos", f"@{handle}") for handle in handles]
+
+
+def _resolve_youtube_channel_id(ydl, url: str) -> str:
+    cached = _YOUTUBE_CHANNEL_ID_CACHE.get(url)
+    if cached is not None:
+        return cached
+    channel_id = ""
+    try:
+        info = ydl.extract_info(url, download=False, process=False)
+        channel_id = _youtube_channel_id_from_info(info)
+    except Exception:
+        channel_id = ""
+    if not channel_id:
+        try:
+            yt_dlp = _get_yt_dlp()
+            opts = _youtube_metadata_opts(extract_flat=True, playlistend=1)
+            with yt_dlp.YoutubeDL(opts) as flat_ydl:
+                info = flat_ydl.extract_info(url, download=False)
+            channel_id = _youtube_channel_id_from_info(info)
+        except Exception:
+            channel_id = ""
+    _YOUTUBE_CHANNEL_ID_CACHE[url] = channel_id
+    return channel_id
+
+
+def _youtube_channel_search_attempts(ydl, job: dict):
+    if _quality_mode(job.get("quality") or "best") != "video":
+        return
+
+    seen_ids: set[str] = set()
+
+    for channel_id, source in _metadata_youtube_channel_ids(job):
+        if channel_id in seen_ids:
+            continue
+        seen_ids.add(channel_id)
+        search_query = _youtube_channel_search_query(channel_id, job)
+        if search_query:
+            yield search_query, f"saved YouTube channel ({source})"
+
+    for group, label in (
+        ("artist", "artist channel"),
+        ("vevo", "VEVO channel"),
+        ("clips", "music-video channel"),
+    ):
+        for url, handle in _youtube_channel_probe_urls(job, group):
+            channel_id = _resolve_youtube_channel_id(ydl, url)
+            if not channel_id or channel_id in seen_ids:
+                continue
+            seen_ids.add(channel_id)
+            search_query = _youtube_channel_search_query(channel_id, job)
+            if search_query:
+                yield search_query, f"{label} {handle}"
 
 
 def _youtube_search_profile_label(job: dict, query: str) -> str:
@@ -307,6 +486,14 @@ def _resolved_youtube_url(job: dict) -> str:
     )
     if _is_youtube_url(direct):
         return direct
+    if _quality_mode(job.get("quality") or merged.get("quality") or "best") == "video":
+        try:
+            import db
+            override = db.get_youtube_video_override({**merged, **job})
+            if override and override.get("webpage_url"):
+                return str(override.get("webpage_url") or "")
+        except Exception:
+            pass
 
     # Fall back to any direct YouTube-ish URL present in metadata.
     for value in (merged.get("url"), merged.get("source_url")):
@@ -314,6 +501,130 @@ def _resolved_youtube_url(job: dict) -> str:
             return value
 
     return _youtube_search_query(job)
+
+
+def _spotify_track_url(job: dict) -> str:
+    merged = _job_metadata(job)
+    for key in ("spotify_url", "external_url", "url", "source_url", "resolved_url"):
+        value = str(merged.get(key) or job.get(key) or "").strip()
+        if "open.spotify.com/track/" in value:
+            return value
+    spotify_id = str(
+        merged.get("spotify_id")
+        or merged.get("spotify_track_id")
+        or merged.get("track_id")
+        or job.get("spotify_id")
+        or ""
+    ).strip()
+    if spotify_id and re.fullmatch(r"[A-Za-z0-9]{12,}", spotify_id):
+        return f"https://open.spotify.com/track/{spotify_id}"
+    track_key = str(job.get("track_key") or merged.get("track_key") or "").strip()
+    if track_key.startswith("spotify_id:"):
+        value = track_key.split(":", 1)[1].strip()
+        if value:
+            return f"https://open.spotify.com/track/{value}"
+    return ""
+
+
+def _video_db_override(job: dict) -> dict | None:
+    if _quality_mode(job.get("quality") or "best") != "video":
+        return None
+    try:
+        import db
+        return db.get_youtube_video_override({**_job_metadata(job), **job})
+    except Exception:
+        return None
+
+
+def _votify_command() -> list[str]:
+    exe = shutil.which("votify")
+    if exe:
+        return [exe]
+    try:
+        import importlib.util
+        if importlib.util.find_spec("votify"):
+            return [sys.executable, "-m", "votify"]
+    except Exception:
+        pass
+    return []
+
+
+def _try_votify_video(output_dir: Path, job: dict, manager) -> Path | None:
+    if _quality_mode(job.get("quality") or "best") != "video":
+        return None
+    spotify_url = _spotify_track_url(job)
+    if not spotify_url:
+        manager._append_cache_event(job, "trying", "Votify skipped: missing Spotify track ID/URL for music video lookup")
+        return None
+    cmd = _votify_command()
+    if not cmd:
+        manager._append_cache_event(job, "trying", "Votify skipped: command/module is not installed; falling back to YouTube")
+        return None
+
+    before = {path.resolve() for path in output_dir.rglob("*") if path.is_file()} if output_dir.exists() else set()
+    temp_dir = output_dir / ".votify-temp"
+    args = [
+        *cmd,
+        spotify_url,
+        "--prefer-video",
+        "--output", str(output_dir),
+        "--temp", str(temp_dir),
+        "--video-format", "mp4",
+        "--video-remux-mode", "ffmpeg",
+        "--overwrite",
+    ]
+    ffmpeg_path = _ffmpeg_location()
+    if ffmpeg_path:
+        args.extend(["--ffmpeg-path", ffmpeg_path])
+
+    with manager._lock:
+        job["status"] = "running"
+        job["output_dir"] = str(output_dir)
+        job["resolved_url"] = spotify_url
+        job["active_provider"] = "votify"
+        job["last_status"] = "Downloading Spotify music video via Votify..."
+    manager._append_cache_event(job, "trying", "Trying Votify Spotify music video before YouTube fallback...")
+
+    try:
+        result = subprocess.run(args, cwd=str(output_dir), capture_output=True, text=True, timeout=900)
+    except Exception as exc:
+        manager._append_cache_event(job, "trying", f"Votify failed to start: {str(exc)[:100]}; falling back to YouTube")
+        return None
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        message = detail[-1] if detail else f"exit {result.returncode}"
+        manager._append_cache_event(job, "trying", f"Votify did not produce a video ({message[:100]}); falling back to YouTube")
+        return None
+
+    from service_downloader import _find_audio_files
+    produced = [path for path in _find_audio_files(output_dir) if path.resolve() not in before]
+    if not produced:
+        produced = _find_audio_files(output_dir)
+    video_files = [path for path in produced if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
+    if not video_files:
+        manager._append_cache_event(job, "trying", "Votify completed but no playable video file was found; falling back to YouTube")
+        return None
+    video_files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    final = video_files[0]
+    try:
+        import db
+        track_key = job.get("track_key") or f"{job.get('artist','').lower()}||{job.get('title','').lower()}"
+        db.save_resolved_source(
+            track_key=track_key,
+            engine="votify",
+            service="spotify",
+            quality="video",
+            resolved_url=spotify_url,
+        )
+    except Exception:
+        pass
+    with manager._lock:
+        job["library_path"] = str(final)
+        job["provider_used"] = "votify"
+        job["progress"] = 100
+        job["last_status"] = "Votify music video download complete"
+    manager._append_cache_event(job, "provider", f"Votify produced {final.name}")
+    return final
 
 
 def _current_track_youtube_url(job: dict) -> str:
@@ -393,6 +704,19 @@ _BAD_MATCH_TERMS = {
     "extended",
 }
 
+_VIDEO_MOVIE_TERMS = (
+    " documentary ",
+    " feature film ",
+    " full film ",
+    " full movie ",
+    " movie ",
+    " short film ",
+    " soundtrack ",
+    " the film ",
+    " the movie ",
+    " trailer ",
+)
+
 
 def _tokens(value: str) -> list[str]:
     ignored = {"a", "an", "and", "feat", "ft", "official", "audio", "video", "lyrics", "the"}
@@ -436,6 +760,51 @@ def _classical_match_adjustment(wanted: dict, raw_title: str, raw_uploader: str)
 def _candidate_url(entry: dict) -> str:
     return str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or "")
 
+
+def _youtube_video_id(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    if "youtu.be" in (parsed.netloc or "").lower():
+        return parsed.path.strip("/")
+    if "youtube.com" in (parsed.netloc or "").lower():
+        from urllib.parse import parse_qs
+
+        return parse_qs(parsed.query).get("v", [""])[0]
+    return ""
+
+
+def _video_music_start_offset(entry: dict, job: dict) -> int:
+    if _quality_mode(job.get("quality") or "best") != "video":
+        return 0
+    try:
+        import db
+        override = db.get_youtube_video_override(job, youtube_url=_candidate_url(entry))
+        if override:
+            return max(0, int(override.get("start_offset_s") or 0))
+    except Exception:
+        pass
+    wanted = _expected_track(job)
+    artist = _norm_text(wanted.get("artist") or "")
+    title = _norm_text(wanted.get("title") or "")
+    candidate_title = _norm_text(entry.get("title") or "")
+    video_id = _youtube_video_id(_candidate_url(entry))
+    duration = _parse_duration_seconds(entry.get("duration"))
+
+    if artist == "michael jackson":
+        # Official long-form MJ short films have several minutes of cinematic
+        # intro before the actual song. Keep the official clip, but cut the
+        # downloaded MP4 to the music section.
+        if title == "thriller" and (video_id == "sOnqjkJTMaA" or ("thriller" in candidate_title and duration >= 700)):
+            return 252
+        if title == "bad" and "bad" in candidate_title and duration >= 900:
+            return 815
+    return 0
+
+
 def _candidate_has_drm(entry: dict) -> bool:
     drm_fields = (
         entry.get("has_drm"),
@@ -453,11 +822,13 @@ def _candidate_has_drm(entry: dict) -> bool:
 def _candidate_requires_auth(entry: dict) -> bool:
     """Return True if the candidate likely requires age verification or
     authentication (e.g. age-restricted or premium-only content)."""
-    if int(entry.get("age_limit") or 0) > 0:
-        return True
-    # 'needs_auth' usually means age verification or sign-in required.
+    # Age-restricted music videos are often still extractable through yt-dlp's
+    # mobile clients. Treat premium/sign-in-only availability as blocking, but
+    # do not reject age_limit alone before those clients get a chance.
+    # 'needs_auth' can mean age verification; mobile clients may still extract
+    # those videos, so let the download attempt decide.
     # 'premium_only' means YouTube Premium required.
-    if entry.get("availability") in ("needs_auth", "premium_only"):
+    if entry.get("availability") == "premium_only":
         return True
     return False
 
@@ -483,6 +854,23 @@ def _candidate_description(entry: dict) -> str:
         or entry.get("short_description")
         or ""
     )
+
+
+def _video_candidate_reject_reason(entry: dict, job: dict, candidate_title: str, uploader: str, description: str, start_offset: int = 0) -> str:
+    if _quality_mode(job.get("quality") or "best") != "video":
+        return ""
+    if start_offset > 0:
+        return ""
+    combined = f" {_norm_text(candidate_title)} {_norm_text(uploader)} {_norm_text(description)} "
+    if any(term in combined for term in _VIDEO_MOVIE_TERMS):
+        return "movie_or_documentary"
+    expected_duration = int(_expected_track(job).get("duration") or 0)
+    candidate_duration = _parse_duration_seconds(entry.get("duration"))
+    if expected_duration > 0 and candidate_duration > 0:
+        tolerance = max(45, int(expected_duration * 0.35))
+        if candidate_duration > expected_duration + tolerance:
+            return "video_duration_mismatch"
+    return ""
 
 
 def _source_score(
@@ -575,15 +963,16 @@ def _video_match_adjustment(entry: dict, job: dict, wanted_artist: str, candidat
         and "lyric video" not in title_text
     )
     music_video_description = " music video " in description_text and " official " in description_text
-    positive_video_signal = any(term in title_text for term in (
+    positive_video_signal = official_video_title or any(term in title_text for term in (
         " music video ",
         " official video ",
         " live ",
         " performance ",
         " concert ",
         " hd ",
+        " 4k ",
     )) or music_video_description
-    audio_or_static = any(term in combined_text for term in (
+    static_audio_marker = any(term in combined_text for term in (
         " official audio ",
         " audio only ",
         " topic ",
@@ -605,7 +994,7 @@ def _video_match_adjustment(entry: dict, job: dict, wanted_artist: str, candidat
         entry.get("channel_is_verified") is True
         and wanted_artist
         and _token_coverage(_tokens(wanted_artist), f"{uploader} {description}") >= 70
-        and not audio_or_static
+        and not static_audio_marker
         and not autogenerated_audio
     )
     if official_video_title:
@@ -621,7 +1010,8 @@ def _video_match_adjustment(entry: dict, job: dict, wanted_artist: str, candidat
     if autogenerated_audio:
         adjustment -= 100
         reasons.append("auto_generated_audio")
-    elif audio_or_static and " official video " not in title_text:
+    audio_or_static = static_audio_marker and not (official_video_title or music_video_description)
+    if audio_or_static and " official video " not in title_text:
         adjustment -= 90
         reasons.append("audio_or_static_video")
 
@@ -662,9 +1052,27 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     description = _norm_text(raw_description)
     visible_candidate_text = _norm_text(f"{candidate_title} {uploader}")
     artist_evidence_text = _norm_text(f"{visible_candidate_text} {description}")
+    start_offset = _video_music_start_offset(entry, job)
 
     if not wanted_title or not candidate_title:
         return 0, {"reason": "missing title metadata"}
+    video_reject = _video_candidate_reject_reason(entry, job, raw_title, raw_uploader, raw_description, start_offset)
+    if video_reject:
+        return -999, {
+            "title": raw_title,
+            "uploader": raw_uploader,
+            "url": _candidate_url(entry),
+            "title_score": 0,
+            "artist_score": 0,
+            "source_score": 0,
+            "title_coverage": 0,
+            "artist_coverage": 0,
+            "duration_score": 0,
+            "score": -999,
+            "drm": False,
+            "video_mode_candidate": True,
+            "video_reject_reason": video_reject,
+        }
     if _candidate_has_drm(entry) or _candidate_requires_auth(entry):
         reason = "drm" if _candidate_has_drm(entry) else "auth_required"
         return -999, {
@@ -709,7 +1117,9 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
     candidate_duration = _parse_duration_seconds(entry.get("duration"))
     duration_score = 50
     duration_penalty = 0
-    if expected_duration and candidate_duration:
+    if expected_duration and candidate_duration and start_offset > 0:
+        duration_score = 100
+    elif expected_duration and candidate_duration:
         diff = abs(expected_duration - candidate_duration)
         if diff <= 5:
             duration_score = 100
@@ -770,6 +1180,8 @@ def _score_youtube_candidate(entry: dict, job: dict) -> tuple[int, dict]:
         **classical_details,
         **video_details,
     }
+    if start_offset > 0:
+        details["video_start_offset"] = start_offset
     return score, details
 
 
@@ -958,6 +1370,19 @@ def _ranked_youtube_matches_with_ai(
     return candidates
 
 
+def _video_download_ranges(selected: dict | None, job: dict):
+    if not selected or _quality_mode(job.get("quality") or "best") != "video":
+        return None
+    start = int(selected.get("video_start_offset") or 0)
+    if start <= 0:
+        return None
+    wanted_duration = int(_expected_track(job).get("duration") or 0)
+    end = start + wanted_duration + 10 if wanted_duration > 0 else None
+    from yt_dlp.utils import download_range_func
+
+    return download_range_func(None, [(start, end)])
+
+
 def run(output_dir: Path, job: dict, manager) -> None:
     from service_downloader import _find_audio_files
 
@@ -974,6 +1399,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
     codec = _quality_to_codec(quality)
     format_selector = _format_selector(quality)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    override = _video_db_override(job) if video_mode else None
+    if video_mode and override:
+        manager._append_cache_event(job, "trying", "Using DB video override")
 
     def progress_cb(payload: dict) -> None:
         status = str(payload.get("status") or "")
@@ -1004,6 +1433,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "noplaylist": True,
         "cachedir": str(output_dir / ".cache"),
         "allow_unplayable_formats": False,
+        "extractor_args": _youtube_extractor_args(),
         "progress_hooks": [progress_cb],
 
         "writethumbnail": True,
@@ -1040,11 +1470,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             def _try_download(target_url: str) -> str | None:
-                if target_url.startswith("ytsearch"):
+                if _is_youtube_search_target(target_url):
                     try:
-                        search_info = ydl.extract_info(target_url, download=False)
+                        channel_id = _youtube_search_channel_id(target_url)
+                        extract_target = _youtube_search_without_channel_filter(target_url)
+                        search_info = ydl.extract_info(extract_target, download=False)
                         if not isinstance(search_info, dict):
                             return None
+                        if channel_id:
+                            search_info = _filter_youtube_entries_by_channel(search_info, channel_id)
                         candidates = _ranked_youtube_matches(search_info, job)
                         candidates = _prepend_current_youtube_candidate(candidates, job)
                         candidates = _ranked_youtube_matches_with_ai(candidates, job, manager)
@@ -1095,7 +1529,31 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             f"{verb} ({selected.get('score', 0)}%): {selected.get('title', '')[:80]}",
                         )
                     try:
-                        result_code = ydl.download([download_url])
+                        previous_ranges = ydl.params.get("download_ranges")
+                        previous_force_keyframes = ydl.params.get("force_keyframes_at_cuts")
+                        try:
+                            ranges = _video_download_ranges(selected, job)
+                            if ranges:
+                                ydl.params["download_ranges"] = ranges
+                                ydl.params["force_keyframes_at_cuts"] = True
+                                manager._append_cache_event(
+                                    job,
+                                    "trying",
+                                    f"Starting video at music section ({int(selected.get('video_start_offset') or 0)}s)",
+                                )
+                            else:
+                                ydl.params.pop("download_ranges", None)
+                                ydl.params.pop("force_keyframes_at_cuts", None)
+                            result_code = ydl.download([download_url])
+                        finally:
+                            if previous_ranges is not None:
+                                ydl.params["download_ranges"] = previous_ranges
+                            else:
+                                ydl.params.pop("download_ranges", None)
+                            if previous_force_keyframes is not None:
+                                ydl.params["force_keyframes_at_cuts"] = previous_force_keyframes
+                            else:
+                                ydl.params.pop("force_keyframes_at_cuts", None)
 
                         # Verify that a file was actually produced.
                         # With ignoreerrors: True, ydl.download might return success-ish codes even if it skipped.
@@ -1126,7 +1584,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 return None
 
             worked_url = None
-            if url:
+            if not video_mode and url.startswith("ytsearch"):
+                for channel_query, channel_label in _youtube_channel_search_attempts(ydl, job):
+                    manager._append_cache_event(job, "trying", f"Trying YouTube {channel_label} before broad search...")
+                    worked_url = _try_download(channel_query)
+                    if worked_url:
+                        break
+
+            if not worked_url and url:
                 worked_url = _try_download(url)
             
             if not worked_url:

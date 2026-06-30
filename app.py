@@ -207,6 +207,7 @@ DOCK_RECENTS_PATH = DATA / "dock_recents.json"
 LYRICS_DIR = DATA / "lyrics"
 VIDEO_CACHE_PATH = DATA / "video_cache.json"
 VIDEO_FILES_DIR = DATA / "video_files"
+VIDEO_CACHE_VERSION = 2
 
 config_lock = threading.Lock()
 lyrics_prefetch_lock = threading.Lock()
@@ -1141,16 +1142,34 @@ def _video_identity(payload: dict) -> dict:
         "artist": _lyrics_field(payload, "artist"),
         "title": _lyrics_field(payload, "title") or _lyrics_field(payload, "name"),
         "album": _lyrics_field(payload, "album"),
+        "duration_s": _lyrics_duration_s(payload),
         "track_key": _lyrics_field(payload, "track_key"),
+        "spotify_id": _lyrics_field(payload, "spotify_id") or _lyrics_field(payload, "track_id"),
+        "isrc": _lyrics_field(payload, "isrc"),
+        "artist_id": _lyrics_field(payload, "artist_id") or _lyrics_field(payload, "spotify_artist_id"),
+        "musicbrainz_recording_id": _lyrics_field(payload, "musicbrainz_recording_id") or _lyrics_field(payload, "musicbrainz_track_id"),
+        "musicbrainz_artist_id": _lyrics_field(payload, "musicbrainz_artist_id"),
+        "deezer_id": _lyrics_field(payload, "deezer_id"),
+        "tidal_id": _lyrics_field(payload, "tidal_id"),
     }
 
 
 def _video_cache_key(identity: dict) -> str:
-    value = {
-        "artist": _video_norm(identity.get("artist") or ""),
-        "title": _video_norm(identity.get("title") or ""),
-        "album": _video_norm(identity.get("album") or ""),
+    stable = {
+        "version": VIDEO_CACHE_VERSION,
+        "track_key": identity.get("track_key") or "",
+        "spotify_id": identity.get("spotify_id") or "",
+        "isrc": identity.get("isrc") or "",
     }
+    if stable["track_key"] or stable["spotify_id"] or stable["isrc"]:
+        value = stable
+    else:
+        value = {
+            "version": VIDEO_CACHE_VERSION,
+            "artist": _video_norm(identity.get("artist") or ""),
+            "title": _video_norm(identity.get("title") or ""),
+            "album": _video_norm(identity.get("album") or ""),
+        }
     return hashlib.sha1(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -1180,7 +1199,81 @@ def _youtube_embed_url(webpage_url: str, video_id: str = "") -> str:
     return f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0" if vid else ""
 
 
+def _youtube_video_id(entry_or_url) -> str:
+    if isinstance(entry_or_url, dict):
+        video_id = str(entry_or_url.get("id") or "")
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            return video_id
+        webpage_url = str(entry_or_url.get("webpage_url") or entry_or_url.get("url") or "")
+    else:
+        webpage_url = str(entry_or_url or "")
+    match = re.search(r"(?:v=|youtu\.be/|embed/)([A-Za-z0-9_-]{11})", webpage_url)
+    return match.group(1) if match else ""
+
+
+def _music_video_start_offset(entry: dict, identity: dict) -> int:
+    try:
+        override = db.get_youtube_video_override(identity, youtube_url=entry.get("webpage_url") or entry.get("url") or "")
+        if override:
+            return max(0, int(override.get("start_offset_s") or 0))
+    except Exception:
+        pass
+    video_id = _youtube_video_id(entry)
+    artist_norm = _video_norm(identity.get("artist") or "")
+    title_norm = _video_norm(identity.get("title") or "")
+    entry_title = _video_norm(entry.get("title") or "")
+    duration = entry.get("duration")
+    try:
+        duration_s = int(duration or 0)
+    except Exception:
+        duration_s = 0
+    if "michael jackson" in artist_norm and "thriller" in title_norm:
+        if video_id == "sOnqjkJTMaA" or ("thriller" in entry_title and duration_s >= 700):
+            return 252
+    if "michael jackson" in artist_norm and title_norm == "bad":
+        if "bad" in entry_title and duration_s >= 900:
+            return 815
+    return 0
+
+
+_VIDEO_MOVIE_TERMS = (
+    "documentary",
+    "feature film",
+    "full film",
+    "full movie",
+    "movie",
+    "short film",
+    "soundtrack",
+    "the film",
+    "the movie",
+    "trailer",
+)
+
+
+def _video_candidate_rejected(entry: dict, identity: dict) -> bool:
+    if _music_video_start_offset(entry, identity) > 0:
+        return False
+    title_raw = str(entry.get("title") or "")
+    channel_raw = str(entry.get("uploader") or entry.get("channel") or "")
+    hay_norm = _video_norm(" ".join([title_raw, channel_raw]))
+    if any(token in hay_norm for token in _VIDEO_MOVIE_TERMS):
+        return True
+    try:
+        expected_duration = int(identity.get("duration_s") or 0)
+        candidate_duration = int(entry.get("duration") or 0)
+    except Exception:
+        expected_duration = 0
+        candidate_duration = 0
+    if expected_duration > 0 and candidate_duration > 0:
+        tolerance = max(45, int(expected_duration * 0.35))
+        if candidate_duration > expected_duration + tolerance:
+            return True
+    return False
+
+
 def _score_video_candidate(entry: dict, identity: dict) -> int:
+    if _video_candidate_rejected(entry, identity):
+        return -999
     title_raw = str(entry.get("title") or "")
     channel_raw = str(entry.get("uploader") or entry.get("channel") or "")
     haystack = " ".join([title_raw, channel_raw])
@@ -1235,6 +1328,33 @@ def _lookup_youtube_video(identity: dict) -> dict:
         cached = _load_video_cache().get(key)
     if cached:
         return {**cached, "source": "cache", "identity": identity}
+
+    try:
+        override = db.get_youtube_video_override(identity)
+    except Exception:
+        override = None
+    if override and override.get("webpage_url"):
+        url = str(override.get("webpage_url") or "")
+        video_id = str(override.get("youtube_video_id") or _youtube_video_id(url))
+        result = {
+            "ok": True,
+            "found": True,
+            "source": "youtube_override",
+            "title": override.get("video_title") or "",
+            "uploader": override.get("channel_title") or "",
+            "duration": override.get("duration_s") or 0,
+            "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else "",
+            "webpage_url": url,
+            "embed_url": _youtube_embed_url(url, video_id),
+            "score": 1000,
+            "video_start_offset": max(0, int(override.get("start_offset_s") or 0)),
+            "identity": identity,
+        }
+        with video_cache_lock:
+            cache = _load_video_cache()
+            cache[key] = {k: v for k, v in result.items() if k != "identity"}
+            _save_video_cache(cache)
+        return result
 
     query = f'{identity["artist"]} {identity["title"]} official music video'
     try:
@@ -1329,6 +1449,10 @@ def _lookup_youtube_video(identity: dict) -> dict:
             m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", suggested_url)
             if m:
                 video_id = m.group(1)
+            start_offset = _music_video_start_offset(
+                {"id": video_id, "webpage_url": suggested_url, "title": identity.get("title") or "", "duration": 0},
+                identity,
+            )
             result = {
                 "ok": True,
                 "found": True,
@@ -1340,6 +1464,7 @@ def _lookup_youtube_video(identity: dict) -> dict:
                 "webpage_url": suggested_url,
                 "embed_url": _youtube_embed_url(suggested_url, video_id),
                 "score": 999,
+                "video_start_offset": start_offset,
                 "identity": identity,
             }
         elif not best_entry or best_score < 40:
@@ -1347,6 +1472,7 @@ def _lookup_youtube_video(identity: dict) -> dict:
         else:
             video_id = str(best_entry.get("id") or "")
             url = best_entry.get("webpage_url") or best_entry.get("url") or (f"https://www.youtube.com/watch?v={video_id}" if video_id else "")
+            start_offset = _music_video_start_offset({**best_entry, "webpage_url": url}, identity)
             result = {
                 "ok": True,
                 "found": True,
@@ -1358,6 +1484,7 @@ def _lookup_youtube_video(identity: dict) -> dict:
                 "webpage_url": url,
                 "embed_url": _youtube_embed_url(url, video_id),
                 "score": best_score,
+                "video_start_offset": start_offset,
                 "identity": identity,
             }
         with video_cache_lock:
@@ -1369,16 +1496,94 @@ def _lookup_youtube_video(identity: dict) -> dict:
         return {"ok": False, "found": False, "error": str(exc), "source": "youtube", "identity": identity}
 
 
+def _try_votify_video_fetch(identity: dict, mp4_path: Path) -> bool:
+    try:
+        from backend_ytpdl import _ffmpeg_location, _spotify_track_url, _votify_command
+        from service_downloader import _find_audio_files
+    except Exception:
+        return False
+    spotify_url = _spotify_track_url({"metadata": identity, **identity})
+    if not spotify_url:
+        return False
+    cmd = _votify_command()
+    if not cmd:
+        return False
+    import subprocess
+
+    VIDEO_FILES_DIR.mkdir(parents=True, exist_ok=True)
+    votify_dir = VIDEO_FILES_DIR / f"{mp4_path.stem}.votify"
+    temp_dir = votify_dir / ".temp"
+    before = {path.resolve() for path in votify_dir.rglob("*") if path.is_file()} if votify_dir.exists() else set()
+    args = [
+        *cmd,
+        spotify_url,
+        "--prefer-video",
+        "--output", str(votify_dir),
+        "--temp", str(temp_dir),
+        "--video-format", "mp4",
+        "--video-remux-mode", "ffmpeg",
+        "--overwrite",
+    ]
+    ffmpeg = _ffmpeg_location()
+    if ffmpeg:
+        args.extend(["--ffmpeg-path", ffmpeg])
+    try:
+        result = subprocess.run(args, cwd=str(VIDEO_FILES_DIR), capture_output=True, text=True, timeout=900)
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    produced = [path for path in _find_audio_files(votify_dir) if path.resolve() not in before]
+    if not produced:
+        produced = _find_audio_files(votify_dir)
+    videos = [path for path in produced if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}]
+    if not videos:
+        return False
+    videos.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    source = videos[0]
+    tmp_path = mp4_path.with_suffix(".votify.tmp.mp4")
+    try:
+        shutil.copy2(source, tmp_path)
+        if tmp_path.stat().st_size <= 65536:
+            tmp_path.unlink(missing_ok=True)
+            return False
+        tmp_path.replace(mp4_path)
+        return True
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        return False
+
+
 def _download_youtube_video_bg(identity: dict, key: str) -> None:
     mp4_path = VIDEO_FILES_DIR / f"{key}.mp4"
     tmp_path = VIDEO_FILES_DIR / f"{key}.tmp.mp4"
     try:
+        try:
+            override = db.get_youtube_video_override(identity)
+        except Exception:
+            override = None
+
+        # Try backend_video torrent clip search first (own session, parallel with music downloads)
+        if not override:
+            try:
+                import backend_video
+                _vid_title = f"{identity.get('artist', '')} – {identity.get('title', '')}".strip(" –")
+                def _vid_log(msg, _t=_vid_title):
+                    service_downloader.append_cache_event("trying", msg, title=_t)
+                if backend_video.fetch_clip_to_path(identity, mp4_path, log_cb=_vid_log):
+                    with _video_fetch_lock:
+                        _video_fetch_jobs[key] = "ready"
+                    return
+            except Exception:
+                pass
+
         lookup = _lookup_youtube_video(identity)
         if not lookup.get("found") or not lookup.get("webpage_url"):
             with _video_fetch_lock:
                 _video_fetch_jobs[key] = "failed"
             return
         url = lookup["webpage_url"]
+        start_offset = int(lookup.get("video_start_offset") or 0)
         VIDEO_FILES_DIR.mkdir(parents=True, exist_ok=True)
         import yt_dlp
         # H.264 + AAC mp4 for Safari/WKWebView compatibility.
@@ -1405,6 +1610,10 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             "fragment_retries": 3,
             "http_chunk_size": 10 * 1024 * 1024,  # avoids 416 range errors on retries
         }
+        if start_offset > 0:
+            from yt_dlp.utils import download_range_func
+            opts["download_ranges"] = download_range_func(None, [(start_offset, None)])
+            opts["force_keyframes_at_cuts"] = True
         from backend_ytpdl import _ffmpeg_location
         ffmpeg = _ffmpeg_location()
         if ffmpeg:

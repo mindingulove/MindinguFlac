@@ -111,6 +111,44 @@ def _init_db(conn: sqlite3.Connection):
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS youtube_videos (
+            video_id TEXT PRIMARY KEY,
+            webpage_url TEXT,
+            channel_id TEXT,
+            channel_url TEXT,
+            channel_title TEXT,
+            video_title TEXT,
+            duration_s INTEGER DEFAULT 0,
+            metadata_json TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS track_video_overrides (
+            override_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_key TEXT,
+            spotify_track_id TEXT,
+            isrc TEXT,
+            musicbrainz_recording_id TEXT,
+            deezer_track_id TEXT,
+            tidal_track_id TEXT,
+            spotify_artist_id TEXT,
+            musicbrainz_artist_id TEXT,
+            youtube_video_id TEXT NOT NULL,
+            start_offset_s INTEGER NOT NULL DEFAULT 0,
+            end_offset_s INTEGER,
+            title TEXT,
+            artist TEXT,
+            album TEXT,
+            reason TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            FOREIGN KEY (youtube_video_id) REFERENCES youtube_videos(video_id)
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS listening_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_id TEXT UNIQUE,
@@ -244,6 +282,12 @@ def _init_db(conn: sqlite3.Connection):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_playlist_recommendation_cache_playlist_id ON playlist_recommendation_cache(playlist_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_playlist_recommendation_cache_score ON playlist_recommendation_cache(score)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_playlist_recommendation_cache_expires_at ON playlist_recommendation_cache(expires_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_video_overrides_track_key ON track_video_overrides(track_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_video_overrides_spotify_track_id ON track_video_overrides(spotify_track_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_video_overrides_isrc ON track_video_overrides(isrc)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_video_overrides_musicbrainz_recording_id ON track_video_overrides(musicbrainz_recording_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_video_overrides_youtube_video_id ON track_video_overrides(youtube_video_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_youtube_videos_channel_id ON youtube_videos(channel_id)")
     # ── Per-listen append-only stats tables ────────────────────────────────────
     # Part of the refactor described in plans/mindinguflac_per_listen_stats_refactor.md
     # One row per playback session per track/artist/album/genre.
@@ -486,6 +530,29 @@ def _run_one_time_migrations(conn: sqlite3.Connection):
                 except Exception:
                     pass
             threading.Thread(target=_run_stats_backfill, daemon=True, name="listen-stats-backfill").start()
+        done = conn.execute(
+            "SELECT value FROM meta WHERE key = 'seed_youtube_video_overrides_v1'"
+        ).fetchone()
+        if not done:
+            save_youtube_video_override({
+                "youtube_video_id": "sOnqjkJTMaA",
+                "webpage_url": "https://www.youtube.com/watch?v=sOnqjkJTMaA",
+                "channel_id": "UCulYu1HEIa7f70L2lYZWHOw",
+                "channel_url": "https://www.youtube.com/channel/UCulYu1HEIa7f70L2lYZWHOw",
+                "channel_title": "michaeljacksonVEVO",
+                "video_title": "Michael Jackson - Thriller (Official 4K Video)",
+                "duration_s": 822,
+                "start_offset_s": 252,
+                "title": "Thriller",
+                "artist": "Michael Jackson",
+                "album": "Thriller",
+                "reason": "Official long-form video has a cinematic intro before the song starts.",
+            }, conn=conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('seed_youtube_video_overrides_v1', ?)",
+                (str(time.time()),),
+            )
+            conn.commit()
     except Exception:
         pass
 
@@ -649,6 +716,146 @@ def backfill_saved_playlist_taste() -> int:
     )
     conn.commit()
     return count
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _youtube_video_id_from_url(value: str) -> str:
+    value = _clean_text(value)
+    if not value:
+        return ""
+    match = re.search(r"(?:v=|youtu\.be/|embed/)([A-Za-z0-9_-]{11})", value)
+    return match.group(1) if match else ""
+
+
+def _override_identity_value(identity: dict, *keys: str) -> str:
+    for key in keys:
+        value = _clean_text(identity.get(key))
+        if value:
+            return value
+    metadata = identity.get("metadata") if isinstance(identity.get("metadata"), dict) else {}
+    for key in keys:
+        value = _clean_text(metadata.get(key))
+        if value:
+            return value
+    return ""
+
+
+def save_youtube_video_override(data: dict, conn: sqlite3.Connection | None = None) -> dict:
+    own_conn = conn is None
+    conn = conn or _get_conn()
+    now = time.time()
+    video_id = _clean_text(data.get("youtube_video_id") or data.get("video_id"))
+    if not video_id:
+        video_id = _youtube_video_id_from_url(data.get("webpage_url") or data.get("youtube_url") or data.get("video_url") or "")
+    if not video_id:
+        return {"ok": False, "error": "Missing youtube_video_id"}
+    webpage_url = _clean_text(data.get("webpage_url") or data.get("youtube_url") or data.get("video_url") or f"https://www.youtube.com/watch?v={video_id}")
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    conn.execute("""
+        INSERT INTO youtube_videos (
+            video_id, webpage_url, channel_id, channel_url, channel_title,
+            video_title, duration_s, metadata_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(video_id) DO UPDATE SET
+            webpage_url = COALESCE(NULLIF(excluded.webpage_url, ''), youtube_videos.webpage_url),
+            channel_id = COALESCE(NULLIF(excluded.channel_id, ''), youtube_videos.channel_id),
+            channel_url = COALESCE(NULLIF(excluded.channel_url, ''), youtube_videos.channel_url),
+            channel_title = COALESCE(NULLIF(excluded.channel_title, ''), youtube_videos.channel_title),
+            video_title = COALESCE(NULLIF(excluded.video_title, ''), youtube_videos.video_title),
+            duration_s = CASE WHEN excluded.duration_s > 0 THEN excluded.duration_s ELSE youtube_videos.duration_s END,
+            metadata_json = COALESCE(NULLIF(excluded.metadata_json, '{}'), youtube_videos.metadata_json),
+            updated_at = excluded.updated_at
+    """, (
+        video_id,
+        webpage_url,
+        _clean_text(data.get("channel_id")),
+        _clean_text(data.get("channel_url")),
+        _clean_text(data.get("channel_title") or data.get("uploader")),
+        _clean_text(data.get("video_title") or data.get("title")),
+        int(data.get("duration_s") or data.get("duration") or 0),
+        json.dumps(metadata),
+        now,
+        now,
+    ))
+    conn.execute("""
+        INSERT INTO track_video_overrides (
+            track_key, spotify_track_id, isrc, musicbrainz_recording_id,
+            deezer_track_id, tidal_track_id, spotify_artist_id, musicbrainz_artist_id,
+            youtube_video_id, start_offset_s, end_offset_s, title, artist, album,
+            reason, enabled, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        _clean_text(data.get("track_key")),
+        _clean_text(data.get("spotify_track_id") or data.get("spotify_id")),
+        _clean_text(data.get("isrc")).upper(),
+        _clean_text(data.get("musicbrainz_recording_id")),
+        _clean_text(data.get("deezer_track_id") or data.get("deezer_id")),
+        _clean_text(data.get("tidal_track_id") or data.get("tidal_id")),
+        _clean_text(data.get("spotify_artist_id") or data.get("artist_id")),
+        _clean_text(data.get("musicbrainz_artist_id")),
+        video_id,
+        max(0, int(data.get("start_offset_s") or data.get("start_offset") or 0)),
+        int(data["end_offset_s"]) if data.get("end_offset_s") not in (None, "") else None,
+        _clean_text(data.get("track_title") or data.get("song_name") or data.get("title")),
+        _clean_text(data.get("artist")),
+        _clean_text(data.get("album")),
+        _clean_text(data.get("reason")),
+        1 if data.get("enabled", 1) not in (False, 0, "0", "false", "False") else 0,
+        now,
+        now,
+    ))
+    if own_conn:
+        conn.commit()
+    return {"ok": True, "youtube_video_id": video_id}
+
+
+def get_youtube_video_override(identity: dict | None = None, youtube_url: str = "", youtube_video_id: str = "") -> dict | None:
+    identity = identity or {}
+    video_id = _clean_text(youtube_video_id) or _youtube_video_id_from_url(youtube_url)
+    track_key = _override_identity_value(identity, "track_key")
+    spotify_track_id = _override_identity_value(identity, "spotify_track_id", "spotify_id", "track_id")
+    isrc = _override_identity_value(identity, "isrc").upper()
+    mb_recording = _override_identity_value(identity, "musicbrainz_recording_id", "musicbrainz_track_id")
+    deezer_track_id = _override_identity_value(identity, "deezer_track_id", "deezer_id")
+    tidal_track_id = _override_identity_value(identity, "tidal_track_id", "tidal_id")
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    rank_parts: list[str] = []
+    rank_params: list[Any] = []
+    for column, value, rank in (
+        ("spotify_track_id", spotify_track_id, 100),
+        ("isrc", isrc, 95),
+        ("musicbrainz_recording_id", mb_recording, 90),
+        ("track_key", track_key, 80),
+        ("deezer_track_id", deezer_track_id, 70),
+        ("tidal_track_id", tidal_track_id, 70),
+        ("youtube_video_id", video_id, 50),
+    ):
+        if not value:
+            continue
+        clauses.append(f"o.{column} = ?")
+        params.append(value)
+        rank_parts.append(f"WHEN o.{column} = ? THEN {rank}")
+        rank_params.append(value)
+    if not clauses:
+        return None
+    row = _get_conn().execute(f"""
+        SELECT o.*, v.webpage_url, v.channel_id, v.channel_url, v.channel_title,
+               v.video_title, v.duration_s,
+               CASE {' '.join(rank_parts)} ELSE 0 END AS match_rank
+        FROM track_video_overrides o
+        JOIN youtube_videos v ON v.video_id = o.youtube_video_id
+        WHERE o.enabled = 1 AND ({' OR '.join(clauses)})
+        ORDER BY match_rank DESC, o.updated_at DESC, o.override_id DESC
+        LIMIT 1
+    """, tuple(rank_params + params)).fetchone()
+    return dict(row) if row else None
 
 
 def save_source_alias(alias_key: str, track_key: str, alias_type: str = ""):
@@ -2498,3 +2705,24 @@ def get_playlist_recommendation_cache(playlist_id: str) -> list[dict]:
         ORDER BY score DESC, created_at DESC
     """, (playlist_id, time.time())).fetchall()
     return [dict(row) for row in rows]
+
+
+def init_database() -> dict:
+    conn = _get_conn()
+    tables = {
+        str(row["name"])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    return {
+        "ok": True,
+        "path": str(_DB_PATH),
+        "youtube_videos": "youtube_videos" in tables,
+        "track_video_overrides": "track_video_overrides" in tables,
+    }
+
+
+if __name__ == "__main__":
+    result = init_database()
+    print(json.dumps(result, indent=2))

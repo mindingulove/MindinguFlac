@@ -306,6 +306,14 @@ def _torrent_key(magnet: str) -> str:
         pass
     return magnet
 
+
+def _torrent_ai_first_batch_grace() -> float:
+    try:
+        return max(0.0, min(20.0, float(os.environ.get("MINDINGUFLAC_TORRENT_AI_FIRST_BATCH_GRACE", "8"))))
+    except Exception:
+        return 8.0
+
+
 def _torrent_info_from_url(url: str, timeout: int = 8):
     if not url:
         return None
@@ -1412,6 +1420,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 pending_search_futures = {}
                 search_executor = None
                 ai_thread = None
+                ai_first_batch_waited = False
                 ai_ranked_keys: list[str] = []
                 ai_lock = threading.Lock()
 
@@ -1529,6 +1538,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     while True:
                         collect_search_results(0.1)
                         start_ai_advisor_if_ready()
+                        if ai_thread and not ai_first_batch_waited and not attempted_keys:
+                            ai_first_batch_waited = True
+                            grace = _torrent_ai_first_batch_grace()
+                            if grace > 0:
+                                ai_thread.join(timeout=grace)
                         results_to_try = ordered_untried_results()
                         if not results_to_try:
                             if pending_search_futures and time.time() < search_deadline:
@@ -1819,17 +1833,19 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 handle, torrent_save_path = _register_job_to_torrent(cached_magnet, job_id, output_dir, manager)
                 current_magnet = cached_magnet
                 
-                # Wait for metadata to resolve (up to 8 seconds)
+                # Wait for metadata to resolve (up to 30 seconds).
+                # Magnet links need DHT propagation time; 8s is too short for
+                # low-peer swarms that still resolve within a normal download window.
                 meta_start = time.time()
                 has_meta = False
-                while time.time() - meta_start < 8.0:
+                while time.time() - meta_start < 30.0:
                     if job_id in manager._cancel_flags:
                         raise RuntimeError("Cancelled")
                     if handle.is_valid() and handle.status().has_metadata:
                         has_meta = True
                         break
                     time.sleep(0.5)
-                
+
                 if has_meta:
                     manager._append_cache_event(job, "trying", f"Step 0: Reusing swarm for: {album}")
                     _scr = stream_to_completion(handle, current_magnet, torrent_save_path, is_artist_verified=True, cached_reuse=True)
@@ -1841,8 +1857,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         db.delete_resolved_source(job.get("track_key") or "")
                         db.delete_album_source(album_key)
                 else:
-                    manager._append_cache_event(job, "trying", "Cached source metadata not resolved yet; falling back to discovery search...")
-                
+                    manager._append_cache_event(job, "trying", "Cached source metadata not resolved in 30s; falling back to discovery search...")
+
                 _unregister_job_from_torrent(current_magnet, job_id)
                 handle = None
                 current_magnet = None

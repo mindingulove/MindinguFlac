@@ -148,7 +148,6 @@ const ENGINE_PROVIDERS = {
 
 const ENGINE_QUALITIES = {
   "ytp-dl": [
-    { value: "video", label: "Music video (MP4/WebM)" },
     { value: "best", label: "Best available" },
     { value: "m4a",  label: "M4A / AAC" },
     { value: "mp3",  label: "MP3" },
@@ -209,8 +208,6 @@ function updateEngineControls(engine, currentService, currentQuality) {
     qualitySel.innerHTML = engineQualities.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
     if (currentQuality && engineQualities.some(o => o.value === currentQuality)) {
       qualitySel.value = currentQuality;
-    } else if (engine === "ytp-dl" && engineQualities.some(o => o.value === "video")) {
-      qualitySel.value = "video";
     } else {
       qualitySel.value = engineQualities[0].value;
     }
@@ -2509,6 +2506,10 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
   seekAfterMetadata(audio, startAt);
   syncPlayPauseButton();
   tryStartAudio(audio, track, requestId, jobId);
+  if (track && !canSwitchToLocalVideo(track)) fetchVideoForTrack(track).catch(() => {});
+  // Restart side-video from the beginning so it stays in sync with the audio.
+  const _sv = $("sideVideoPlayer");
+  if (_sv && _sv.tagName === "VIDEO" && state.videoMode) { _sv.currentTime = 0; _sv.play().catch(() => {}); }
 }
 
 async function resumeBrowserAudioFromStableSource(audio) {
@@ -2822,9 +2823,11 @@ function canSwitchToLocalVideo(track = state.currentTrack) {
 }
 
 function canSwitchToVideo(track = state.currentTrack) {
+  if (!track || (!track.title && !track.artist)) return false;
   return canSwitchToLocalVideo(track) ||
     state.videoFetch.status === "ready" ||
-    state.videoFetch.status === "downloading";
+    state.videoFetch.status === "downloading" ||
+    state.videoFetch.status === "not_found";
 }
 
 function localMediaStreamUrl(filePath) {
@@ -2846,6 +2849,7 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     title: track.title || "",
     album: track.album || "",
     track_key: key,
+    ...(track.duration_ms ? { duration_ms: String(track.duration_ms) } : {}),
     ...(force ? { force: "1" } : {}),
   });
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -2858,6 +2862,7 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
       state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "" };
       renderSideVideoButton();
       if (data.status === "ready" || data.status === "not_found") {
+        if (data.status === "not_found") showToast("No video found for this track");
         if (state.videoMode && state.sideVideoTrackKey === key && data.status === "ready") {
           renderSideCover(track);
         }
@@ -2866,12 +2871,31 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     } catch (_) {}
     await new Promise((r) => setTimeout(r, 3000));
   }
-  // Timed out — treat as not found so the button disappears
+  // Timed out — treat as not found
   if (state.videoFetch.trackKey === key) {
     state.videoFetch = { trackKey: key, status: "not_found", path: "" };
     renderSideVideoButton();
+    showToast("No video found for this track");
   }
   return state.videoFetch;
+}
+
+function showToast(msg, durationMs = 3000) {
+  let el = document.getElementById("appToast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "appToast";
+    el.className = "app-toast";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.remove("app-toast-hide");
+  el.classList.add("app-toast-show");
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(() => {
+    el.classList.remove("app-toast-show");
+    el.classList.add("app-toast-hide");
+  }, durationMs);
 }
 
 function renderSideVideoButton() {
@@ -2885,6 +2909,8 @@ function renderSideVideoButton() {
     button.innerHTML = '<i class="bi bi-music-note-beamed"></i><span>Switch to audio</span>';
   } else if (state.videoFetch.status === "downloading") {
     button.innerHTML = '<i class="bi bi-hourglass-split"></i><span>Loading video…</span>';
+  } else if (state.videoFetch.status === "not_found") {
+    button.innerHTML = '<i class="bi bi-camera-video-off"></i><span>No video</span>';
   } else {
     button.innerHTML = '<i class="bi bi-play-btn"></i><span>Switch to video</span>';
   }
@@ -4799,6 +4825,54 @@ async function prefetchNextTracks() {
   await Promise.all(targets.map(track => prefetchOneTrack(track, orderKey)));
 }
 
+const _videoPrefetchInflight = new Set();
+
+function _triggerVideoFetchForTrack(track) {
+  const key = trackKey(track);
+  if (_videoPrefetchInflight.has(key)) return;
+  if (canSwitchToLocalVideo(track)) return;
+  const params = new URLSearchParams({
+    artist: track.artist || "",
+    title: track.title || "",
+    album: track.album || "",
+    track_key: key,
+    ...(track.duration_ms ? { duration_ms: String(track.duration_ms) } : {}),
+  });
+  _videoPrefetchInflight.add(key);
+  api(`/api/video/fetch?${params.toString()}`).catch(() => {}).finally(() => {
+    _videoPrefetchInflight.delete(key);
+  });
+  console.log("[VideoPrefetch] queued:", track.title);
+}
+
+function prefetchNextVideos() {
+  // Walk the entire queue in batches of 2 staggered by 500 ms so we don't
+  // slam the backend with dozens of simultaneous torrent/YouTube searches.
+  if (!state.queue.length) return;
+  const idx = getQueueIndex();
+  const start = idx >= 0 ? idx + 1 : 0;
+  const remaining = [];
+  const seen = new Set([state.currentTrack ? trackKey(state.currentTrack) : ""]);
+  for (let i = 0; i < state.queue.length; i++) {
+    const track = state.queue[(start + i) % state.queue.length];
+    const key = trackKey(track);
+    if (!playableQueueItem(track) || seen.has(key)) continue;
+    seen.add(key);
+    remaining.push(track);
+  }
+  if (!remaining.length) return;
+  // Fire first batch immediately, then stagger subsequent batches 10 s apart
+  const BATCH = 2;
+  remaining.forEach((track, i) => {
+    const delay = Math.floor(i / BATCH) * 10000;
+    if (delay === 0) {
+      _triggerVideoFetchForTrack(track);
+    } else {
+      setTimeout(() => _triggerVideoFetchForTrack(track), delay);
+    }
+  });
+}
+
 async function toggleTrackLibrary(track, button, refresh) {
   if (!isTrackItem(track)) return;
   if (button.classList.contains("progress")) {
@@ -5499,7 +5573,7 @@ function startNativeAudioPolling(requestId) {
     // ontimeupdate never fires on the native path, so trigger it here too.
     if (state.nativeAudio.position >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
       state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTracks().catch(() => {});
+      prefetchNextTracks().catch(() => {}); prefetchNextVideos();
     }
     if (status.ended && !state.manualPauseRequested) {
       await finalizeListeningSession("complete", "native_audio_ended").catch(() => {});
@@ -5956,7 +6030,7 @@ function bindPlayer() {
     // race the stream handoff and trigger an early advance.
     if (audio.currentTime >= 2 && state.prefetchedForRequestId !== state.playbackRequestId && !isActiveJobStreamUrl(state.currentStreamUrl)) {
       state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTracks().catch(() => {});
+      prefetchNextTracks().catch(() => {}); prefetchNextVideos();
     }
   };
   audio.onseeked = () => {
@@ -6146,7 +6220,7 @@ function bindPlayer() {
         }
         updateSidebarNextQueue();
 
-        prefetchNextTracks().catch(() => {});
+        prefetchNextTracks().catch(() => {}); prefetchNextVideos();
       }
     };
   }
@@ -7624,7 +7698,7 @@ function reorderQueueTrack(fromIndex, toIndex) {
   state.queueIndex = state.queue.findIndex(track => trackKey(track) === currentKey);
   if (state.queueIndex < 0 && currentKey) state.queueIndex = 0;
   state.originalQueue = [...state.queue];
-  prefetchNextTracks();
+  prefetchNextTracks(); prefetchNextVideos();
   refreshQueuePanel();
   updateSidebarNextQueue();
   return true;
@@ -7761,7 +7835,15 @@ $("lyricsScroll").addEventListener("scroll", () => {
   state.lyrics.lastScrollAt = Date.now();
   setLyricsSynced(false);
 }, { passive: true });
-$("sideVideoSwitch").onclick = () => switchSideVideoMode(!state.videoMode);
+$("sideVideoSwitch").onclick = () => {
+  if (!state.videoMode && state.videoFetch.status === "not_found" && state.currentTrack) {
+    state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };
+    renderSideVideoButton();
+    fetchVideoForTrack(state.currentTrack, { force: true }).catch(() => {});
+    return;
+  }
+  switchSideVideoMode(!state.videoMode);
+};
 $("sideVideoRefresh").onclick = () => {
   if (!state.currentTrack) return;
   state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };

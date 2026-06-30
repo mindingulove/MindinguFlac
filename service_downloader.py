@@ -319,6 +319,13 @@ def downloaded_track_matches_request(path: Path, job: dict) -> tuple[bool, str]:
 
     diff_s = abs(expected_ms - actual_ms) / 1000
     if diff_s > 10:
+        requested_quality = str(job.get("quality") or "").strip().lower()
+        is_video = requested_quality == "video" or path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".ogv"}
+        if is_video:
+            expected_s = expected_ms / 1000
+            tolerance_s = max(45, expected_s * 0.35)
+            if actual_ms / 1000 > expected_s + tolerance_s:
+                return False, f"video duration mismatch: expected {expected_s:.0f}s, got {actual_ms / 1000:.0f}s"
         return True, f"duration differs: expected {expected_ms / 1000:.0f}s, got {actual_ms / 1000:.0f}s ({diff_s:.0f}s off)"
     return True, ""
 
@@ -971,7 +978,9 @@ class ServiceDownloadManager:
             source_name = "cache"
             found_rank = status["cache_quality"]
 
-        # If the found quality is lower than requested, ignore it so start_job triggers a re-download
+        # If the found quality is lower than requested, ignore it so start_job
+        # triggers a re-download. Changing engine alone should not bypass cache,
+        # but changing to a higher quality should.
         if found_path and found_rank < requested_rank:
             print(f"[Engine] Existing {source_name} version (rank {found_rank}) is lower than requested {requested_quality} (rank {requested_rank}). Ignoring for re-download.")
             return {"source": "", "path": "", **status}
@@ -1105,12 +1114,86 @@ class ServiceDownloadManager:
                         path = normalized
                         changed = True
                     matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
+        matches.extend(self._find_cache_files_on_disk(identity))
         if changed:
             self._save_jobs()
         if not matches:
             return None
         matches.sort(key=lambda item: (item["quality"], item["path"].stat().st_mtime), reverse=True)
         return matches[0]
+
+    def _find_cache_files_on_disk(self, identity: dict) -> list[dict]:
+        cache_dir = Path(self.config.cache_dir)
+        if not cache_dir.exists():
+            return []
+        matches = []
+        known_paths = set()
+        with self._lock:
+            for job in self.jobs.values():
+                if job.get("library_path"):
+                    known_paths.add(str(job["library_path"]))
+
+        for path in _find_audio_files(cache_dir):
+            if str(path) in known_paths:
+                continue
+            job = self._cache_job_from_sidecar(path, identity) or self._cache_job_from_filename(path, identity)
+            if not job:
+                continue
+            matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
+        return matches
+
+    def _cache_job_from_sidecar(self, path: Path, identity: dict) -> dict | None:
+        info_path = path.parent / "metadata.json"
+        if not info_path.exists():
+            return None
+        try:
+            data = json.loads(info_path.read_text("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        album_info = data.get("album_info") if isinstance(data.get("album_info"), dict) else {}
+        tracks = data.get("tracks") if isinstance(data.get("tracks"), dict) else {}
+        for title, meta in tracks.items():
+            if not isinstance(meta, dict):
+                continue
+            artist = meta.get("artist") or album_info.get("artist") or identity.get("artist_part") or "Unknown Artist"
+            if not _audio_path_matches_track(path, str(title), str(artist)):
+                continue
+            job = {
+                "id": path.parent.name,
+                "mode": "stream",
+                "status": "finished",
+                "artist": clean_part(artist),
+                "album": clean_part(meta.get("album") or album_info.get("album") or identity.get("album_part") or "Unknown Album"),
+                "title": clean_part(meta.get("title") or title),
+                "metadata": _merge_nonempty_metadata(dict(album_info), meta),
+                "output_dir": str(path.parent),
+                "library_path": str(path),
+            }
+            if _job_matches_identity(job, identity):
+                return job
+        return None
+
+    def _cache_job_from_filename(self, path: Path, identity: dict) -> dict | None:
+        if not _audio_path_matches_track(path, identity["title_part"], identity["artist_part"]):
+            return None
+        job = {
+            "id": path.parent.name,
+            "mode": "stream",
+            "status": "finished",
+            "artist": identity["artist_part"],
+            "album": identity["album_part"],
+            "title": identity["title_part"],
+            "metadata": {
+                "artist": identity["artist_part"],
+                "album": identity["album_part"],
+                "title": identity["title_part"],
+            },
+            "output_dir": str(path.parent),
+            "library_path": str(path),
+        }
+        return job
 
     def _repair_finished_audio_path(self, job: dict) -> bool:
         if job.get("status") != "finished" or not job.get("output_dir"):
@@ -1464,8 +1547,13 @@ class ServiceDownloadManager:
             resolved_keys = _source_lookup_keys_from_payload(payload)
             resolved_data = db.get_resolved_source_for_keys(resolved_keys)
             if resolved_data:
+                video_requested = str(payload.get("quality") or metadata.get("quality") or "").strip().lower() == "video"
                 # If the engine matches or we have a direct URL, we can reuse it
-                if resolved_data.get("engine") == engine:
+                if video_requested and engine == "ytp-dl" and resolved_data.get("engine") == "ytp-dl":
+                    # Music videos now use DB override -> Votify -> YouTube.
+                    # Do not let an old persisted YouTube URL bypass that order.
+                    pass
+                elif resolved_data.get("engine") == engine or (video_requested and engine == "ytp-dl" and resolved_data.get("engine") == "votify"):
                     resolved_url = resolved_data.get("resolved_url", "")
                     service = resolved_data.get("service") or service
                 elif engine == "torrent" and resolved_data.get("engine") == "ytp-dl":

@@ -368,6 +368,36 @@ class PlaybackSourceTests(unittest.TestCase):
 
         self.assertEqual(Path(source["path"]).name, "Song - Artist.flac")
 
+    def test_recovers_cache_file_from_disk_when_job_record_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cache_dir = root / "cache" / "lost-job"
+            cache_path = cache_dir / "Bad - Michael Jackson.flac"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_bytes(b"fLaC" + b"\0" * (101 * 1024))
+            (cache_dir / "metadata.json").write_text(
+                '{"album_info":{"artist":"Michael Jackson","album":"Bad"},"tracks":{"Bad":{"title":"Bad","artist":"Michael Jackson","spotify_id":"spotify-id"}}}',
+                "utf-8",
+            )
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="tidal",
+                default_quality="LOSSLESS",
+            )
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                manager = service_downloader.ServiceDownloadManager(config)
+                source = manager.playback_source({
+                    "artist": "Michael Jackson",
+                    "album": "Bad",
+                    "title": "Bad",
+                    "spotify_id": "spotify-id",
+                    "quality": "LOSSLESS",
+                })
+
+        self.assertEqual(source["source"], "cache")
+        self.assertEqual(source["path"], str(cache_path))
+
     def test_recovers_converted_audio_extension_when_recorded_path_was_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -788,6 +818,15 @@ class DownloadedTrackMatchesRequestTests(unittest.TestCase):
             ok, msg = service_downloader.downloaded_track_matches_request(Path("x.flac"), self._job(200000))
         self.assertTrue(ok)
         self.assertIn("duration differs", msg)
+
+    def test_rejects_movie_length_video_duration_mismatch(self):
+        with patch.object(service_downloader, "_audio_duration_ms", return_value=5400000):
+            ok, msg = service_downloader.downloaded_track_matches_request(
+                Path("x.mp4"),
+                {"quality": "video", "metadata": {"duration_ms": 313000}},
+            )
+        self.assertFalse(ok)
+        self.assertIn("video duration mismatch", msg)
 
 
 if __name__ == "__main__":
