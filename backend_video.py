@@ -94,6 +94,12 @@ def _looks_like_clip(title: str) -> bool:
     # Bracketed broadcast network or codec markers
     if _re.search(r"\b(nhkg?|nhk world|tbs|fuji tv|abc tv|nbc|cbs tv|bbc one|bbc two|hevc|x265)\b", low):
         return False
+    # Reject titles that are predominantly non-Latin (Chinese, Japanese, Korean, Arabic, etc.)
+    # A music video for an English-language track should have mostly ASCII in the title.
+    latin_chars = len(_re.findall(r"[A-Za-z0-9\s\-_.,!?'\"()]", title or ""))
+    total_chars = max(len((title or "").replace(" ", "")), 1)
+    if latin_chars / total_chars < 0.4:
+        return False
     return True
 
 
@@ -264,12 +270,37 @@ def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dic
 
 # ── Torrent clip download ────────────────────────────────────────────────────
 
+def _ffmpeg_exe() -> str:
+    """Return path to bundled ffmpeg (via imageio-ffmpeg) or fall back to PATH."""
+    try:
+        from backend_ytpdl import _ffmpeg_location
+        return _ffmpeg_location()
+    except Exception:
+        pass
+    import shutil, os
+    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    return shutil.which(name) or "ffmpeg"
+
+
+def _ffprobe_exe() -> str:
+    """Return path to ffprobe alongside the bundled ffmpeg, or fall back to PATH."""
+    import os, shutil
+    ffmpeg = _ffmpeg_exe()
+    if ffmpeg and ffmpeg != "ffmpeg":
+        # imageio-ffmpeg ships ffprobe next to ffmpeg
+        probe = str(Path(ffmpeg).with_name("ffprobe" + (".exe" if os.name == "nt" else "")))
+        if Path(probe).exists():
+            return probe
+    name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    return shutil.which(name) or "ffprobe"
+
+
 def _video_duration_s(path: Path) -> float:
     """Return video duration in seconds via ffprobe, or 0 on failure."""
     try:
         import subprocess, json as _json
         result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
+            [_ffprobe_exe(), "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0:
@@ -290,7 +321,7 @@ def _ensure_web_safe_audio(path: Path) -> bool:
     import subprocess, json as _json
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
+            [_ffprobe_exe(), "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
             capture_output=True, text=True, timeout=15,
         )
         if r.returncode != 0:
@@ -306,7 +337,7 @@ def _ensure_web_safe_audio(path: Path) -> bool:
         print(f"[VideoBackend] re-encoding audio {audio_codecs} → AAC for WebKit compatibility")
         tmp = path.with_suffix(".reencode.mp4")
         res = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(path),
+            [_ffmpeg_exe(), "-y", "-i", str(path),
              "-c:v", "copy",        # video: no re-encode
              "-c:a", "aac", "-b:a", "192k",  # audio: AC3/DTS → AAC
              "-c:s", "mov_text",    # subtitle passthrough (or drop if unsupported)
@@ -567,11 +598,15 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
         _log("Video: no torrent clips found, trying YouTube...")
 
     # --- Phase 2: try torrent first (up to 10 ranked candidates), then YouTube ---
+    _MIN_RELEVANCE = 0.15  # below this the result is unrelated to the track
     for candidate in torrent_candidates[:10]:
         magnet = candidate.get("magnet") or ""
         if not magnet:
             continue
         rel = candidate.get("_relevance", 0)
+        if rel < _MIN_RELEVANCE:
+            _log(f"Video: skipping low-relevance torrent ({rel:.2f}) — {candidate.get('title', '')[:50]}")
+            continue
         _log(f"Video: trying torrent clip (relevance={rel:.2f}) — {candidate.get('title', '')[:60]} "
              f"({candidate.get('seeders', 0)} seeds)")
         if _download_torrent_clip(magnet, output_path, expected_s=expected_s):
