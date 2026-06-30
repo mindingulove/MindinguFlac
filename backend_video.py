@@ -68,20 +68,30 @@ def _parse_bytes(value) -> int:
 
 
 def _looks_like_clip(title: str) -> bool:
-    """True when the torrent name looks like a music video clip, not a concert/TV show."""
+    """True when the torrent name looks like a music video clip, not junk/TV/software."""
     import re as _re
     low = (title or "").lower()
-    # Hard rejects
+    # Hard rejects: concerts, full albums, video formats that signal multi-episode packs
     if any(w in low for w in (
         "concert", "live at", "full album", "discography",
         "dvdrip", "blu-ray", "bluray", "bdrip",
         "season", "episode",
     )):
         return False
-    # TV/anime release pattern: [GroupName] Title - NN (Network codec) — e.g. [NanakoRaws] Mao - 15
-    if _re.search(r"^\[[A-Za-z0-9_\-]{2,20}\]", title or ""):
+    # TV episode pattern: S01E01 / S01E01-E03 etc.
+    if _re.search(r"\bS\d{1,3}E\d{1,3}\b", title or "", _re.IGNORECASE):
         return False
-    # Bracketed broadcast network or codec group without music context
+    # Software/crack torrents: version numbers + crack indicators
+    if _re.search(r"\b(crack(s|ed)?|keygen|serial|portable|repack|nulled|patch)\b", low):
+        return False
+    if _re.search(r"\bv\d+\.\d+[\.\d]*\b", low) and any(w in low for w in ("fix", "pro", "setup", "installer", "activat")):
+        return False
+    if _re.search(r"\{[A-Za-z]+\}", title or ""):  # {CracksHash}, {TeamOS} etc.
+        return False
+    # TV/anime release group prefix: [GroupName] — supports ASCII and non-ASCII group names
+    if _re.search(r"^\[.{2,30}\]", title or ""):
+        return False
+    # Bracketed broadcast network or codec markers
     if _re.search(r"\b(nhkg?|nhk world|tbs|fuji tv|abc tv|nbc|cbs tv|bbc one|bbc two|hevc|x265)\b", low):
         return False
     return True
@@ -182,8 +192,36 @@ def _search_solid_video(query: str, timeout: int) -> list[dict]:
     return out
 
 
+def _clip_relevance_score(r: dict, artist: str, title: str) -> float:
+    """Score 0–1: how well the torrent title matches the artist+track we want.
+
+    High score → try first. Combines title relevance with a log-seeders bonus
+    so a spot-on 5-seed match beats a 200-seed discography pack.
+    """
+    import math as _math
+    import re as _re
+    t = (r.get("title") or "").lower()
+    a_low = artist.lower()
+    ti_low = title.lower()
+
+    # Word-level overlap between query and result title
+    query_words = set(_re.findall(r"\w+", f"{a_low} {ti_low}")) - {"the", "a", "an", "of", "and", "in"}
+    title_words = set(_re.findall(r"\w+", t))
+    overlap = len(query_words & title_words) / max(len(query_words), 1)
+
+    # Bonus for containing both artist name and track title
+    has_artist = a_low in t or any(w in t for w in a_low.split() if len(w) > 3)
+    has_title  = ti_low in t or all(w in t for w in ti_low.split() if len(w) > 2)
+    bonus = (0.25 if has_artist else 0) + (0.35 if has_title else 0)
+
+    # Small seeder log-bonus (caps at ~0.15 for very high seed counts)
+    seed_bonus = min(0.15, _math.log1p(int(r.get("seeders") or 0)) / 40)
+
+    return min(1.0, overlap * 0.25 + bonus + seed_bonus)
+
+
 def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dict]:
-    """Search all video sources in parallel; return candidates sorted by seeders."""
+    """Search all video sources in parallel; return filtered candidates ranked by relevance."""
     query = f"{artist} {title} music video"
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=3) as ex:
@@ -198,13 +236,29 @@ def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dic
             except Exception:
                 pass
 
-    filtered = [
-        r for r in results
-        if int(r.get("seeders") or 0) >= 1
-        and (_CLIP_MAX_BYTES == 0 or _parse_bytes(r.get("size_bytes")) <= _CLIP_MAX_BYTES)
-        and _looks_like_clip(r.get("title") or "")
-    ]
-    filtered.sort(key=lambda r: int(r.get("seeders") or 0), reverse=True)
+    try:
+        import db as _db
+        _adult_terms = _db.get_adult_filter_terms()
+    except Exception:
+        _adult_terms = set()
+
+    def _passes(r: dict) -> bool:
+        t = (r.get("title") or "").lower()
+        if not _looks_like_clip(r.get("title") or ""):
+            return False
+        if _adult_terms and any(term in t for term in _adult_terms):
+            return False
+        if int(r.get("seeders") or 0) < 1:
+            return False
+        if _CLIP_MAX_BYTES > 0 and _parse_bytes(r.get("size_bytes")) > _CLIP_MAX_BYTES:
+            return False
+        return True
+
+    filtered = [r for r in results if _passes(r)]
+    # Score by relevance first; seeders already factored in via log-bonus
+    for r in filtered:
+        r["_relevance"] = _clip_relevance_score(r, artist, title)
+    filtered.sort(key=lambda r: r["_relevance"], reverse=True)
     return filtered
 
 
@@ -223,6 +277,52 @@ def _video_duration_s(path: Path) -> float:
     except Exception:
         pass
     return 0.0
+
+
+_WEB_SAFE_AUDIO = frozenset({"aac", "mp3", "opus", "vorbis", "mp4a"})
+
+def _ensure_web_safe_audio(path: Path) -> bool:
+    """If the video has AC3/DTS/unsupported audio, re-encode the audio track to AAC in-place.
+
+    Video stream is copied (no quality loss, fast). Returns True when the file is
+    ready to play in WKWebView, False if ffmpeg fails and the file should be discarded.
+    """
+    import subprocess, json as _json
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            return True  # can't probe — pass through, let player decide
+        streams = _json.loads(r.stdout).get("streams", [])
+        audio_codecs = [
+            (s.get("codec_name") or "").lower()
+            for s in streams if s.get("codec_type") == "audio"
+        ]
+        needs_remux = any(c and c not in _WEB_SAFE_AUDIO for c in audio_codecs)
+        if not needs_remux:
+            return True
+        print(f"[VideoBackend] re-encoding audio {audio_codecs} → AAC for WebKit compatibility")
+        tmp = path.with_suffix(".reencode.mp4")
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path),
+             "-c:v", "copy",        # video: no re-encode
+             "-c:a", "aac", "-b:a", "192k",  # audio: AC3/DTS → AAC
+             "-c:s", "mov_text",    # subtitle passthrough (or drop if unsupported)
+             "-map", "0:v:0", "-map", "0:a:0",  # keep first video + first audio track only
+             str(tmp)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if res.returncode == 0 and tmp.exists() and tmp.stat().st_size > 65536:
+            tmp.replace(path)
+            return True
+        tmp.unlink(missing_ok=True)
+        print(f"[VideoBackend] audio re-encode failed: {res.stderr[-200:]}")
+        return False
+    except Exception as exc:
+        print(f"[VideoBackend] _ensure_web_safe_audio error: {exc}")
+        return True  # don't reject on unexpected errors
 
 
 def _clip_duration_ok(path: Path, expected_s: float) -> bool:
@@ -320,6 +420,8 @@ def _download_torrent_clip(magnet: str, output_path: Path, expected_s: float = 0
             return False
 
         if not _clip_duration_ok(src, expected_s):
+            return False
+        if not _ensure_web_safe_audio(src):
             return False
 
         tmp = output_path.with_suffix(".vtmp" + output_path.suffix)
@@ -464,12 +566,13 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
     else:
         _log("Video: no torrent clips found, trying YouTube...")
 
-    # --- Phase 2: try torrent first, then YouTube -------------------------
-    for candidate in torrent_candidates[:3]:
+    # --- Phase 2: try torrent first (up to 10 ranked candidates), then YouTube ---
+    for candidate in torrent_candidates[:10]:
         magnet = candidate.get("magnet") or ""
         if not magnet:
             continue
-        _log(f"Video: trying torrent clip — {candidate.get('title', '')[:60]} "
+        rel = candidate.get("_relevance", 0)
+        _log(f"Video: trying torrent clip (relevance={rel:.2f}) — {candidate.get('title', '')[:60]} "
              f"({candidate.get('seeders', 0)} seeds)")
         if _download_torrent_clip(magnet, output_path, expected_s=expected_s):
             _log(f"Video: clip saved from torrent → {output_path.name}")
