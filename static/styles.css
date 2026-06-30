@@ -907,8 +907,8 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   left: 266px;
   right: 348px;
   top: 88px;
-  bottom: 108px;
-  border-radius: 8px;
+  bottom: 0;
+  border-radius: 8px 8px 0 0;
   overflow: hidden;
   background:
     radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--lyrics-bg) 82%, white 10%) 0%, transparent 44%),
