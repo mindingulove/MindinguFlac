@@ -79,7 +79,15 @@ def _looks_like_clip(title: str) -> bool:
     )):
         return False
     # Audio-only releases (music files, not video clips)
-    if _re.search(r"\b(320kbps|320 kbps|flac|mp3|aac|wav|lossless|24-bit|24bit)\b", low):
+    if _re.search(r"\b(320[\s_]?kbps|flac|mp3|aac|wav|lossless|24[\s-]?bit)\b", low):
+        return False
+    # Doujinshi / anime CG sets: (同人CG集), (COMIC1☆28), [無修正] etc.
+    if _re.search(r"^\(", title or "") and _re.search(r"[　-鿿＀-￯]", title or ""):
+        return False
+    # Manga/comic digital releases: (Digital), chapter ranges 001-005, volume markers v28
+    if _re.search(r"\(Digital\)", title or "", _re.IGNORECASE):
+        return False
+    if _re.search(r"\b\d{3}-\d{3}\b", title or ""):  # chapter range like 001-005
         return False
     # TV episode pattern: S01E01 / S01E01-E03 etc.
     if _re.search(r"\bS\d{1,3}E\d{1,3}\b", title or "", _re.IGNORECASE):
@@ -679,6 +687,13 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
 
     # --- Phase 2: try torrent first (up to 10 ranked candidates), then YouTube ---
     _MIN_RELEVANCE = 0.15
+    # If we already have a YouTube result and the top candidates all have 0 seeders,
+    # skip torrents — they'll stall for 30s each and YouTube is already waiting.
+    top = [c for c in torrent_candidates[:10] if c.get("_relevance", 0) >= _MIN_RELEVANCE]
+    if youtube_result and top and all(int(c.get("seeders") or 0) == 0 for c in top[:3]):
+        _log("Video: all top torrent candidates have 0 seeders — skipping to YouTube fallback")
+        torrent_candidates = []
+
     for candidate in torrent_candidates[:10]:
         magnet = candidate.get("magnet") or ""
         if not magnet:
@@ -698,11 +713,7 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
                 except Exception:
                     pass
             return True
-        # Blacklist this magnet — stalled or no peers
-        try:
-            _db.add_video_blacklist(magnet, reason="stalled or no peers")
-        except Exception:
-            pass
+        # Don't blacklist stalled magnets — seeder shortage is temporary
 
     if youtube_result:
         url = youtube_result["webpage_url"]
