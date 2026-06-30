@@ -201,17 +201,22 @@ def _search_solid_video(query: str, timeout: int) -> list[dict]:
 def _clip_relevance_score(r: dict, artist: str, title: str) -> float:
     """Score 0–1: how well the torrent title matches the artist+track we want.
 
-    High score → try first. Combines title relevance with a log-seeders bonus
-    so a spot-on 5-seed match beats a 200-seed discography pack.
+    High score → try first. Combines fuzzy similarity, word overlap, and a
+    log-seeders bonus so a spot-on 5-seed match beats a 200-seed discography pack.
     """
     import math as _math
     import re as _re
+    from difflib import SequenceMatcher
     t = (r.get("title") or "").lower()
     a_low = artist.lower()
     ti_low = title.lower()
+    query = f"{a_low} {ti_low}"
+
+    # Fuzzy similarity of the full query against the torrent title (handles typos/punctuation)
+    fuzzy = SequenceMatcher(None, query, t, autojunk=False).ratio()
 
     # Word-level overlap between query and result title
-    query_words = set(_re.findall(r"\w+", f"{a_low} {ti_low}")) - {"the", "a", "an", "of", "and", "in"}
+    query_words = set(_re.findall(r"\w+", query)) - {"the", "a", "an", "of", "and", "in"}
     title_words = set(_re.findall(r"\w+", t))
     overlap = len(query_words & title_words) / max(len(query_words), 1)
 
@@ -223,7 +228,8 @@ def _clip_relevance_score(r: dict, artist: str, title: str) -> float:
     # Small seeder log-bonus (caps at ~0.15 for very high seed counts)
     seed_bonus = min(0.15, _math.log1p(int(r.get("seeders") or 0)) / 40)
 
-    return min(1.0, overlap * 0.25 + bonus + seed_bonus)
+    # Fuzzy contributes up to 0.15; word overlap up to 0.10; bonuses dominate for exact matches
+    return min(1.0, fuzzy * 0.15 + overlap * 0.10 + bonus + seed_bonus)
 
 
 def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dict]:
