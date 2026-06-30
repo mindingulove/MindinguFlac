@@ -104,6 +104,9 @@ def _looks_like_clip(title: str) -> bool:
         return False
     if _re.search(r"\b\d{3}-\d{3}\b", title or ""):  # chapter range like 001-005
         return False
+    # Webcam/adult site date-prefix format: "26 06 30 ModelName" (YY MM DD)
+    if _re.search(r"^\w[\w\s]*\b\d{2} \d{2} \d{2}\b", title or ""):
+        return False
     # TV episode pattern: S01E01 / S01E01-E03 etc.
     if _re.search(r"\bS\d{1,3}E\d{1,3}\b", title or "", _re.IGNORECASE):
         return False
@@ -169,6 +172,16 @@ def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dic
 
     query = f"{artist} {title} music video"
 
+    # Standard trackers to add to magnets that have none (e.g. limetorrents)
+    from torrent_sources import _TRACKERS as _STD_TRACKERS
+    import urllib.parse as _up
+    _tracker_suffix = "".join(f"&tr={_up.quote(t)}" for t in _STD_TRACKERS)
+
+    def _ensure_trackers(magnet: str) -> str:
+        if "&tr=" not in magnet:
+            return magnet + _tracker_suffix
+        return magnet
+
     # Normalise raw provider results to {title, magnet, size_bytes, seeders, leechers, source}
     def _normalise(raw: list[dict], src: str) -> list[dict]:
         out = []
@@ -177,6 +190,7 @@ def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dic
             magnet = r.get("magnet") or ""
             if not title_r or not magnet:
                 continue
+            magnet = _ensure_trackers(magnet)
             # size may be stored as int bytes or human string depending on provider
             sb = r.get("size_bytes") or r.get("size") or 0
             if isinstance(sb, str):
@@ -194,15 +208,17 @@ def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dic
     results: list[dict] = []
     ex = ThreadPoolExecutor(max_workers=8)
     try:
+        _fast = timeout        # API-backed providers
+        _slow = min(timeout, 6)  # scraper-based; cap so they don't block
         futures = {
-            ex.submit(_ts._search_apibay_music_video, query, timeout): "apibay",
-            ex.submit(_ts._search_knaben_music_video, query, timeout): "knaben",
-            ex.submit(_ts._search_solid_music_video, query, timeout): "solid",
-            ex.submit(_ts.search_1337x, query, timeout): "1337x",
-            ex.submit(_ts.search_kickass, query, timeout): "kickass",
-            ex.submit(_ts.search_limetorrents, query, timeout): "limetorrents",
-            ex.submit(_ts.search_torlock, query, timeout): "torlock",
-            ex.submit(_ts.search_torrentdownloads, query, timeout): "torrentdownloads",
+            ex.submit(_ts._search_apibay_music_video, query, _fast): "apibay",
+            ex.submit(_ts._search_knaben_music_video, query, _fast): "knaben",
+            ex.submit(_ts._search_solid_music_video, query, _fast): "solid",
+            ex.submit(_ts.search_1337x, query, _slow): "1337x",
+            ex.submit(_ts.search_kickass, query, _slow): "kickass",
+            ex.submit(_ts.search_limetorrents, query, _fast): "limetorrents",
+            ex.submit(_ts.search_torlock, query, _slow): "torlock",
+            ex.submit(_ts.search_torrentdownloads, query, _slow): "torrentdownloads",
         }
         try:
             for fut in as_completed(futures, timeout=timeout):
@@ -571,7 +587,55 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
             torrent_candidates = []
 
     def _do_youtube_lookup():
+        """Fast yt-dlp search for official music video; falls back to AI lookup."""
         nonlocal youtube_result, youtube_start_offset
+        # First try: check DB override (instant, no network)
+        try:
+            import db as _db
+            override = _db.get_youtube_video_override(identity)
+            if override and override.get("youtube_video_id"):
+                vid = override["youtube_video_id"]
+                youtube_result = {"found": True, "webpage_url": f"https://www.youtube.com/watch?v={vid}"}
+                youtube_start_offset = int(override.get("start_offset_s") or 0)
+                return
+        except Exception:
+            pass
+        # Second try: direct yt-dlp search — fast, no AI, prioritises Vevo/official
+        try:
+            import yt_dlp
+            query = f"ytsearch5:{artist} {title} official music video"
+            opts = {
+                "quiet": True, "no_warnings": True, "noprogress": True,
+                "noplaylist": True, "extract_flat": True, "socket_timeout": 8,
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(query, download=False) or {}
+            entries = info.get("entries") or []
+            # Duration filter: music video should be within 3x the track duration (or < 15min)
+            _dur_max = max(expected_s * 3, 900) if expected_s else 900
+            def _dur_ok(e: dict) -> bool:
+                d = float(e.get("duration") or 0)
+                return d <= 0 or d <= _dur_max  # 0 = unknown duration, allow through
+            def _pick(entries, require_official: bool):
+                for e in entries:
+                    url = e.get("url") or e.get("webpage_url") or ""
+                    if not url or not _dur_ok(e):
+                        continue
+                    ch = (e.get("channel") or e.get("uploader") or "").lower()
+                    t = (e.get("title") or "").lower()
+                    name_match = artist.lower() in t or any(w in t for w in artist.lower().split() if len(w) > 3)
+                    track_match = title.lower() in t or all(w in t for w in title.lower().split() if len(w) > 2)
+                    is_official = "vevo" in ch or "official" in ch or "vevo" in t or "official" in t
+                    if name_match and track_match and (not require_official or is_official):
+                        return url
+                return ""
+            url = _pick(entries, require_official=True) or _pick(entries, require_official=False)
+            if url:
+                youtube_result = {"found": True, "webpage_url": url}
+                return
+        except Exception:
+            pass
+        # Fallback: AI-powered lookup (slower)
         try:
             from app import _lookup_youtube_video
             res = _lookup_youtube_video(identity)
