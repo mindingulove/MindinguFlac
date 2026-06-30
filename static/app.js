@@ -4427,7 +4427,7 @@ function currentLyricsIndex(position) {
   let lo = 0, hi = lines.length - 1, best = -1;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if (lines[mid].time <= position + 0.08) {
+    if (lines[mid].time <= position) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -4530,6 +4530,8 @@ function openLyricsPanel() {
   if (!panel) return;
   state.lyrics.open = true;
   panel.hidden = false;
+  const bg = $("lyricsBg");
+  if (bg) bg.hidden = false;
   $("btnLyrics")?.classList.add("active");
   if (!state.currentTrack) {
     renderLyricsContent("Play a song to see lyrics");
@@ -4546,6 +4548,8 @@ function closeLyricsPanel() {
   if (!panel) return;
   state.lyrics.open = false;
   panel.hidden = true;
+  const bg = $("lyricsBg");
+  if (bg) bg.hidden = true;
   $("btnLyrics")?.classList.remove("active");
 }
 
@@ -7826,6 +7830,7 @@ $("btnQueue").onclick = () => {
 $("queuePanelClose").onclick = closeQueuePanel;
 
 $("btnLyrics").onclick = toggleLyricsPanel;
+$("lyricsBg").onclick = closeLyricsPanel;
 $("lyricsSync").onclick = () => {
   setLyricsSynced(true);
   updateLyricsPosition(currentPlaybackSeconds(), true);
