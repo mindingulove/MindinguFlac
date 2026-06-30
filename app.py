@@ -906,18 +906,6 @@ def quick_music_suggestions(term: str, limit: int = 24) -> list[dict]:
     return results[:limit]
 
 
-def _is_strong_music_suggestion(term: str, item: dict) -> bool:
-    score, _, _, _ = search_relevance(term, item)
-    wanted = term.strip().lower()
-    if not wanted:
-        return False
-    tokens = [token for token in re.findall(r"[a-z0-9]+", wanted) if len(token) > 1]
-    haystack = " ".join(str(item.get(key, "")) for key in ("artist", "album", "title", "name")).lower()
-    if tokens and all(token in haystack for token in tokens):
-        return score >= 55
-    return score >= 80
-
-
 def log_taste_cache_event(action: str, payload: dict) -> None:
     title = str(payload.get("title") or payload.get("artist") or payload.get("track_key") or "Taste").strip()
     artist = str(payload.get("artist") or "").strip()

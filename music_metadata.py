@@ -2069,56 +2069,6 @@ def track_credits(track: dict) -> dict:
     return result
 
 
-def _bandsintown_events(artist_name: str) -> list[dict]:
-    if not artist_name:
-        return []
-    try:
-        url = (
-            "https://rest.bandsintown.com/artists/"
-            + urllib.parse.quote(artist_name, safe="")
-            + "/events?"
-            + urllib.parse.urlencode({"app_id": "mindinguflac"})
-        )
-        data = get_json(url, timeout=8)
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    events = []
-    for event in data[:50]:
-        venue = event.get("venue") or {}
-        datetime_value = event.get("datetime") or ""
-        date_part = datetime_value.split("T", 1)[0]
-        time_part = datetime_value.split("T", 1)[1][:5] if "T" in datetime_value else ""
-        month = ""
-        day = ""
-        if date_part:
-            try:
-                parsed = time.strptime(date_part, "%Y-%m-%d")
-                month = time.strftime("%b", parsed)
-                day = str(parsed.tm_mday)
-            except Exception:
-                pass
-        location = ", ".join(part for part in [venue.get("city", ""), venue.get("region", "") or venue.get("country", "")] if part)
-        events.append({
-            "name": event.get("title") or venue.get("name") or "Event",
-            "artist": artist_name,
-            "date": date_part,
-            "datetime": datetime_value,
-            "time": time_part,
-            "month": month,
-            "day": day,
-            "city": venue.get("city") or location,
-            "state": venue.get("region") or "",
-            "location": location,
-            "venue": venue.get("name") or "",
-            "country": venue.get("country") or "",
-            "url": event.get("url") or "",
-            "source": "Bandsintown",
-        })
-    return events
-
-
 _TOUR_CACHE_TTL = 12 * 3600  # real listings: refresh roughly twice a day
 _TOUR_EMPTY_TTL = _TOUR_CACHE_TTL
 

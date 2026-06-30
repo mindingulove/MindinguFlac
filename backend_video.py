@@ -123,12 +123,15 @@ def _looks_like_clip(title: str) -> bool:
     # Bracketed broadcast network or codec markers
     if _re.search(r"\b(nhkg?|nhk world|tbs|fuji tv|abc tv|nbc|cbs tv|bbc one|bbc two|hevc|x265)\b", low):
         return False
-    # Reject titles that are predominantly non-Latin (Chinese, Japanese, Korean, Arabic, etc.)
-    # A music video for an English-language track should have mostly ASCII in the title.
-    latin_chars = len(_re.findall(r"[A-Za-z0-9\s\-_.,!?'\"()]", title or ""))
-    total_chars = max(len((title or "").replace(" ", "")), 1)
-    if latin_chars / total_chars < 0.4:
+    # Reject titles that start with CJK characters (Japanese/Chinese/Korean anime, manga, etc.)
+    if _re.match(r'^[぀-ヿ㐀-䶿一-鿿가-힯]', title or ""):
         return False
+    # Reject if CJK characters make up more than 20% of non-space characters
+    cjk = len(_re.findall(r'[぀-ヿ㐀-䶿一-鿿가-힯]', title or ""))
+    if cjk > 0:
+        non_space = max(len((title or "").replace(" ", "")), 1)
+        if cjk / non_space > 0.20:
+            return False
     return True
 
 
@@ -728,7 +731,7 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
             _log("Video: AI advisor timed out, using local ranking")
 
     # --- Phase 2: try torrent first (up to 10 ranked candidates), then YouTube ---
-    _MIN_RELEVANCE = 0.15
+    _MIN_RELEVANCE = 0.45
     # If we already have a YouTube result and the top candidates all have 0 seeders,
     # skip torrents — they'll stall for 30s each and YouTube is already waiting.
     top = [c for c in torrent_candidates[:10] if c.get("_relevance", 0) >= _MIN_RELEVANCE]

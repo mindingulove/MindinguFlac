@@ -1081,15 +1081,6 @@ def _clear_cached_artist_ids_conn(conn: sqlite3.Connection, artist: str | None) 
     return changed
 
 
-def clear_cached_artist_ids(artist: str | None = None) -> int:
-    """Strip cached Spotify/generic artist-id fields from track & album metadata
-    so the next lookup re-resolves them from scratch. Use to scrub 'poisoned'
-    rows where a wrong/non-Spotify artist id was cached (which would otherwise
-    feed the sidebar/tour/credits a bad id). Pass an artist name to limit the
-    scrub to that artist (matched on the 'artist||...' key prefix), or None to
-    scrub every cached row. Returns the number of rows changed."""
-    return _clear_cached_artist_ids_conn(_get_conn(), artist)
-
 
 def save_album_source(album_key: str, engine: str, resolved_url: str):
     conn = _get_conn()
@@ -1199,18 +1190,6 @@ def get_adult_filter_terms() -> set[str]:
         if str(row["term"]).strip()
     }
 
-
-def save_adult_filter_term(term: str, enabled: bool = True, source: str = "manual"):
-    term = (term or "").strip().lower()
-    if not term:
-        return
-    conn = _get_conn()
-    conn.execute("""
-        INSERT OR REPLACE INTO adult_filter_terms
-            (term, kind, match_mode, enabled, source, last_updated)
-        VALUES (?, 'adult', 'word', ?, ?, ?)
-    """, (term, 1 if enabled else 0, source, time.time()))
-    conn.commit()
 
 
 def _json_load_maybe(value: str | None) -> dict:

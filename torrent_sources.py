@@ -129,15 +129,6 @@ def _int_from_text(value: str) -> int:
         return 0
 
 
-def _category_from_text(value: str) -> str:
-    text = (value or "").lower()
-    if any(word in text for word in ("audio", "music", "mp3", "flac")):
-        return "audio"
-    if any(word in text for word in ("video", "movie", "movies", "tv", "1080p", "720p")):
-        return "video"
-    return "unknown"
-
-
 def _torrentdownloads_parse_listing(page: str, limit: int = 30) -> list[dict]:
     rows = re.findall(r'<div class="grey_bar3[^"]*">(.*?)</div>', page or "", flags=re.I | re.S)
     parsed: list[dict] = []
@@ -684,37 +675,3 @@ def _search_solid_music_video(query: str, timeout: int) -> list[dict]:
         pass
     return out
 
-
-def search_music_video_clips(artist: str, title: str, timeout: int = 15) -> list[dict]:
-    """Search torrent sites for a music video clip for the given track.
-
-    Returns results sorted by seeders desc, filtered to plausible clip size.
-    Each result has the standard {title, magnet, size, seeders, source, category} shape.
-    """
-    query = f"{artist} {title} music video"
-    results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [
-            executor.submit(_search_apibay_music_video, query, timeout),
-            executor.submit(_search_knaben_music_video, query, timeout),
-            executor.submit(_search_solid_music_video, query, timeout),
-        ]
-        for future in futures:
-            try:
-                results += future.result() or []
-            except Exception:
-                pass
-
-    filtered: list[dict] = []
-    for r in results:
-        if int(r.get("seeders") or 0) < 1:
-            continue
-        size_bytes = _parse_size_bytes(r.get("size"))
-        if size_bytes > _VIDEO_CLIP_MAX_BYTES:
-            continue
-        if not _looks_like_clip(r.get("title") or ""):
-            continue
-        filtered.append(r)
-
-    filtered.sort(key=lambda r: int(r.get("seeders") or 0), reverse=True)
-    return filtered
