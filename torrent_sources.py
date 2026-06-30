@@ -577,12 +577,6 @@ def _looks_like_clip(title: str) -> bool:
     return True  # accept by default; size filter handles the rest
 
 
-def _parse_size_bytes(value: str | int | None) -> int:
-    try:
-        return int(value or 0)
-    except Exception:
-        return 0
-
 
 def _search_apibay_music_video(query: str, timeout: int) -> list[dict]:
     """Apibay search restricted to TPB category 200 (Video) which includes 203 Music Videos."""

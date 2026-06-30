@@ -182,71 +182,6 @@ def _select(items: list[dict], title: str, artist: str, isrc: str) -> dict | Non
 # HLS manifest from trackManifests endpoint
 # ---------------------------------------------------------------------------
 
-def _get_hls_url(requests_module, base_url: str, track_id: int, quality: str = "LOSSLESS", headers: dict | None = None) -> str | None:
-    """Return the nested (media-level) m3u8 URL for a track, or None."""
-    try:
-        formats = "FLAC_HIRES" if "HI_RES" in quality else "FLAC"
-
-        hdrs = headers or _get_headers()
-        resp = requests_module.get(
-            f"{base_url}/trackManifests/",
-            params={
-                "id": str(track_id),
-                "quality": quality,
-                "formats": formats,
-                "adaptive": "false",
-            },
-            headers=hdrs,
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            return None
-
-        manifest_data = resp.json().get("data", {})
-        master_url = manifest_data.get("data", {}).get("attributes", {}).get("uri", "")
-        if not master_url:
-            master_url = manifest_data.get("attributes", {}).get("uri", "")
-        if not master_url:
-            # Maybe it's not nested under "data"
-            master_url = resp.json().get("uri", "")
-        if not master_url:
-            return None
-            return None
-
-        r2 = requests_module.get(master_url, headers=hdrs, timeout=15)
-        if r2.status_code != 200:
-            return None
-
-        # master m3u8 → find the media-level m3u8 URL
-        media_url = None
-        for line in r2.text.splitlines():
-            if line.strip() and not line.startswith("#"):
-                media_rel = line.strip()
-                media_url = urllib.parse.urljoin(master_url, media_rel)
-                if "?" not in media_rel and "?" in master_url:
-                    media_url += master_url[master_url.find("?"):]
-                break
-
-        if not media_url:
-            return None
-
-        # Fetch media playlist and reject previews by summing #EXTINF durations
-        r3 = requests_module.get(media_url, headers=hdrs, timeout=15)
-        if r3.status_code != 200:
-            return None
-        total_dur = sum(
-            float(line.split(":")[1].split(",")[0])
-            for line in r3.text.splitlines()
-            if line.startswith("#EXTINF:")
-        )
-        if total_dur > 0 and total_dur < 60:
-            return None
-
-        return media_url
-    except Exception:
-        pass
-    return None
-
 
 def _rewrite_m3u8_for_proxy(m3u8_text: str, base_url: str) -> str:
     """Replace CDN URLs with audio-proxy URLs (for ffmpeg server-side download)."""
@@ -273,33 +208,6 @@ def _rewrite_m3u8_for_proxy(m3u8_text: str, base_url: str) -> str:
         out.append(line)
     return "\n".join(out)
 
-
-def _rewrite_m3u8_for_local_proxy(m3u8_text: str, base_url: str) -> str:
-    """Replace CDN URLs with /api/tidal_proxy?url=… (same-origin, for Safari HLS streaming)."""
-    out = []
-    base_query = ""
-    if "?" in base_url:
-        base_query = base_url[base_url.find("?"):]
-
-    for line in m3u8_text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#EXT-X-MAP:URI=\""):
-            def _sub(m):
-                rel = m.group(1)
-                url = urllib.parse.urljoin(base_url, rel)
-                if "?" not in rel and base_query:
-                    url += base_query
-                enc = urllib.parse.quote(url, safe="")
-                return f'URI="/api/tidal_proxy?url={enc}"'
-            line = re.sub(r'URI="([^"]+)"', _sub, line)
-        elif stripped and not stripped.startswith("#"):
-            url = urllib.parse.urljoin(base_url, stripped)
-            if "?" not in stripped and base_query:
-                url += base_query
-            enc = urllib.parse.quote(url, safe="")
-            line = f"/api/tidal_proxy?url={enc}"
-        out.append(line)
-    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------

@@ -87,17 +87,6 @@ def get_playlist_track_keys(playlist_id: str) -> set[str]:
     return keys
 
 
-def get_playlist_track_signatures(playlist_id: str) -> set[str]:
-    playlist = next((pl for pl in _load_playlists() if pl.get("id") == playlist_id), None)
-    if not playlist:
-        return set()
-    keys = set()
-    for track in playlist.get("tracks") or []:
-        key = _canonical_track_signature(track)
-        if key:
-            keys.add(key)
-    return keys
-
 
 def get_current_queue_track_keys(queue_track_keys: set[str] | None = None) -> set[str]:
     return {str(key).strip() for key in (queue_track_keys or set()) if str(key).strip()}

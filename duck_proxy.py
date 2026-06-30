@@ -205,9 +205,6 @@ def send_chat(
     return res
 
 
-def save_bypass(data):  # retained for backward compatibility
-    pass
-
 
 def shutdown() -> None:
     """Stop the long-running browser worker if it is running."""

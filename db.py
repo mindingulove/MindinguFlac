@@ -718,21 +718,6 @@ def _backfill_genre_affinity(conn: sqlite3.Connection) -> int:
     return added
 
 
-def backfill_saved_playlist_taste() -> int:
-    conn = _get_conn()
-    done = conn.execute(
-        "SELECT value FROM meta WHERE key = 'saved_playlist_taste_backfill_v2'"
-    ).fetchone()
-    if done:
-        return 0
-    count = _backfill_saved_playlist_taste(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('saved_playlist_taste_backfill_v2', ?)",
-        (str(time.time()),),
-    )
-    conn.commit()
-    return count
-
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
@@ -1528,20 +1513,6 @@ def _extract_metadata_bundle(event: dict, track_key: str) -> dict:
     return merged
 
 
-def _track_status_row(track_key: str) -> dict | None:
-    row = _get_conn().execute("SELECT * FROM track_affinity WHERE track_key = ?", (track_key,)).fetchone()
-    return dict(row) if row else None
-
-
-def _artist_status_row(artist_key: str) -> dict | None:
-    row = _get_conn().execute("SELECT * FROM artist_affinity WHERE artist_key = ?", (artist_key,)).fetchone()
-    return dict(row) if row else None
-
-
-def _genre_status_row(genre_key: str) -> dict | None:
-    row = _get_conn().execute("SELECT * FROM genre_affinity WHERE genre_key = ?", (genre_key,)).fetchone()
-    return dict(row) if row else None
-
 
 def _store_status_history(conn: sqlite3.Connection, track_key: str, old_status: str, new_status: str, old_score: float, new_score: float, reason: str = "") -> None:
     conn.execute("""
@@ -1550,92 +1521,6 @@ def _store_status_history(conn: sqlite3.Connection, track_key: str, old_status: 
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (track_key, old_status, new_status, old_score, new_score, time.time(), reason))
 
-
-def _update_affinity_row(
-    conn: sqlite3.Connection,
-    table: str,
-    key_col: str,
-    key: str,
-    name_col: str,
-    name: str,
-    score_delta: float,
-    listened_ms: int,
-    event_type: str,
-    listened_percent: float,
-    status: str | None = None,
-    hard_blacklisted: bool = False,
-    reason: str = "",
-    include_completed: bool = True,
-) -> dict:
-    now = time.time()
-    row = conn.execute(f"SELECT * FROM {table} WHERE {key_col} = ?", (key,)).fetchone()
-    data = dict(row) if row else {}
-    old_status = data.get("status", "neutral")
-    old_score = float(data.get("score") or 0.0)
-    new_score = old_score + float(score_delta or 0.0)
-    from taste_profile import derive_status
-
-    new_status = status or derive_status(new_score, hard_blacklisted=hard_blacklisted or old_status == "hard_blacklisted")
-    if hard_blacklisted:
-        new_status = "hard_blacklisted"
-    counts = {
-        "total_plays": int(data.get("total_plays") or 0),
-        "total_skips": int(data.get("total_skips") or 0),
-        "total_completed": int(data.get("total_completed") or 0),
-        "total_listened_ms": int(data.get("total_listened_ms") or 0) + int(listened_ms or 0),
-    }
-    et = (event_type or "").lower()
-    if et in {"skip", "manual_dislike"}:
-        counts["total_skips"] += 1
-        data["last_skipped_at"] = now
-    elif include_completed and et == "complete":
-        counts["total_completed"] += 1
-        counts["total_plays"] += 1
-    elif et.startswith("manual_") or et in {"play", "complete"}:
-        counts["total_plays"] += 1
-    if data.get("first_seen_at") is None:
-        data["first_seen_at"] = now
-
-    values = {
-        key_col: key,
-        name_col: name or data.get(name_col, ""),
-        "score": new_score,
-        "status": new_status,
-        "last_listened_at": now if listened_ms or et in {"play", "complete", "manual_like"} else data.get("last_listened_at"),
-        "updated_at": now,
-    }
-    if table == "track_affinity":
-        values.update({
-            "title": data.get("title") or name or "",
-            "artist": data.get("artist") or "",
-            "album": data.get("album") or "",
-            "total_plays": counts["total_plays"],
-            "total_skips": counts["total_skips"],
-            "total_completed": counts["total_completed"],
-            "total_listened_ms": counts["total_listened_ms"],
-            "last_skipped_at": data.get("last_skipped_at"),
-            "first_seen_at": data.get("first_seen_at"),
-        })
-    else:
-        values.update({
-            "score": new_score,
-            "status": new_status,
-            "total_plays": counts["total_plays"],
-            "total_skips": counts["total_skips"],
-            "total_completed": counts["total_completed"],
-            "total_listened_ms": counts["total_listened_ms"],
-        })
-    placeholders = ", ".join([f"{col} = ?" for col in values.keys() if col != key_col])
-    params = [values[col] for col in values.keys() if col != key_col] + [key]
-    if row:
-        conn.execute(f"UPDATE {table} SET {placeholders} WHERE {key_col} = ?", params)
-    else:
-        insert_cols = ", ".join(values.keys())
-        insert_vals = ", ".join(["?"] * len(values))
-        conn.execute(f"INSERT INTO {table} ({insert_cols}) VALUES ({insert_vals})", list(values.values()))
-    if old_status != new_status or abs(old_score - new_score) > 0.00001:
-        _store_status_history(conn, key if table == "track_affinity" else str(data.get(key_col) or key), old_status, new_status, old_score, new_score, reason)
-    return get_track_affinity(key) if table == "track_affinity" else (get_artist_affinity(name or key) if table == "artist_affinity" else get_genre_affinity(name or key))
 
 
 _KEY_PREFIXES = {"spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_track_id", "deezer_id", "tidal_id"}
@@ -2209,20 +2094,6 @@ def get_liked_tracks(limit: int = 100) -> list[dict]:
     return _affinity_tracks("liked", limit)
 
 
-def get_recently_recovered_tracks(limit: int = 50) -> list[dict]:
-    rows = _get_conn().execute("""
-        SELECT * FROM affinity_status_history
-        WHERE old_status = 'soft_blacklisted' AND new_status IN ('neutral', 'liked')
-        ORDER BY changed_at DESC
-        LIMIT ?
-    """, (limit,)).fetchall()
-    out = []
-    for row in rows:
-        affinity = get_track_affinity(row["track_key"]) or {}
-        if affinity:
-            out.append(affinity)
-    return out
-
 
 def get_listened_time(track_key: str | None, artist: str | None, period: str) -> dict:
     conn = _get_conn()
@@ -2633,10 +2504,6 @@ def touch_playlist_recommendation_session(session_id: str, playlist_id: str = ""
     conn.commit()
 
 
-def get_playlist_recommendation_session(session_id: str) -> dict | None:
-    row = _get_conn().execute("SELECT * FROM playlist_recommendation_sessions WHERE session_id = ?", (session_id,)).fetchone()
-    return dict(row) if row else None
-
 
 def record_playlist_recommendation_feedback(playlist_id: str, track_key: str, action: str, session_id: str | None = None) -> None:
     conn = _get_conn()
@@ -2692,14 +2559,6 @@ def save_playlist_recommendation_cache(item: dict, playlist_id: str, score: floa
     ))
     conn.commit()
 
-
-def get_playlist_recommendation_cache(playlist_id: str) -> list[dict]:
-    rows = _get_conn().execute("""
-        SELECT * FROM playlist_recommendation_cache
-        WHERE playlist_id = ? AND expires_at >= ?
-        ORDER BY score DESC, created_at DESC
-    """, (playlist_id, time.time())).fetchall()
-    return [dict(row) for row in rows]
 
 
 def init_database() -> dict:

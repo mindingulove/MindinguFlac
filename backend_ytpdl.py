@@ -112,9 +112,6 @@ def _is_youtube_url(value: str) -> bool:
     return "youtube.com" in host or "youtu.be" in host or "music.youtube.com" in host
 
 
-def _safe_outtmpl(output_dir: Path) -> str:
-    return str(output_dir / "%(title).200B - %(uploader).100B.%(ext)s")
-
 
 def _job_metadata(job: dict) -> dict:
     track = job.get("track") if isinstance(job.get("track"), dict) else {}

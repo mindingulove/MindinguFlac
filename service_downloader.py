@@ -380,19 +380,6 @@ def _estimated_total_bytes(job: dict, detected_ext: str = "") -> int:
     return max(estimated, 1)
 
 
-def _downloaded_candidate_size(root: Path) -> int:
-    if not root.exists():
-        return 0
-    candidates: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if is_download_audio_candidate(path):
-            candidates.append(path)
-    if not candidates:
-        return 0
-    return max((path.stat().st_size for path in candidates), default=0)
-
 
 def _norm(value: object) -> str:
     return clean_part(str(value or "")).casefold()
@@ -1607,21 +1594,6 @@ class ServiceDownloadManager:
         if job and self._repair_finished_audio_path(job):
             self._save_jobs()
         return self._public_job(job) if job else None
-
-    def update_job_identifiers(self, job_id: str, enriched_payload: dict) -> None:
-        enriched = enriched_payload.get("track") or enriched_payload.get("metadata") or {}
-        with self._lock:
-            job = self.jobs.get(job_id)
-            if not job or job.get("status") in ("finished", "error"):
-                return
-            for key in IDENTIFIER_FIELDS:
-                if enriched.get(key) and not job.get(key):
-                    job[key] = enriched[key]
-            meta = job.get("metadata")
-            if isinstance(meta, dict):
-                for key in IDENTIFIER_FIELDS:
-                    if enriched.get(key) and not meta.get(key):
-                        meta[key] = enriched[key]
 
     def _worker(self, job_id: str, payload: dict) -> None:
         with self._lock:

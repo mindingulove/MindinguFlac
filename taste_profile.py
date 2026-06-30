@@ -5,7 +5,6 @@ import time
 import unicodedata
 
 
-_REPEAT_CACHE: dict[str, tuple[int, int, int]] = {}
 
 
 def _normalize_text(value: str) -> str:
@@ -86,12 +85,3 @@ def extract_genres_from_metadata(metadata: dict) -> list[str]:
     return out
 
 
-def calculate_repeat_bonus(track_key: str, event_timestamp: float) -> float:
-    # The persisted repeat detection happens in db.py. This helper keeps a small
-    # in-process cache so call sites can still ask for the repeat bump directly.
-    key = normalize_artist_key(track_key)
-    tm = time.localtime(float(event_timestamp or 0.0))
-    day = (tm.tm_year, tm.tm_yday, tm.tm_mday)
-    last = _REPEAT_CACHE.get(key)
-    _REPEAT_CACHE[key] = day
-    return 2.0 if last == day else 0.0

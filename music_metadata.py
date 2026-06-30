@@ -35,10 +35,6 @@ def norm_name(value: str) -> str:
     return "".join(char for char in value.lower() if char.isalnum())
 
 
-def query_tokens(value: str) -> list[str]:
-    ignored = {"the", "a", "an", "and", "or", "of", "in", "on", "to", "for"}
-    return [token for token in re.split(r"[^a-z0-9]+", value.lower()) if len(token) > 1 and token not in ignored]
-
 
 def format_duration_ms(milliseconds: int) -> str:
     if not milliseconds:
@@ -60,9 +56,6 @@ def get_json(url: str, timeout: int = 10) -> dict:
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
-
-def cover_art_url(release_id: str) -> str:
-    return f"/api/artwork/{urllib.parse.quote(release_id)}" if release_id else ""
 
 
 def caa_artwork(release_id: str) -> list[dict]:
@@ -103,9 +96,6 @@ def proxy_artwork_url(url: str) -> str:
     # Always route through our backend proxy to fix CORS/Broken images
     return "/api/image?" + urllib.parse.urlencode({"url": url})
 
-
-def lyrics_lookup_url(artist: str, title: str) -> str:
-    return "https://api.lyrics.ovh/v1/" + urllib.parse.quote(artist) + "/" + urllib.parse.quote(title) if artist and title else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1223,19 +1213,6 @@ def _ac_fields(artist_credit: list) -> dict:
     return {"musicbrainz_artist_id": a.get("id", ""), "artist_sort": a.get("sort-name", "")}
 
 
-@functools.lru_cache(maxsize=128)
-def find_artist_id(artist: str) -> str:
-    try:
-        data = get_json("https://musicbrainz.org/ws/2/artist?" + urllib.parse.urlencode({
-            "query": f'artist:"{artist}"', "fmt": "json", "limit": "5",
-        }))
-        for item in data.get("artists", []):
-            if norm_name(item.get("name", "")) == norm_name(artist):
-                return item.get("id", "")
-        return (data.get("artists") or [{}])[0].get("id", "")
-    except Exception:
-        return ""
-
 
 # ---------------------------------------------------------------------------
 # Indexers
@@ -1750,42 +1727,6 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
 
     return about
 
-
-def musicbrainz_related_artists(artist_name: str, limit: int = 100) -> list[dict]:
-    """Relationship-based related artists from MusicBrainz (band members,
-    collaborators, etc.). MusicBrainz has no true 'similar artists', so this is
-    a best-effort fallback when Spotify has no 'fans also like' data. No images
-    are available from MusicBrainz, so tiles fall back to a placeholder."""
-    if not artist_name:
-        return []
-    try:
-        q = urllib.parse.quote(f'artist:"{artist_name}"')
-        data = get_json(f"https://musicbrainz.org/ws/2/artist/?query={q}&fmt=json&limit=1")
-        arts = data.get("artists") or []
-        mbid = (arts[0].get("id") if arts else "") or ""
-        if not mbid:
-            return []
-        detail = get_json(f"https://musicbrainz.org/ws/2/artist/{mbid}?inc=artist-rels&fmt=json")
-        out, seen = [], {norm_name(artist_name)}
-        for rel in (detail.get("relations") or []):
-            target = rel.get("artist") or {}
-            name = (target.get("name") or "").strip()
-            key = norm_name(name)
-            if not name or key in seen:
-                continue
-            seen.add(key)
-            out.append({
-                "name": name,
-                "artist_id": "",
-                "musicbrainz_artist_id": target.get("id", ""),
-                "artwork_url": "",
-                "type": "artist",
-            })
-            if len(out) >= limit:
-                break
-        return out
-    except Exception:
-        return []
 
 
 def related_artists(artist_id: str, artist_name: str, limit: int = 20) -> dict:
@@ -2590,20 +2531,6 @@ def spotify_artist_about(artist_id: str) -> dict:
     _artist_about_cache[artist_id] = (time.time(), result)
     return result
 
-
-def fetch_wikipedia_bio(artist_name: str) -> str:
-    try:
-        params = urllib.parse.urlencode({
-            "action": "query", "format": "json", "prop": "extracts",
-            "exintro": 1, "explaintext": 1, "titles": artist_name, "redirects": 1,
-        })
-        data = json.loads(_web_request_text(f"https://en.wikipedia.org/w/api.php?{params}"))
-        pages = data.get("query", {}).get("pages", {})
-        for page_id in pages:
-            return pages[page_id].get("extract", "")
-    except Exception:
-        pass
-    return ""
 
 
 _WIKI_BASE = "https://en.wikipedia.org"

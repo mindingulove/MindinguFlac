@@ -41,6 +41,3 @@ def call_sync_or_async(obj: object, sync_name: str, async_name: str, *args: Any,
         raise AttributeError(f"{type(obj).__name__} has neither {sync_name} nor {async_name}")
     return run_async_blocking(async_method(*args, **kwargs))
 
-
-def has_sync_or_async(obj: object, sync_name: str, async_name: str) -> bool:
-    return callable(getattr(obj, sync_name, None)) or callable(getattr(obj, async_name, None))
