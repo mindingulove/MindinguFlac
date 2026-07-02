@@ -678,18 +678,45 @@ class TestBackendYtpDl(unittest.TestCase):
 
         backend_ytpdl.run(output_dir, job, manager)
 
-        yt_dlp_instance.extract_info.assert_called_once_with(
+        yt_dlp_instance.extract_info.assert_any_call(
             "ytsearch15:Pink Floyd See Emily Play official audio",
             download=False,
         )
+        search_opts = yt_dlp_module.YoutubeDL.call_args_list[-1].args[0]
+        self.assertEqual(search_opts["extract_flat"], "in_playlist")
         yt_dlp_instance.download.assert_called_once_with(["https://www.youtube.com/watch?v=official"])
         self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=official")
         self.assertEqual(job["ytpdl_match"]["title"], "Pink Floyd - See Emily Play (Official Audio)")
 
+    @patch("ai_reranker.rank_candidates", return_value={
+        "ranked_urls": [
+            "https://www.youtube.com/watch?v=ai",
+            "https://www.youtube.com/watch?v=local",
+        ],
+    })
+    @patch("ai_reranker.is_enabled", return_value=True)
+    @patch("backend_ytpdl._youtube_ai_race_timeout", return_value=1)
+    def test_youtube_ai_advisor_accepts_url_only_response(self, race_timeout, is_enabled, rank_candidates):
+        manager = MagicMock()
+        manager.config.duck_model = "1"
+        manager._append_cache_event = MagicMock()
+        job = {"id": "job-1", "artist": "Artist", "title": "Song", "album": "Album"}
+        candidates = [
+            ("https://www.youtube.com/watch?v=local", {"title": "Artist - Song", "uploader": "Artist", "score": 90}),
+            ("https://www.youtube.com/watch?v=ai", {"title": "Artist - Song Official Audio", "uploader": "Artist", "score": 80}),
+            ("https://www.youtube.com/watch?v=third", {"title": "Artist - Song live", "uploader": "Artist", "score": 70}),
+        ]
+
+        ordered = backend_ytpdl._ranked_youtube_matches_with_ai(candidates, job, manager)
+
+        self.assertEqual(ordered[0][0], "https://www.youtube.com/watch?v=ai")
+        self.assertEqual(ordered[1][0], "https://www.youtube.com/watch?v=local")
+        self.assertEqual(ordered[2][0], "https://www.youtube.com/watch?v=third")
+
     @patch("backend_ytpdl._get_yt_dlp")
     @patch("backend_ytpdl._resolved_youtube_url", return_value="ytsearch15:Sabrina Carpenter Espresso official video")
     @patch("service_downloader._find_audio_files", return_value=[Path("/tmp/out/video.mp4")])
-    def test_run_video_searches_artist_channel_before_unfiltered_search(self, find_audio_files, resolved_url, get_yt_dlp):
+    def test_run_video_search_uses_flat_candidate_extraction(self, find_audio_files, resolved_url, get_yt_dlp):
         manager = MagicMock()
         manager._cancel_flags = set()
         manager._append_cache_event = MagicMock()
@@ -709,7 +736,7 @@ class TestBackendYtpDl(unittest.TestCase):
         def extract_info(target, download=False, **kwargs):
             if target == "https://www.youtube.com/@sabrinacarpenter/videos":
                 return {"channel_id": "UC12345678901234567890"}
-            if target == "ytsearch12:Sabrina Carpenter Espresso official video":
+            if target == "ytsearch15:Sabrina Carpenter Espresso official video":
                 return {
                     "entries": [
                         {
@@ -740,10 +767,10 @@ class TestBackendYtpDl(unittest.TestCase):
         backend_ytpdl.run(output_dir, job, manager)
 
         searched_targets = [call.args[0] for call in yt_dlp_instance.extract_info.call_args_list]
-        self.assertIn("https://www.youtube.com/@sabrinacarpenter/videos", searched_targets)
-        self.assertIn("ytsearch12:Sabrina Carpenter Espresso official video", searched_targets)
-        self.assertNotIn("ytsearch15:Sabrina Carpenter Espresso official video", searched_targets)
-        ydl_opts = yt_dlp_module.YoutubeDL.call_args.args[0]
+        self.assertIn("ytsearch15:Sabrina Carpenter Espresso official video", searched_targets)
+        search_opts = yt_dlp_module.YoutubeDL.call_args_list[-1].args[0]
+        self.assertEqual(search_opts["extract_flat"], "in_playlist")
+        ydl_opts = yt_dlp_module.YoutubeDL.call_args_list[-2].args[0]
         self.assertEqual(ydl_opts["extractor_args"]["youtube"]["player_client"], ["android", "ios", "web"])
         yt_dlp_instance.download.assert_called_once_with(["https://www.youtube.com/watch?v=official"])
         self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=official")

@@ -1246,6 +1246,29 @@ def _ranked_youtube_matches(search_info: dict, job: dict) -> list[tuple[str, dic
     raise RuntimeError(f"ytp-dl could not find any plausible YouTube match; best was {best_score}%: {title}")
 
 
+def _extract_youtube_search_info(yt_dlp, target_url: str, ydl_opts: dict) -> dict | None:
+    search_opts = {
+        key: value
+        for key, value in ydl_opts.items()
+        if key not in {
+            "format",
+            "outtmpl",
+            "paths",
+            "progress_hooks",
+            "writethumbnail",
+            "addmetadata",
+            "postprocessors",
+            "merge_output_format",
+            "download_ranges",
+            "force_keyframes_at_cuts",
+        }
+    }
+    search_opts["extract_flat"] = "in_playlist"
+    with yt_dlp.YoutubeDL(search_opts) as search_ydl:
+        search_info = search_ydl.extract_info(target_url, download=False)
+    return search_info if isinstance(search_info, dict) else None
+
+
 def _youtube_ai_race_timeout() -> float:
     try:
         return max(0.0, min(30.0, float(os.environ.get("MINDINGUFLAC_YOUTUBE_AI_RACE_TIMEOUT", "15"))))
@@ -1328,7 +1351,7 @@ def _ranked_youtube_matches_with_ai(
 
     ranked_ids = result.get("ranked_ids")
     ranked_urls = result.get("ranked_urls")
-    if not isinstance(ranked_ids, list):
+    if not isinstance(ranked_ids, list) and not isinstance(ranked_urls, list):
         return candidates
 
     ordered: list[tuple[str, dict]] = []
@@ -1345,18 +1368,19 @@ def _ranked_youtube_matches_with_ai(
             if item:
                 ordered.append(item)
 
-    for value in ranked_ids:
-        try:
-            item = id_to_candidate.get(int(value))
-        except Exception:
-            item = None
-        if not item:
-            continue
-        url = item[0]
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        ordered.append(item)
+    if isinstance(ranked_ids, list):
+        for value in ranked_ids:
+            try:
+                item = id_to_candidate.get(int(value))
+            except Exception:
+                item = None
+            if not item:
+                continue
+            url = item[0]
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            ordered.append(item)
     for item in candidates:
         if item[0] not in seen_urls:
             ordered.append(item)
@@ -1471,7 +1495,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     try:
                         channel_id = _youtube_search_channel_id(target_url)
                         extract_target = _youtube_search_without_channel_filter(target_url)
-                        search_info = ydl.extract_info(extract_target, download=False)
+                        search_info = _extract_youtube_search_info(yt_dlp, extract_target, ydl_opts)
                         if not isinstance(search_info, dict):
                             return None
                         if channel_id:
