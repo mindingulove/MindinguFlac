@@ -241,12 +241,11 @@ def main() -> None:
             _create_shortcut(desktop / "Mindinguflac.lnk", launcher)
 
         if prefs.get("startmenu"):
-            start = (
-                _local_appdata().parent / "Roaming"
-                / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-            )
-            start.mkdir(parents=True, exist_ok=True)
-            _create_shortcut(start / "Mindinguflac.lnk", launcher)
+            appdata = os.environ.get("APPDATA", "")
+            if appdata:
+                start = pathlib.Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+                start.mkdir(parents=True, exist_ok=True)
+                _create_shortcut(start / "Mindinguflac.lnk", launcher)
 
     subprocess.Popen(
         [str(app_exe)] + sys.argv[1:],
