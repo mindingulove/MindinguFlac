@@ -7,7 +7,8 @@ All notable changes to Mindinguflac are documented here.
 ## [1.2.0] — 2026-07-05
 
 ### Added
-- Expanded synced lyrics support and video playback/fallback features.
+- Expanded synced lyrics support.
+- Music video playback: the backend searches eight torrent providers (apibay, knaben, SolidTorrents, 1337x, KickAss, limetorrents, torlock, torrentdownloads) in parallel with a YouTube lookup; whichever returns a valid clip first is used, with YouTube as the automatic fallback when no torrent clip is found.
 
 ### Updated
 - SpotiFLAC → 1.3.1.
