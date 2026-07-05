@@ -88,7 +88,7 @@ def _apply_dark_titlebar(hwnd: int) -> None:
         pass
 
 
-def _make_toggle(parent, text: str, var, bg: str, fg: str) -> None:
+def _make_toggle(tk, parent, text: str, var, bg: str, fg: str) -> None:
     """Custom checkbox that fully respects bg/fg — avoids native GDI indicator."""
     CHECKED   = "☑"
     UNCHECKED = "☐"
@@ -170,8 +170,8 @@ def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
 
     var_desktop   = tk.BooleanVar(value=True)
     var_startmenu = tk.BooleanVar(value=True)
-    _make_toggle(cb_frame, "Desktop shortcut",   var_desktop,   bg, fg)
-    _make_toggle(cb_frame, "Start Menu shortcut", var_startmenu, bg, fg)
+    _make_toggle(tk, cb_frame, "Desktop shortcut",   var_desktop,   bg, fg)
+    _make_toggle(tk, cb_frame, "Start Menu shortcut", var_startmenu, bg, fg)
 
     bar = ttk.Progressbar(root, length=420, mode="determinate", maximum=100)
     bar.pack(pady=(14, 0))
