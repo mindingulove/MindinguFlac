@@ -372,18 +372,42 @@ Invoke-Checked { & $python scripts\make_desktop_icons.py }
 Invoke-Checked { & $python -m PyInstaller --clean --noconfirm Mindinguflac-windows.spec }
 
 Write-Host "--- Packaging ---"
-$zipPath = Join-Path $root "/dist/Mindinguflac-windows.zip"
-if (Test-Path $zipPath) {
-    Remove-Item $zipPath -Force
+
+# Verify the main app built correctly
+$appDir  = Join-Path $root "dist\Mindinguflac"
+$appExe  = Join-Path $appDir "Mindinguflac.exe"
+if (-not (Test-Path $appExe)) {
+    throw "Build failed: main app exe not found at $appExe"
 }
 
-$appDir = Join-Path $root "dist\Mindinguflac"
-$exePath = Join-Path $appDir "Mindinguflac.exe"
-if (-not (Test-Path $exePath)) {
-    throw "Build failed: $exePath not found."
-}
+# Extract build ID from app.py and write _build_id.txt (read by launcher at runtime)
+$buildId = (& $python -c "import re; m = re.search(r'SpotiFLACStreamer/([^\x22]+)', open('app.py').read()); print(m.group(1) if m else 'unknown')")
+Write-Host "Build ID: $buildId"
+[System.IO.File]::WriteAllText((Join-Path $root "_build_id.txt"), $buildId)
 
-Compress-Archive -Path "$appDir\*" -DestinationPath $zipPath
+# Zip the onedir app — launcher will extract this on first user run
+$bundleZip = Join-Path $root "dist\bundle.zip"
+if (Test-Path $bundleZip) { Remove-Item $bundleZip -Force }
+Write-Host "Creating bundle.zip from $appDir ..."
+Compress-Archive -Path "$appDir\*" -DestinationPath $bundleZip
+Write-Host "bundle.zip created: $([math]::Round((Get-Item $bundleZip).Length / 1MB, 1)) MB"
+
+# Build the tiny launcher (onefile) that wraps bundle.zip + shows progress bar
+Write-Host "Building launcher..."
+Invoke-Checked { & $python -m PyInstaller --clean --noconfirm Mindinguflac-launcher.spec }
+
+# Tidy up build-time temp files
+Remove-Item (Join-Path $root "_build_id.txt")  -ErrorAction SilentlyContinue
+Remove-Item $bundleZip                          -ErrorAction SilentlyContinue
+
+# Package the launcher as the final deliverable
+$zipPath    = Join-Path $root "dist\Mindinguflac-windows.zip"
+$launcherExe = Join-Path $root "dist\Mindinguflac.exe"
+if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+if (-not (Test-Path $launcherExe)) {
+    throw "Build failed: launcher exe not found at $launcherExe"
+}
+Compress-Archive -Path $launcherExe -DestinationPath $zipPath
 
 Write-Host "--- Success ---"
-Write-Host "Built: $zipPath"
+Write-Host "Built: $zipPath ($([math]::Round((Get-Item $zipPath).Length / 1MB, 1)) MB)"

@@ -18,6 +18,7 @@ dist/
 Mindinguflac-macos-arm64.zip
 !Mindinguflac.spec
 !Mindinguflac-windows.spec
+!Mindinguflac-launcher.spec
 test_output/
 plans/
 debug_*.py
