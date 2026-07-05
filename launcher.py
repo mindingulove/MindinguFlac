@@ -2,8 +2,9 @@
 launcher.py — Mindinguflac first-run extractor + launcher.
 
 First run (or after a version change):
+  - Shows a native-looking setup window (light/dark follows system theme)
+  - User clicks Unpack to start extraction
   - Extracts bundle.zip to %LOCALAPPDATA%\Mindinguflac\app\<build_id>\
-  - Shows a themed progress window with desktop/Start-Menu shortcut options
   - Cleans up previous version directories
   - Marks extraction complete with .ok
 
@@ -37,12 +38,23 @@ def _local_appdata() -> pathlib.Path:
 
 
 def _launcher_exe() -> pathlib.Path:
-    """Path to the running launcher exe (stable shortcut target)."""
     return pathlib.Path(sys.executable)
 
 
+def _is_dark_mode() -> bool:
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        )
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return value == 0
+    except Exception:
+        return False
+
+
 def _create_shortcut(link_path: pathlib.Path, target: pathlib.Path) -> None:
-    """Create a Windows .lnk shortcut via PowerShell (no extra dependencies)."""
     try:
         script = (
             f'$ws = New-Object -ComObject WScript.Shell; '
@@ -61,95 +73,105 @@ def _create_shortcut(link_path: pathlib.Path, target: pathlib.Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Extraction window (tkinter runs in main thread, extraction in a worker)
+# Extraction window
 # ---------------------------------------------------------------------------
 
 def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
-    """
-    Shows progress window, runs extraction in a background thread.
-    Returns {"desktop": bool, "startmenu": bool} from checkbox state.
-    """
     try:
         import tkinter as tk
         from tkinter import ttk
     except Exception:
-        # tkinter unavailable — extract silently
         _extract_silent(bundle, target)
         return {"desktop": False, "startmenu": False}
 
-    result = {"desktop": True, "startmenu": True}
+    dark = _is_dark_mode()
+
+    # Colours that follow the system theme
+    bg      = "#1c1c1c" if dark else "#ffffff"
+    fg      = "#ffffff" if dark else "#000000"
+    fg_sub  = "#aaaaaa" if dark else "#555555"
+    cb_sel  = "#3a3a3a" if dark else "#e0e0e0"
+
+    result      = {"desktop": True, "startmenu": True}
     progress_ref = [0]
-    done_event = threading.Event()
-    error_ref = [None]
+    done_event  = threading.Event()
+    error_ref   = [None]
+    extract_started = threading.Event()
 
     root = tk.Tk()
-    root.title("Mindinguflac")
+    root.title("Mindinguflac Setup")
     root.resizable(False, False)
-    root.configure(bg="#16213e")
-    root.geometry("460x210")
+    root.configure(bg=bg)
+    root.geometry("460x240")
     root.update_idletasks()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry(f"460x210+{(sw - 460) // 2}+{(sh - 210) // 2}")
+    root.geometry(f"460x240+{(sw - 460) // 2}+{(sh - 240) // 2}")
     root.attributes("-topmost", True)
-    root.protocol("WM_DELETE_WINDOW", lambda: None)  # disable close during extraction
+    root.protocol("WM_DELETE_WINDOW", lambda: None)
+
+    # Use the native Windows ttk theme
+    style = ttk.Style(root)
+    try:
+        style.theme_use("vista")
+    except Exception:
+        style.theme_use("default")
 
     # Title
     tk.Label(
-        root, text="Setting up Mindinguflac",
-        bg="#16213e", fg="#ffffff", font=("Segoe UI", 13, "bold"),
-    ).pack(pady=(20, 3))
+        root, text="Mindinguflac Setup",
+        bg=bg, fg=fg, font=("Segoe UI", 12, "bold"),
+    ).pack(pady=(22, 3))
     tk.Label(
-        root, text="First run — extracting files. This only happens once.",
-        bg="#16213e", fg="#888888", font=("Segoe UI", 9),
+        root,
+        text="Files need to be unpacked on first run.\nThis only happens once.",
+        bg=bg, fg=fg_sub, font=("Segoe UI", 9), justify="center",
     ).pack()
 
-    # Progress bar
-    style = ttk.Style(root)
-    style.theme_use("default")
-    style.configure(
-        "mf.Horizontal.TProgressbar",
-        troughcolor="#0f3460", background="#1db954",
-        bordercolor="#16213e", lightcolor="#1db954", darkcolor="#1db954",
-    )
-    bar = ttk.Progressbar(
-        root, length=420, mode="determinate", maximum=100,
-        style="mf.Horizontal.TProgressbar",
-    )
-    bar.pack(pady=12)
-
     # Shortcut checkboxes
-    cb_frame = tk.Frame(root, bg="#16213e")
-    cb_frame.pack()
+    cb_frame = tk.Frame(root, bg=bg)
+    cb_frame.pack(pady=(12, 0))
 
-    var_desktop = tk.BooleanVar(value=True)
+    var_desktop   = tk.BooleanVar(value=True)
     var_startmenu = tk.BooleanVar(value=True)
 
-    tk.Checkbutton(
-        cb_frame, text="Create desktop shortcut",
-        variable=var_desktop, bg="#16213e", fg="#cccccc",
-        selectcolor="#0f3460", activebackground="#16213e",
-        font=("Segoe UI", 9),
-    ).pack(side="left", padx=10)
-    tk.Checkbutton(
-        cb_frame, text="Add to Start Menu",
-        variable=var_startmenu, bg="#16213e", fg="#cccccc",
-        selectcolor="#0f3460", activebackground="#16213e",
-        font=("Segoe UI", 9),
-    ).pack(side="left", padx=10)
+    ckb_opts = dict(bg=bg, fg=fg, selectcolor=cb_sel,
+                    activebackground=bg, activeforeground=fg,
+                    font=("Segoe UI", 9))
+    tk.Checkbutton(cb_frame, text="Desktop shortcut",
+                   variable=var_desktop, **ckb_opts).pack(side="left", padx=14)
+    tk.Checkbutton(cb_frame, text="Start Menu shortcut",
+                   variable=var_startmenu, **ckb_opts).pack(side="left", padx=14)
 
-    status_lbl = tk.Label(
-        root, text="Extracting...",
-        bg="#16213e", fg="#555555", font=("Segoe UI", 8),
-    )
-    status_lbl.pack(pady=(8, 0))
+    # Progress bar (hidden until Unpack is clicked)
+    bar = ttk.Progressbar(root, length=420, mode="determinate", maximum=100)
+    bar.pack(pady=(12, 0))
+    bar.pack_forget()
+
+    # Status label
+    status_lbl = tk.Label(root, text="", bg=bg, fg=fg_sub, font=("Segoe UI", 8))
+    status_lbl.pack(pady=(4, 0))
+
+    # Unpack button
+    btn = ttk.Button(root, text="Unpack")
+    btn.pack(pady=(10, 0))
+
+    def _on_unpack():
+        btn.pack_forget()
+        bar.pack(pady=(12, 0))
+        status_lbl.config(text="Extracting...")
+        result["desktop"]   = var_desktop.get()
+        result["startmenu"] = var_startmenu.get()
+        extract_started.set()
+        threading.Thread(target=_worker, daemon=True).start()
+        root.after(80, _tick)
+
+    btn.config(command=_on_unpack)
 
     def _tick():
         bar["value"] = progress_ref[0]
         if done_event.is_set():
-            result["desktop"] = var_desktop.get()
-            result["startmenu"] = var_startmenu.get()
-            status_lbl.config(text="Done. Launching...")
             bar["value"] = 100
+            status_lbl.config(text="Done. Launching...")
             root.update()
             root.after(800, root.destroy)
         else:
@@ -163,8 +185,6 @@ def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
         finally:
             done_event.set()
 
-    threading.Thread(target=_worker, daemon=True).start()
-    root.after(80, _tick)
     root.mainloop()
 
     if error_ref[0]:
@@ -193,17 +213,15 @@ def _extract_silent(bundle: pathlib.Path, target: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    bid = _build_id()
+    bid      = _build_id()
     app_root = _local_appdata() / "Mindinguflac" / "app"
-    target = app_root / bid
-    marker = target / ".ok"
-    app_exe = target / "Mindinguflac.exe"
-    bundle = pathlib.Path(getattr(sys, "_MEIPASS", ".")) / "bundle.zip"
+    target   = app_root / bid
+    marker   = target / ".ok"
+    app_exe  = target / "Mindinguflac.exe"
+    bundle   = pathlib.Path(getattr(sys, "_MEIPASS", ".")) / "bundle.zip"
 
-    needs_extract = not marker.exists() or not app_exe.exists()
-
-    if needs_extract:
-        # Remove stale version directories first
+    if not marker.exists() or not app_exe.exists():
+        # Remove stale version directories
         if app_root.exists():
             for d in app_root.iterdir():
                 if d.is_dir() and d.name != bid:
