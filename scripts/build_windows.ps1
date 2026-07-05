@@ -377,12 +377,13 @@ if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
 }
 
-$exePath = Join-Path $root "dist\Mindinguflac.exe"
+$appDir = Join-Path $root "dist\Mindinguflac"
+$exePath = Join-Path $appDir "Mindinguflac.exe"
 if (-not (Test-Path $exePath)) {
     throw "Build failed: $exePath not found."
 }
 
-Compress-Archive -Path $exePath -DestinationPath $zipPath
+Compress-Archive -Path "$appDir\*" -DestinationPath $zipPath
 
 Write-Host "--- Success ---"
 Write-Host "Built: $zipPath"
