@@ -116,15 +116,19 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
-    exclude_binaries=True,
+    a.binaries,
+    a.datas,
+    exclude_binaries=False,
     name='Mindinguflac',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
+    # Extracts to %LOCALAPPDATA%\Mindinguflac\runtime\_MEI<build_hash> on first
+    # run; reuses that folder on subsequent runs; re-extracts only when the
+    # build hash changes (i.e. a new release).
+    runtime_tmpdir=r'%LOCALAPPDATA%\Mindinguflac\runtime',
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -132,13 +136,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['build/icons/mindinguflac.ico'],
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='Mindinguflac',
 )
