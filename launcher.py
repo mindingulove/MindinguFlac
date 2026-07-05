@@ -54,13 +54,19 @@ def _is_dark_mode() -> bool:
         return False
 
 
-def _create_shortcut(link_path: pathlib.Path, target: pathlib.Path) -> None:
+def _create_shortcut(special_folder: str, name: str, target: pathlib.Path) -> None:
+    """Create a .lnk in a Windows special folder resolved by PowerShell.
+    special_folder: "Desktop", "Programs", etc. (Environment.SpecialFolder names)
+    """
     try:
+        target_str = str(target).replace("\\", "\\\\")
+        workdir    = str(target.parent).replace("\\", "\\\\")
         script = (
+            f'$folder = [Environment]::GetFolderPath("{special_folder}"); '
             f'$ws = New-Object -ComObject WScript.Shell; '
-            f'$s = $ws.CreateShortcut("{link_path}"); '
-            f'$s.TargetPath = "{target}"; '
-            f'$s.WorkingDirectory = "{target.parent}"; '
+            f'$s = $ws.CreateShortcut("$folder\\{name}"); '
+            f'$s.TargetPath = "{target_str}"; '
+            f'$s.WorkingDirectory = "{workdir}"; '
             f'$s.Save()'
         )
         subprocess.run(
@@ -265,15 +271,10 @@ def main() -> None:
         launcher = _launcher_exe()
 
         if prefs.get("desktop"):
-            desktop = pathlib.Path(os.environ.get("USERPROFILE", "~")).expanduser() / "Desktop"
-            _create_shortcut(desktop / "Mindinguflac.lnk", launcher)
+            _create_shortcut("Desktop", "Mindinguflac.lnk", launcher)
 
         if prefs.get("startmenu"):
-            appdata = os.environ.get("APPDATA", "")
-            if appdata:
-                start = pathlib.Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-                start.mkdir(parents=True, exist_ok=True)
-                _create_shortcut(start / "Mindinguflac.lnk", launcher)
+            _create_shortcut("Programs", "Mindinguflac.lnk", launcher)
 
     subprocess.Popen(
         [str(app_exe)] + sys.argv[1:],
