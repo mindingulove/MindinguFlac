@@ -54,6 +54,7 @@ def _create_shortcut(link_path: pathlib.Path, target: pathlib.Path) -> None:
         subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             check=False, capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except Exception:
         pass
@@ -229,7 +230,10 @@ def main() -> None:
             start.mkdir(parents=True, exist_ok=True)
             _create_shortcut(start / "Mindinguflac.lnk", launcher)
 
-    subprocess.Popen([str(app_exe)] + sys.argv[1:])
+    subprocess.Popen(
+        [str(app_exe)] + sys.argv[1:],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 if __name__ == "__main__":
