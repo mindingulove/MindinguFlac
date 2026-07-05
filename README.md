@@ -12,6 +12,16 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - Updated SpotiFLAC to `1.3.1`, including resolver validation, Spotify token auto-renewal, Tidal proxy fixes, and downloader validation updates.
 - Visible Settings footer, backend user agent, release helper, and macOS About/bundle metadata now report `1.2.0`.
 
+<p align="center">
+  <img src="docs/screenshots/video.png" width="800" alt="Music video clip playback in the now playing sidebar">
+  <br><i>Music video clip playback with a quick switch back to audio</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/lyrics.png" width="800" alt="Synced lyrics overlay with timing offset controls">
+  <br><i>Synced lyrics overlay with compact timing offset controls</i>
+</p>
+
 ## v1.1.1
 
 - Artist pages now recover live Spotify top tracks again when the direct artist top-tracks endpoint is empty.
@@ -25,28 +35,6 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - Search, artist pages, and playlist recommendations now favor ID-first matching and taste-aware ranking.
 - Stats month picker rebuilt as a proper dropdown overlay; home pill shows a house icon.
 - Fixed SQLite database lock storms caused by background migration threads cascading on startup.
-
-## v1.1.0 Preview
-
-<p align="center">
-  <img src="docs/screenshots/stats_1.png" width="800" alt="Your Listening Stats with period picker and monthly breakdown">
-  <br><i>Personal listening stats with time-based filtering and listening-over-time chart</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/stats_2.png" width="800" alt="Top listened tracks and top listened artists">
-  <br><i>Top tracks ranked by play count and listened time, with top artists discovery</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/recomended-right_click_new_sidebar.png" width="800" alt="Playlist with Recommended section and context menu">
-  <br><i>Playlist recommendations based on listening taste with quick-action context menu</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/stats_3.png" width="800" alt="Top listened albums and top genres with bar chart">
-  <br><i>Genre affinity chart and top albums derived from real listening history</i>
-</p>
 
 ## Core Philosophy
 
@@ -169,6 +157,26 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 <p align="center">
   <img src="docs/screenshots/settings_discogs.png" width="800" alt="Discogs Settings">
   <br><i>Settings - Integration with Qobuz and Discogs for enhanced metadata</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/stats_1.png" width="800" alt="Your Listening Stats with period picker and monthly breakdown">
+  <br><i>Personal listening stats with time-based filtering and listening-over-time chart</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/stats_2.png" width="800" alt="Top listened tracks and top listened artists">
+  <br><i>Top tracks ranked by play count and listened time, with top artists discovery</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/recomended-right_click_new_sidebar.png" width="800" alt="Playlist with Recommended section and context menu">
+  <br><i>Playlist recommendations based on listening taste with quick-action context menu</i>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/stats_3.png" width="800" alt="Top listened albums and top genres with bar chart">
+  <br><i>Genre affinity chart and top albums derived from real listening history</i>
 </p>
 
 ## Setup & Usage

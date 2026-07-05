@@ -364,6 +364,10 @@ Ensure-VCRedistX64
 # Fail fast if libtorrent still can't load, instead of shipping a broken app
 # (PyInstaller silently skips an un-importable libtorrent in collect_all).
 Invoke-Checked { & $python -c "import libtorrent; print('libtorrent OK', libtorrent.version)" }
+& $python -m playwright install chromium
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Playwright Chromium install failed; Gemini browser support will be unavailable in this build." -ForegroundColor Yellow
+}
 Invoke-Checked { & $python scripts\make_desktop_icons.py }
 Invoke-Checked { & $python -m PyInstaller --clean --noconfirm Mindinguflac-windows.spec }
 

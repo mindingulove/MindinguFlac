@@ -76,7 +76,8 @@ try:
     with sync_playwright() as _playwright:
         _chromium_executable = Path(_playwright.chromium.executable_path)
     _chromium_root = str(_chromium_executable.parent.parent)
-    datas.append((_chromium_root, f"ms-playwright/{_chromium_executable.parent.parent.name}"))
+    if _chromium_executable.exists():
+        datas.append((_chromium_root, f"ms-playwright/{_chromium_executable.parent.parent.name}"))
 except Exception:
     pass
 
