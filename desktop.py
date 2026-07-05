@@ -7,6 +7,7 @@ import sys
 import threading
 import subprocess
 import traceback
+import time
 import webbrowser
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def get_runtime_dir() -> Path:
 
 
 _log_path = None
+_startup_t0 = time.monotonic()
 
 class SafeLogWriter:
     def __init__(self, path: Path):
@@ -76,7 +78,28 @@ def setup_desktop_logging() -> Path:
 
 
 def log_step(message: str) -> None:
-    print(f"[desktop] {message}", flush=True)
+    elapsed = time.monotonic() - _startup_t0
+    print(f"[desktop +{elapsed:.2f}s] {message}", flush=True)
+
+
+def write_startup_failure(exc: BaseException) -> None:
+    try:
+        log_dir = get_runtime_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "desktop-fatal.log"
+        path.write_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)), encoding="utf-8")
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                f"Mindinguflac failed to start.\n\n{exc}\n\nCheck %LOCALAPPDATA%\\Mindinguflac\\runtime\\desktop-fatal.log",
+                "Mindinguflac startup error",
+                0x10,
+            )
+        except Exception:
+            pass
 
 
 def resource_path(relative: str) -> Path:
@@ -522,6 +545,7 @@ if __name__ == "__main__":
         sys.exit(0)
     try:
         main()
-    except Exception:
+    except Exception as exc:
+        write_startup_failure(exc)
         traceback.print_exc()
         raise

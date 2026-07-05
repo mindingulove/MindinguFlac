@@ -17,6 +17,13 @@ _proc: subprocess.Popen | None = None
 _req_id = 0
 _last_error = ""
 
+
+def _worker_env() -> dict:
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
 def _worker_alive() -> bool:
     return _proc is not None and _proc.poll() is None
 
@@ -51,11 +58,13 @@ def _start_worker() -> bool:
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=None,
+            stderr=subprocess.DEVNULL if getattr(sys, "frozen", False) else None,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             cwd=os.path.dirname(_WORKER_SCRIPT),
-            env=dict(os.environ),
+            env=_worker_env(),
         )
     except Exception as exc:
         _last_error = f"spawn failed: {exc}"
@@ -66,7 +75,7 @@ def _start_worker() -> bool:
     while time.time() < deadline:
         if _proc.poll() is not None:
             _last_error = "worker exited during startup"
-            _proc = None
+            _stop_worker()
             return False
         line = _proc.stdout.readline()
         if not line: continue
@@ -98,8 +107,19 @@ def _stop_worker():
                 except Exception: pass
                 try:
                     _proc.wait(timeout=5)
-                except Exception: _proc.kill()
+                except Exception:
+                    _proc.kill()
+                    try:
+                        _proc.wait(timeout=2)
+                    except Exception:
+                        pass
         except Exception: pass
+        for stream in (_proc.stdin, _proc.stdout, _proc.stderr):
+            try:
+                if stream:
+                    stream.close()
+            except Exception:
+                pass
     _proc = None
 
 def _ensure_worker() -> bool:

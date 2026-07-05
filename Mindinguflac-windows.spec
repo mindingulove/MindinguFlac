@@ -1,4 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
 datas = [('static', 'static')]
@@ -19,6 +21,7 @@ hiddenimports = [
     'backend_spotiflac',
     'backend_tidal_hifi',
     'backend_monochrome',
+    'backend_video',
     'vcredist',
     'backend_ytpdl',
     'catalog',
@@ -31,6 +34,18 @@ hiddenimports = [
     'db',
 ]
 
+def _collect_package(package_name, include_submodules=False):
+    try:
+        tmp_ret = collect_all(package_name)
+        datas.extend(tmp_ret[0])
+        binaries.extend(tmp_ret[1])
+        hiddenimports.extend(tmp_ret[2])
+        if include_submodules:
+            hiddenimports.extend(collect_submodules(package_name))
+    except Exception:
+        pass
+
+
 for _pkg in (
     'SpotiFLAC',
     'torrfetch',
@@ -41,26 +56,12 @@ for _pkg in (
     'mutagen', 'cryptography',
     'countrystatecity_countries',
 ):
-    try:
-        tmp_ret = collect_all(_pkg)
-        datas += tmp_ret[0]
-        binaries += tmp_ret[1]
-        hiddenimports += tmp_ret[2]
-        hiddenimports += collect_submodules(_pkg)
-    except Exception:
-        pass
+    _collect_package(_pkg)
 
 datas += collect_data_files('webview')
 hiddenimports += collect_submodules('webview')
 
-try:
-    tmp_ret = collect_all('bleak')
-    datas += tmp_ret[0]
-    binaries += tmp_ret[1]
-    hiddenimports += tmp_ret[2]
-    hiddenimports += collect_submodules('bleak')
-except Exception:
-    pass
+_collect_package('bleak')
 
 # libtorrent must be collected, not just hidden-imported: its win_amd64 wheel
 # ships dependent native DLLs (OpenSSL etc.) next to libtorrent.pyd. Without
@@ -68,14 +69,16 @@ except Exception:
 # with "DLL load failed while importing libtorrent: The specified module could
 # not be found."
 for package_name in ('libtorrent', 'PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy', 'imageio_ffmpeg', 'playwright', 'playwright_stealth'):
-    try:
-        tmp_ret = collect_all(package_name)
-        datas += tmp_ret[0]
-        binaries += tmp_ret[1]
-        hiddenimports += tmp_ret[2]
-        hiddenimports += collect_submodules(package_name)
-    except Exception:
-        pass
+    _collect_package(package_name)
+
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as _playwright:
+        _chromium_executable = Path(_playwright.chromium.executable_path)
+    _chromium_root = str(_chromium_executable.parent.parent)
+    datas.append((_chromium_root, f"ms-playwright/{_chromium_executable.parent.parent.name}"))
+except Exception:
+    pass
 
 for module_name in (
     'winrt',
@@ -112,9 +115,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='Mindinguflac',
     debug=False,
     bootloader_ignore_signals=False,
@@ -129,4 +131,13 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['build/icons/mindinguflac.ico'],
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='Mindinguflac',
 )

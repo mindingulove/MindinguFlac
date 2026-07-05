@@ -1,8 +1,16 @@
 # Mindinguflac
 
-A high-performance, private music meta-search and personal streaming platform. Mindinguflac allows users to aggregate metadata from multiple open sources, discover new artists through high-fidelity discography mapping, and manage a local media library with a modern, responsive interface.
+A high-performance, private music meta-search and personal streaming platform. Mindinguflac allows users to aggregate metadata from multiple open sources, discover new artists through high-fidelity discography mapping, play audio and music videos, follow synced lyrics, and manage a local media library with a modern, responsive interface.
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
+
+## v1.2.0
+
+- Added expanded synced lyrics support through Spotify, Apple, Musixmatch, LRCLIB, and Amazon lyric providers where available.
+- Added richer music-video playback/fallback behavior, including reusable video cache records and persisted video overrides.
+- Improved YouTube fallback matching for music videos while keeping metadata checks, blacklist handling, and local scoring safeguards.
+- Updated SpotiFLAC to `1.3.1`, including resolver validation, Spotify token auto-renewal, Tidal proxy fixes, and downloader validation updates.
+- Visible Settings footer, backend user agent, release helper, and macOS About/bundle metadata now report `1.2.0`.
 
 ## v1.1.1
 
@@ -56,15 +64,17 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
   - **macOS**: Full "Now Playing" integration, Touch Bar support, and Media Key handling.
   - **Windows**: Native audio output device selection and silent background processing.
 - **Advanced Streaming**: Intelligent buffer management allowing you to listen while your media is being indexed or moved, with stable pause/resume across active-download and cached-file handoffs.
+- **Synced Lyrics**: Fetches and displays timed lyrics from multiple providers, with LRCLIB and Amazon included alongside Spotify, Apple, and Musixmatch.
+- **Music Video Playback**: Supports video playback and music-video fallback flows with persistent cache records, known-good video overrides, and safe YouTube fallback when a dedicated video source is unavailable.
 - **Spotify Playlists**: Import any public Spotify playlist by link — Mindinguflac loads the full track list, artwork, and metadata, then lets you stream or download each track in lossless quality (see the *70s 80s 90s* playlist below).
 - **Discogs Integration**: Optionally provide a Discogs personal token in Settings to fetch high-resolution vinyl sleeves, booklet images, and extended metadata for your album galleries.
 - **Playlist Engine**: Create local playlists, manage queues, and import metadata from public share links.
 - **High-Quality Trackers**: Integrated real-time health monitoring for public metadata swarms to ensure the most reliable connection.
 - **Smart Parallel Prefetching**: Automatically downloads the next 5 tracks in your queue in parallel, ensuring instant transitions between songs.
-- **Persistent SQLite Engine**: All successfully resolved Torrent magnets, YouTube URLs, and enriched metadata (Spotify IDs, ISRCs, MusicBrainz IDs) are now saved in a local SQLite database for instant offline access and to prevent redundant searches.
+- **Persistent SQLite Engine**: All successfully resolved Torrent magnets, YouTube URLs, video overrides, and enriched metadata (Spotify IDs, ISRCs, MusicBrainz IDs) are now saved in a local SQLite database for instant offline access and to prevent redundant searches.
 - **Torrent Safety Filters**: Adult/video vocabulary is stored in the local SQLite database and checked before fuzzy scoring and again after torrent metadata exposes internal file paths. Terms found in the requested track title or album are allowed only for that request; unrelated adult/video terms are still blocked.
 - **Optional AI Advisor**: Clean torrent and YouTube candidates can be ranked in parallel by Gemini or DuckDuckGo/Duck.ai. AI never sees candidates blocked by the local adult/video filter and cannot override metadata checks or the "first real byte progress wins" torrent race.
-- **Improved YouTube Engine**: Smart quality-scoring and automatic skipping of age-restricted or blocked videos with persistent blacklisting.
+- **Improved YouTube Engine**: Smart quality-scoring and automatic skipping of age-restricted or blocked videos with persistent blacklisting, plus music-video fallback behavior for tracks without a reusable video source.
 - **Visual Quality Indicators**: Real-time **HI-RES** and **HQ** badges in the player sidebar indicating the actual audio fidelity being streamed.
 - **Rich Now Playing Sidebar**: Spotify-style right rail with artwork, quality badges, related music, artist information, credits, tour dates, and the next queue item.
 - **Live Tour Dates**: A dedicated Spotify-style "All events" page lists an artist's upcoming concerts (venue, city, date, time, price), fetched via Hypebot/Bandsintown or the selected AI backend and cached locally with 12-hour renewal metadata.

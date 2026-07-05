@@ -342,8 +342,16 @@ It must print AMD64 or X86_64. If it prints ARM64, do not use it.
 $python = $venvPython
 Write-Host "Using Python: $python"
 Invoke-Checked { & $python -m pip install --upgrade pip }
+Write-Host "--- Removing stale SpotiFLAC installs ---"
+& $python -m pip uninstall -y SpotiFLAC | Out-Host
+Invoke-Checked { & $python -c "import pathlib, shutil, site; roots=site.getsitepackages()+[site.getusersitepackages()]; [shutil.rmtree(p, ignore_errors=True) for root in roots if root for pattern in ('SpotiFLAC*', 'spotiflac*') for p in pathlib.Path(root).glob(pattern)]" }
 Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
-Invoke-Checked { & $python -m pip install --upgrade "git+https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version.git@v1.1.8" }
+$spotiflacUrl = "git+https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version.git@v1.3.1#egg=SpotiFLAC"
+Write-Host "--- Pinning SpotiFLAC v1.3.1 ---"
+& $python -m pip uninstall -y SpotiFLAC | Out-Host
+Invoke-Checked { & $python -c "import pathlib, shutil, site; roots=site.getsitepackages()+[site.getusersitepackages()]; [shutil.rmtree(p, ignore_errors=True) for root in roots if root for pattern in ('SpotiFLAC*', 'spotiflac*') for p in pathlib.Path(root).glob(pattern)]" }
+Invoke-Checked { & $python -m pip install --upgrade --force-reinstall --no-cache-dir $spotiflacUrl }
+Invoke-Checked { & $python -c "import importlib.metadata as m; version=m.version('SpotiFLAC'); print('SpotiFLAC', version); raise SystemExit(0 if version == '1.3.1' else 1)" }
 Invoke-Checked { & $python -m pip install --only-binary=libtorrent libtorrent }
 # libtorrent's win_amd64 wheel links OpenSSL 1.1 (libssl-1_1-x64.dll /
 # libcrypto-1_1-x64.dll), which Python 3.12 (OpenSSL 3, libcrypto-3.dll) does
@@ -365,12 +373,13 @@ if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
 }
 
-$exePath = Join-Path $root "dist\Mindinguflac.exe"
+$appDir = Join-Path $root "dist\Mindinguflac"
+$exePath = Join-Path $appDir "Mindinguflac.exe"
 if (-not (Test-Path $exePath)) {
     throw "Build failed: $exePath not found."
 }
 
-Compress-Archive -Path $exePath -DestinationPath $zipPath
+Compress-Archive -Path "$appDir\*" -DestinationPath $zipPath
 
 Write-Host "--- Success ---"
 Write-Host "Built: $zipPath"

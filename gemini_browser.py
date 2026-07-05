@@ -59,11 +59,17 @@ _NAV_TIMEOUT_MS = 90_000
 _REPLY_TIMEOUT_S = float(os.environ.get("MINDINGUFLAC_GEMINI_REPLY_TIMEOUT", "180"))
 
 def _log(*a):
-    print("[gemini_browser]", *a, file=sys.stderr, flush=True)
+    try:
+        print("[gemini_browser]", *a, file=sys.stderr, flush=True)
+    except OSError:
+        pass
 
 def _emit(obj: dict):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=True) + "\n")
+        sys.stdout.flush()
+    except OSError:
+        pass
 
 class _Worker:
     def __init__(self):
@@ -77,6 +83,11 @@ class _Worker:
             self._start_with_retry()
         except Exception as e:
             if "Executable doesn't exist" in str(e) or "Please run" in str(e):
+                if getattr(sys, "frozen", False):
+                    raise RuntimeError(
+                        "Gemini browser unavailable: bundled Playwright Chromium is missing. "
+                        "Rebuild the Windows package after installing Playwright browsers."
+                    ) from e
                 _log("Chromium not found. Attempting automatic installation...")
                 try:
                     import subprocess

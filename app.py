@@ -240,10 +240,19 @@ def _writable_cache_fallback() -> Path:
 
 
 def _sanitize_runtime_config(config: AppConfig) -> AppConfig:
+    DATA.mkdir(parents=True, exist_ok=True)
+    config.music_dir.mkdir(parents=True, exist_ok=True)
+    LYRICS_DIR.mkdir(parents=True, exist_ok=True)
+    VIDEO_FILES_DIR.mkdir(parents=True, exist_ok=True)
     if not _is_writable_directory(config.cache_dir):
         fallback = _writable_cache_fallback()
         print(f"[Config] Cache dir is not writable: {config.cache_dir}; using {fallback}")
         config.cache_dir = fallback
+        try:
+            save_config(CONFIG_PATH, config)
+        except Exception:
+            pass
+    if not CONFIG_PATH.exists():
         try:
             save_config(CONFIG_PATH, config)
         except Exception:

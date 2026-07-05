@@ -1702,6 +1702,7 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
     if has_spotify_stats or len(spotify_bio) > 5:
         about["biography"] = spotify_bio or "Official biography currently unavailable."
         about["bio_source"] = "Spotify"
+        about["stats_source"] = "Spotify" if has_spotify_stats else ""
     else:
         # ABSOLUTE FALLBACK: Only if Spotify has zero stats AND zero bio. Pull the
         # Wikipedia lead section (with its inline article links preserved) and the
@@ -1716,6 +1717,7 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
             if wiki.get("html"):
                 about["biography_html"] = wiki["html"]
             about["bio_source"] = "Wikipedia"
+            about["stats_source"] = ""
             # Use the Wikipedia page image when Spotify gave us no artist photo.
             if wiki.get("image") and not about.get("avatar") and not (about.get("gallery") or []):
                 proxied = proxy_artwork_url(wiki["image"])

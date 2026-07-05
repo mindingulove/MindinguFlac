@@ -3677,6 +3677,13 @@ function showArtistAboutModal(about = {}, artistName = "Artist", artistId = "", 
       });
   const gallery = about.gallery || [];
   const heroImage = image || about.hero_image || (gallery[0] && gallery[0].url) || "";
+  const followers = Number(about.followers || 0);
+  const monthlyListeners = Number(about.monthly_listeners || 0);
+  const statsHtml = [
+    followers > 0 ? `<div class="about-stat-item"><b>${formatCount(followers)}</b><span>Followers</span></div>` : "",
+    monthlyListeners > 0 ? `<div class="about-stat-item"><b>${formatCount(monthlyListeners)}</b><span>Monthly Listeners</span></div>` : "",
+  ].filter(Boolean).join("");
+  const source = about.bio_source ? String(about.bio_source) : "";
   const dialog = document.createElement("dialog");
   dialog.className = "about-modal sidebar-about-modal";
   dialog.id = "sidebarArtistAboutModal";
@@ -3685,11 +3692,9 @@ function showArtistAboutModal(about = {}, artistName = "Artist", artistId = "", 
     <div class="sidebar-about-modal-content">
       ${heroImage ? `<div class="sidebar-about-hero" style="background-image:url('${heroImage}')"></div>` : ""}
       <div class="sidebar-about-body">
-        <div class="about-stat-row">
-          <div class="about-stat-item"><b>${formatCount(about.followers)}</b><span>Followers</span></div>
-          <div class="about-stat-item"><b>${formatCount(about.monthly_listeners)}</b><span>Monthly Listeners</span></div>
-        </div>
+        ${statsHtml ? `<div class="about-stat-row">${statsHtml}</div>` : ""}
         <div class="about-bio-full">${bioHtml}</div>
+        ${source ? `<div class="bio-source">Source: ${esc(source)}</div>` : ""}
         ${about.top_cities && about.top_cities.length ? `
           <h3>Where people listen</h3>
           <ul class="top-cities-list">
@@ -5377,8 +5382,10 @@ async function renderSettings() {
   state.settings = await api("/api/settings");
 
   $("cacheDir").value = state.settings.cache_dir || "";
+  $("cacheDir").title = state.settings.cache_dir || "";
 
   $("musicDir").value = state.settings.music_dir || "";
+  $("musicDir").title = state.settings.music_dir || "";
 
   const engine = state.settings.download_engine || "spotiflac";
   $("downloadEngine").value = engine;
