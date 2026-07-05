@@ -76,6 +76,43 @@ def _create_shortcut(link_path: pathlib.Path, target: pathlib.Path) -> None:
 # Extraction window
 # ---------------------------------------------------------------------------
 
+def _apply_dark_titlebar(hwnd: int) -> None:
+    """Tell DWM to render a dark title bar (Windows 10 20H1+ / Windows 11)."""
+    try:
+        import ctypes
+        val = ctypes.c_int(1)
+        for attr in (20, 19):   # 20 = Win11, 19 = Win10 build 18985+
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(val), ctypes.sizeof(val))
+    except Exception:
+        pass
+
+
+def _make_toggle(parent, text: str, var, bg: str, fg: str) -> None:
+    """Custom checkbox that fully respects bg/fg — avoids native GDI indicator."""
+    CHECKED   = "☑"
+    UNCHECKED = "☐"
+
+    def _toggle(_event=None):
+        var.set(not var.get())
+        ind.config(text=CHECKED if var.get() else UNCHECKED)
+
+    f = tk.Frame(parent, bg=bg, cursor="hand2")
+    f.bind("<Button-1>", _toggle)
+
+    ind = tk.Label(f, text=CHECKED if var.get() else UNCHECKED,
+                   bg=bg, fg=fg, font=("Segoe UI", 10), cursor="hand2")
+    ind.pack(side="left")
+    ind.bind("<Button-1>", _toggle)
+
+    lbl = tk.Label(f, text=f"  {text}", bg=bg, fg=fg,
+                   font=("Segoe UI", 9), cursor="hand2")
+    lbl.pack(side="left")
+    lbl.bind("<Button-1>", _toggle)
+
+    f.pack(side="left", padx=14)
+
+
 def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
     try:
         import tkinter as tk
@@ -86,17 +123,15 @@ def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
 
     dark = _is_dark_mode()
 
-    # Colours that follow the system theme
-    bg      = "#1c1c1c" if dark else "#ffffff"
-    fg      = "#ffffff" if dark else "#000000"
-    fg_sub  = "#aaaaaa" if dark else "#555555"
-    cb_sel  = "#3a3a3a" if dark else "#e0e0e0"
+    bg     = "#1c1c1c" if dark else "#ffffff"
+    fg     = "#ffffff" if dark else "#000000"
+    fg_sub = "#aaaaaa" if dark else "#555555"
 
-    result      = {"desktop": True, "startmenu": True}
+    result       = {"desktop": True, "startmenu": True}
     progress_ref = [0]
-    done_event  = threading.Event()
-    error_ref   = [None]
-    extract_started = threading.Event()
+    done_event   = threading.Event()
+    error_ref    = [None]
+    extracting   = [False]
 
     root = tk.Tk()
     root.title("Mindinguflac Setup")
@@ -107,61 +142,54 @@ def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"460x240+{(sw - 460) // 2}+{(sh - 240) // 2}")
     root.attributes("-topmost", True)
-    root.protocol("WM_DELETE_WINDOW", lambda: None)
 
-    # Use the native Windows ttk theme
+    def _on_close():
+        if not extracting[0]:
+            root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", _on_close)
+
+    if dark:
+        root.update()
+        _apply_dark_titlebar(root.winfo_id())
+
     style = ttk.Style(root)
     try:
         style.theme_use("vista")
     except Exception:
         style.theme_use("default")
 
-    # Title
-    tk.Label(
-        root, text="Mindinguflac Setup",
-        bg=bg, fg=fg, font=("Segoe UI", 12, "bold"),
-    ).pack(pady=(22, 3))
-    tk.Label(
-        root,
-        text="Files need to be unpacked on first run.\nThis only happens once.",
-        bg=bg, fg=fg_sub, font=("Segoe UI", 9), justify="center",
-    ).pack()
+    tk.Label(root, text="Mindinguflac Setup",
+             bg=bg, fg=fg, font=("Segoe UI", 12, "bold")).pack(pady=(22, 3))
+    tk.Label(root,
+             text="Files need to be unpacked on first run.\nThis only happens once.",
+             bg=bg, fg=fg_sub, font=("Segoe UI", 9), justify="center").pack()
 
-    # Shortcut checkboxes
     cb_frame = tk.Frame(root, bg=bg)
-    cb_frame.pack(pady=(12, 0))
+    cb_frame.pack(pady=(14, 0))
 
     var_desktop   = tk.BooleanVar(value=True)
     var_startmenu = tk.BooleanVar(value=True)
+    _make_toggle(cb_frame, "Desktop shortcut",   var_desktop,   bg, fg)
+    _make_toggle(cb_frame, "Start Menu shortcut", var_startmenu, bg, fg)
 
-    ckb_opts = dict(bg=bg, fg=fg, selectcolor=cb_sel,
-                    activebackground=bg, activeforeground=fg,
-                    font=("Segoe UI", 9))
-    tk.Checkbutton(cb_frame, text="Desktop shortcut",
-                   variable=var_desktop, **ckb_opts).pack(side="left", padx=14)
-    tk.Checkbutton(cb_frame, text="Start Menu shortcut",
-                   variable=var_startmenu, **ckb_opts).pack(side="left", padx=14)
-
-    # Progress bar (hidden until Unpack is clicked)
     bar = ttk.Progressbar(root, length=420, mode="determinate", maximum=100)
-    bar.pack(pady=(12, 0))
+    bar.pack(pady=(14, 0))
     bar.pack_forget()
 
-    # Status label
     status_lbl = tk.Label(root, text="", bg=bg, fg=fg_sub, font=("Segoe UI", 8))
     status_lbl.pack(pady=(4, 0))
 
-    # Unpack button
     btn = ttk.Button(root, text="Unpack")
     btn.pack(pady=(10, 0))
 
     def _on_unpack():
+        extracting[0] = True
         btn.pack_forget()
-        bar.pack(pady=(12, 0))
+        bar.pack(pady=(14, 0))
         status_lbl.config(text="Extracting...")
         result["desktop"]   = var_desktop.get()
         result["startmenu"] = var_startmenu.get()
-        extract_started.set()
         threading.Thread(target=_worker, daemon=True).start()
         root.after(80, _tick)
 
