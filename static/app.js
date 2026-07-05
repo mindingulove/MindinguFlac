@@ -2861,6 +2861,11 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
       const data = await api(`/api/video/fetch?${params.toString()}`);
       if (state.videoFetch.trackKey !== key) return state.videoFetch;
       state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "" };
+      if (state.videoFetch.status === "not_found" && state.videoMode && state.sideVideoTrackKey === key) {
+        state.videoMode = false;
+        state.sideVideoTrackKey = "";
+        renderSideCover(track);
+      }
       renderSideVideoButton();
       if (data.status === "ready" || data.status === "not_found") {
         if (data.status === "not_found") showToast("No video found for this track");
@@ -2875,6 +2880,11 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
   // Timed out — treat as not found
   if (state.videoFetch.trackKey === key) {
     state.videoFetch = { trackKey: key, status: "not_found", path: "" };
+    if (state.videoMode && state.sideVideoTrackKey === key) {
+      state.videoMode = false;
+      state.sideVideoTrackKey = "";
+      renderSideCover(track);
+    }
     renderSideVideoButton();
     showToast("No video found for this track");
   }
@@ -2903,10 +2913,11 @@ function renderSideVideoButton() {
   const button = $("sideVideoSwitch");
   const refresh = $("sideVideoRefresh");
   if (!button) return;
-  const available = state.videoMode || canSwitchToVideo();
+  const hasUsableVideo = canSwitchToLocalVideo() || (state.videoFetch.status === "ready" && !!state.videoFetch.path);
+  const available = (state.videoMode && hasUsableVideo) || canSwitchToVideo();
   button.hidden = !available;
-  button.classList.toggle("active", !!state.videoMode);
-  if (state.videoMode) {
+  button.classList.toggle("active", !!state.videoMode && hasUsableVideo);
+  if (state.videoMode && hasUsableVideo) {
     button.innerHTML = '<i class="bi bi-music-note-beamed"></i><span>Switch to audio</span>';
   } else if (state.videoFetch.status === "downloading") {
     button.innerHTML = '<i class="bi bi-hourglass-split"></i><span>Loading video…</span>';
@@ -2915,7 +2926,7 @@ function renderSideVideoButton() {
   } else {
     button.innerHTML = '<i class="bi bi-play-btn"></i><span>Switch to video</span>';
   }
-  if (refresh) refresh.hidden = !state.videoMode;
+  if (refresh) refresh.hidden = !(state.videoMode && hasUsableVideo);
 }
 
 function renderSideCover(track) {

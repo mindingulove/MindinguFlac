@@ -4,6 +4,17 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.2.0] — 2026-07-05
+
+### Added
+- Expanded synced lyrics support and video playback/fallback features.
+
+### Updated
+- SpotiFLAC → 1.3.1.
+- Visible Settings footer, backend user-agent, and macOS About/bundle versions now report `1.2.0`.
+
+---
+
 ## [1.1.4] — 2026-06-27
 
 ### Fixed

@@ -87,6 +87,64 @@ class TestBackendYtpDl(unittest.TestCase):
             "ytsearch15:Ciaccona official audio",
         )
 
+    def test_youtube_search_retries_without_browser_cookies_after_empty_results(self):
+        calls = []
+
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+                calls.append(opts)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, target_url, download=False):
+                if self.opts.get("cookiesfrombrowser"):
+                    return {"entries": []}
+                return {"entries": [{"title": "Song", "webpage_url": "https://www.youtube.com/watch?v=ok"}]}
+
+        yt_dlp = MagicMock()
+        yt_dlp.YoutubeDL = FakeYoutubeDL
+
+        result = backend_ytpdl._extract_youtube_search_info(
+            yt_dlp,
+            "ytsearch15:Song official audio",
+            {"ignoreerrors": True, "cookiesfrombrowser": ("safari",), "format": "bestaudio"},
+        )
+
+        self.assertEqual(len(result["entries"]), 1)
+        self.assertFalse(calls[0]["ignoreerrors"])
+        self.assertEqual(calls[0]["cookiesfrombrowser"], ("safari",))
+        self.assertNotIn("cookiesfrombrowser", calls[1])
+        self.assertNotIn("format", calls[0])
+
+    def test_youtube_search_reports_real_extraction_error(self):
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, target_url, download=False):
+                raise OSError("Failed to resolve www.youtube.com")
+
+        yt_dlp = MagicMock()
+        yt_dlp.YoutubeDL = FakeYoutubeDL
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to resolve www.youtube.com"):
+            backend_ytpdl._extract_youtube_search_info(
+                yt_dlp,
+                "ytsearch15:Song official audio",
+                {"ignoreerrors": True},
+            )
+
     def test_video_youtube_query_prefers_official_video(self):
         self.assertEqual(
             backend_ytpdl._youtube_search_query({

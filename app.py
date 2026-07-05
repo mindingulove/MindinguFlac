@@ -1754,7 +1754,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.1.4"
+    server_version = "SpotiFLACStreamer/1.2.0"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:

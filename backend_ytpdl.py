@@ -1263,10 +1263,54 @@ def _extract_youtube_search_info(yt_dlp, target_url: str, ydl_opts: dict) -> dic
             "force_keyframes_at_cuts",
         }
     }
+    # Search extraction should surface YouTube/network errors. The download path
+    # uses ignoreerrors=True so one bad candidate does not abort all fallbacks,
+    # but inheriting it here turns DNS/cookie/rate-limit failures into an empty
+    # result list and hides the real reason from cache logs.
+    search_opts["ignoreerrors"] = False
     search_opts["extract_flat"] = "in_playlist"
-    with yt_dlp.YoutubeDL(search_opts) as search_ydl:
-        search_info = search_ydl.extract_info(target_url, download=False)
-    return search_info if isinstance(search_info, dict) else None
+
+    def _extract_with(opts: dict) -> dict | None:
+        with yt_dlp.YoutubeDL(opts) as search_ydl:
+            search_info = search_ydl.extract_info(target_url, download=False)
+        return search_info if isinstance(search_info, dict) else None
+
+    def _entry_count(search_info: dict | None) -> int:
+        if not isinstance(search_info, dict):
+            return 0
+        return len([entry for entry in (search_info.get("entries") or []) if isinstance(entry, dict)])
+
+    first_error: Exception | None = None
+    try:
+        search_info = _extract_with(search_opts)
+        if _entry_count(search_info) > 0 or not search_opts.get("cookiesfrombrowser"):
+            return search_info
+    except Exception as exc:
+        first_error = exc
+        if not search_opts.get("cookiesfrombrowser"):
+            raise RuntimeError(f"yt-dlp YouTube search failed for {target_url}: {exc}") from exc
+
+    if search_opts.get("cookiesfrombrowser"):
+        no_cookie_opts = dict(search_opts)
+        no_cookie_opts.pop("cookiesfrombrowser", None)
+        try:
+            search_info = _extract_with(no_cookie_opts)
+            if _entry_count(search_info) > 0:
+                return search_info
+            if first_error is not None:
+                raise RuntimeError(
+                    f"yt-dlp YouTube search returned no entries without browser cookies; "
+                    f"cookie search first failed with: {first_error}"
+                ) from first_error
+        except Exception as exc:
+            if first_error is not None:
+                raise RuntimeError(
+                    f"yt-dlp YouTube search failed with browser cookies and without them; "
+                    f"cookie error: {first_error}; no-cookie error: {exc}"
+                ) from exc
+            raise RuntimeError(f"yt-dlp YouTube search failed without browser cookies: {exc}") from exc
+
+    raise RuntimeError(f"yt-dlp YouTube search returned no entries for {target_url}")
 
 
 def _youtube_ai_race_timeout() -> float:
@@ -1450,7 +1494,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
-        "ignoreerrors": True,
+        "ignoreerrors": False,
         "noplaylist": True,
         "cachedir": str(output_dir / ".cache"),
         "allow_unplayable_formats": False,
@@ -1550,50 +1594,72 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             f"{verb} ({selected.get('score', 0)}%): {selected.get('title', '')[:80]}",
                         )
                     try:
-                        previous_ranges = ydl.params.get("download_ranges")
-                        previous_force_keyframes = ydl.params.get("force_keyframes_at_cuts")
-                        try:
-                            ranges = _video_download_ranges(selected, job)
-                            if ranges:
-                                ydl.params["download_ranges"] = ranges
-                                ydl.params["force_keyframes_at_cuts"] = True
-                                manager._append_cache_event(
-                                    job,
-                                    "trying",
-                                    f"Starting video at music section ({int(selected.get('video_start_offset') or 0)}s)",
-                                )
-                            else:
-                                ydl.params.pop("download_ranges", None)
-                                ydl.params.pop("force_keyframes_at_cuts", None)
-                            result_code = ydl.download([download_url])
-                        finally:
-                            if previous_ranges is not None:
-                                ydl.params["download_ranges"] = previous_ranges
-                            else:
-                                ydl.params.pop("download_ranges", None)
-                            if previous_force_keyframes is not None:
-                                ydl.params["force_keyframes_at_cuts"] = previous_force_keyframes
-                            else:
-                                ydl.params.pop("force_keyframes_at_cuts", None)
+                        def _download_with(download_ydl) -> tuple[int, bool]:
+                            previous_ranges = download_ydl.params.get("download_ranges")
+                            previous_force_keyframes = download_ydl.params.get("force_keyframes_at_cuts")
+                            before = {path.resolve() for path in output_dir.rglob("*") if path.is_file()}
+                            try:
+                                ranges = _video_download_ranges(selected, job)
+                                if ranges:
+                                    download_ydl.params["download_ranges"] = ranges
+                                    download_ydl.params["force_keyframes_at_cuts"] = True
+                                    manager._append_cache_event(
+                                        job,
+                                        "trying",
+                                        f"Starting video at music section ({int(selected.get('video_start_offset') or 0)}s)",
+                                    )
+                                else:
+                                    download_ydl.params.pop("download_ranges", None)
+                                    download_ydl.params.pop("force_keyframes_at_cuts", None)
+                                result = download_ydl.download([download_url])
+                            finally:
+                                if previous_ranges is not None:
+                                    download_ydl.params["download_ranges"] = previous_ranges
+                                else:
+                                    download_ydl.params.pop("download_ranges", None)
+                                if previous_force_keyframes is not None:
+                                    download_ydl.params["force_keyframes_at_cuts"] = previous_force_keyframes
+                                else:
+                                    download_ydl.params.pop("force_keyframes_at_cuts", None)
+                            produced = [path for path in _find_audio_files(output_dir) if path.resolve() not in before]
+                            result_code = result if isinstance(result, int) else 0
+                            return result_code, bool(produced or _find_audio_files(output_dir))
 
-                        # Verify that a file was actually produced.
-                        # With ignoreerrors: True, ydl.download might return success-ish codes even if it skipped.
-                        if result_code == 0 or _find_audio_files(output_dir):
+                        result_code, has_file = _download_with(ydl)
+                        if result_code == 0 or has_file:
                             return download_url
 
-                        # Failed to produce a file — only blacklist for permanent failures,
-                        # NOT for transient bot-detection (403/429). Those URLs are fine,
-                        # just blocked by cookies/rate-limit this session.
-                        db.add_to_blacklist(download_url, "ytp-dl produced no file (likely restricted or unplayable)")
+                        if ydl.params.get("cookiesfrombrowser"):
+                            no_cookie_opts = dict(ydl_opts)
+                            no_cookie_opts.pop("cookiesfrombrowser", None)
+                            manager._append_cache_event(job, "trying", "YouTube candidate produced no file with browser cookies; retrying without cookies...")
+                            with yt_dlp.YoutubeDL(no_cookie_opts) as no_cookie_ydl:
+                                result_code, has_file = _download_with(no_cookie_ydl)
+                            if result_code == 0 or has_file:
+                                return download_url
+
+                        # This can be caused by transient YouTube cookie/session failures, so do not
+                        # permanently blacklist the URL unless yt-dlp raises a concrete non-transient error.
                         if index + 1 < len(attempts):
                             manager._append_cache_event(
-                                job, "trying", f"YouTube candidate failed to download, blacklisting and trying another..."
+                                job, "trying", f"YouTube candidate produced no file, trying another..."
                             )
                         continue
                     except Exception as exc:
                         exc_str = str(exc)
                         # 403/429 = bot detection / rate limit — transient, don't blacklist
-                        transient = any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in"))
+                        transient = any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in", "cookies", "PO Token", "SABR"))
+                        if transient and ydl.params.get("cookiesfrombrowser"):
+                            no_cookie_opts = dict(ydl_opts)
+                            no_cookie_opts.pop("cookiesfrombrowser", None)
+                            manager._append_cache_event(job, "trying", f"YouTube candidate unavailable with browser cookies ({exc_str[:60]}), retrying without cookies...")
+                            try:
+                                with yt_dlp.YoutubeDL(no_cookie_opts) as no_cookie_ydl:
+                                    result_code, has_file = _download_with(no_cookie_ydl)
+                                if result_code == 0 or has_file:
+                                    return download_url
+                            except Exception as retry_exc:
+                                exc_str = f"{exc_str}; no-cookie retry: {retry_exc}"
                         if not transient:
                             db.add_to_blacklist(download_url, f"ytp-dl error: {exc_str[:120]}")
                         if index + 1 < len(attempts):

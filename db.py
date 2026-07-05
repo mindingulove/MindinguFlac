@@ -1142,6 +1142,7 @@ def clear_youtube_blacklist():
     """Remove all YouTube URLs from the blacklist (transient 403/bot-detection blocks)."""
     conn = _get_conn()
     conn.execute("DELETE FROM blacklist WHERE url LIKE '%youtube%' OR url LIKE '%youtu.be%'")
+    conn.execute("DELETE FROM blacklist_aliases WHERE url LIKE '%youtube%' OR url LIKE '%youtu.be%'")
     conn.commit()
 
 
@@ -1207,7 +1208,7 @@ def _musicbrainz_json(url: str) -> dict:
     if cached is not None:
         return cached
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mindinguflac/1.1.4"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mindinguflac/1.2.0"})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             if isinstance(data, dict) and data:
