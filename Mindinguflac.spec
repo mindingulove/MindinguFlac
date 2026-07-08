@@ -133,6 +133,20 @@ for _pkg in ('playwright', 'playwright_stealth'):
     except Exception:
         pass
 
+datas = [
+    (src, dest)
+    for src, dest in datas
+    if Path(src).name != '.endpoints_cache.txt'
+]
+try:
+    import SpotiFLAC.core.endpoints as _spotiflac_endpoints
+
+    _seed = Path(_spotiflac_endpoints._CACHE_FILE)
+    if _seed.is_file():
+        datas.append((str(_seed), 'spotiflac_cache'))
+except Exception:
+    pass
+
 
 helper = Path('build/macos/MindinguflacNowPlayingHelper')
 if helper.is_file():
@@ -152,7 +166,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['runtime_hook_spotiflac_cache.py'],
     excludes=['MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
     noarchive=False,
     optimize=0,
@@ -192,8 +206,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.2.0',
-        'CFBundleVersion': '1.2.0',
+        'CFBundleShortVersionString': '1.2.1',
+        'CFBundleVersion': '1.2.1',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

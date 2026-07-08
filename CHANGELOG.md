@@ -4,6 +4,21 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.2.1] — 2026-07-08
+
+### Fixed
+- SpotiFLAC provider HTTP clients now request identity encoding, preventing broken compressed API responses from crashing cache jobs with `incorrect header check`.
+- Provider decompression failures are now captured as provider failures, allowing the controlled fallback chain to continue instead of surfacing a raw cache-job error.
+- Apple Music is now included in the SpotiFLAC fallback order shown by Settings, with Apple lossless/Atmos quality values mapped to `ALAC` and `ATMOS`.
+- Deezer/provider downloads mislabeled as `.flac` are repaired to their actual audio container before validation and metadata embedding.
+- YouTube downloads now discover explicit `cookies.txt` files and retry without auth options when cookie-based attempts fail.
+- Packaged macOS builds now redirect SpotiFLAC endpoint cache writes to app data, preserving bundle code-signature validity.
+
+### Updated
+- Visible Settings footer, backend user-agent, release helper, and macOS About/bundle versions now report `1.2.1`.
+
+---
+
 ## [1.2.0] — 2026-07-05
 
 ### Added

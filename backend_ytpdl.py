@@ -33,6 +33,58 @@ def _youtube_metadata_opts(**overrides) -> dict:
     return opts
 
 
+def _youtube_cookie_file() -> str:
+    paths: list[Path] = []
+    env_path = os.environ.get("MINDINGUFLAC_YOUTUBE_COOKIES") or os.environ.get("YTDLP_COOKIES")
+    if env_path:
+        paths.append(Path(env_path).expanduser())
+    try:
+        from config import app_data_dir
+
+        paths.append(app_data_dir() / "cookies.txt")
+    except Exception:
+        pass
+    paths.extend([
+        Path.cwd() / "cookies.txt",
+        Path(__file__).resolve().parent / "cookies.txt",
+    ])
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        app_contents = exe_dir.parent if exe_dir.name == "MacOS" else exe_dir
+        paths.extend([
+            exe_dir / "cookies.txt",
+            app_contents / "Resources" / "cookies.txt",
+            Path(getattr(sys, "_MEIPASS", "")) / "cookies.txt",
+        ])
+
+    for path in paths:
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return str(path)
+        except Exception:
+            continue
+    return ""
+
+
+def _add_youtube_cookie_file(opts: dict) -> bool:
+    cookie_file = _youtube_cookie_file()
+    if not cookie_file:
+        return False
+    opts["cookiefile"] = cookie_file
+    return True
+
+
+def _has_youtube_auth_opts(opts: dict) -> bool:
+    return bool(opts.get("cookiefile") or opts.get("cookiesfrombrowser"))
+
+
+def _without_youtube_auth_opts(opts: dict) -> dict:
+    no_auth_opts = dict(opts)
+    no_auth_opts.pop("cookiefile", None)
+    no_auth_opts.pop("cookiesfrombrowser", None)
+    return no_auth_opts
+
+
 def _ffmpeg_location() -> str:
     """Return a path yt-dlp can use to find ffmpeg.
 
@@ -1283,16 +1335,15 @@ def _extract_youtube_search_info(yt_dlp, target_url: str, ydl_opts: dict) -> dic
     first_error: Exception | None = None
     try:
         search_info = _extract_with(search_opts)
-        if _entry_count(search_info) > 0 or not search_opts.get("cookiesfrombrowser"):
+        if _entry_count(search_info) > 0 or not _has_youtube_auth_opts(search_opts):
             return search_info
     except Exception as exc:
         first_error = exc
-        if not search_opts.get("cookiesfrombrowser"):
+        if not _has_youtube_auth_opts(search_opts):
             raise RuntimeError(f"yt-dlp YouTube search failed for {target_url}: {exc}") from exc
 
-    if search_opts.get("cookiesfrombrowser"):
-        no_cookie_opts = dict(search_opts)
-        no_cookie_opts.pop("cookiesfrombrowser", None)
+    if _has_youtube_auth_opts(search_opts):
+        no_cookie_opts = _without_youtube_auth_opts(search_opts)
         try:
             search_info = _extract_with(no_cookie_opts)
             if _entry_count(search_info) > 0:
@@ -1512,16 +1563,18 @@ def run(output_dir: Path, job: dict, manager) -> None:
     if ffmpeg_path:
         ydl_opts["ffmpeg_location"] = ffmpeg_path
 
-    # Use browser cookies to avoid YouTube 403 bot-detection blocks.
     yt_dlp = _get_yt_dlp()
-    for _browser in ("safari", "chrome", "firefox"):
-        try:
-            with yt_dlp.YoutubeDL({"quiet": True, "cookiesfrombrowser": (_browser,)}) as _probe:
-                list(_probe.cookiejar)
-            ydl_opts["cookiesfrombrowser"] = (_browser,)
-            break
-        except Exception:
-            continue
+    # Prefer an explicit yt-dlp cookies.txt file when present; browser cookie
+    # extraction is a fallback because it can fail on locked/encrypted stores.
+    if not _add_youtube_cookie_file(ydl_opts):
+        for _browser in ("safari", "chrome", "firefox"):
+            try:
+                with yt_dlp.YoutubeDL({"quiet": True, "cookiesfrombrowser": (_browser,)}) as _probe:
+                    list(_probe.cookiejar)
+                ydl_opts["cookiesfrombrowser"] = (_browser,)
+                break
+            except Exception:
+                continue
 
     with manager._lock:
         job["status"] = "running"
@@ -1629,10 +1682,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if result_code == 0 or has_file:
                             return download_url
 
-                        if ydl.params.get("cookiesfrombrowser"):
-                            no_cookie_opts = dict(ydl_opts)
-                            no_cookie_opts.pop("cookiesfrombrowser", None)
-                            manager._append_cache_event(job, "trying", "YouTube candidate produced no file with browser cookies; retrying without cookies...")
+                        if _has_youtube_auth_opts(ydl.params):
+                            no_cookie_opts = _without_youtube_auth_opts(ydl_opts)
+                            manager._append_cache_event(job, "trying", "YouTube candidate produced no file with cookies; retrying without cookies...")
                             with yt_dlp.YoutubeDL(no_cookie_opts) as no_cookie_ydl:
                                 result_code, has_file = _download_with(no_cookie_ydl)
                             if result_code == 0 or has_file:
@@ -1649,10 +1701,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         exc_str = str(exc)
                         # 403/429 = bot detection / rate limit — transient, don't blacklist
                         transient = any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in", "cookies", "PO Token", "SABR"))
-                        if transient and ydl.params.get("cookiesfrombrowser"):
-                            no_cookie_opts = dict(ydl_opts)
-                            no_cookie_opts.pop("cookiesfrombrowser", None)
-                            manager._append_cache_event(job, "trying", f"YouTube candidate unavailable with browser cookies ({exc_str[:60]}), retrying without cookies...")
+                        if transient and _has_youtube_auth_opts(ydl.params):
+                            no_cookie_opts = _without_youtube_auth_opts(ydl_opts)
+                            manager._append_cache_event(job, "trying", f"YouTube candidate unavailable with cookies ({exc_str[:60]}), retrying without cookies...")
                             try:
                                 with yt_dlp.YoutubeDL(no_cookie_opts) as no_cookie_ydl:
                                     result_code, has_file = _download_with(no_cookie_ydl)

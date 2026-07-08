@@ -121,6 +121,55 @@ class TestBackendYtpDl(unittest.TestCase):
         self.assertNotIn("cookiesfrombrowser", calls[1])
         self.assertNotIn("format", calls[0])
 
+    @patch("backend_ytpdl._youtube_cookie_file", return_value="/tmp/youtube-cookies.txt")
+    def test_youtube_cookie_file_is_added_to_opts(self, cookie_file):
+        opts = {"quiet": True}
+
+        self.assertTrue(backend_ytpdl._add_youtube_cookie_file(opts))
+        self.assertEqual(opts["cookiefile"], "/tmp/youtube-cookies.txt")
+
+    def test_youtube_cookie_file_checks_app_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_path = Path(tmp) / "cookies.txt"
+            cookie_path.write_text("# Netscape HTTP Cookie File\n.example\tTRUE\t/\tFALSE\t0\tSID\tvalue\n")
+
+            with patch.dict("os.environ", {"MINDINGUFLAC_YOUTUBE_COOKIES": ""}, clear=False), \
+                    patch("config.app_data_dir", return_value=Path(tmp)):
+                self.assertEqual(backend_ytpdl._youtube_cookie_file(), str(cookie_path))
+
+    def test_youtube_search_retries_without_cookie_file_after_empty_results(self):
+        calls = []
+
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+                calls.append(opts)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, target_url, download=False):
+                if self.opts.get("cookiefile"):
+                    return {"entries": []}
+                return {"entries": [{"title": "Song", "webpage_url": "https://www.youtube.com/watch?v=ok"}]}
+
+        yt_dlp = MagicMock()
+        yt_dlp.YoutubeDL = FakeYoutubeDL
+
+        result = backend_ytpdl._extract_youtube_search_info(
+            yt_dlp,
+            "ytsearch15:Song official audio",
+            {"ignoreerrors": True, "cookiefile": "/tmp/youtube-cookies.txt", "format": "bestaudio"},
+        )
+
+        self.assertEqual(len(result["entries"]), 1)
+        self.assertEqual(calls[0]["cookiefile"], "/tmp/youtube-cookies.txt")
+        self.assertNotIn("cookiefile", calls[1])
+        self.assertNotIn("format", calls[0])
+
     def test_youtube_search_reports_real_extraction_error(self):
         class FakeYoutubeDL:
             def __init__(self, opts):

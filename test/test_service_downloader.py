@@ -434,6 +434,19 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertEqual(source["path"], str(converted_path))
         self.assertEqual(manager.jobs["job-id"]["library_path"], str(converted_path))
 
+    def test_repairs_mislabeled_flac_cache_file_before_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "cache" / "job-id"
+            output_dir.mkdir(parents=True)
+            mislabeled = output_dir / "My Vision - Seal.flac"
+            mislabeled.write_bytes(b"\0\0\0\x18ftypM4A " + b"\0" * (101 * 1024))
+
+            audio_files = service_downloader._find_audio_files(output_dir)
+
+        self.assertEqual([path.name for path in audio_files], ["My Vision - Seal.m4a"])
+        self.assertFalse(mislabeled.exists())
+
     def test_cache_activity_reports_created_updated_and_removed_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

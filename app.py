@@ -1611,13 +1611,12 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             from yt_dlp.utils import download_range_func
             opts["download_ranges"] = download_range_func(None, [(start_offset, None)])
             opts["force_keyframes_at_cuts"] = True
-        from backend_ytpdl import _ffmpeg_location
+        from backend_ytpdl import _add_youtube_cookie_file, _ffmpeg_location
         ffmpeg = _ffmpeg_location()
         if ffmpeg:
             opts["ffmpeg_location"] = ffmpeg
 
-        # Try with browser cookies first (avoids YouTube 403 bot-detection),
-        # then fall back to no cookies if all browsers fail.
+        # Prefer an explicit cookies.txt file, then browser cookies, then no cookies.
         def _try_download(download_opts: dict) -> bool:
             tmp_path.unlink(missing_ok=True)
             with yt_dlp.YoutubeDL(download_opts) as ydl:
@@ -1625,11 +1624,18 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             return tmp_path.exists() and tmp_path.stat().st_size > 65536
 
         downloaded = False
-        for _browser in ("safari", "chrome", "firefox", None):
+        attempts = []
+        cookie_opts = dict(opts)
+        if _add_youtube_cookie_file(cookie_opts):
+            attempts.append(cookie_opts)
+        for _browser in ("safari", "chrome", "firefox"):
+            attempt_opts = dict(opts)
+            attempt_opts["cookiesfrombrowser"] = (_browser,)
+            attempts.append(attempt_opts)
+        attempts.append(dict(opts))
+
+        for attempt_opts in attempts:
             try:
-                attempt_opts = dict(opts)
-                if _browser:
-                    attempt_opts["cookiesfrombrowser"] = (_browser,)
                 downloaded = _try_download(attempt_opts)
                 if downloaded:
                     break
@@ -1763,7 +1769,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.2.0"
+    server_version = "SpotiFLACStreamer/1.2.1"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:

@@ -24,6 +24,7 @@ _sf_clients_lock = threading.Lock()
 _sf_clients: dict[str | None, object] = {}
 _sf_async_clients_lock = threading.Lock()
 _sf_async_clients: dict[str | None, object] = {}
+_IDENTITY_ENCODING_HEADERS = {"Accept-Encoding": "identity"}
 
 def _get_sf_client(proxy: str | None = None):
     import httpx
@@ -32,7 +33,12 @@ def _get_sf_client(proxy: str | None = None):
             # Create a dedicated client for this proxy configuration (or direct)
             # SpotiFLAC uses httpx.Client internally; we provide a pooled one.
             limits = httpx.Limits(max_keepalive_connections=30, max_connections=100)
-            _sf_clients[proxy] = httpx.Client(limits=limits, timeout=300.0, proxy=proxy)
+            _sf_clients[proxy] = httpx.Client(
+                limits=limits,
+                timeout=300.0,
+                proxy=proxy,
+                headers=_IDENTITY_ENCODING_HEADERS,
+            )
         return _sf_clients[proxy]
 
 def _get_sf_async_client(proxy: str | None = None):
@@ -40,7 +46,12 @@ def _get_sf_async_client(proxy: str | None = None):
     with _sf_async_clients_lock:
         if proxy not in _sf_async_clients:
             limits = httpx.Limits(max_keepalive_connections=30, max_connections=100)
-            _sf_async_clients[proxy] = httpx.AsyncClient(limits=limits, timeout=300.0, proxy=proxy)
+            _sf_async_clients[proxy] = httpx.AsyncClient(
+                limits=limits,
+                timeout=300.0,
+                proxy=proxy,
+                headers=_IDENTITY_ENCODING_HEADERS,
+            )
         return _sf_async_clients[proxy]
 
 def _patched_get_sync_client(cls):
@@ -58,6 +69,11 @@ async def _patched_get_async_client_safe(cls):
     # SpotiFLAC 1.2.6+ routes provider traffic through this async-only accessor.
     proxy = getattr(_spotiflac_job_local, "proxy", None)
     return _get_sf_async_client(proxy)
+
+
+def _is_decompression_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "decompress" in text and "incorrect header check" in text
 
 _SPOTIFLAC_SERVICE_MAP: dict[str, str] = {
     "apple_music": "apple",
@@ -189,7 +205,7 @@ def prefetch_tor() -> None:
 
 def spotiflac_fallback_services(selected_service: str, quality: str) -> list[str]:
     # Prioritize Qobuz and Deezer over Amazon for better stability
-    fallback_order = ["qobuz", "deezer", "amazon", "tidal"]
+    fallback_order = ["qobuz", "deezer", "amazon", "apple", "tidal"]
     if selected_service in _LOSSY_ONLY_SERVICES:
         peers = []
         lossless = [service for service in fallback_order if service not in _LOSSY_ONLY_SERVICES and service != selected_service]
@@ -203,11 +219,11 @@ def spotiflac_fallback_services(selected_service: str, quality: str) -> list[str
 def spotiflac_provider_quality(requested_quality: str, service: str) -> str:
     requested = str(requested_quality or "LOSSLESS").upper()
     if requested == "DOLBY_ATMOS":
-        return {"tidal": "DOLBY_ATMOS", "qobuz": "27", "amazon": "LOSSLESS", "deezer": "LOSSLESS"}.get(service, requested)
+        return {"tidal": "DOLBY_ATMOS", "qobuz": "27", "amazon": "LOSSLESS", "deezer": "LOSSLESS", "apple": "ATMOS"}.get(service, requested)
     if requested in {"HI_RES", "HI_RES_LOSSLESS"}:
-        return {"tidal": "HI_RES_LOSSLESS", "qobuz": "27", "amazon": "LOSSLESS", "deezer": "LOSSLESS"}.get(service, requested)
+        return {"tidal": "HI_RES_LOSSLESS", "qobuz": "27", "amazon": "LOSSLESS", "deezer": "LOSSLESS", "apple": "ALAC"}.get(service, requested)
     if requested == "LOSSLESS":
-        return {"qobuz": "6"}.get(service, requested)
+        return {"qobuz": "6", "apple": "ALAC"}.get(service, requested)
     return requested_quality
 
 
@@ -458,7 +474,13 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
                     print(f"[Bypass] Quality unavailable: {msg}")
                     return False, False
             return True, False
-        except Exception:
+        except Exception as exc:
+            if _is_decompression_error(exc):
+                captured.append(
+                    "provider response decompression failed; retrying/falling back with identity encoding"
+                )
+            else:
+                captured.append(str(exc) or exc.__class__.__name__)
             return False, False
         finally:
             if old_ua: os.environ["USER_AGENT"] = old_ua

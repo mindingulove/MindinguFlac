@@ -44,6 +44,65 @@ def is_valid_audio_file(path: Path) -> bool:
     return any(byte != 0 for byte in header)
 
 
+def _audio_suffix_from_header(path: Path) -> str:
+    try:
+        if path.stat().st_size < 100 * 1024:
+            return ""
+        with path.open("rb") as audio_file:
+            header = audio_file.read(4096)
+    except Exception:
+        return ""
+
+    if header[:4] == b"fLaC":
+        return ".flac"
+    if b"OggS" in header[:64]:
+        return ".ogg"
+    if header[:4] == b"RIFF" and b"WAVE" in header[:32]:
+        return ".wav"
+    if b"ftyp" in header[:32]:
+        current_suffix = path.suffix.lower()
+        if current_suffix in {".m4a", ".m4b", ".m4p", ".m4r", ".aac", ".mp4", ".mov"}:
+            return current_suffix
+        major = header[8:12].lower()
+        return ".m4a" if major in {b"m4a ", b"m4b ", b"mp42", b"isom"} else ".mp4"
+    if header[:3] == b"ID3" or (len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0):
+        return ".mp3"
+
+    try:
+        from mutagen import File as MutagenFile  # type: ignore
+        audio = MutagenFile(path)
+        mime = next(iter(getattr(audio, "mime", []) or []), "").lower()
+        if "flac" in mime:
+            return ".flac"
+        if "mpeg" in mime or "mp3" in mime:
+            return ".mp3"
+        if "mp4" in mime or "aac" in mime:
+            return ".m4a"
+        if "ogg" in mime or "opus" in mime:
+            return ".ogg"
+        if "wav" in mime or "wave" in mime:
+            return ".wav"
+    except Exception:
+        pass
+    return ""
+
+
+def _repair_audio_extension(path: Path) -> Path:
+    detected = _audio_suffix_from_header(path)
+    if not detected or detected == path.suffix.lower():
+        return path
+    if path.suffix.lower() not in AUDIO_SUFFIXES:
+        return path
+    target = path.with_suffix(detected)
+    try:
+        if target.exists():
+            target.unlink()
+        path.rename(target)
+        return target
+    except OSError:
+        return path
+
+
 AUDIO_SUFFIXES = {
     ".mp3", ".flac", ".m4a", ".mp4", ".mov", ".ogg", ".opus", ".wav", ".aac", ".alac", ".webm",
     ".wma", ".wv", ".ape", ".mpc", ".m4b", ".m4p", ".m4r",
@@ -256,6 +315,7 @@ def _find_audio_files(root: Path, delete_invalid: bool = False) -> list[Path]:
         return files
     for path in root.rglob("*"):
         if path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES:
+            path = _repair_audio_extension(path)
             if is_valid_audio_file(path):
                 files.append(path)
             elif delete_invalid:
