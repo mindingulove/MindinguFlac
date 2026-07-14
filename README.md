@@ -10,7 +10,7 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - Connected Bluetooth devices in the Connect panel now try to activate the matching audio output instead of remaining a dead connected row.
 - When a Bluetooth output is saved or selected but not reachable, playback now falls back to `This computer`.
 - Side video playback now stays active when audio is routed through the native output path, including tracks started from Recently Played.
-- Visible Settings footer, backend user agent, release helper, and macOS About/bundle metadata now report `1.2.2`.
+
 
 ## v1.2.0
 
@@ -18,7 +18,7 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 - Added richer music-video playback/fallback behavior, including reusable video cache records and persisted video overrides.
 - Improved YouTube fallback matching for music videos while keeping metadata checks, blacklist handling, and local scoring safeguards.
 - Updated SpotiFLAC to `1.3.1`, including resolver validation, Spotify token auto-renewal, Tidal proxy fixes, and downloader validation updates.
-- Visible Settings footer, backend user agent, release helper, and macOS About/bundle metadata now report `1.2.0`.
+
 
 <p align="center">
   <img src="docs/screenshots/video.png" width="800" alt="Music video clip playback in the now playing sidebar">
