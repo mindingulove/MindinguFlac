@@ -136,6 +136,9 @@ _spotify_artist_id_cache: OrderedDict[str, str] = OrderedDict()
 _spotify_artist_top_tracks_cache_lock = threading.Lock()
 _spotify_artist_top_tracks_cache: OrderedDict[tuple[str, int, str], list[dict]] = OrderedDict()
 _SPOTIFY_ARTIST_CACHE_SIZE = 128
+_spotify_search_results_cache_lock = threading.Lock()
+_spotify_search_results_cache: OrderedDict[str, dict[str, tuple[object, ...]]] = OrderedDict()
+_SPOTIFY_SEARCH_RESULTS_CACHE_SIZE = 64
 
 
 def clear_spotify_artist_caches() -> None:
@@ -143,6 +146,8 @@ def clear_spotify_artist_caches() -> None:
         _spotify_artist_id_cache.clear()
     with _spotify_artist_top_tracks_cache_lock:
         _spotify_artist_top_tracks_cache.clear()
+    with _spotify_search_results_cache_lock:
+        _spotify_search_results_cache.clear()
 
 
 def _numeric_plays(value: object) -> int:
@@ -172,6 +177,77 @@ def _legacy_track_item(item: object) -> dict:
     }
 
 
+def _track_artist_names(item: object) -> list[str]:
+    if isinstance(item, dict):
+        raw_artists = item.get("artists")
+        if isinstance(raw_artists, list):
+            names = []
+            for artist in raw_artists:
+                if not isinstance(artist, dict):
+                    continue
+                name = str(artist.get("name") or "").strip()
+                if name:
+                    names.append(name)
+            return names
+        if isinstance(raw_artists, str):
+            return [name.strip() for name in raw_artists.split(",") if name.strip()]
+    raw_value = getattr(item, "artists", "")
+    return [name.strip() for name in str(raw_value or "").split(",") if name.strip()]
+
+
+def _filter_search_tracks_for_artist(items: list[object], artist_name: str, limit: int) -> list[object]:
+    target = norm_name(artist_name)
+    if not target:
+        return list(items[:limit])
+
+    exact_matches = []
+    loose_matches = []
+    seen = set()
+
+    for item in items:
+        artist_names = _track_artist_names(item)
+        if not artist_names:
+            continue
+        normalized = [norm_name(name) for name in artist_names if name]
+        if not normalized:
+            continue
+
+        track_id = ""
+        if isinstance(item, dict):
+            track_id = str(item.get("id") or item.get("uri") or item.get("name") or "")
+        else:
+            track_id = str(getattr(item, "id", "") or getattr(item, "external_url", "") or getattr(item, "title", ""))
+        if track_id in seen:
+            continue
+
+        if target in normalized:
+            seen.add(track_id)
+            exact_matches.append(item)
+            continue
+
+        joined = " ".join(normalized)
+        if target in joined:
+            seen.add(track_id)
+            loose_matches.append(item)
+
+    matches = exact_matches or loose_matches
+    return matches[:limit]
+
+
+def _search_track_by_spotify_id(items: list[object], spotify_id: str) -> object | None:
+    target = str(spotify_id or "").strip()
+    if not target:
+        return None
+    for item in items:
+        if isinstance(item, dict):
+            item_id = str(item.get("id") or "").strip()
+        else:
+            item_id = str(getattr(item, "id", "") or "").strip()
+        if item_id == target:
+            return item
+    return None
+
+
 def _legacy_simple_item(item: dict, kind: str) -> dict:
     cover_url = item.get("cover_url", "")
     artists = item.get("artists", "")
@@ -188,6 +264,99 @@ def _legacy_simple_item(item: dict, kind: str) -> dict:
         "popularity": _numeric_plays(item.get("plays", 0)) // 10000,
         "type": kind,
     }
+
+
+def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = False) -> dict[str, list]:
+    key = str(query or "").strip().lower()
+    if not force_refresh:
+        with _spotify_search_results_cache_lock:
+            cached = _spotify_search_results_cache.get(key)
+            if cached is not None:
+                _spotify_search_results_cache.move_to_end(key)
+                return {name: list(values) for name, values in cached.items()}
+
+    client = _get_spotify_client(force_refresh=force_refresh)
+    if not client:
+        return {"tracks": [], "albums": [], "artists": [], "playlists": []}
+    try:
+        from spotiflac_compat import call_sync_or_async
+
+        results = call_sync_or_async(client, "search", "search_async", query, limit=limit) or {}
+        normalized = {
+            "tracks": list(results.get("tracks", []) or []),
+            "albums": list(results.get("albums", []) or []),
+            "artists": list(results.get("artists", []) or []),
+            "playlists": list(results.get("playlists", []) or []),
+        }
+        if normalized["albums"] or normalized["artists"] or normalized["playlists"] or hasattr(client, "search"):
+            if any(normalized.values()):
+                with _spotify_search_results_cache_lock:
+                    _spotify_search_results_cache[key] = {name: tuple(values) for name, values in normalized.items()}
+                    _spotify_search_results_cache.move_to_end(key)
+                    while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
+                        _spotify_search_results_cache.popitem(last=False)
+            return normalized
+    except Exception:
+        pass
+
+    web_client = getattr(client, "web_client", None)
+    payload_builder = getattr(client, "_search_payload", None)
+    if web_client and payload_builder:
+        try:
+            data = web_client.query(payload_builder(query, limit))
+            search_v2 = data.get("data", {}).get("searchV2", {})
+        except Exception:
+            search_v2 = {}
+        if search_v2:
+            normalized = {
+                "tracks": list(results.get("tracks", []) if "results" in locals() else []),
+                "albums": _raw_search_simple_items(client, query, limit, "album"),
+                "artists": _raw_search_simple_items(client, query, limit, "artist"),
+                "playlists": [],
+            }
+            if any(normalized.values()):
+                with _spotify_search_results_cache_lock:
+                    _spotify_search_results_cache[key] = {name: tuple(values) for name, values in normalized.items()}
+                    _spotify_search_results_cache.move_to_end(key)
+                    while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
+                        _spotify_search_results_cache.popitem(last=False)
+            return normalized
+
+    normalized = {
+        "tracks": list(results.get("tracks", []) or []),
+        "albums": [],
+        "artists": [],
+        "playlists": [],
+    }
+    if any(normalized.values()):
+        with _spotify_search_results_cache_lock:
+            _spotify_search_results_cache[key] = {name: tuple(values) for name, values in normalized.items()}
+            _spotify_search_results_cache.move_to_end(key)
+            while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
+                _spotify_search_results_cache.popitem(last=False)
+    return normalized
+
+
+def _best_artist_search_match(artist_name: str, items: list[dict]) -> dict:
+    if not items:
+        return {}
+    target = norm_name(artist_name)
+    exact = []
+    partial = []
+    for item in items:
+        name = str(item.get("name") or "").strip()
+        normalized = norm_name(name)
+        if not normalized:
+            continue
+        if normalized == target:
+            exact.append(item)
+        elif target and target in normalized:
+            partial.append(item)
+    if exact:
+        return exact[0]
+    if partial:
+        return partial[0]
+    return items[0] if items else {}
 
 
 def _raw_search_simple_items(client: object, query: str, limit: int, kind: str) -> list[dict]:
@@ -386,10 +555,12 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
             client, "get_artist_profile", "get_artist_profile_async", artist_id
         )
         artist = profile.get("profile", {}).get("name", "")
-        tracks = (
+        tracks = _filter_search_tracks_for_artist(
             call_sync_or_async(client, "search_tracks", "search_tracks_async", artist, limit=limit)
             if artist
-            else []
+            else [],
+            artist,
+            limit,
         )
         return {"tracks": [_legacy_track_item(item) for item in tracks]}
 
@@ -1045,16 +1216,14 @@ def spotify_artist_artwork(artist: str, artist_id: str = "") -> str:
     for attempt in range(2):
         sp_id = artist_id or spotify_artist_id(artist)
         if not sp_id:
-            data = _sp("search", q=f"artist:{artist}", type="artist", limit=3)
-            items = (data.get("artists") or {}).get("items") or []
-            for a in items:
-                if norm_name(a.get("name", "")) == norm_name(artist):
-                    images = a.get("images") or []
-                    if images:
-                        result = proxy_artwork_url(images[0]["url"])
-                        with _spotify_artist_id_cache_lock:
-                            _spotify_artist_id_cache[f"artwork:{key[0]}::{key[1]}"] = result
-                        return result
+            results = _spotify_search_results(artist, limit=10, force_refresh=attempt > 0)
+            match = _best_artist_search_match(artist, results.get("artists", []))
+            cover_url = str(match.get("cover_url") or "").strip()
+            if cover_url:
+                result = proxy_artwork_url(cover_url)
+                with _spotify_artist_id_cache_lock:
+                    _spotify_artist_id_cache[f"artwork:{key[0]}::{key[1]}"] = result
+                return result
             if attempt == 0:
                 _reset_spotify_client_cache()
                 continue
@@ -1064,6 +1233,15 @@ def spotify_artist_artwork(artist: str, artist_id: str = "") -> str:
         images = data.get("images") or []
         if images:
             result = proxy_artwork_url(images[0]["url"])
+            with _spotify_artist_id_cache_lock:
+                _spotify_artist_id_cache[f"artwork:{key[0]}::{key[1]}"] = result
+            return result
+
+        results = _spotify_search_results(artist, limit=10, force_refresh=attempt > 0)
+        match = _best_artist_search_match(artist, results.get("artists", []))
+        cover_url = str(match.get("cover_url") or "").strip()
+        if cover_url:
+            result = proxy_artwork_url(cover_url)
             with _spotify_artist_id_cache_lock:
                 _spotify_artist_id_cache[f"artwork:{key[0]}::{key[1]}"] = result
             return result
@@ -1093,19 +1271,17 @@ def spotify_artist_id(artist_name: str) -> str:
             return cached
 
     for attempt in range(2):
-        data = _sp("search", q=f'artist:"{artist_name}"', type="artist", limit=3)
-        sp_artists = (data.get("artists") or {}).get("items") or []
-        for item in sp_artists:
-            if norm_name(item.get("name", "")) == norm_name(artist_name):
-                artist_id = item.get("id", "")
-                if artist_id:
-                    with _spotify_artist_id_cache_lock:
-                        _spotify_artist_id_cache[key] = artist_id
-                        _spotify_artist_id_cache.move_to_end(key)
-                        while len(_spotify_artist_id_cache) > _SPOTIFY_ARTIST_CACHE_SIZE:
-                            _spotify_artist_id_cache.popitem(last=False)
-                return artist_id
-        fallback_id = (sp_artists[0].get("id") or "") if sp_artists else ""
+        results = _spotify_search_results(artist_name, limit=10, force_refresh=attempt > 0)
+        match = _best_artist_search_match(artist_name, results.get("artists", []))
+        artist_id = str(match.get("id") or "").strip()
+        if artist_id:
+            with _spotify_artist_id_cache_lock:
+                _spotify_artist_id_cache[key] = artist_id
+                _spotify_artist_id_cache.move_to_end(key)
+                while len(_spotify_artist_id_cache) > _SPOTIFY_ARTIST_CACHE_SIZE:
+                    _spotify_artist_id_cache.popitem(last=False)
+            return artist_id
+        fallback_id = str((results.get("artists") or [{}])[0].get("id") or "").strip() if results.get("artists") else ""
         if fallback_id:
             with _spotify_artist_id_cache_lock:
                 _spotify_artist_id_cache[key] = fallback_id
@@ -1139,6 +1315,82 @@ def _resolve_spotify_artist_id(artist_name: str, artist_id: str = "") -> str:
     return resolved_id or supplied_id
 
 
+def _extract_open_spotify_artist_top_tracks(html_text: str, artist_name: str, limit: int = 20) -> list[dict]:
+    text = str(html_text or "")
+    if not text:
+        return []
+    start = text.find(">Popular</")
+    if start < 0:
+        start = text.find("data-testid=\"track-row\"")
+    if start < 0:
+        return []
+    section = text[start:start + 50000]
+    rows = re.findall(
+        r'(data-testid="track-row".*?)(?=data-testid="track-row"|<h2[^>]*>|</body>)',
+        section,
+        re.IGNORECASE | re.DOTALL,
+    )
+    results = []
+    seen_ids = set()
+    for row in rows:
+        track_id_match = re.search(
+            r'spotify:track:([A-Za-z0-9]+)',
+            row,
+            re.IGNORECASE,
+        )
+        track_id = (track_id_match.group(1) if track_id_match else "").strip()
+        if not track_id or track_id in seen_ids:
+            continue
+        title_match = re.search(
+            r'e-10451-line-clamp"[^>]*>([^<]+)</span>',
+            row,
+            re.IGNORECASE | re.DOTALL,
+        )
+        title = html.unescape((title_match.group(1) if title_match else "").strip())
+        if not title:
+            title = html.unescape(str(re.search(r'aria-label="([^"]+)"', row) or "").strip())
+        if not title:
+            continue
+        image_match = re.search(r'<img[^>]+src="([^"]+)"', row, re.IGNORECASE)
+        plays_matches = re.findall(r'>([\d,]+)</span>', row, re.IGNORECASE)
+        plays = _numeric_plays(plays_matches[-1] if plays_matches else 0)
+        cover_url = (image_match.group(1) if image_match else "").strip()
+        seen_ids.add(track_id)
+        results.append({
+            "id": track_id,
+            "name": title,
+            "artists": [{"name": artist_name}],
+            "album": {
+                "name": "",
+                "images": [{"url": cover_url}] if cover_url else [],
+            },
+            "duration_ms": 0,
+            "external_urls": {"spotify": f"https://open.spotify.com/track/{track_id}"},
+            "external_ids": {"isrc": ""},
+            "popularity": plays // 10000,
+        })
+        if len(results) >= max(1, int(limit or 0)):
+            break
+    return results
+
+
+@functools.lru_cache(maxsize=32)
+def _load_open_spotify_artist_page(artist_id: str) -> str:
+    if not artist_id:
+        return ""
+    return _web_request_text(
+        f"https://open.spotify.com/artist/{artist_id}",
+        headers={"User-Agent": _WEB_MOBILE_USER_AGENT},
+    )
+
+
+def _load_artist_top_tracks_from_open_page(artist_id: str, artist_name: str, limit: int = 20) -> list[dict]:
+    if not artist_id:
+        return []
+    html_text = _load_open_spotify_artist_page(artist_id)
+    return _extract_open_spotify_artist_top_tracks(html_text, artist_name, limit=limit)
+
+
 def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str = "") -> list[dict]:
     key = (artist_name.strip().lower(), int(limit or 0), artist_id.strip())
     with _spotify_artist_top_tracks_cache_lock:
@@ -1151,24 +1403,64 @@ def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str 
         sp_artist_id = artist_id or spotify_artist_id(artist_name)
         if not sp_artist_id:
             return []
-        data = _sp(f"artists/{sp_artist_id}/top-tracks", market="US")
-        sp_tracks = (data.get("tracks") or [])[:limit]
+        used_search_fallback = False
+        search_results = _spotify_search_results(
+            artist_name,
+            limit=limit * 3,
+            force_refresh=attempt > 0,
+        )
+        sp_tracks = _filter_search_tracks_for_artist(
+            list(search_results.get("tracks", []) or []),
+            artist_name,
+            limit,
+        )
+        if sp_tracks:
+            used_search_fallback = True
+        open_page_tracks = []
         if not sp_tracks:
             client = _get_spotify_client(force_refresh=attempt > 0)
-            search_tracks = getattr(client, "search_tracks", None)
-            if search_tracks:
-                try:
-                    sp_tracks = list(search_tracks(artist_name, limit=limit) or [])[:limit]
-                except Exception:
-                    sp_tracks = []
+            try:
+                sp_tracks = _raw_artist_top_track_items(client, sp_artist_id, limit=limit) if client else []
+            except Exception:
+                sp_tracks = []
+        if not sp_tracks:
+            try:
+                open_page_tracks = _load_artist_top_tracks_from_open_page(sp_artist_id, artist_name, limit=limit)
+            except Exception:
+                open_page_tracks = []
+            sp_tracks = open_page_tracks
+        elif used_search_fallback or all(_numeric_plays(getattr(track, "plays", 0) if not isinstance(track, dict) else track.get("plays", 0)) <= 0 for track in sp_tracks):
+            try:
+                open_page_tracks = _load_artist_top_tracks_from_open_page(sp_artist_id, artist_name, limit=limit)
+            except Exception:
+                open_page_tracks = []
+        open_page_track_map = {
+            str(item.get("id") or "").strip(): item
+            for item in open_page_tracks
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }
         results = []
         for t in sp_tracks:
-            legacy_track = _legacy_track_item(t)
+            matched_track = None
+            if isinstance(t, dict):
+                matched_track = _search_track_by_spotify_id(
+                    list(search_results.get("tracks", []) or []),
+                    t.get("id", ""),
+                )
+            legacy_track = _legacy_track_item(matched_track or t)
             images = (legacy_track.get("album") or {}).get("images") or []
             art = proxy_artwork_url(images[0]["url"]) if images else ""
             album_name = (legacy_track.get("album") or {}).get("name", "")
             if not art and album_name:
                 art = spotify_album_artwork(artist_name, album_name)
+            plays = 0
+            open_page_track = open_page_track_map.get(str(legacy_track.get("id") or "").strip())
+            if open_page_track:
+                plays = _numeric_plays(open_page_track.get("popularity", 0)) * 10000
+            if isinstance(t, dict):
+                plays = max(plays, _numeric_plays(t.get("popularity", 0)) * 10000)
+            if plays <= 0:
+                plays = legacy_track.get("popularity", 0) * 10000
             results.append({
                 "title": legacy_track.get("name", ""),
                 "artist": artist_name,
@@ -1176,7 +1468,7 @@ def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str 
                 "artwork_url": art,
                 "duration": format_duration_ms(legacy_track.get("duration_ms", 0)),
                 "length": legacy_track.get("duration_ms", 0),
-                "plays": legacy_track.get("popularity", 0) * 10000,
+                "plays": plays,
                 "spotify_url": (legacy_track.get("external_urls") or {}).get("spotify", ""),
                 "spotify_id": legacy_track.get("id", ""),
                 "isrc": (legacy_track.get("external_ids") or {}).get("isrc", ""),
@@ -1225,94 +1517,77 @@ class BaseMusicIndexer:
 
 class SpotifyIndexer(BaseMusicIndexer):
     def search(self, query: str) -> list[dict]:
-        search_v2 = {}
         for attempt in range(2):
-            client = _get_spotify_client(force_refresh=attempt > 0)
-            web_client = getattr(client, "web_client", None)
-            payload_builder = getattr(client, "_search_payload", None)
-            if not web_client or not payload_builder:
-                if attempt == 0:
-                    _reset_spotify_client_cache()
-                    continue
-                return []
-            try:
-                data = web_client.query(payload_builder(query, 20))
-                search_v2 = data.get("data", {}).get("searchV2", {})
-            except Exception:
-                if attempt == 0:
-                    _reset_spotify_client_cache()
-                    continue
-                return []
-            if search_v2 or attempt > 0:
+            results = _spotify_search_results(query, limit=20, force_refresh=attempt > 0)
+            if any(results.values()) or attempt > 0:
                 break
             _reset_spotify_client_cache()
-        if not search_v2:
+        else:
+            results = {"tracks": [], "albums": [], "artists": [], "playlists": []}
+
+        if not any(results.values()):
             return []
 
-        def _join_artists(node):
-            if not node: return "", ""
-            items = node.get("items") or []
-            names = ", ".join(a.get("profile", {}).get("name") or a.get("name") or ""
-                              for a in items if isinstance(a, dict))
-            first_id = ""
-            if items:
-                # Some API versions use 'uri', others use 'data' -> 'uri'
-                first = items[0]
-                uri = (first.get("uri") or (first.get("data") or {}).get("uri")) if isinstance(first, dict) else ""
-                if uri: first_id = uri.split(":")[-1]
-            return names, first_id
-
-        results = []
+        items = []
 
         # Tracks
-        for item in search_v2.get("tracksV2", {}).get("items", []):
-            t = item.get("item", {}).get("data", {})
-            if not t.get("id"): continue
-            cover = _best_raw_image(t.get("albumOfTrack", {}).get("coverArt"))
-            names, aid = _join_artists(t.get("artists"))
-            results.append({
-                "type": "track", "title": t.get("name", "Unknown"),
-                "artist": names, "artist_id": aid,
-                "album": t.get("albumOfTrack", {}).get("name", "Unknown"),
-                "artwork_url": proxy_artwork_url(cover),
-                "spotify_url": f"https://open.spotify.com/track/{t['id']}",
-                "spotify_id": t["id"], "isrc": "",
-                "source": "Spotify", "plays": _numeric_plays(t.get("playcount")),
+        for track in results.get("tracks", []):
+            legacy_track = _legacy_track_item(track)
+            artists = legacy_track.get("artists") or []
+            artist_name = ", ".join(
+                a.get("name", "") for a in artists if isinstance(a, dict) and a.get("name")
+            )
+            artist_id = ""
+            if artists and isinstance(artists[0], dict):
+                artist_id = str(artists[0].get("id") or "").strip()
+            images = (legacy_track.get("album") or {}).get("images") or []
+            cover = images[0].get("url", "") if images and isinstance(images[0], dict) else ""
+            items.append({
+                "type": "track",
+                "title": legacy_track.get("name", "Unknown"),
+                "artist": artist_name,
+                "artist_id": artist_id,
+                "album": (legacy_track.get("album") or {}).get("name", "Unknown"),
+                "artwork_url": proxy_artwork_url(cover) if cover else "",
+                "spotify_url": (legacy_track.get("external_urls") or {}).get("spotify", ""),
+                "spotify_id": legacy_track.get("id", ""),
+                "isrc": (legacy_track.get("external_ids") or {}).get("isrc", ""),
+                "source": "Spotify",
+                "plays": _numeric_plays(getattr(track, "plays", 0)),
             })
 
         # Albums
-        for item in search_v2.get("albumsV2", {}).get("items", []):
-            node = item.get("data", {})
-            uri = node.get("uri", "")
-            if not uri: continue
-            album_id = uri.split(":")[-1]
-            cover = _best_raw_image(node.get("coverArt"))
-            names, aid = _join_artists(node.get("artists"))
-            results.append({
-                "type": "album", "title": node.get("name", "Unknown"),
-                "artist": names, "artist_id": aid,
-                "album": node.get("name", ""),
-                "artwork_url": proxy_artwork_url(cover),
-                "spotify_id": album_id, "source": "Spotify", "plays": 0,
+        for album in results.get("albums", []):
+            cover = str(album.get("cover_url") or "").strip()
+            items.append({
+                "type": "album",
+                "title": album.get("name", "Unknown"),
+                "artist": album.get("artists", ""),
+                "artist_id": "",
+                "album": album.get("name", ""),
+                "artwork_url": proxy_artwork_url(cover) if cover else "",
+                "spotify_id": album.get("id", ""),
+                "source": "Spotify",
+                "plays": 0,
             })
 
         # Artists
-        for item in search_v2.get("artists", {}).get("items", []):
-            node = item.get("data", {})
-            uri = node.get("uri", "")
-            if not uri: continue
-            artist_id = uri.split(":")[-1]
-            # Try visuals -> avatarImage, then visualIdentity -> squareCoverImage
-            cover = _best_raw_image(node.get("visuals", {}).get("avatarImage") if node.get("visuals") else None) or \
-                    _best_raw_image(node.get("visualIdentity", {}).get("squareCoverImage") if node.get("visualIdentity") else None)
-            name = node.get("profile", {}).get("name", "Unknown")
-            results.append({
-                "type": "artist", "title": name, "artist": name, "artist_id": artist_id,
-                "artwork_url": proxy_artwork_url(cover),
-                "spotify_id": artist_id, "source": "Spotify", "plays": 0,
+        for artist in results.get("artists", []):
+            cover = str(artist.get("cover_url") or "").strip()
+            name = artist.get("name", "Unknown")
+            artist_id = artist.get("id", "")
+            items.append({
+                "type": "artist",
+                "title": name,
+                "artist": name,
+                "artist_id": artist_id,
+                "artwork_url": proxy_artwork_url(cover) if cover else "",
+                "spotify_id": artist_id,
+                "source": "Spotify",
+                "plays": 0,
             })
 
-        return results
+        return items
 
     def top_tracks(self, limit: int = 20) -> list[dict]:
         results = []
@@ -1655,6 +1930,34 @@ def album_metadata(config: AppConfig, artist: str, album: str, track: str = "") 
     return {"artist": artist, "album": album, "title": track}
 
 
+def _normalize_artist_about_payload(about: dict | None) -> dict:
+    payload = dict(about or {})
+    gallery = payload.get("gallery")
+    if not isinstance(gallery, list):
+        gallery = []
+    payload["gallery"] = gallery
+    payload["top_cities"] = payload.get("top_cities") or []
+    payload["related_artists"] = payload.get("related_artists") or []
+    payload["monthly_listeners"] = int(payload.get("monthly_listeners") or 0)
+    payload["followers"] = int(payload.get("followers") or 0)
+    payload["global_chart_position"] = int(payload.get("global_chart_position") or 0)
+    payload["verified"] = bool(payload.get("verified"))
+    payload["avatar"] = str(payload.get("avatar") or "")
+    hero_image = str(payload.get("hero_image") or "")
+    if not hero_image:
+        hero_image = payload["avatar"]
+    if not hero_image and gallery:
+        hero_image = str((gallery[0] or {}).get("url") or "")
+    payload["hero_image"] = hero_image
+    payload["biography"] = str(payload.get("biography") or "").strip()
+    bio_html = payload.get("biography_html")
+    if bio_html:
+        payload["biography_html"] = str(bio_html)
+    payload["bio_source"] = str(payload.get("bio_source") or "")
+    payload["stats_source"] = str(payload.get("stats_source") or "")
+    return payload
+
+
 def artist_about(artist_id: str, artist_name: str) -> dict:
     # Tracks played from album pages carry no artist_id; resolve it from the
     # (full, untruncated) artist name so the sidebar shows the right artist's
@@ -1665,7 +1968,7 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
         except Exception:
             artist_id = ""
 
-    about = spotify_artist_about(artist_id)
+    about = _normalize_artist_about_payload(spotify_artist_about(artist_id))
 
     # A non-empty but wrong id resolves to nothing on Spotify's API and would
     # otherwise short-circuit the reliable name-based lookup, leaving the sidebar
@@ -1680,7 +1983,7 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
         except Exception:
             resolved_id = ""
         if resolved_id and resolved_id != artist_id:
-            retry = spotify_artist_about(resolved_id)
+            retry = _normalize_artist_about_payload(spotify_artist_about(resolved_id))
             if retry.get("monthly_listeners") or retry.get("followers"):
                 about, artist_id = retry, resolved_id
 
@@ -1690,7 +1993,7 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
         try:
             art = spotify_artist_artwork(artist_name, artist_id)
             if art:
-                about = {**about, "avatar": art}
+                about = _normalize_artist_about_payload({**about, "avatar": art})
         except Exception:
             pass
 
@@ -1727,7 +2030,7 @@ def artist_about(artist_id: str, artist_name: str) -> dict:
             about["biography"] = "Official artist information is currently unavailable."
             about["bio_source"] = "Spotify"
 
-    return about
+    return _normalize_artist_about_payload(about)
 
 
 
@@ -2265,6 +2568,7 @@ def enrich_albums_batch(results: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 _WEB_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
+_WEB_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 _WEB_QUERY_URL = "https://api-partner.spotify.com/pathfinder/v2/query"
 _WEB_APP_VERSION = "896000000"
 _WEB_REQUEST_TIMEOUT_S = 18
@@ -2514,9 +2818,121 @@ def _load_artist_about(artist_id: str) -> dict:
     }
 
 
-def spotify_artist_about(artist_id: str) -> dict:
+def _parse_number_compact(text: str) -> int:
+    raw = str(text or "").strip()
+    if not raw:
+        return 0
+    normalized = raw.replace(",", "").replace(" ", "")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([KMB])?", normalized, re.IGNORECASE)
+    if not match:
+        digits = re.sub(r"[^\d]", "", raw)
+        return int(digits) if digits else 0
+    value = float(match.group(1))
+    suffix = (match.group(2) or "").upper()
+    multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1)
+    return int(value * multiplier)
+
+
+def _extract_open_spotify_artist_about(html_text: str, artist_id: str = "") -> dict:
+    text = str(html_text or "")
+    if not text:
+        return {}
+
+    def _match(pattern: str, flags: int = 0) -> str:
+        found = re.search(pattern, text, flags)
+        return found.group(1).strip() if found else ""
+
+    monthly_listeners = 0
+    for pattern in (
+        r'data-testid="monthly-listeners-label"[^>]*>([\d,\.KMBkmb ]+)\s+monthly listeners<',
+        r'>About</h2><div[^>]*>([\d,\.KMBkmb ]+)\s+monthly listeners<',
+        r'content="[^"]*Artist\s+[·•]\s+([\d,\.KMBkmb ]+)\s+monthly listeners',
+    ):
+        monthly_listeners = _parse_number_compact(_match(pattern, re.IGNORECASE | re.DOTALL))
+        if monthly_listeners > 0:
+            break
+
+    biography_html = ""
+    about_match = re.search(
+        r'>About</h2>.*?data-testid="expandable-description"[^>]*>.*?<span[^>]*>(.*?)</span>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if about_match:
+        biography_html = about_match.group(1).strip()
+    biography = re.sub(r"<[^>]+>", "", html.unescape(biography_html or ""))
+    biography = re.sub(r"\s+\n", "\n", biography)
+    biography = re.sub(r"\n{3,}", "\n\n", biography).strip()
+
+    followers = _parse_number_compact(_match(
+        r'<p[^>]*>\s*([\d,\.KMBkmb ]+)\s*</p>\s*<p[^>]*>\s*Followers\s*</p>',
+        re.IGNORECASE | re.DOTALL,
+    ))
+
+    related_artists = []
+    fans_idx = text.find(">Fans also like</h2>")
+    if fans_idx >= 0:
+        section = text[fans_idx:fans_idx + 20000]
+        for href, image, name in re.findall(
+            r'href="/artist/([^"/?]+)"[^>]*>.*?<img[^>]+src="([^"]+)"[^>]*>.*?<span[^>]*>([^<]+)</span>',
+            section,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            artist_name = html.unescape(name).strip()
+            if not artist_name:
+                continue
+            related_artists.append({
+                "name": artist_name,
+                "id": href.strip(),
+                "image": image.strip(),
+            })
+        deduped = []
+        seen_related = set()
+        for item in related_artists:
+            key = (item.get("id") or "", item.get("name") or "")
+            if key in seen_related:
+                continue
+            seen_related.add(key)
+            deduped.append(item)
+        related_artists = deduped
+
+    avatar = _match(r'<meta property="og:image" content="([^"]+)"', re.IGNORECASE)
+    name = html.unescape(_match(r"<title>(.*?)\s*\|\s*Spotify</title>", re.IGNORECASE | re.DOTALL))
+
+    result = {
+        "name": name,
+        "monthly_listeners": monthly_listeners,
+        "followers": followers,
+        "biography": biography,
+        "bio_source": "Spotify",
+        "stats_source": "Spotify",
+        "avatar": proxy_artwork_url(avatar) if avatar else "",
+        "hero_image": proxy_artwork_url(avatar) if avatar else "",
+        "gallery": [],
+        "top_cities": [],
+        "verified": False,
+        "related_artists": related_artists,
+    }
+    if biography_html:
+        result["biography_html"] = f"<p>{biography_html}</p>"
+    if artist_id and not result["name"]:
+        result["name"] = artist_id
+    return result
+
+
+def _load_artist_about_from_open_page(artist_id: str) -> dict:
     if not artist_id:
         return {}
+    html_text = _web_request_text(
+        f"https://open.spotify.com/artist/{artist_id}",
+        headers={"User-Agent": _WEB_MOBILE_USER_AGENT},
+    )
+    return _extract_open_spotify_artist_about(html_text, artist_id)
+
+
+def spotify_artist_about(artist_id: str) -> dict:
+    if not artist_id:
+        return _normalize_artist_about_payload({})
     cached = _artist_about_cache.get(artist_id)
     if cached:
         ttl = _ARTIST_ABOUT_CACHE_TTL_S if cached[1] else _ARTIST_ABOUT_FAILURE_TTL_S
@@ -2530,6 +2946,17 @@ def spotify_artist_about(artist_id: str) -> dict:
         if cached:
             return cached[1]
         result = {}
+    if not (
+        result.get("monthly_listeners")
+        or result.get("followers")
+        or (result.get("biography") or "").strip()
+        or result.get("related_artists")
+    ):
+        try:
+            result = _load_artist_about_from_open_page(artist_id)
+        except Exception as e:
+            print(f"[SpotifyWeb] Open page about fallback failed for {artist_id}: {e}")
+    result = _normalize_artist_about_payload(result)
     _artist_about_cache[artist_id] = (time.time(), result)
     return result
 

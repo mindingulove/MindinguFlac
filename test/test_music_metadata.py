@@ -106,6 +106,74 @@ class FakeDiscographyClient(FakePublicSpotifyClient):
         ]
 
 
+OPEN_SPOTIFY_ARTIST_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Michael Jackson | Spotify</title>
+  <meta property="og:image" content="https://i.scdn.co/image/ab6761610000e5eb997cc9a4aec335d46c9481fd"/>
+  <meta property="og:description" content="Artist · 104.7M monthly listeners."/>
+</head>
+<body>
+  <div data-testid="artist-entity-view">
+    <div data-testid="monthly-listeners-label">104,725,274 monthly listeners</div>
+  </div>
+  <div>
+    <h2>About</h2>
+    <div>104,725,274 monthly listeners</div>
+    <div data-testid="expandable-description">
+      <div>
+        <div>
+          <span>Michael Jackson is one of the most influential artists in history.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <p>48,876,033</p>
+    <p>Followers</p>
+  </div>
+  <div>
+    <h2>Fans also like</h2>
+    <div data-testid="carousel-mwp">
+      <div data-testid="card-mwp">
+        <a href="/artist/0du5cEVh5yTK9QJze8zA0C">
+          <img src="https://i.scdn.co/image/bruno"/>
+          <span>Bruno Mars</span>
+        </a>
+      </div>
+      <div data-testid="card-mwp">
+        <a href="/artist/2iE18Oxc8YSumAU232n4rW">
+          <img src="https://i.scdn.co/image/jackson5"/>
+          <span>The Jackson 5</span>
+        </a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+OPEN_SPOTIFY_ARTIST_TOP_TRACKS_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+  <span>Popular</span>
+  <div data-testid="track-row" role="group" aria-labelledby="listrow-title-track-spotify:track:7J1uxwnxfQLu4APicE5Rnj-0" aria-label="Billie Jean">
+    <img src="https://i.scdn.co/image/ab67616d0000485132a7d87248d1b75463483df5"/>
+    <p id="listrow-title-track-spotify:track:7J1uxwnxfQLu4APicE5Rnj-0"><span class="e-10451-line-clamp">Billie Jean</span></p>
+    <div><span>3,040,144,939</span></div>
+  </div>
+  <div data-testid="track-row" role="group" aria-labelledby="listrow-title-track-spotify:track:3BovdzfaX4jb5KFQwoPfAw-1" aria-label="Beat It">
+    <img src="https://i.scdn.co/image/ab67616d0000485132a7d87248d1b75463483df5"/>
+    <p id="listrow-title-track-spotify:track:3BovdzfaX4jb5KFQwoPfAw-1"><span class="e-10451-line-clamp">Beat It</span></p>
+    <div><span>1,996,981,600</span></div>
+  </div>
+</body>
+</html>
+"""
+
+
 class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
     def setUp(self):
         if hasattr(music_metadata, "clear_search_music_cache"):
@@ -213,6 +281,28 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(tracks[0]["title"], "Beat It")
 
+    def test_spotify_artist_top_tracks_filters_fallback_results_to_requested_artist(self):
+        class MixedFallbackClient(FakePublicSpotifyClient):
+            def __init__(self):
+                self.web_client = self
+
+            def query(self, payload):
+                return {"data": {"artistUnion": {"discography": {"topTracks": {"items": []}}}}}
+
+            def get_artist_profile(self, artist_id):
+                return {"profile": {"name": "Michael Jackson"}}
+
+            def search_tracks(self, query, limit=20):
+                return [
+                    FakeTrack(title="Wrong Song", artists="Someone Else", id="wrong-track"),
+                    FakeTrack(title="Beat It", artists="Michael Jackson", id="beat-it"),
+                ]
+
+        with patch.object(music_metadata, "_get_spotify_client", return_value=MixedFallbackClient()):
+            tracks = music_metadata.spotify_artist_top_tracks("Michael Jackson", artist_id="artist-id")
+
+        self.assertEqual([track["title"] for track in tracks], ["Beat It"])
+
     def test_spotify_artist_top_tracks_uses_artist_overview_before_search_fallback(self):
         class ArtistOverviewClient(FakePublicSpotifyClient):
             def __init__(self):
@@ -310,6 +400,116 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
             tracks = music_metadata.spotify_artist_top_tracks("Michael Jackson", artist_id="artist-id")
 
         self.assertEqual(tracks[0]["title"], "Beat It")
+
+    def test_artist_about_returns_wikipedia_bio_without_spotify_stats(self):
+        with patch.object(music_metadata, "spotify_artist_about", return_value={}):
+            with patch.object(music_metadata, "spotify_artist_id", return_value="artist-id"):
+                with patch.object(music_metadata, "spotify_artist_artwork", return_value="/api/image?url=spotify-artist"):
+                    with patch.object(music_metadata, "fetch_wikipedia_about", return_value={
+                        "text": "Michael Jackson was an American singer.",
+                        "html": "<p>Michael Jackson was an American singer.</p>",
+                        "image": "https://images.example/wiki.jpg",
+                    }):
+                        about = music_metadata.artist_about("", "Michael Jackson")
+
+        self.assertEqual(about["bio_source"], "Wikipedia")
+        self.assertEqual(about["biography"], "Michael Jackson was an American singer.")
+        self.assertEqual(about["hero_image"], "/api/image?url=spotify-artist")
+        self.assertEqual(about["monthly_listeners"], 0)
+        self.assertEqual(about["followers"], 0)
+
+    def test_artist_about_normalizes_missing_fields(self):
+        with patch.object(music_metadata, "spotify_artist_about", return_value={"avatar": "/api/image?url=artist"}):
+            about = music_metadata.artist_about("artist-id", "Michael Jackson")
+
+        self.assertEqual(about["hero_image"], "/api/image?url=artist")
+        self.assertEqual(about["gallery"], [])
+        self.assertEqual(about["top_cities"], [])
+        self.assertEqual(about["related_artists"], [])
+        self.assertEqual(about["monthly_listeners"], 0)
+        self.assertEqual(about["followers"], 0)
+
+    def test_extract_open_spotify_artist_about_parses_stats_bio_and_related_artists(self):
+        about = music_metadata._extract_open_spotify_artist_about(OPEN_SPOTIFY_ARTIST_HTML, "artist-id")
+
+        self.assertEqual(about["name"], "Michael Jackson")
+        self.assertEqual(about["monthly_listeners"], 104725274)
+        self.assertEqual(about["followers"], 48876033)
+        self.assertIn("most influential artists in history", about["biography"])
+        self.assertEqual(about["avatar"], "/api/image?url=https%3A%2F%2Fi.scdn.co%2Fimage%2Fab6761610000e5eb997cc9a4aec335d46c9481fd")
+        self.assertEqual([item["name"] for item in about["related_artists"]], ["Bruno Mars", "The Jackson 5"])
+
+    def test_spotify_artist_about_falls_back_to_open_spotify_artist_page(self):
+        with patch.object(music_metadata, "_load_artist_about", return_value={}):
+            with patch.object(music_metadata, "_load_artist_about_from_open_page", return_value={
+                "name": "Michael Jackson",
+                "monthly_listeners": 104725274,
+                "followers": 48876033,
+                "biography": "Public Spotify bio",
+                "bio_source": "Spotify",
+                "stats_source": "Spotify",
+                "avatar": "/api/image?url=spotify-image",
+                "hero_image": "/api/image?url=spotify-image",
+                "related_artists": [{"name": "Bruno Mars", "id": "0du5cEVh5yTK9QJze8zA0C", "image": "https://i.scdn.co/image/bruno"}],
+            }):
+                music_metadata._artist_about_cache.clear()
+                about = music_metadata.spotify_artist_about("artist-id")
+
+        self.assertEqual(about["monthly_listeners"], 104725274)
+        self.assertEqual(about["followers"], 48876033)
+        self.assertEqual(about["biography"], "Public Spotify bio")
+        self.assertEqual(about["related_artists"][0]["name"], "Bruno Mars")
+
+    def test_extract_open_spotify_artist_top_tracks_parses_track_ids_and_plays(self):
+        tracks = music_metadata._extract_open_spotify_artist_top_tracks(
+            OPEN_SPOTIFY_ARTIST_TOP_TRACKS_HTML,
+            "Michael Jackson",
+            limit=5,
+        )
+
+        self.assertEqual([track["id"] for track in tracks], ["7J1uxwnxfQLu4APicE5Rnj", "3BovdzfaX4jb5KFQwoPfAw"])
+        self.assertEqual(tracks[0]["name"], "Billie Jean")
+        self.assertEqual(tracks[0]["popularity"] * 10000, 3040140000)
+
+    def test_spotify_artist_top_tracks_open_page_fallback_preserves_spotiflac_ids_and_isrc(self):
+        with patch.object(music_metadata, "_spotify_search_results", return_value={
+            "tracks": [FakeTrack(
+                id="3BovdzfaX4jb5KFQwoPfAw",
+                title="Beat It",
+                artists="Michael Jackson",
+                album="Thriller",
+                cover_url="https://images.example/thriller.jpg",
+                external_url="https://open.spotify.com/track/3BovdzfaX4jb5KFQwoPfAw",
+                isrc="USSM19902991",
+                duration_ms=258000,
+                plays="950000",
+            )],
+            "albums": [],
+            "artists": [],
+            "playlists": [],
+        }):
+            with patch.object(music_metadata, "_get_spotify_client", return_value=None):
+                with patch.object(music_metadata, "_load_artist_top_tracks_from_open_page", return_value=[{
+                    "id": "3BovdzfaX4jb5KFQwoPfAw",
+                    "name": "Beat It",
+                    "artists": [{"name": "Michael Jackson"}],
+                    "album": {"name": "", "images": []},
+                    "duration_ms": 0,
+                    "external_urls": {"spotify": "https://open.spotify.com/track/3BovdzfaX4jb5KFQwoPfAw"},
+                    "external_ids": {"isrc": ""},
+                    "popularity": 199698,
+                }]):
+                    tracks = music_metadata.spotify_artist_top_tracks(
+                        "Michael Jackson",
+                        artist_id="artist-id",
+                        limit=5,
+                    )
+
+        self.assertEqual(tracks[0]["title"], "Beat It")
+        self.assertEqual(tracks[0]["album"], "Thriller")
+        self.assertEqual(tracks[0]["spotify_id"], "3BovdzfaX4jb5KFQwoPfAw")
+        self.assertEqual(tracks[0]["isrc"], "USSM19902991")
+        self.assertEqual(tracks[0]["plays"], 1996980000)
 
     def test_artist_page_fills_missing_track_art_from_album(self):
         class MissingArtworkClient(FakePublicSpotifyClient):

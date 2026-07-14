@@ -1920,24 +1920,57 @@ async function renderArtistPage(artist) {
         timeout: 60000,
         body: JSON.stringify({ artist_id: resolvedArtistId, name: artistName })
       });
-      if (!about || !about.monthly_listeners) return;
+      const gallery = Array.isArray(about?.gallery) ? about.gallery : [];
+      const followers = Number(about?.followers || 0);
+      const monthlyListeners = Number(about?.monthly_listeners || 0);
+      const firstGalleryImg = (gallery[0] && gallery[0].url) || "";
+      const previewImage = about?.hero_image || about?.avatar || firstGalleryImg || artistArtwork || "";
+      const bioText = about?.biography ? String(about.biography).replace(/<[^>]*>/g, "") : "";
+      const hasRenderableAbout = !!(
+        about && (
+          monthlyListeners > 0 ||
+          followers > 0 ||
+          bioText ||
+          about.biography_html ||
+          previewImage ||
+          gallery.length ||
+          ((about.top_cities || []).length > 0)
+        )
+      );
+      if (!hasRenderableAbout) return;
 
       const aboutSection = $("artistAboutSection");
       aboutSection.classList.remove("hidden");
       
       const format = (n) => new Intl.NumberFormat().format(n);
-      const firstGalleryImg = about.gallery && about.gallery[0] ? about.gallery[0].url : artistArtwork;
 
       const bioHtml = formatBiographyHtml(about.biography || "No biography available.", {
         name: artistName,
         artist: artistName,
         artist_id: resolvedArtistId,
       });
+      const statsHtml = [
+        followers > 0 ? `
+                <div class="about-stat-item">
+                  <b>${format(followers)}</b>
+                  <span>Followers</span>
+                </div>
+              ` : "",
+        monthlyListeners > 0 ? `
+                <div class="about-stat-item">
+                  <b>${format(monthlyListeners)}</b>
+                  <span>Monthly Listeners</span>
+                </div>
+              ` : ""
+      ].filter(Boolean).join("");
+      const previewMeta = monthlyListeners > 0
+        ? `${format(monthlyListeners)} monthly listeners`
+        : (followers > 0 ? `${format(followers)} followers` : `Source: ${about.bio_source || "Spotify"}`);
 
       aboutSection.innerHTML = `
         <h2 style="margin: 48px 0 24px">About</h2>
         <div class="artist-about-preview" id="artistAboutTrigger">
-          <img src="${firstGalleryImg}" class="artist-about-img">
+          <img src="${previewImage}" class="artist-about-img">
           ${about.global_chart_position ? `
             <div class="rank-badge">
               <span class="rank-label">World</span>
@@ -1945,32 +1978,23 @@ async function renderArtistPage(artist) {
             </div>
           ` : ""}
           <div class="artist-about-overlay">
-          <div class="about-listeners">${format(about.monthly_listeners)} monthly listeners</div>
-          <div class="about-bio-preview">${about.biography ? about.biography.replace(/<[^>]*>/g, "") : ""}</div>
+          <div class="about-listeners">${esc(previewMeta)}</div>
+          <div class="about-bio-preview">${esc(bioText)}</div>
           </div>
           </div>
 
           <dialog class="about-modal" id="artistAboutModal">
           <button class="about-close" id="artistAboutClose"><i class="bi bi-x-lg"></i></button>
           <div class="about-modal-content">
-          ${about.gallery && about.gallery.length > 0 ? `
+          ${gallery.length > 0 ? `
             <div class="about-gallery">
-              ${about.gallery.map(img => `<img src="${img.url}" loading="lazy">`).join("")}
+              ${gallery.map(img => `<img src="${img.url}" loading="lazy">`).join("")}
             </div>
           ` : ""}
 
           <div class="about-modal-grid">
             <div>
-              <div class="about-stat-row">
-                <div class="about-stat-item">
-                  <b>${format(about.followers)}</b>
-                  <span>Followers</span>
-                </div>
-                <div class="about-stat-item">
-                  <b>${format(about.monthly_listeners)}</b>
-                  <span>Monthly Listeners</span>
-                </div>
-              </div>
+              ${statsHtml ? `<div class="about-stat-row">${statsHtml}</div>` : ""}
               <div class="about-bio-full">${bioHtml}</div>
 
               <div class="posted-by-row">
