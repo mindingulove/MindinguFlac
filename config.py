@@ -101,6 +101,10 @@ class AppConfig:
     tour_country: str = ""
     discogs_token: str = ""
     qobuz_token: str = ""
+    preferred_audio_output_id: str = ""
+    preferred_audio_output_name: str = ""
+    preferred_native_device_uid: str = ""
+    preferred_bluetooth_address: str = ""
 
     def public_dict(self) -> dict:
         def _safe_path(p: Path) -> str:
@@ -134,6 +138,10 @@ class AppConfig:
             "track_max_retries": self.track_max_retries,
             "discogs_token": self.discogs_token,
             "qobuz_token": self.qobuz_token,
+            "preferred_audio_output_id": self.preferred_audio_output_id,
+            "preferred_audio_output_name": self.preferred_audio_output_name,
+            "preferred_native_device_uid": self.preferred_native_device_uid,
+            "preferred_bluetooth_address": self.preferred_bluetooth_address,
         }
 
     @classmethod
@@ -186,6 +194,10 @@ class AppConfig:
             tour_country=str(value.get("tour_country", "") or "").strip(),
             discogs_token=str(value.get("discogs_token", "") or "").strip(),
             qobuz_token=str(value.get("qobuz_token", "") or "").strip(),
+            preferred_audio_output_id=str(value.get("preferred_audio_output_id", "") or "").strip(),
+            preferred_audio_output_name=str(value.get("preferred_audio_output_name", "") or "").strip(),
+            preferred_native_device_uid=str(value.get("preferred_native_device_uid", "") or "").strip(),
+            preferred_bluetooth_address=str(value.get("preferred_bluetooth_address", "") or "").strip(),
         )
 
 

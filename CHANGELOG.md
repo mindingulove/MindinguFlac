@@ -4,6 +4,19 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.2.2] — 2026-07-14
+
+### Fixed
+- Prevented duplicate Mindinguflac app instances from opening a second desktop window on macOS startup/relaunch.
+- Connected Bluetooth devices in the Connect panel now try to activate the matching audio output instead of remaining a dead no-op row.
+- When a saved or selected Bluetooth output is not reachable, playback now falls back to `This computer` instead of staying stuck on an unavailable device.
+- Side video playback now stays in sync when audio is playing through the native output path, including tracks launched from Recently Played.
+
+### Updated
+- Visible Settings footer, backend user-agent, release helper, and macOS About/bundle metadata now report `1.2.2`.
+
+---
+
 ## [1.2.1] — 2026-07-08
 
 ### Fixed
@@ -12,7 +25,7 @@ All notable changes to Mindinguflac are documented here.
 - Apple Music is now included in the SpotiFLAC fallback order shown by Settings, with Apple lossless/Atmos quality values mapped to `ALAC` and `ATMOS`.
 - Deezer/provider downloads mislabeled as `.flac` are repaired to their actual audio container before validation and metadata embedding.
 - YouTube downloads now discover explicit `cookies.txt` files and retry without auth options when cookie-based attempts fail.
-- Packaged macOS builds now redirect SpotiFLAC endpoint cache writes to app data, preserving bundle code-signature validity.
+- Packaged macOS builds now redirect SpotiFLAC's internal provider endpoint cache (`SpotiFLAC/core/.endpoints_cache.txt`) to app data; the bundled copy is only used as a read-only seed, so endpoint refreshes no longer mutate the signed `.app` bundle.
 
 ### Updated
 - Visible Settings footer, backend user-agent, release helper, and macOS About/bundle versions now report `1.2.1`.

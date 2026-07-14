@@ -4,14 +4,13 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
 
-## v1.2.1
+## v1.2.2
 
-- Fixed provider HTTP decompression failures that could stop SpotiFLAC cache jobs before fallback providers ran.
-- Added Apple Music to the controlled SpotiFLAC fallback chain and mapped Apple lossless/Atmos qualities correctly.
-- Repaired mislabeled provider audio downloads before validation, so non-FLAC containers saved with a `.flac` suffix no longer fail metadata embedding as invalid FLAC.
-- Added explicit YouTube cookie-file discovery and retry behavior for anti-bot/cookie-gated downloads.
-- Packaged builds now keep SpotiFLAC endpoint cache writes in app data so macOS code signatures stay valid.
-- Visible Settings footer, backend user agent, release helper, and macOS About/bundle metadata now report `1.2.1`.
+- Prevented duplicate Mindinguflac desktop instances from opening a second app window on macOS relaunch.
+- Connected Bluetooth devices in the Connect panel now try to activate the matching audio output instead of remaining a dead connected row.
+- When a Bluetooth output is saved or selected but not reachable, playback now falls back to `This computer`.
+- Side video playback now stays active when audio is routed through the native output path, including tracks started from Recently Played.
+- Visible Settings footer, backend user agent, release helper, and macOS About/bundle metadata now report `1.2.2`.
 
 ## v1.2.0
 

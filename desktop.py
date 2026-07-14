@@ -26,6 +26,7 @@ _macos_dock_state: dict[str, object] = {
     "playing": False,
 }
 webview = None
+_instance_lock_handle = None
 
 
 def get_runtime_dir() -> Path:
@@ -34,6 +35,63 @@ def get_runtime_dir() -> Path:
     if sys.platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME / "runtime"
     return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_NAME / "runtime"
+
+
+def acquire_single_instance_lock() -> bool:
+    global _instance_lock_handle
+    runtime_dir = get_runtime_dir()
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = runtime_dir / "app.lock"
+    try:
+        handle = lock_path.open("a+", encoding="utf-8")
+    except OSError:
+        return True
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        _instance_lock_handle = handle
+        return True
+    except OSError:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        return False
+
+
+def release_single_instance_lock() -> None:
+    global _instance_lock_handle
+    handle = _instance_lock_handle
+    _instance_lock_handle = None
+    if handle is None:
+        return
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
 
 
 _log_path = None
@@ -415,61 +473,62 @@ def main() -> None:
     global webview
     # Set desktop mode immediately before any other imports
     os.environ["MINDINGUFLAC_DESKTOP"] = "1"
-    
-    log_path = setup_desktop_logging()
-    os.environ.setdefault("PYWEBVIEW_LOG", "INFO")
-    
-    if sys.platform == "win32":
-        # pywebview's Windows backends set pythonnet to coreclr when needed.
-        # Forcing netfx here makes the packaged app exit on systems where that
-        # runtime is not available before a window can be shown.
-        os.environ.pop("PYTHONNET_RUNTIME", None)
-        
-        # Stability flags: disable features known to cause hangs in shared/restricted environments
-        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
-            "--disable-dev-shm-usage --disable-features=ZstdContentEncoding"
-        )
-        
-        # Set AUMID for proper taskbar grouping and notifications
-        try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mindinguflac.desktop")
-        except Exception:
-            log_step("SetCurrentProcessExplicitAppUserModelID failed")
-
-        # Use a consistent folder for WebView2 data
-        runtime_dir = get_runtime_dir()
-        wv2_data = runtime_dir / "WebView2Data"
-        try:
-            wv2_data.mkdir(parents=True, exist_ok=True)
-            # Setting this variable ensures WebView2 loader picks it up immediately
-            os.environ["WEBVIEW2_USER_DATA_FOLDER"] = str(wv2_data)
-        except Exception as exc:
-            log_step(f"Unable to prepare WebView2 data folder: {exc}")
-
-    log_step(f"startup log: {log_path}")
-    log_step("importing pywebview")
-    import webview as _webview
-    webview = _webview
-    log_step(f"pywebview imported: {getattr(webview, '__version__', 'unknown')}")
-    log_step("configuring TLS certificates")
-    configure_tls_certificates()
-    log_step("importing app")
-    import app
-
-    log_step("initializing recent items")
-    app.initialize_dock_recent_items()
-    log_step("creating local HTTP server")
-    server = app.create_server("127.0.0.1", 0)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, name="mindinguflac-http", daemon=True)
-    thread.start()
-    log_step(f"server started on port {port}")
-
-    icon_path = resource_path("static/assets/app_icon.png")
-    url = f"http://127.0.0.1:{port}/index.html"
-    force_dark_appearance()
-
+    if not acquire_single_instance_lock():
+        return
     try:
+        log_path = setup_desktop_logging()
+        os.environ.setdefault("PYWEBVIEW_LOG", "INFO")
+        
+        if sys.platform == "win32":
+            # pywebview's Windows backends set pythonnet to coreclr when needed.
+            # Forcing netfx here makes the packaged app exit on systems where that
+            # runtime is not available before a window can be shown.
+            os.environ.pop("PYTHONNET_RUNTIME", None)
+            
+            # Stability flags: disable features known to cause hangs in shared/restricted environments
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+                "--disable-dev-shm-usage --disable-features=ZstdContentEncoding"
+            )
+            
+            # Set AUMID for proper taskbar grouping and notifications
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mindinguflac.desktop")
+            except Exception:
+                log_step("SetCurrentProcessExplicitAppUserModelID failed")
+
+            # Use a consistent folder for WebView2 data
+            runtime_dir = get_runtime_dir()
+            wv2_data = runtime_dir / "WebView2Data"
+            try:
+                wv2_data.mkdir(parents=True, exist_ok=True)
+                # Setting this variable ensures WebView2 loader picks it up immediately
+                os.environ["WEBVIEW2_USER_DATA_FOLDER"] = str(wv2_data)
+            except Exception as exc:
+                log_step(f"Unable to prepare WebView2 data folder: {exc}")
+
+        log_step(f"startup log: {log_path}")
+        log_step("importing pywebview")
+        import webview as _webview
+        webview = _webview
+        log_step(f"pywebview imported: {getattr(webview, '__version__', 'unknown')}")
+        log_step("configuring TLS certificates")
+        configure_tls_certificates()
+        log_step("importing app")
+        import app
+
+        log_step("initializing recent items")
+        app.initialize_dock_recent_items()
+        log_step("creating local HTTP server")
+        server = app.create_server("127.0.0.1", 0)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, name="mindinguflac-http", daemon=True)
+        thread.start()
+        log_step(f"server started on port {port}")
+
+        icon_path = resource_path("static/assets/app_icon.png")
+        url = f"http://127.0.0.1:{port}/index.html"
+        force_dark_appearance()
+
         log_step("creating pywebview window")
         window = webview.create_window(
             APP_NAME,
@@ -518,16 +577,27 @@ def main() -> None:
             # Give time to read the log if running in console
             import time
             time.sleep(5)
-            
     finally:
-        log_step("shutting down desktop server")
-        _stop_macos_now_playing_helper()
         try:
-            app.apply_shutdown_cache_cleanup()
+            if "_log_path" in globals() and _log_path is not None:
+                log_step("shutting down desktop server")
+        except Exception:
+            pass
+        try:
+            _stop_macos_now_playing_helper()
+        except Exception:
+            pass
+        try:
+            if "app" in locals():
+                app.apply_shutdown_cache_cleanup()
         except Exception as exc:
             log_step(f"cache shutdown cleanup failed: {exc}")
-        server.shutdown()
-        server.server_close()
+        try:
+            if "server" in locals():
+                server.shutdown()
+                server.server_close()
+        finally:
+            release_single_instance_lock()
 
 
 if __name__ == "__main__":

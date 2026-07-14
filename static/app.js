@@ -2961,8 +2961,7 @@ function renderSideCover(track) {
           // video actually has data to render — more reliable than loadedmetadata
           // for starting playback, especially when re-entering video mode mid-song.
           video.addEventListener("canplay", () => {
-            const audio = $("audioPlayer");
-            if (!state.manualPauseRequested && audio && !audio.paused) {
+            if (!state.manualPauseRequested && isPlaybackVisiblyActive()) {
               video.play().catch(() => {});
             }
           }, { once: true });
@@ -4433,7 +4432,7 @@ function syncLocalVideoOverlay(position = currentPlaybackSeconds(), forcePlay = 
       video.currentTime = target;
     }
   }
-  if (forcePlay && !state.manualPauseRequested && audio && !audio.paused) {
+  if (forcePlay && !state.manualPauseRequested && isPlaybackVisiblyActive()) {
     video.play().catch(() => {});
   }
 }
@@ -5542,6 +5541,7 @@ async function fallbackToDefaultOutputAndResume(requestId, position) {
   if (typeof audio.setSinkId === "function") {
     try { await audio.setSinkId(""); } catch (e) {}
   }
+  await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
   $("btnConnectDevice").classList.toggle("active", false);
   _refreshConnectPanel().catch(() => {});
   if (libraryPath && track) {
@@ -5997,7 +5997,7 @@ function bindPlayer() {
     api("/api/dock/playing-state", { method: "POST", body: JSON.stringify({ playing: !audio.paused }) }).catch(() => {});
     const vid = $("sideVideoPlayer");
     if (vid && vid.tagName === "VIDEO") {
-      if (audio.paused) vid.pause();
+      if (!isPlaybackVisiblyActive()) vid.pause();
       else vid.play().catch(() => {});
     }
     if (audio.paused) {
@@ -7186,6 +7186,7 @@ async function boot() {
 
   await Promise.all([loadCatalog(), loadPlaylists()]);
   seedDockRecentTracks();
+  await restorePreferredAudioOutput().catch(() => {});
   
   // Try to restore playback state before showing home page
   await restorePlaybackState();
@@ -7223,6 +7224,127 @@ function _ensureAudioContext() {
   _audioSrcNode = _audioCtx.createMediaElementSource(audio);
   _audioSrcNode.connect(_audioCtx.destination);
   return _audioCtx;
+}
+
+function isPlaybackVisiblyActive() {
+  const audio = $("audioPlayer");
+  return !!(
+    (state.nativeAudio && state.nativeAudio.active && state.nativeAudio.playing) ||
+    (audio && !audio.paused)
+  );
+}
+
+async function _persistPreferredAudioOutput(details = {}) {
+  if (!state.settings) state.settings = {};
+  state.settings.preferred_audio_output_id = String(details.deviceId || "");
+  state.settings.preferred_audio_output_name = String(details.name || "");
+  state.settings.preferred_native_device_uid = String(details.nativeUid || "");
+  state.settings.preferred_bluetooth_address = String(details.bluetoothAddress || "");
+  await api("/api/settings", {
+    method: "POST",
+    body: JSON.stringify(state.settings),
+  }).catch(() => {});
+}
+
+function _findOutputRouteCandidate(preferred, backendDevices, browserOutputs, nativeAvailable = false) {
+  const preferredId = String(preferred?.deviceId || "").trim();
+  const preferredName = String(preferred?.name || "").trim().toLowerCase();
+  const preferredNativeUid = String(preferred?.nativeUid || "").trim();
+
+  for (const bd of (backendDevices || [])) {
+    const label = String(bd.name || "Audio Device");
+    const match = (browserOutputs || []).find(b =>
+      (b.label && _audioLabelsMatch(b.label, label)) ||
+      b.deviceId === bd.uid
+    );
+    const nativeId = bd.uid ? `native:${bd.uid}` : "";
+    const candidate = {
+      name: label,
+      deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
+      nativeUid: nativeAvailable && bd.uid ? bd.uid : "",
+    };
+    if (
+      (preferredNativeUid && candidate.nativeUid === preferredNativeUid) ||
+      (preferredId && candidate.deviceId === preferredId) ||
+      (preferredName && _audioLabelsMatch(candidate.name, preferredName))
+    ) {
+      return candidate;
+    }
+  }
+
+  for (const b of (browserOutputs || [])) {
+    const label = String(b.label || "").trim();
+    if (!label) continue;
+    if (
+      (preferredId && b.deviceId === preferredId) ||
+      (preferredName && _audioLabelsMatch(label, preferredName))
+    ) {
+      return { name: label, deviceId: b.deviceId, nativeUid: "" };
+    }
+  }
+  return null;
+}
+
+async function _switchToDefaultOutput(reason = "") {
+  await setAudioOutputDevice("");
+  await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
+  await _refreshConnectPanel().catch(() => {});
+  if (reason && state.currentTrack) setPlayerStatus(reason, state.currentTrack);
+}
+
+async function _activatePreferredOutput(preferred, timeoutMs = 8000, persist = true) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 0);
+  while (Date.now() < deadline) {
+    const [audioState, browserOutputs] = await Promise.all([
+      api("/api/audio/devices").catch(() => null),
+      _getOutputDevices().catch(() => []),
+    ]);
+    const backendDevices = audioState?.devices || [];
+    const nativeAvailable = !!audioState?.native_available;
+    const candidate = _findOutputRouteCandidate(preferred, backendDevices, browserOutputs, nativeAvailable);
+    if (candidate) {
+      const targetId = candidate.nativeUid ? `native:${candidate.nativeUid}` : candidate.deviceId;
+      await setAudioOutputDevice(targetId);
+      if (persist) {
+        await _persistPreferredAudioOutput({
+          deviceId: targetId,
+          name: candidate.name,
+          nativeUid: candidate.nativeUid,
+          bluetoothAddress: preferred.bluetoothAddress || "",
+        });
+      }
+      await _refreshConnectPanel().catch(() => {});
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+async function restorePreferredAudioOutput() {
+  const preferred = {
+    deviceId: state.settings?.preferred_audio_output_id || "",
+    name: state.settings?.preferred_audio_output_name || "",
+    nativeUid: state.settings?.preferred_native_device_uid || "",
+    bluetoothAddress: state.settings?.preferred_bluetooth_address || "",
+  };
+  if (!preferred.deviceId && !preferred.name && !preferred.nativeUid && !preferred.bluetoothAddress) return;
+
+  if (preferred.bluetoothAddress) {
+    const btState = await api("/api/bluetooth/state").catch(() => null);
+    const btDevice = (btState?.devices || []).find(d => d.address === preferred.bluetoothAddress);
+    if (btDevice && btDevice.paired && !btDevice.connected) {
+      await api("/api/bluetooth/pair", {
+        method: "POST",
+        body: JSON.stringify({ address: btDevice.address }),
+      }).catch(() => {});
+    }
+  }
+
+  const activated = await _activatePreferredOutput(preferred, 10000, false).catch(() => false);
+  if (!activated) {
+    await _switchToDefaultOutput("Saved Bluetooth output unavailable — using this computer");
+  }
 }
 
 async function setAudioOutputDevice(deviceId) {
@@ -7264,7 +7386,7 @@ async function setAudioOutputDevice(deviceId) {
           state.nativeAudio.playing = false;
         }
       } catch (error) {
-        setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
+        await _switchToDefaultOutput(error?.message || "Bluetooth output unavailable — using this computer");
       }
     } else if (state.currentTrack) {
       // No completed/cache file exists yet. Native app-only output cannot play
@@ -7422,6 +7544,7 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
 
     const label = bd.name || "Audio Device";
     const isAirPlay = label.toLowerCase().includes("airplay");
+    const btMatch = (btState?.devices || []).find(dev => _audioLabelsMatch(dev.name, label));
     
     const nativeId = bd.uid ? `native:${bd.uid}` : "";
     items.push({
@@ -7429,6 +7552,7 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
         deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
         backendUid: bd.uid,
         nativeUid: nativeAvailable && bd.uid ? bd.uid : "",
+        bluetoothAddress: btMatch?.address || "",
         needsBrowserRoute: !match && !nativeAvailable,
         icon: isAirPlay ? "bi-broadcast-pin" : _deviceIcon(label),
         sub: isAirPlay ? "AirPlay" : (match && !nativeAvailable ? "" : (nativeAvailable ? "App audio only" : (_canChooseBrowserAudioOutput() ? "Choose output" : "Browser unsupported")))
@@ -7478,7 +7602,12 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
         const selected = await _selectBrowserAudioOutput();
         if (!selected) return;
         await setAudioOutputDevice(selected.deviceId);
-        _activeSinkId = selected.deviceId;
+        await _persistPreferredAudioOutput({
+          deviceId: selected.deviceId,
+          name: selected.label || item.name,
+          nativeUid: "",
+          bluetoothAddress: "",
+        });
         await _refreshConnectPanel();
         return;
       }
@@ -7512,6 +7641,12 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
 
       console.log("[Audio] Routing to:", item.name, targetId || "Default");
       await setAudioOutputDevice(targetId);
+      await _persistPreferredAudioOutput({
+        deviceId: targetId,
+        name: item.name,
+        nativeUid: item.nativeUid || "",
+        bluetoothAddress: item.bluetoothAddress || "",
+      });
       await _refreshConnectPanel();
     };
     list.appendChild(li);
@@ -7564,7 +7699,7 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
     li.className = "connect-device-item connect-nearby";
     li.dataset.address = dev.address;
     const subtext = dev.connected ? "Connected" : dev.address;
-    const btnText = dev.connected ? "Active" : (dev.paired ? "Connect" : "Pair");
+    const btnText = dev.connected ? "Use" : (dev.paired ? "Connect" : "Pair");
     const btnClass = dev.connected ? "connect-pair-btn connected" : "connect-pair-btn";
 
     li.innerHTML = `
@@ -7573,18 +7708,39 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
         <span class="connect-device-name">${dev.name}</span>
         <span class="connect-device-sub">${subtext}</span>
       </div>
-      <button class="${btnClass}" type="button" ${dev.connected ? 'disabled' : ''}>${btnText}</button>
+      <button class="${btnClass}" type="button">${btnText}</button>
     `;
     li.querySelector(".connect-pair-btn").onclick = async (e) => {
       e.stopPropagation();
       const btn = e.currentTarget;
-      btn.textContent = dev.paired ? "Connecting..." : "Pairing...";
+      btn.textContent = dev.connected ? "Activating..." : (dev.paired ? "Connecting..." : "Pairing...");
       btn.disabled = true;
       try {
-        const res = await api("/api/bluetooth/pair", { method: "POST", body: JSON.stringify({ address: dev.address }) });
-        if (res.error) { btn.textContent = "Failed"; btn.disabled = false; }
-      else { btn.textContent = "Done"; setTimeout(() => _refreshConnectPanel(), 2000); }
-      } catch { btn.textContent = "Error"; btn.disabled = false; }
+        if (!dev.connected) {
+          const res = await api("/api/bluetooth/pair", { method: "POST", body: JSON.stringify({ address: dev.address }) });
+          if (res.error) {
+            btn.textContent = "Failed";
+            btn.disabled = false;
+            return;
+          }
+        }
+        const activated = await _activatePreferredOutput({
+          name: dev.name,
+          bluetoothAddress: dev.address,
+        }, 10000, true);
+        if (!activated) {
+          btn.textContent = "Default";
+          btn.disabled = false;
+          await _switchToDefaultOutput(`"${dev.name}" is not reachable — using this computer`);
+          return;
+        }
+        btn.textContent = "Active";
+        setTimeout(() => _refreshConnectPanel(), 400);
+      } catch {
+        btn.textContent = "Default";
+        btn.disabled = false;
+        await _switchToDefaultOutput("Bluetooth output unavailable — using this computer");
+      }
     };
     list.appendChild(li);
   }
