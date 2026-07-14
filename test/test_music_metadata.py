@@ -331,6 +331,37 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
         self.assertEqual(tracks[0]["spotify_id"], "ordinary-world-id")
         self.assertEqual(tracks[0]["plays"], 570780000)
 
+    def test_spotify_artist_top_tracks_does_not_reuse_smaller_cached_search_result(self):
+        class LimitSensitiveClient(FakePublicSpotifyClient):
+            def __init__(self):
+                self.web_client = self
+
+            def query(self, payload):
+                return {"data": {"artistUnion": {"discography": {"topTracks": {"items": []}}}}}
+
+            def search(self, query, limit=20):
+                base = [
+                    FakeTrack(id="our-house", title="Our House", artists="Madness", plays="376360000"),
+                    FakeTrack(id="one-step-beyond", title="One Step Beyond", artists="Madness", plays="94290000"),
+                    FakeTrack(id="baggy-trousers", title="Baggy Trousers", artists="Madness", plays="72470000"),
+                    FakeTrack(id="it-must-be-love", title="It Must Be Love", artists="Madness", plays="136340000"),
+                ]
+                tracks = base[:2] if limit <= 20 else base
+                return {"tracks": tracks, "albums": [], "artists": [], "playlists": []}
+
+        with patch.object(music_metadata, "_get_spotify_client", return_value=LimitSensitiveClient()):
+            smaller = music_metadata._spotify_search_results("Madness", limit=20)
+            self.assertEqual(len(smaller["tracks"]), 2)
+
+            tracks = music_metadata.spotify_artist_top_tracks("Madness", artist_id="artist-id")
+
+        self.assertEqual([track["title"] for track in tracks], [
+            "Our House",
+            "One Step Beyond",
+            "Baggy Trousers",
+            "It Must Be Love",
+        ])
+
     def test_spotify_artist_id_uses_cached_discovery_identity(self):
         with patch("catalog.load_discovery_cache", return_value={
             "artist_identities": {

@@ -10,7 +10,12 @@ All notable changes to Mindinguflac are documented here.
 - Prevented duplicate Mindinguflac app instances from opening a second desktop window on macOS startup/relaunch.
 - Connected Bluetooth devices in the Connect panel now try to activate the matching audio output instead of remaining a dead no-op row.
 - When a saved or selected Bluetooth output is not reachable, playback now falls back to `This computer` instead of staying stuck on an unavailable device.
+- Native Bluetooth mute on macOS now honors an explicit `0` volume request instead of snapping back to full volume through the native-audio API path.
 - Side video playback now stays in sync when audio is playing through the native output path, including tracks launched from Recently Played.
+- Artist pages now render a fast initial Popular Tracks section immediately, then stream enriched playcounts in place instead of blocking the whole discovery view.
+- Artist page albums and related artists now load in parallel with the slower top-track enrichment pass, so those sections appear without waiting for every playcount lookup to finish.
+- Artist page top-track headers now use the compact single-height layout instead of leaving an oversized blank gap above the row labels.
+- Missing Spotify playcounts on artist-page overflow tracks are now backfilled with per-track Spotify stats, so fallback tracks such as compilation or non-top10 rows still show populated plays.
 
 ### Updated
 - Visible Settings footer, backend user-agent, release helper, and macOS About/bundle metadata now report `1.2.2`.

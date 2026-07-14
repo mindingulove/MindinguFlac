@@ -2309,6 +2309,31 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   text-align: center;
 }
 
+#artistTopTracksSection .section-head.sticky-head {
+  margin-bottom: 0;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  transform: none;
+  border-bottom: 0;
+}
+
+.artist-track-list-header {
+  margin-top: 0;
+  top: 44px;
+}
+
+#artistTopTracksSection.tracks-loading .track-list-header::after {
+  content: "Updating plays...";
+  position: absolute;
+  right: 56px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 .track-status-icon {
   font-size: 18px;
   color: var(--muted);

@@ -1755,6 +1755,14 @@ async function renderArtistPage(artist) {
           <h2>Popular Tracks</h2>
           <button class="see-more hidden" id="artistTracksToggle" type="button"></button>
         </div>
+        <div class="track-list-header artist-track-list-header">
+          <div>#</div>
+          <div>Title</div>
+          <div class="plays-column">Plays</div>
+          <div>Album</div>
+          <div class="time-column"><i class="bi bi-clock"></i></div>
+          <div></div>
+        </div>
         <div id="artistTopTracks" class="track-list"></div>
       </div>
 
@@ -1801,6 +1809,7 @@ async function renderArtistPage(artist) {
   let resolvedArtistId = artistId;
   let tracksExpanded = false;
   let albumsExpanded = false;
+  let artistTracksLoading = false;
 
   function artistPlaybackContext() {
     return {
@@ -1828,6 +1837,8 @@ async function renderArtistPage(artist) {
       artistPlaybackContext(),
       artistTracks
     );
+    const section = $("artistTopTracksSection");
+    if (section) section.classList.toggle("tracks-loading", artistTracksLoading);
     updateSectionToggle("artistTracksToggle", tracksExpanded, artistTracks.length > ARTIST_TRACK_PREVIEW_COUNT, () => {
       tracksExpanded = !tracksExpanded;
       redrawArtistTracks();
@@ -1944,25 +1955,6 @@ async function renderArtistPage(artist) {
       
       const format = (n) => new Intl.NumberFormat().format(n);
 
-      const bioHtml = formatBiographyHtml(about.biography || "No biography available.", {
-        name: artistName,
-        artist: artistName,
-        artist_id: resolvedArtistId,
-      });
-      const statsHtml = [
-        followers > 0 ? `
-                <div class="about-stat-item">
-                  <b>${format(followers)}</b>
-                  <span>Followers</span>
-                </div>
-              ` : "",
-        monthlyListeners > 0 ? `
-                <div class="about-stat-item">
-                  <b>${format(monthlyListeners)}</b>
-                  <span>Monthly Listeners</span>
-                </div>
-              ` : ""
-      ].filter(Boolean).join("");
       const previewMeta = monthlyListeners > 0
         ? `${format(monthlyListeners)} monthly listeners`
         : (followers > 0 ? `${format(followers)} followers` : `Source: ${about.bio_source || "Spotify"}`);
@@ -1982,58 +1974,13 @@ async function renderArtistPage(artist) {
           <div class="about-bio-preview">${esc(bioText)}</div>
           </div>
           </div>
-
-          <dialog class="about-modal" id="artistAboutModal">
-          <button class="about-close" id="artistAboutClose"><i class="bi bi-x-lg"></i></button>
-          <div class="about-modal-content">
-          ${gallery.length > 0 ? `
-            <div class="about-gallery">
-              ${gallery.map(img => `<img src="${img.url}" loading="lazy">`).join("")}
-            </div>
-          ` : ""}
-
-          <div class="about-modal-grid">
-            <div>
-              ${statsHtml ? `<div class="about-stat-row">${statsHtml}</div>` : ""}
-              <div class="about-bio-full">${bioHtml}</div>
-
-              <div class="posted-by-row">
-                 <div class="mini-art" style="background-image: url('${artistArtwork}')"></div>
-                 <span>Posted By <b class="artist-link-inline" data-open-artist='${attrJson(artistTarget({ artist: artistName, name: artistName, artist_id: resolvedArtistId }))}'>${esc(artistName)}</b></span>
-              </div>
-
-              <div style="margin-top: 24px; font-size: 12px; color: var(--muted)">Source: ${about.bio_source || "Spotify"}</div>
-            </div>
-              <div>
-                <h3 style="margin-bottom: 24px">Where people listen</h3>
-                <ul class="top-cities-list">
-                  ${(about.top_cities || []).map(c => `
-                    <li>
-                      <b>${esc(c.city)}, ${esc(c.country)}</b>
-                      <span>${format(c.count)} listeners</span>
-                    </li>
-                  `).join("")}
-                </ul>
-              </div>
-            </div>
-          </div>
-        </dialog>
       `;
-
-      const modal = $("artistAboutModal");
-      $("artistAboutTrigger").onclick = () => modal.showModal();
-      $("artistAboutClose").onclick = () => modal.close();
-      modal.onclick = (e) => { if (e.target === modal) modal.close(); };
-      modal.addEventListener("keydown", (event) => {
-        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-          event.stopPropagation();
-          event.preventDefault();
-          const content = modal.querySelector(".about-modal-content");
-          if (content) content.scrollBy({ top: event.key === "ArrowDown" ? 80 : -80, behavior: "smooth" });
-        }
-      });
-
-      bindArtistInlineLinks(aboutSection, modal);
+      $("artistAboutTrigger").onclick = () => showArtistAboutModal(
+        about,
+        artistName,
+        resolvedArtistId,
+        previewImage,
+      );
 
     } catch (e) {
       console.error("Failed to load artist about:", e);
@@ -2055,6 +2002,9 @@ async function renderArtistPage(artist) {
     clearTimeout(timeout);
     try {
       const part = JSON.parse(e.data);
+      const clearArtistLoading = () => {
+        if ($("artistLoading")) $("artistLoading").remove();
+      };
       if (part.type === "artist_info") {
         resolvedArtistId = part.artist_id || resolvedArtistId;
         artistArtwork = part.artwork_url || artistArtwork;
@@ -2080,14 +2030,17 @@ async function renderArtistPage(artist) {
       }
       if (part.type === "top_tracks") {
         artistTracks = part.tracks || [];
+        artistTracksLoading = !!part.loading;
         $("artistTopTracksSection").classList.remove("hidden");
         redrawArtistTracks();
+        clearArtistLoading();
       }
       if (part.type === "albums") {
         if (part.albums && part.albums.length) {
             artistAlbums = part.albums;
             $("artistAlbumsSection").classList.remove("hidden");
             redrawArtistAlbums();
+            clearArtistLoading();
         }
       }
       if (part.type === "related_artists") {
@@ -2095,6 +2048,7 @@ async function renderArtistPage(artist) {
             artistRelated = part.artists;
             $("artistRelatedSection").classList.remove("hidden");
             redrawArtistRelated();
+            clearArtistLoading();
         }
       }
     } catch (err) {}
@@ -3707,25 +3661,45 @@ function showArtistAboutModal(about = {}, artistName = "Artist", artistId = "", 
     monthlyListeners > 0 ? `<div class="about-stat-item"><b>${formatCount(monthlyListeners)}</b><span>Monthly Listeners</span></div>` : "",
   ].filter(Boolean).join("");
   const source = about.bio_source ? String(about.bio_source) : "";
+  const galleryUrls = [];
+  const seenGallery = new Set();
+  for (const img of gallery) {
+    const url = String(img?.url || "").trim();
+    if (!url || seenGallery.has(url)) continue;
+    seenGallery.add(url);
+    galleryUrls.push(url);
+  }
+  if (heroImage && !seenGallery.has(heroImage)) {
+    galleryUrls.unshift(heroImage);
+  }
+  const topCities = Array.isArray(about.top_cities) ? about.top_cities : [];
   const dialog = document.createElement("dialog");
-  dialog.className = "about-modal sidebar-about-modal";
+  dialog.className = "about-modal";
   dialog.id = "sidebarArtistAboutModal";
   dialog.innerHTML = `
     <button class="about-close" type="button" aria-label="Close"><i class="bi bi-x-lg"></i></button>
-    <div class="sidebar-about-modal-content">
-      ${heroImage ? `<div class="sidebar-about-hero" style="background-image:url('${heroImage}')"></div>` : ""}
-      <div class="sidebar-about-body">
+    <div class="about-modal-content">
+      ${galleryUrls.length ? `
+        <div class="about-gallery">
+          ${galleryUrls.map(url => `<img src="${url}" loading="lazy">`).join("")}
+        </div>
+      ` : ""}
+      <div class="about-modal-grid">
+        <div>
         ${statsHtml ? `<div class="about-stat-row">${statsHtml}</div>` : ""}
         <div class="about-bio-full">${bioHtml}</div>
         ${source ? `<div class="bio-source">Source: ${esc(source)}</div>` : ""}
-        ${about.top_cities && about.top_cities.length ? `
+        </div>
+        <div>
+        ${topCities.length ? `
           <h3>Where people listen</h3>
           <ul class="top-cities-list">
-            ${about.top_cities.slice(0, 8).map(c => `
+            ${topCities.slice(0, 8).map(c => `
               <li><b>${esc(c.city)}, ${esc(c.country)}</b><span>${formatCount(c.count)} listeners</span></li>
             `).join("")}
           </ul>
         ` : ""}
+        </div>
       </div>
     </div>
   `;

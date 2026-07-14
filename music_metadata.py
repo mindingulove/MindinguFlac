@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -136,8 +137,12 @@ _spotify_artist_id_cache: OrderedDict[str, str] = OrderedDict()
 _spotify_artist_top_tracks_cache_lock = threading.Lock()
 _spotify_artist_top_tracks_cache: OrderedDict[tuple[str, int, str], list[dict]] = OrderedDict()
 _SPOTIFY_ARTIST_CACHE_SIZE = 128
+_spotify_album_id_cache_lock = threading.Lock()
+_spotify_album_id_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
+_spotify_track_playcount_cache_lock = threading.Lock()
+_spotify_track_playcount_cache: OrderedDict[str, int] = OrderedDict()
 _spotify_search_results_cache_lock = threading.Lock()
-_spotify_search_results_cache: OrderedDict[str, dict[str, tuple[object, ...]]] = OrderedDict()
+_spotify_search_results_cache: OrderedDict[tuple[str, int], dict[str, tuple[object, ...]]] = OrderedDict()
 _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE = 64
 
 
@@ -146,6 +151,10 @@ def clear_spotify_artist_caches() -> None:
         _spotify_artist_id_cache.clear()
     with _spotify_artist_top_tracks_cache_lock:
         _spotify_artist_top_tracks_cache.clear()
+    with _spotify_album_id_cache_lock:
+        _spotify_album_id_cache.clear()
+    with _spotify_track_playcount_cache_lock:
+        _spotify_track_playcount_cache.clear()
     with _spotify_search_results_cache_lock:
         _spotify_search_results_cache.clear()
 
@@ -248,6 +257,92 @@ def _search_track_by_spotify_id(items: list[object], spotify_id: str) -> object 
     return None
 
 
+def _resolve_spotify_album_id(artist_name: str, album_name: str) -> str:
+    key = (norm_name(artist_name), norm_name(album_name))
+    if not key[0] or not key[1]:
+        return ""
+    with _spotify_album_id_cache_lock:
+        cached = _spotify_album_id_cache.get(key)
+        if cached is not None:
+            _spotify_album_id_cache.move_to_end(key)
+            return cached
+
+    album_id = ""
+    try:
+        data = _sp("search", q=f'artist:"{artist_name}" album:"{album_name}"', type="album", limit=5)
+        items = ((data.get("albums") or {}).get("items") or [])
+        target_artist = norm_name(artist_name)
+        target_album = norm_name(album_name)
+        for item in items:
+            candidate_album = norm_name(item.get("name", ""))
+            candidate_artists = [norm_name((artist or {}).get("name", "")) for artist in (item.get("artists") or [])]
+            if candidate_album != target_album:
+                continue
+            if target_artist and candidate_artists and target_artist not in candidate_artists:
+                continue
+            album_id = str(item.get("id") or "").strip()
+            if album_id:
+                break
+    except Exception:
+        album_id = ""
+
+    with _spotify_album_id_cache_lock:
+        _spotify_album_id_cache[key] = album_id
+        _spotify_album_id_cache.move_to_end(key)
+        while len(_spotify_album_id_cache) > _SPOTIFY_ARTIST_CACHE_SIZE:
+            _spotify_album_id_cache.popitem(last=False)
+    return album_id
+
+
+def _spotify_track_playcount(track_id: str, force_refresh: bool = False) -> int:
+    track_id = str(track_id or "").strip()
+    if not track_id:
+        return 0
+    if not force_refresh:
+        with _spotify_track_playcount_cache_lock:
+            cached = _spotify_track_playcount_cache.get(track_id)
+            if cached is not None:
+                _spotify_track_playcount_cache.move_to_end(track_id)
+                return int(cached or 0)
+
+    client = _get_spotify_client(force_refresh=force_refresh)
+    web_client = getattr(client, "web_client", None) if client else None
+    if not web_client:
+        return 0
+    payload = {
+        "operationName": "getTrack",
+        "variables": {"uri": f"spotify:track:{track_id}"},
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294",
+            }
+        },
+    }
+    playcount = 0
+    for attempt in range(2):
+        try:
+            data = web_client.query(payload) or {}
+            track_union = data.get("data", {}).get("trackUnion", {}) or {}
+            playcount = _numeric_plays(track_union.get("playcount"))
+        except Exception:
+            playcount = 0
+        if playcount > 0 or attempt > 0:
+            break
+        _reset_spotify_client_cache()
+        client = _get_spotify_client(force_refresh=True)
+        web_client = getattr(client, "web_client", None) if client else None
+        if not web_client:
+            break
+
+    with _spotify_track_playcount_cache_lock:
+        _spotify_track_playcount_cache[track_id] = playcount
+        _spotify_track_playcount_cache.move_to_end(track_id)
+        while len(_spotify_track_playcount_cache) > 512:
+            _spotify_track_playcount_cache.popitem(last=False)
+    return playcount
+
+
 def _legacy_simple_item(item: dict, kind: str) -> dict:
     cover_url = item.get("cover_url", "")
     artists = item.get("artists", "")
@@ -267,7 +362,7 @@ def _legacy_simple_item(item: dict, kind: str) -> dict:
 
 
 def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = False) -> dict[str, list]:
-    key = str(query or "").strip().lower()
+    key = (str(query or "").strip().lower(), int(limit or 0))
     if not force_refresh:
         with _spotify_search_results_cache_lock:
             cached = _spotify_search_results_cache.get(key)
@@ -1391,7 +1486,12 @@ def _load_artist_top_tracks_from_open_page(artist_id: str, artist_name: str, lim
     return _extract_open_spotify_artist_top_tracks(html_text, artist_name, limit=limit)
 
 
-def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str = "") -> list[dict]:
+def spotify_artist_top_tracks(
+    artist_name: str,
+    limit: int = 25,
+    artist_id: str = "",
+    enrich_missing_playcounts: bool = True,
+) -> list[dict]:
     key = (artist_name.strip().lower(), int(limit or 0), artist_id.strip())
     with _spotify_artist_top_tracks_cache_lock:
         cached = _spotify_artist_top_tracks_cache.get(key)
@@ -1403,33 +1503,48 @@ def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str 
         sp_artist_id = artist_id or spotify_artist_id(artist_name)
         if not sp_artist_id:
             return []
-        used_search_fallback = False
         search_results = _spotify_search_results(
             artist_name,
             limit=limit * 3,
             force_refresh=attempt > 0,
         )
-        sp_tracks = _filter_search_tracks_for_artist(
+        search_tracks = _filter_search_tracks_for_artist(
             list(search_results.get("tracks", []) or []),
             artist_name,
             limit,
         )
-        if sp_tracks:
-            used_search_fallback = True
+        client = _get_spotify_client(force_refresh=attempt > 0)
+        raw_top_tracks = []
+        try:
+            raw_top_tracks = _raw_artist_top_track_items(client, sp_artist_id, limit=limit) if client else []
+        except Exception:
+            raw_top_tracks = []
+
+        base_tracks = list(raw_top_tracks or search_tracks)
+        seen_track_ids = {
+            str((track.get("id") if isinstance(track, dict) else getattr(track, "id", "")) or "").strip()
+            for track in base_tracks
+            if str((track.get("id") if isinstance(track, dict) else getattr(track, "id", "")) or "").strip()
+        }
+        if search_tracks:
+            for track in search_tracks:
+                track_id = str((track.get("id") if isinstance(track, dict) else getattr(track, "id", "")) or "").strip()
+                if track_id and track_id in seen_track_ids:
+                    continue
+                if track_id:
+                    seen_track_ids.add(track_id)
+                base_tracks.append(track)
+                if len(base_tracks) >= limit:
+                    break
+
         open_page_tracks = []
-        if not sp_tracks:
-            client = _get_spotify_client(force_refresh=attempt > 0)
-            try:
-                sp_tracks = _raw_artist_top_track_items(client, sp_artist_id, limit=limit) if client else []
-            except Exception:
-                sp_tracks = []
-        if not sp_tracks:
+        if not base_tracks:
             try:
                 open_page_tracks = _load_artist_top_tracks_from_open_page(sp_artist_id, artist_name, limit=limit)
             except Exception:
                 open_page_tracks = []
-            sp_tracks = open_page_tracks
-        elif used_search_fallback or all(_numeric_plays(getattr(track, "plays", 0) if not isinstance(track, dict) else track.get("plays", 0)) <= 0 for track in sp_tracks):
+            base_tracks = open_page_tracks
+        elif search_tracks or all(_numeric_plays(getattr(track, "plays", 0) if not isinstance(track, dict) else track.get("plays", 0)) <= 0 for track in base_tracks):
             try:
                 open_page_tracks = _load_artist_top_tracks_from_open_page(sp_artist_id, artist_name, limit=limit)
             except Exception:
@@ -1439,8 +1554,9 @@ def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str 
             for item in open_page_tracks
             if isinstance(item, dict) and str(item.get("id") or "").strip()
         }
+        album_playcount_cache: dict[str, dict[str, int]] = {}
         results = []
-        for t in sp_tracks:
+        for t in base_tracks[:limit]:
             matched_track = None
             if isinstance(t, dict):
                 matched_track = _search_track_by_spotify_id(
@@ -1461,6 +1577,15 @@ def spotify_artist_top_tracks(artist_name: str, limit: int = 25, artist_id: str 
                 plays = max(plays, _numeric_plays(t.get("popularity", 0)) * 10000)
             if plays <= 0:
                 plays = legacy_track.get("popularity", 0) * 10000
+            track_id = str(legacy_track.get("id") or "").strip()
+            if enrich_missing_playcounts and plays <= 0 and album_name and track_id:
+                album_id = _resolve_spotify_album_id(artist_name, album_name)
+                if album_id:
+                    if album_id not in album_playcount_cache:
+                        album_playcount_cache[album_id] = spotify_album_playcounts(album_id)
+                    plays = album_playcount_cache[album_id].get(track_id, 0)
+            if enrich_missing_playcounts and plays <= 0 and track_id:
+                plays = _spotify_track_playcount(track_id)
             results.append({
                 "title": legacy_track.get("name", ""),
                 "artist": artist_name,
@@ -1734,64 +1859,121 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
         save_artist_identity(artist, resolved_artist_id, art)
     
     yield {"type": "artist_info", "artist": artist, "artist_id": resolved_artist_id, "artwork_url": art}
-    
-    top_tracks = spotify_artist_top_tracks(artist, artist_id=resolved_artist_id)
-    top_tracks.sort(
-        key=lambda track: (
-            db.get_taste_score_for_track(str(track.get("track_key") or track.get("spotify_id") or "")),
-            db.get_taste_score_for_artist(str(track.get("artist") or artist or "")),
-            int(track.get("plays") or 0),
-        ),
-        reverse=True,
-    )
-    yield {"type": "top_tracks", "tracks": top_tracks}
 
-    album_items = []
+    def _sort_artist_tracks(tracks: list[dict]) -> list[dict]:
+        rows = list(tracks or [])
+        rows.sort(
+            key=lambda track: (
+                db.get_taste_score_for_track(str(track.get("track_key") or track.get("spotify_id") or "")),
+                db.get_taste_score_for_artist(str(track.get("artist") or artist or "")),
+                int(track.get("plays") or 0),
+            ),
+            reverse=True,
+        )
+        return rows
+
+    def _load_top_tracks_payload() -> list[dict]:
+        return _sort_artist_tracks(spotify_artist_top_tracks(artist, artist_id=resolved_artist_id))
+
+    def _load_albums_payload() -> list[dict]:
+        album_items = []
+        if resolved_artist_id:
+            for attempt in range(2):
+                client = _get_spotify_client(force_refresh=attempt > 0)
+                if not client:
+                    break
+                try:
+                    album_items = _raw_artist_discography_items(client, resolved_artist_id)
+                except Exception:
+                    album_items = []
+                if album_items or attempt > 0:
+                    break
+                _reset_spotify_client_cache()
+
+        if album_items:
+            source_items = [_legacy_simple_item(item, "album") for item in album_items]
+        else:
+            data = _sp("search", q=f'artist:"{artist}"', type="album", limit=50)
+            source_items = (data.get("albums") or {}).get("items") or []
+
+        albums = []
+        for item in source_items:
+            images = item.get("images") or []
+            albums.append({
+                "type": "album", "title": item["name"], "artist": artist, "album": item["name"],
+                "year": release_year(item.get("release_date", "")),
+                "artwork_url": proxy_artwork_url(images[0].get("url", "")) if images else "",
+                "spotify_id": item["id"], "source": "Spotify",
+                "release_type": item.get("release_type", "")
+            })
+
+        def _album_sort_key(a):
+            rt = a.get("release_type", "").upper()
+            priority = 0 if rt == "ALBUM" else (1 if rt == "COMPILATION" else (2 if rt == "SINGLE" else 3))
+            year = a.get("year", "")
+            return (priority, "" if not year else str(9999 - int(year)) if year.isdigit() else year)
+
+        albums.sort(key=_album_sort_key)
+        return albums
+
+    def _load_related_payload() -> list[dict]:
+        related = related_artists(resolved_artist_id, artist)
+        return list(related.get("artists", []) or [])
+    
+    fast_top_tracks = []
     if resolved_artist_id:
-        for attempt in range(2):
-            client = _get_spotify_client(force_refresh=attempt > 0)
-            if not client:
-                break
-            try:
-                album_items = _raw_artist_discography_items(client, resolved_artist_id)
-            except Exception:
-                album_items = []
-            if album_items or attempt > 0:
-                break
-            _reset_spotify_client_cache()
-    
-    if album_items:
-        source_items = [_legacy_simple_item(item, "album") for item in album_items]
-    else:
-        # Fallback to search if discography fetch failed or no ID
-        data = _sp("search", q=f'artist:"{artist}"', type="album", limit=50)
-        source_items = (data.get("albums") or {}).get("items") or []
-    albums = []
-    for item in source_items:
-        images = item.get("images") or []
-        albums.append({
-            "type": "album", "title": item["name"], "artist": artist, "album": item["name"],
-            "year": release_year(item.get("release_date", "")),
-            "artwork_url": proxy_artwork_url(images[0].get("url", "")) if images else "",
-            "spotify_id": item["id"], "source": "Spotify",
-            "release_type": item.get("release_type", "")
-        })
-    
-    # Sort albums to prioritize main studio albums over singles/compilations
-    def _album_sort_key(a):
-        rt = a.get("release_type", "").upper()
-        # 0 for ALBUM, 1 for COMPILATION, 2 for SINGLE/EP, 3 for others
-        priority = 0 if rt == "ALBUM" else (1 if rt == "COMPILATION" else (2 if rt == "SINGLE" else 3))
-        # Secondary sort by year (newest first, fallback to empty)
-        year = a.get("year", "")
-        return (priority, "" if not year else str(9999 - int(year)) if year.isdigit() else year)
-    
-    albums.sort(key=_album_sort_key)
-    
-    yield {"type": "albums", "albums": albums}
+        client = _get_spotify_client()
+        try:
+            raw_fast_tracks = _raw_artist_top_track_items(client, resolved_artist_id, limit=10) if client else []
+        except Exception:
+            raw_fast_tracks = []
+        for t in raw_fast_tracks:
+            legacy_track = _legacy_track_item(t)
+            images = (legacy_track.get("album") or {}).get("images") or []
+            album_name = (legacy_track.get("album") or {}).get("name", "")
+            fast_top_tracks.append({
+                "title": legacy_track.get("name", ""),
+                "artist": artist,
+                "album": album_name,
+                "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
+                "duration": format_duration_ms(legacy_track.get("duration_ms", 0)),
+                "length": legacy_track.get("duration_ms", 0),
+                "plays": legacy_track.get("popularity", 0) * 10000,
+                "spotify_url": (legacy_track.get("external_urls") or {}).get("spotify", ""),
+                "spotify_id": legacy_track.get("id", ""),
+                "isrc": (legacy_track.get("external_ids") or {}).get("isrc", ""),
+                "source": "Spotify",
+            })
+    if not fast_top_tracks:
+        fast_top_tracks = spotify_artist_top_tracks(
+            artist,
+            artist_id=resolved_artist_id,
+            enrich_missing_playcounts=False,
+        )
+    fast_top_tracks = _sort_artist_tracks(fast_top_tracks)
+    yield {"type": "top_tracks", "tracks": fast_top_tracks, "loading": True}
 
-    related = related_artists(resolved_artist_id, artist)
-    yield {"type": "related_artists", "artists": related.get("artists", [])}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        future_map = {
+            executor.submit(_load_top_tracks_payload): "top_tracks",
+            executor.submit(_load_albums_payload): "albums",
+            executor.submit(_load_related_payload): "related_artists",
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            kind = future_map[future]
+            try:
+                payload = future.result()
+            except Exception:
+                payload = fast_top_tracks if kind == "top_tracks" else []
+            if kind == "top_tracks":
+                if payload != fast_top_tracks:
+                    yield {"type": "top_tracks", "tracks": payload, "loading": False}
+                else:
+                    yield {"type": "top_tracks", "tracks": fast_top_tracks, "loading": False}
+            elif kind == "albums":
+                yield {"type": "albums", "albums": payload}
+            elif kind == "related_artists":
+                yield {"type": "related_artists", "artists": payload}
 
 
 def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "", spotify_id: str = "") -> dict:

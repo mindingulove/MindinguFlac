@@ -2685,11 +2685,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(service_downloader.playback_source(enrich_download_payload(body)))
                 return
             if path == "/api/native_audio/play":
+                raw_volume = body.get("volume", 1)
+                raw_position = body.get("position", 0)
                 self.send_json(native_audio.play(
                     body.get("path", ""),
                     body.get("device_uid", ""),
-                    float(body.get("volume", 1) or 1),
-                    float(body.get("position", 0) or 0),
+                    float(1 if raw_volume is None else raw_volume),
+                    float(0 if raw_position is None else raw_position),
                     body.get("metadata"),
                 ))
                 return
@@ -2703,10 +2705,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(native_audio.stop())
                 return
             if path == "/api/native_audio/seek":
-                self.send_json(native_audio.seek(float(body.get("position", 0) or 0)))
+                raw_position = body.get("position", 0)
+                self.send_json(native_audio.seek(float(0 if raw_position is None else raw_position)))
                 return
             if path == "/api/native_audio/volume":
-                self.send_json(native_audio.set_volume(float(body.get("volume", 1) or 1)))
+                raw_volume = body.get("volume", 1)
+                self.send_json(native_audio.set_volume(float(1 if raw_volume is None else raw_volume)))
                 return
             if path == "/api/service/promote":
                 result = service_downloader.promote_to_library(

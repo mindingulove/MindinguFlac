@@ -196,6 +196,200 @@ def _macos_unmute_device(device_uid: str) -> None:
         pass
 
 
+def _macos_set_device_mute(device_uid: str, muted: bool) -> None:
+    """Best-effort: toggle the CoreAudio mute flag on the selected output."""
+    if not device_uid or sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+
+        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+
+        def _fcc(s: str) -> int:
+            return int.from_bytes(s.encode(), "big")
+
+        class _PA(ctypes.Structure):
+            _fields_ = [("mSel", ctypes.c_uint32), ("mScope", ctypes.c_uint32), ("mEl", ctypes.c_uint32)]
+
+        kSys, kGlob, kOutp = ctypes.c_uint32(1), _fcc("glob"), _fcc("outp")
+        kDev, kUID, kMute, kUTF8 = _fcc("dev#"), _fcc("uid "), _fcc("mute"), 0x08000100
+
+        ca.AudioObjectGetPropertyDataSize.restype = ctypes.c_int32
+        ca.AudioObjectGetPropertyData.restype = ctypes.c_int32
+        ca.AudioObjectHasProperty.restype = ctypes.c_bool
+        ca.AudioObjectSetPropertyData.restype = ctypes.c_int32
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFRelease.restype = None
+
+        def _data_ptr(value):
+            return ctypes.cast(value, ctypes.c_void_p)
+
+        def _get_cfstr(dev: int, selector: int) -> str:
+            pa_uid = _PA(selector, kGlob, 0)
+            value = ctypes.c_void_p(0)
+            size = ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
+            if ca.AudioObjectGetPropertyData(dev, ctypes.byref(pa_uid), 0, None, ctypes.byref(size), ctypes.byref(value)):
+                return ""
+            if not value.value:
+                return ""
+            try:
+                buf = ctypes.create_string_buffer(512)
+                if not cf.CFStringGetCString(value, _data_ptr(buf), len(buf), kUTF8):
+                    return ""
+                return buf.value.decode("utf-8", "replace")
+            finally:
+                try:
+                    cf.CFRelease(value)
+                except Exception:
+                    pass
+
+        def _set_uint32(dev: int, selector: int, scope: int, element: int, value: int) -> None:
+            pa = _PA(selector, scope, element)
+            if not ca.AudioObjectHasProperty(dev, ctypes.byref(pa)):
+                return
+            data = ctypes.c_uint32(value)
+            ca.AudioObjectSetPropertyData(
+                dev,
+                ctypes.byref(pa),
+                0,
+                None,
+                ctypes.c_uint32(ctypes.sizeof(data)),
+                ctypes.byref(data),
+            )
+
+        pa = _PA(kDev, kGlob, 0)
+        sz = ctypes.c_uint32(0)
+        if ca.AudioObjectGetPropertyDataSize(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz)):
+            return
+        ids = (ctypes.c_uint32 * (sz.value // ctypes.sizeof(ctypes.c_uint32)))()
+        if ca.AudioObjectGetPropertyData(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz), ids):
+            return
+
+        target = None
+        for dev in ids:
+            dev_id = int(dev)
+            if _get_cfstr(dev_id, kUID) == device_uid:
+                target = dev_id
+                break
+        if target is None:
+            return
+
+        mute_value = 1 if muted else 0
+        for scope in (kOutp, kGlob):
+            for el in (0, 1, 2):
+                _set_uint32(target, kMute, scope, el, mute_value)
+    except Exception:
+        pass
+
+
+def _macos_set_device_volume(device_uid: str, volume: float) -> None:
+    """Best-effort: apply scalar volume to the selected CoreAudio output."""
+    if not device_uid or sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+
+        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        try:
+            ahs = ctypes.CDLL("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")
+        except Exception:
+            ahs = None
+
+        def _fcc(s: str) -> int:
+            return int.from_bytes(s.encode(), "big")
+
+        class _PA(ctypes.Structure):
+            _fields_ = [("mSel", ctypes.c_uint32), ("mScope", ctypes.c_uint32), ("mEl", ctypes.c_uint32)]
+
+        kSys, kGlob, kOutp = ctypes.c_uint32(1), _fcc("glob"), _fcc("outp")
+        kDev, kUID, kVol, kVMV, kUTF8 = _fcc("dev#"), _fcc("uid "), _fcc("volm"), _fcc("vmvc"), 0x08000100
+
+        ca.AudioObjectGetPropertyDataSize.restype = ctypes.c_int32
+        ca.AudioObjectGetPropertyData.restype = ctypes.c_int32
+        ca.AudioObjectHasProperty.restype = ctypes.c_bool
+        ca.AudioObjectSetPropertyData.restype = ctypes.c_int32
+        cf.CFStringGetCString.restype = ctypes.c_bool
+        cf.CFRelease.restype = None
+        if ahs is not None:
+            try:
+                ahs.AudioHardwareServiceHasProperty.restype = ctypes.c_bool
+                ahs.AudioHardwareServiceGetPropertyData.restype = ctypes.c_int32
+                ahs.AudioHardwareServiceSetPropertyData.restype = ctypes.c_int32
+            except Exception:
+                ahs = None
+
+        def _data_ptr(value):
+            return ctypes.cast(value, ctypes.c_void_p)
+
+        def _get_cfstr(dev: int, selector: int) -> str:
+            pa_uid = _PA(selector, kGlob, 0)
+            value = ctypes.c_void_p(0)
+            size = ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
+            if ca.AudioObjectGetPropertyData(dev, ctypes.byref(pa_uid), 0, None, ctypes.byref(size), ctypes.byref(value)):
+                return ""
+            if not value.value:
+                return ""
+            try:
+                buf = ctypes.create_string_buffer(512)
+                if not cf.CFStringGetCString(value, _data_ptr(buf), len(buf), kUTF8):
+                    return ""
+                return buf.value.decode("utf-8", "replace")
+            finally:
+                try:
+                    cf.CFRelease(value)
+                except Exception:
+                    pass
+
+        def _set_float(dev: int, selector: int, element: int, value: float, use_service: bool = False) -> bool:
+            pa = _PA(selector, kOutp, element)
+            has_prop = ahs.AudioHardwareServiceHasProperty if use_service and ahs is not None else ca.AudioObjectHasProperty
+            set_prop = ahs.AudioHardwareServiceSetPropertyData if use_service and ahs is not None else ca.AudioObjectSetPropertyData
+            if not has_prop(dev, ctypes.byref(pa)):
+                return False
+            data = ctypes.c_float(max(0.0, min(1.0, float(value))))
+            err = set_prop(
+                dev,
+                ctypes.byref(pa),
+                0,
+                None,
+                ctypes.c_uint32(ctypes.sizeof(data)),
+                ctypes.byref(data),
+            )
+            return not bool(err)
+
+        pa = _PA(kDev, kGlob, 0)
+        sz = ctypes.c_uint32(0)
+        if ca.AudioObjectGetPropertyDataSize(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz)):
+            return
+        ids = (ctypes.c_uint32 * (sz.value // ctypes.sizeof(ctypes.c_uint32)))()
+        if ca.AudioObjectGetPropertyData(kSys, ctypes.byref(pa), 0, None, ctypes.byref(sz), ids):
+            return
+
+        target = None
+        for dev in ids:
+            dev_id = int(dev)
+            if _get_cfstr(dev_id, kUID) == device_uid:
+                target = dev_id
+                break
+        if target is None:
+            return
+
+        if volume <= 0.0001:
+            _macos_set_device_mute(device_uid, True)
+        else:
+            _macos_set_device_mute(device_uid, False)
+
+        applied = _set_float(target, kVMV, 0, volume, use_service=True)
+        for el in (1, 2):
+            applied = _set_float(target, kVol, el, volume) or applied
+        if not applied:
+            _set_float(target, kVol, 0, volume)
+    except Exception:
+        pass
+
+
 class NativeAudioManager:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -278,6 +472,7 @@ class NativeAudioManager:
                 sound.setPlaybackDeviceIdentifier_(device_uid)
                 # Unmute the target device first, so a left-muted output isn't silent.
                 _macos_unmute_device(device_uid)
+                _macos_set_device_volume(device_uid, volume)
             sound.setVolume_(max(0.0, min(1.0, float(volume))))
             if position > 0:
                 sound.setCurrentTime_(max(0.0, float(position)))
@@ -367,6 +562,10 @@ class NativeAudioManager:
             self._volume = max(0.0, min(1.0, float(volume)))
             if self._sound is not None:
                 self._sound.setVolume_(self._volume)
+            if self._device_uid and sys.platform == "darwin":
+                if self._volume > 0.0001:
+                    _macos_unmute_device(self._device_uid)
+                _macos_set_device_volume(self._device_uid, self._volume)
         return self.status() | {"ok": True}
 
     def status(self) -> dict:
