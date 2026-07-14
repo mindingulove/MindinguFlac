@@ -13,6 +13,8 @@ This release focuses on macOS desktop stability, Bluetooth output recovery, vide
 - Artist page albums and related artists now load in parallel with the slow playcount enrichment pass.
 - Artist page overflow tracks now backfill missing Spotify plays with per-track Spotify stats, so non-top10 rows and compilation tracks still show populated play counts.
 - Artist page Popular Tracks headers now use a tighter single-height layout.
+- Artist page Popular Tracks headers no longer show a temporary `Updating plays...` label during the background enrichment pass.
+- Listening Stats now fall back to period-filtered raw listening events for top artists, top albums, and top genres whenever the newer aggregate tables are incomplete, keeping those sections populated and matched to the selected period.
 
 ## Updated
 

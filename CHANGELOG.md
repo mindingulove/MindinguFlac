@@ -15,10 +15,9 @@ All notable changes to Mindinguflac are documented here.
 - Artist pages now render a fast initial Popular Tracks section immediately, then stream enriched playcounts in place instead of blocking the whole discovery view.
 - Artist page albums and related artists now load in parallel with the slower top-track enrichment pass, so those sections appear without waiting for every playcount lookup to finish.
 - Artist page top-track headers now use the compact single-height layout instead of leaving an oversized blank gap above the row labels.
+- Artist page Popular Tracks headers no longer show a transient `Updating plays...` label while the background enrichment pass is still running.
 - Missing Spotify playcounts on artist-page overflow tracks are now backfilled with per-track Spotify stats, so fallback tracks such as compilation or non-top10 rows still show populated plays.
-
-### Updated
-- Visible Settings footer, backend user-agent, release helper, and macOS About/bundle metadata now report `1.2.2`.
+- Listening Stats now fall back to period-filtered raw listening events for top artists, top albums, and top genres whenever the newer aggregate tables are incomplete, keeping those sections populated and aligned with the selected period.
 
 ---
 

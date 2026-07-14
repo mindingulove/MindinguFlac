@@ -2233,6 +2233,175 @@ def get_top_listened_tracks(period: str, limit: int = 10, offset: int = 0, year:
     return {"period": period, "items": items, "total": int((total_row["total"] if total_row else 0) or 0)}
 
 
+def _top_listened_artists_from_events(conn: sqlite3.Connection, clause: str, params: list[Any], limit: int, offset: int) -> dict:
+    rows = conn.execute(f"""
+        SELECT LOWER(TRIM(artist)) AS artist_bucket,
+               MAX(artist) AS artist_name,
+               MAX(track_key) AS sample_track_key,
+               MAX(metadata_json) AS sample_metadata_json,
+               COALESCE(SUM({_effective_listened_ms_sql()}), 0) AS listened_ms,
+               COUNT(*) AS plays,
+               SUM(CASE WHEN event_type = 'complete' THEN 1 ELSE 0 END) AS completed,
+               SUM(CASE WHEN event_type IN ('skip', 'manual_dislike') THEN 1 ELSE 0 END) AS skips
+        FROM listening_events
+        WHERE COALESCE(TRIM(artist), '') != ''{clause}
+        GROUP BY artist_bucket
+        ORDER BY listened_ms DESC, plays DESC, artist_name ASC
+        LIMIT ? OFFSET ?
+    """, params + [int(limit), int(offset)]).fetchall()
+    total_row = conn.execute(f"""
+        SELECT COUNT(*) AS total
+        FROM (
+            SELECT 1
+            FROM listening_events
+            WHERE COALESCE(TRIM(artist), '') != ''{clause}
+            GROUP BY LOWER(TRIM(artist))
+        )
+    """, params).fetchone()
+    items = []
+    for row in rows:
+        artist_name = str(row["artist_name"] or "").strip()
+        track_key = str(row["sample_track_key"] or "").strip()
+        meta = _track_metadata_fallback(track_key, "", artist_name, "", no_mb=True) if track_key else {}
+        sample_meta = _json_load_maybe(row["sample_metadata_json"])
+        spotify_artist_id = str(
+            sample_meta.get("artist_id")
+            or sample_meta.get("spotify_artist_id")
+            or meta.get("artist_id")
+            or meta.get("spotify_artist_id")
+            or ""
+        ).strip()
+        aff = get_artist_affinity(artist_name) or {}
+        items.append({
+            "artist_key": spotify_artist_id or str(row["artist_bucket"] or ""),
+            "spotify_artist_id": spotify_artist_id,
+            "artist_name": artist_name,
+            "type": "artist",
+            "artist": artist_name,
+            "name": artist_name,
+            "artwork_url": sample_meta.get("artist_artwork_url") or meta.get("artwork_url") or "",
+            "listened_ms": int(row["listened_ms"] or 0),
+            "plays": int(row["plays"] or 0),
+            "completed": int(row["completed"] or 0),
+            "skips": int(row["skips"] or 0),
+            "taste_score": float(aff.get("score") or 0.0),
+            "status": aff.get("status") or "neutral",
+        })
+    return {"items": items, "total": int((total_row["total"] if total_row else 0) or 0)}
+
+
+def _top_listened_albums_from_events(conn: sqlite3.Connection, clause: str, params: list[Any], limit: int, offset: int) -> dict:
+    rows = conn.execute(f"""
+        SELECT LOWER(TRIM(artist)) || '|' || LOWER(TRIM(album)) AS album_bucket,
+               MAX(album) AS album,
+               MAX(artist) AS artist,
+               MAX(track_key) AS sample_track_key,
+               MAX(metadata_json) AS sample_metadata_json,
+               COALESCE(SUM({_effective_listened_ms_sql()}), 0) AS listened_ms,
+               COUNT(*) AS plays,
+               SUM(CASE WHEN event_type = 'complete' THEN 1 ELSE 0 END) AS completed,
+               SUM(CASE WHEN event_type IN ('skip', 'manual_dislike') THEN 1 ELSE 0 END) AS skips,
+               COUNT(DISTINCT track_key) AS tracks_heard
+        FROM listening_events
+        WHERE COALESCE(TRIM(artist), '') != '' AND COALESCE(TRIM(album), '') != ''{clause}
+        GROUP BY album_bucket
+        ORDER BY listened_ms DESC, plays DESC, album ASC
+        LIMIT ? OFFSET ?
+    """, params + [int(limit), int(offset)]).fetchall()
+    total_row = conn.execute(f"""
+        SELECT COUNT(*) AS total
+        FROM (
+            SELECT 1
+            FROM listening_events
+            WHERE COALESCE(TRIM(artist), '') != '' AND COALESCE(TRIM(album), '') != ''{clause}
+            GROUP BY LOWER(TRIM(artist)) || '|' || LOWER(TRIM(album))
+        )
+    """, params).fetchone()
+    items = []
+    for row in rows:
+        album = str(row["album"] or "").strip()
+        artist = str(row["artist"] or "").strip()
+        track_key = str(row["sample_track_key"] or "").strip()
+        meta = _track_metadata_fallback(track_key, "", artist, album, no_mb=True) if track_key else {}
+        sample_meta = _json_load_maybe(row["sample_metadata_json"])
+        plays = int(row["plays"] or 0)
+        completed = int(row["completed"] or 0)
+        spotify_artist_id = str(sample_meta.get("artist_id") or sample_meta.get("spotify_artist_id") or "").strip()
+        album_key = f"{spotify_artist_id or _normalize_key(artist)}_{_normalize_key(album)}"
+        items.append({
+            "album_key": album_key,
+            "artist_key": spotify_artist_id or _normalize_key(artist),
+            "album": album,
+            "artist": artist,
+            "type": "album",
+            "name": album,
+            "title": album,
+            "artwork_url": sample_meta.get("artwork_url") or meta.get("artwork_url") or "",
+            "listened_ms": int(row["listened_ms"] or 0),
+            "plays": plays,
+            "tracks_heard": int(row["tracks_heard"] or 0),
+            "completed": completed,
+            "skips": int(row["skips"] or 0),
+            "completion_rate": (completed / max(plays, 1)) * 100.0,
+        })
+    return {"items": items, "total": int((total_row["total"] if total_row else 0) or 0)}
+
+
+def _top_genres_from_events(conn: sqlite3.Connection, clause: str, params: list[Any], limit: int, offset: int) -> dict:
+    from taste_profile import extract_genres_from_metadata, normalize_genre_key
+
+    rows = conn.execute(f"""
+        SELECT track_key, title, artist, album, metadata_json,
+               {_effective_listened_ms_sql()} AS listened_ms,
+               event_type
+        FROM listening_events
+        WHERE 1=1{clause}
+        ORDER BY started_at DESC
+    """, params).fetchall()
+
+    totals: dict[str, dict[str, Any]] = {}
+    track_genre_cache: dict[str, list[str]] = {}
+    for row in rows:
+        track_key = str(row["track_key"] or "").strip()
+        md = _json_load_maybe(row["metadata_json"])
+        genres = extract_genres_from_metadata(md)
+        if not genres and track_key:
+            cached = track_genre_cache.get(track_key)
+            if cached is None:
+                cached = [g for g in (_track_metadata_fallback(track_key, row["title"] or "", row["artist"] or "", row["album"] or "", no_mb=True).get("genres") or []) if g]
+                track_genre_cache[track_key] = cached
+            genres = cached
+        if not genres:
+            continue
+        listened_ms = int(row["listened_ms"] or 0)
+        completed = 1 if str(row["event_type"] or "").lower() == "complete" else 0
+        skipped = 1 if str(row["event_type"] or "").lower() in {"skip", "manual_dislike"} else 0
+        for genre_name in genres:
+            genre_key = normalize_genre_key(genre_name)
+            if not genre_key:
+                continue
+            item = totals.setdefault(genre_key, {
+                "genre_key": genre_key,
+                "genre": genre_name,
+                "listened_ms": 0,
+                "plays": 0,
+                "completed": 0,
+                "skips": 0,
+            })
+            item["listened_ms"] += listened_ms
+            item["plays"] += 1
+            item["completed"] += completed
+            item["skips"] += skipped
+
+    items = sorted(totals.values(), key=lambda item: (-int(item["listened_ms"]), -int(item["plays"]), str(item["genre"])))
+    for item in items:
+        aff = get_genre_affinity(item["genre"] or item["genre_key"]) or {}
+        item["affinity_score"] = float(aff.get("score") or 0.0)
+        item["taste_score"] = float(aff.get("score") or 0.0)
+        item["status"] = aff.get("status") or "neutral"
+    return {"items": items[offset:offset + limit], "total": len(items)}
+
+
 def get_top_listened_artists(period: str, limit: int = 10, offset: int = 0, year: int | None = None, month: int | None = None, months: list[int] | None = None) -> dict:
     # Queries artist_listen_stats_events (Spotify ID keys) — plans/mindinguflac_per_listen_stats_refactor.md Part 3
     conn = _get_conn()
@@ -2257,6 +2426,15 @@ def get_top_listened_artists(period: str, limit: int = 10, offset: int = 0, year
         FROM artist_listen_stats_events
         WHERE 1=1{clause}
     """, params).fetchone()
+    if not rows and not int((total_row["total"] if total_row else 0) or 0):
+        fallback = _top_listened_artists_from_events(
+            conn,
+            _stats_range_clause(period, year=year, month=month, months=months)[0],
+            _stats_range_clause(period, year=year, month=month, months=months)[1],
+            limit,
+            offset,
+        )
+        return {"period": period, **fallback}
     items = []
     for row in rows:
         artist_name = row["artist_name"] or ""
@@ -2305,6 +2483,15 @@ def get_top_listened_albums(period: str, limit: int = 10, offset: int = 0, year:
         FROM album_listen_stats_events
         WHERE 1=1{clause}
     """, params).fetchone()
+    if not rows and not int((total_row["total"] if total_row else 0) or 0):
+        fallback = _top_listened_albums_from_events(
+            conn,
+            _stats_range_clause(period, year=year, month=month, months=months)[0],
+            _stats_range_clause(period, year=year, month=month, months=months)[1],
+            limit,
+            offset,
+        )
+        return {"period": period, **fallback}
     items = []
     for row in rows:
         plays = int(row["plays"] or 0)
@@ -2424,30 +2611,9 @@ def get_top_genres(period: str, limit: int = 10, offset: int = 0, year: int | No
         total = len(items)
         return {"period": period, "items": items[offset:offset + limit], "total": total}
 
-    # Fallback: genre_affinity has cumulative all-time genre data (populated by backfill).
-    # It is not period-filtered but shows real genre data.
-    # Once genre_listen_stats_events backfill completes, this path won't be reached.
-    aff_rows = conn.execute("""
-        SELECT genre_key, genre_name, score, total_plays, total_listened_ms, total_skips, total_completed
-        FROM genre_affinity
-        ORDER BY total_listened_ms DESC, score DESC
-        LIMIT ? OFFSET ?
-    """, [limit, offset]).fetchall()
-    total_row = conn.execute("SELECT COUNT(*) AS c FROM genre_affinity").fetchone()
-    items = []
-    for row in aff_rows:
-        items.append({
-            "genre_key": row["genre_key"],
-            "genre": row["genre_name"] or row["genre_key"],
-            "listened_ms": int(row["total_listened_ms"] or 0),
-            "plays": int(row["total_plays"] or 0),
-            "completed": int(row["total_completed"] or 0),
-            "skips": int(row["total_skips"] or 0),
-            "affinity_score": float(row["score"] or 0.0),
-            "taste_score": float(row["score"] or 0.0),
-            "status": "neutral",
-        })
-    return {"period": period, "items": items, "total": int((total_row["c"] if total_row else 0) or 0)}
+    fallback_clause, fallback_params = _stats_range_clause(period, year=year, month=month, months=months)
+    fallback = _top_genres_from_events(conn, fallback_clause, fallback_params, limit, offset)
+    return {"period": period, **fallback}
 
 
 def get_taste_score_for_track(track_key: str) -> float:
