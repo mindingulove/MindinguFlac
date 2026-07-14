@@ -15,7 +15,3 @@ This release focuses on macOS desktop stability, Bluetooth output recovery, vide
 - Artist page Popular Tracks headers now use a tighter single-height layout.
 - Artist page Popular Tracks headers no longer show a temporary `Updating plays...` label during the background enrichment pass.
 - Listening Stats now fall back to period-filtered raw listening events for top artists, top albums, and top genres whenever the newer aggregate tables are incomplete, keeping those sections populated and matched to the selected period.
-
-## Updated
-
-- Visible Settings footer, backend user-agent, release helper, and macOS About/bundle metadata now report `1.2.2`.
