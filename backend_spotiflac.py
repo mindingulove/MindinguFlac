@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -23,7 +24,10 @@ _STREAM_CAPTURE_INSTALLED = False
 _sf_clients_lock = threading.Lock()
 _sf_clients: dict[str | None, object] = {}
 _sf_async_clients_lock = threading.Lock()
-_sf_async_clients: dict[str | None, object] = {}
+# Async HTTP transports are tied to the event loop that first uses them. Each
+# SpotiFLAC provider attempt is executed through ``asyncio.run()``, so key by
+# loop instead of reusing a transport from an earlier provider attempt.
+_sf_async_clients: dict[tuple[str | None, int | None], object] = {}
 _IDENTITY_ENCODING_HEADERS = {"Accept-Encoding": "identity"}
 _http_identity_guard_installed = False
 _http_identity_guard_lock = threading.Lock()
@@ -95,16 +99,34 @@ def _get_sf_client(proxy: str | None = None):
 
 def _get_sf_async_client(proxy: str | None = None):
     import httpx
+    try:
+        loop_key: int | None = id(asyncio.get_running_loop())
+    except RuntimeError:
+        loop_key = None
+    client_key = (proxy, loop_key)
     with _sf_async_clients_lock:
-        if proxy not in _sf_async_clients:
+        if client_key not in _sf_async_clients:
             limits = httpx.Limits(max_keepalive_connections=30, max_connections=100)
-            _sf_async_clients[proxy] = httpx.AsyncClient(
+            _sf_async_clients[client_key] = httpx.AsyncClient(
                 limits=limits,
                 timeout=300.0,
                 proxy=proxy,
                 headers=_IDENTITY_ENCODING_HEADERS,
             )
-        return _sf_async_clients[proxy]
+        return _sf_async_clients[client_key]
+
+
+async def _close_sf_async_clients_for_current_loop() -> None:
+    """Close and discard clients created by the provider attempt's event loop."""
+    loop_key = id(asyncio.get_running_loop())
+    with _sf_async_clients_lock:
+        clients = [
+            _sf_async_clients.pop(key)
+            for key in list(_sf_async_clients)
+            if key[1] == loop_key
+        ]
+    for client in clients:
+        await client.aclose()
 
 def _patched_get_sync_client(cls):
     # Returns a client configured with the current thread's proxy
@@ -349,7 +371,14 @@ def _run_spotiflac_download(kwargs: dict) -> None:
     url = _spotiflac_url_for_options(str(kwargs.get("url") or ""), include_featuring)
     loop_minutes = kwargs.get("loop")
     downloader = SpotiflacDownloader(DownloadOptions(**options_kwargs))
-    run_async_blocking(downloader.run_async(url, loop_minutes=loop_minutes))
+
+    async def _run_and_close() -> None:
+        try:
+            await downloader.run_async(url, loop_minutes=loop_minutes)
+        finally:
+            await _close_sf_async_clients_for_current_loop()
+
+    run_async_blocking(_run_and_close())
 
 
 def requested_spotiflac_track_metadata(track, job: dict):

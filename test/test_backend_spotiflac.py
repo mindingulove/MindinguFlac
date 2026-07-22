@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -40,6 +41,19 @@ class SpotiFLACProviderSelectionTests(unittest.TestCase):
 
         self.assertEqual(client.headers.get("accept-encoding"), "identity")
         self.assertEqual(async_client.headers.get("accept-encoding"), "identity")
+
+    def test_async_clients_do_not_cross_event_loop_boundaries(self):
+        async def get_client():
+            client = backend_spotiflac._get_sf_async_client(None)
+            try:
+                return client
+            finally:
+                await backend_spotiflac._close_sf_async_clients_for_current_loop()
+
+        first_client = asyncio.run(get_client())
+        second_client = asyncio.run(get_client())
+
+        self.assertIsNot(first_client, second_client)
 
     def test_identity_headers_replace_provider_compression_request(self):
         headers = backend_spotiflac._identity_encoding_headers({

@@ -8,6 +8,7 @@ All notable changes to Mindinguflac are documented here.
 
 ### Fixed
 - Download engines now explicitly request uncompressed HTTP responses, avoiding `incorrect header check` failures from proxies that mislabel response encoding across YouTube, Torrent, and SpotiFLAC downloads.
+- SpotiFLAC provider attempts now use a fresh async HTTP client per event loop, preventing a successful first provider from leaving Deezer, Apple, or Tidal bound to its closed loop.
 
 ### Updated
 - SpotiFLAC → 1.5.2, bringing its current async download orchestration and provider updates.
