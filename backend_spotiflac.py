@@ -25,6 +25,58 @@ _sf_clients: dict[str | None, object] = {}
 _sf_async_clients_lock = threading.Lock()
 _sf_async_clients: dict[str | None, object] = {}
 _IDENTITY_ENCODING_HEADERS = {"Accept-Encoding": "identity"}
+_http_identity_guard_installed = False
+_http_identity_guard_lock = threading.Lock()
+
+
+def _identity_encoding_headers(headers: object = None) -> dict:
+    """Return request headers that never ask a broken proxy to compress data."""
+    normalized = {
+        str(key): value
+        for key, value in dict(headers or {}).items()
+        if str(key).lower() != "accept-encoding"
+    }
+    normalized.update(_IDENTITY_ENCODING_HEADERS)
+    return normalized
+
+
+def _install_identity_encoding_guard() -> None:
+    """Make direct provider HTTP calls use identity encoding too.
+
+    SpotiFLAC 1.5.x has providers that create their own ``httpx`` or
+    ``requests`` client instead of using ``NetworkManager``. Some networks
+    label plain responses as deflate, causing ``incorrect header check``
+    before provider fallback can run. Apply the safe policy at the request
+    boundary for the downloader process.
+    """
+    global _http_identity_guard_installed
+    with _http_identity_guard_lock:
+        if _http_identity_guard_installed:
+            return
+
+        import httpx
+        import requests
+
+        original_sync_request = httpx.Client.request
+        original_async_request = httpx.AsyncClient.request
+        original_requests_request = requests.sessions.Session.request
+
+        def sync_request(self, method, url, **kwargs):
+            kwargs["headers"] = _identity_encoding_headers(kwargs.get("headers"))
+            return original_sync_request(self, method, url, **kwargs)
+
+        async def async_request(self, method, url, **kwargs):
+            kwargs["headers"] = _identity_encoding_headers(kwargs.get("headers"))
+            return await original_async_request(self, method, url, **kwargs)
+
+        def requests_request(self, method, url, **kwargs):
+            kwargs["headers"] = _identity_encoding_headers(kwargs.get("headers"))
+            return original_requests_request(self, method, url, **kwargs)
+
+        httpx.Client.request = sync_request
+        httpx.AsyncClient.request = async_request
+        requests.sessions.Session.request = requests_request
+        _http_identity_guard_installed = True
 
 def _get_sf_client(proxy: str | None = None):
     import httpx
@@ -417,6 +469,7 @@ def run(url: str, output_dir: Path, job: dict, manager) -> None:
     if job["id"] in manager._cancel_flags:
         return
 
+    _install_identity_encoding_guard()
     prefetch_tor()
 
     try:

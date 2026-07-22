@@ -318,7 +318,7 @@ def _torrent_info_from_url(url: str, timeout: int = 8):
     if not url:
         return None
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read(5 * 1024 * 1024)
         for payload in (data, bytearray(data)):

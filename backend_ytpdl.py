@@ -28,6 +28,7 @@ def _youtube_metadata_opts(**overrides) -> dict:
         "skip_download": True,
         "socket_timeout": 8,
         "extractor_args": _youtube_extractor_args(),
+        "http_headers": {"Accept-Encoding": "identity"},
     }
     opts.update(overrides)
     return opts
@@ -1550,6 +1551,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "cachedir": str(output_dir / ".cache"),
         "allow_unplayable_formats": False,
         "extractor_args": _youtube_extractor_args(),
+        # Some upstream/CDN proxies advertise a deflate body but return plain
+        # bytes. Asking for identity lets yt-dlp's own retry paths run.
+        "http_headers": {"Accept-Encoding": "identity"},
         "progress_hooks": [progress_cb],
 
         "writethumbnail": True,

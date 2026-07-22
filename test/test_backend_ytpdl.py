@@ -7,6 +7,12 @@ import backend_ytpdl
 
 
 class TestBackendYtpDl(unittest.TestCase):
+    def test_youtube_metadata_requests_identity_encoding(self):
+        self.assertEqual(
+            backend_ytpdl._youtube_metadata_opts()["http_headers"]["Accept-Encoding"],
+            "identity",
+        )
+
     def test_quality_to_codec(self):
         self.assertEqual(backend_ytpdl._quality_to_codec("mp3"), "mp3")
         self.assertEqual(backend_ytpdl._quality_to_codec("m4a"), "m4a")

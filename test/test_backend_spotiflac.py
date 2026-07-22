@@ -41,6 +41,14 @@ class SpotiFLACProviderSelectionTests(unittest.TestCase):
         self.assertEqual(client.headers.get("accept-encoding"), "identity")
         self.assertEqual(async_client.headers.get("accept-encoding"), "identity")
 
+    def test_identity_headers_replace_provider_compression_request(self):
+        headers = backend_spotiflac._identity_encoding_headers({
+            "Accept-Encoding": "gzip, deflate, br",
+            "User-Agent": "provider",
+        })
+
+        self.assertEqual(headers, {"User-Agent": "provider", "Accept-Encoding": "identity"})
+
     def test_detects_provider_decompression_error(self):
         exc = RuntimeError("Error -3 while decompressing data: incorrect header check")
 

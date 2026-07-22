@@ -4,6 +4,17 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.2.3] — 2026-07-22
+
+### Fixed
+- Download engines now explicitly request uncompressed HTTP responses, avoiding `incorrect header check` failures from proxies that mislabel response encoding across YouTube, Torrent, and SpotiFLAC downloads.
+
+### Updated
+- SpotiFLAC → 1.5.2, bringing its current async download orchestration and provider updates.
+- Desktop builds now include the `nodriver` dependency required by SpotiFLAC's browser-backed provider fallback.
+
+---
+
 ## [1.2.2] — 2026-07-14
 
 ### Fixed

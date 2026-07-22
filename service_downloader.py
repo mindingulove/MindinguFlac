@@ -1821,6 +1821,12 @@ class ServiceDownloadManager:
                         job["library_promote_error"] = str(exc)
                     self._save_jobs()
         except Exception as exc:
+            logging.getLogger("service_downloader").exception(
+                "Download worker failed before completion: job=%s engine=%s service=%s",
+                job.get("id"),
+                job.get("engine"),
+                job.get("service"),
+            )
             with self._lock:
                 job["status"] = "error"
                 job["error"] = str(exc)
