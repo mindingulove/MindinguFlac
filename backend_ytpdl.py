@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 _YOUTUBE_CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{20,}$")
 _YOUTUBE_CHANNEL_ID_CACHE: dict[str, str] = {}
+_YOUTUBE_AUTH_COOKIE_NAMES = {
+    "APISID", "HSID", "LOGIN_INFO", "SAPISID", "SID", "SSID",
+    "__Secure-1PAPISID", "__Secure-1PSID", "__Secure-3PAPISID", "__Secure-3PSID",
+}
 
 
 def _youtube_extractor_args() -> dict:
@@ -84,6 +88,45 @@ def _without_youtube_auth_opts(opts: dict) -> dict:
     no_auth_opts.pop("cookiefile", None)
     no_auth_opts.pop("cookiesfrombrowser", None)
     return no_auth_opts
+
+
+def _youtube_browser_cookie_order() -> tuple[str, ...]:
+    """Return the browser order appropriate for the host OS.
+
+    Browser cookie extraction is optional: callers must still work with no
+    browser, no signed-in account, or a browser whose keychain is locked.
+    """
+    if sys.platform == "darwin":
+        return ("safari", "chrome")
+    if sys.platform.startswith("win"):
+        return ("edge", "chrome")
+    return ("chrome", "firefox")
+
+
+def _has_youtube_auth_cookie(cookiejar) -> bool:
+    """Avoid selecting a browser profile that has no signed-in YouTube session."""
+    try:
+        return any(
+            str(getattr(cookie, "name", "")) in _YOUTUBE_AUTH_COOKIE_NAMES
+            and str(getattr(cookie, "domain", "")).lstrip(".").endswith(("youtube.com", "google.com"))
+            for cookie in cookiejar
+        )
+    except Exception:
+        return False
+
+
+def _add_browser_youtube_cookies(yt_dlp, opts: dict) -> str:
+    """Use the first preferred browser that exposes signed-in YouTube cookies."""
+    for browser in _youtube_browser_cookie_order():
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True, "cookiesfrombrowser": (browser,)}) as probe:
+                if not _has_youtube_auth_cookie(probe.cookiejar):
+                    continue
+            opts["cookiesfrombrowser"] = (browser,)
+            return browser
+        except Exception:
+            continue
+    return ""
 
 
 def _ffmpeg_location() -> str:
@@ -1568,17 +1611,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
         ydl_opts["ffmpeg_location"] = ffmpeg_path
 
     yt_dlp = _get_yt_dlp()
-    # Prefer an explicit yt-dlp cookies.txt file when present; browser cookie
-    # extraction is a fallback because it can fail on locked/encrypted stores.
-    if not _add_youtube_cookie_file(ydl_opts):
-        for _browser in ("safari", "chrome", "firefox"):
-            try:
-                with yt_dlp.YoutubeDL({"quiet": True, "cookiesfrombrowser": (_browser,)}) as _probe:
-                    list(_probe.cookiejar)
-                ydl_opts["cookiesfrombrowser"] = (_browser,)
-                break
-            except Exception:
-                continue
+    # Let yt-dlp use the most recently accessed browser profile by leaving
+    # PROFILE/CONTAINER unspecified. This is normally more reliable than a
+    # copied cookies.txt, which expires quickly. A valid explicit file remains
+    # a fallback for machines where the browser's cookie store is unavailable.
+    browser_cookie_source = _add_browser_youtube_cookies(yt_dlp, ydl_opts)
+    if not _has_youtube_auth_opts(ydl_opts):
+        _add_youtube_cookie_file(ydl_opts)
 
     with manager._lock:
         job["status"] = "running"
@@ -1587,6 +1626,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
         job["last_status"] = "Searching YouTube..." if url.startswith("ytsearch") else "Downloading from YouTube..."
         job["active_provider"] = "ytp-dl"
     label = "video" if video_mode else (codec.upper() if codec else "best native audio")
+    if browser_cookie_source:
+        manager._append_cache_event(job, "trying", f"Using YouTube login cookies from {browser_cookie_source.title()}")
     manager._append_cache_event(job, "trying", f"Downloading via ytp-dl ({label})...")
 
     try:

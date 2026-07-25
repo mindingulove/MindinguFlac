@@ -4,6 +4,11 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
 
+## v1.2.4
+
+- YouTube fallback now automatically uses a signed-in browser session when YouTube presents its bot-verification challenge: Safari then Chrome on macOS, or Edge then Chrome on Windows.
+- No manually exported `cookies.txt` is required when the selected browser is signed in to YouTube.
+
 ## v1.2.3
 
 - Prevented duplicate Mindinguflac desktop instances from opening a second app window on macOS relaunch.

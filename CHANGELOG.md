@@ -4,6 +4,18 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.2.4] — 2026-07-25
+
+### Fixed
+- YouTube fallback now detects a signed-in local browser session when YouTube requires bot verification, trying Safari then Chrome on macOS and Edge then Chrome on Windows.
+- Browser selection skips profiles without YouTube login cookies and reports the selected browser in the cache log.
+
+### Updated
+- Visible Settings footer, backend user-agent, release helper, and macOS About/bundle versions now report `1.2.4`.
+- SpotiFLAC download module updated to version `1.5.2`.
+
+---
+
 ## [1.2.3] — 2026-07-22
 
 ### Fixed

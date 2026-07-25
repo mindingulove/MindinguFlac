@@ -143,6 +143,45 @@ class TestBackendYtpDl(unittest.TestCase):
                     patch("config.app_data_dir", return_value=Path(tmp)):
                 self.assertEqual(backend_ytpdl._youtube_cookie_file(), str(cookie_path))
 
+    def test_browser_cookie_order_is_platform_specific(self):
+        with patch("backend_ytpdl.sys.platform", "darwin"):
+            self.assertEqual(backend_ytpdl._youtube_browser_cookie_order(), ("safari", "chrome"))
+        with patch("backend_ytpdl.sys.platform", "win32"):
+            self.assertEqual(backend_ytpdl._youtube_browser_cookie_order(), ("edge", "chrome"))
+
+    def test_browser_cookie_loader_falls_back_to_chrome_when_safari_has_no_youtube_login(self):
+        calls = []
+
+        class Cookie:
+            def __init__(self, name, domain):
+                self.name = name
+                self.domain = domain
+
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+                browser = opts["cookiesfrombrowser"][0]
+                calls.append(browser)
+                self.cookiejar = [Cookie("PREF", ".youtube.com")]
+                if browser == "chrome":
+                    self.cookiejar.append(Cookie("SID", ".youtube.com"))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        opts = {}
+        with patch("backend_ytpdl.sys.platform", "darwin"):
+            selected = backend_ytpdl._add_browser_youtube_cookies(
+                type("YtDlp", (), {"YoutubeDL": FakeYoutubeDL}), opts
+            )
+
+        self.assertEqual(selected, "chrome")
+        self.assertEqual(calls, ["safari", "chrome"])
+        self.assertEqual(opts["cookiesfrombrowser"], ("chrome",))
+
     def test_youtube_search_retries_without_cookie_file_after_empty_results(self):
         calls = []
 
