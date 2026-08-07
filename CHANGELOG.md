@@ -4,6 +4,19 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.2.5] — 2026-08-07
+
+### Fixed
+- The sidebar **Related music** card no longer stays empty until you skip to another track and back. `/api/artist/top_tracks` returned HTTP 500 (`'NoneType' object has no attribute 'strip'`) whenever the card sent `artist_id: null`, which is the normal state for a track whose Spotify artist ID has not been resolved yet. The card's error handler removes itself on failure, and since the sidebar only rebuilds when the track key changes, it never retried — so the card stayed gone for the whole track. `spotify_artist_top_tracks()` now coerces a missing artist name or ID instead of raising.
+- The same card no longer hangs on `Loading related music...` before disappearing. `/api/artist/top_tracks` ran per-track play-count enrichment sequentially, taking 30–80s for artists with large catalogues, while the frontend aborts that request after 20s — so the card never populated. The endpoint now skips enrichment (its only consumer renders artwork and title, never play counts), cutting a cold Michael Jackson response from 79.5s to 5.1s. Artist-page sorting still enriches play counts as before.
+
+### Updated
+- SpotiFLAC download module updated from `1.5.2` to `1.6.0`, bringing its provider-pool cleanup on batch completion and a configurable concurrent-download limit.
+- macOS and Windows PyInstaller specs now bundle `pydoll`. SpotiFLAC 1.6.0 imports it at package-import time (`core/solver.py` and `core/signed_session_mono.py`, reached via `providers/amazon.py`), and upstream declares it only in its `requirements.txt` rather than its package dependencies — without this, `import SpotiFLAC` fails at startup in a frozen build.
+- Visible Settings footer, backend user-agent, release helper, and macOS About/bundle versions now report `1.2.5`.
+
+---
+
 ## [1.2.4] — 2026-07-25
 
 ### Fixed

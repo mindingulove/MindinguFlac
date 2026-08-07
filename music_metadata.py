@@ -1492,7 +1492,12 @@ def spotify_artist_top_tracks(
     artist_id: str = "",
     enrich_missing_playcounts: bool = True,
 ) -> list[dict]:
-    key = (artist_name.strip().lower(), int(limit or 0), artist_id.strip())
+    # Callers may pass None for either field: the sidebar "Related music" card
+    # sends artist_id=null for tracks whose Spotify artist ID has not been
+    # resolved yet, which used to raise AttributeError here and 500 the request.
+    artist_name = (artist_name or "").strip()
+    artist_id = (artist_id or "").strip()
+    key = (artist_name.lower(), int(limit or 0), artist_id)
     with _spotify_artist_top_tracks_cache_lock:
         cached = _spotify_artist_top_tracks_cache.get(key)
         if cached is not None:

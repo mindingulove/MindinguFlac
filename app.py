@@ -1769,7 +1769,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.2.4"
+    server_version = "SpotiFLACStreamer/1.2.5"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -2396,7 +2396,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/artist/top_tracks":
                 from music_metadata import spotify_artist_top_tracks
-                self.send_json({"tracks": spotify_artist_top_tracks(body.get("name"), artist_id=body.get("artist_id"))})
+                # The only consumer is the sidebar "Related music" card, which shows
+                # artwork/title only — it never renders play counts. Per-track playcount
+                # enrichment is sequential and pushes this endpoint to 30-80s for artists
+                # with many tracks, well past the frontend's 20s timeout, so the card
+                # never populated. Skipping it keeps the response ~7s.
+                self.send_json({"tracks": spotify_artist_top_tracks(
+                    body.get("name"),
+                    artist_id=body.get("artist_id"),
+                    enrich_missing_playcounts=False,
+                )})
                 return
             if path == "/api/artist/tour":
                 tour_url = (

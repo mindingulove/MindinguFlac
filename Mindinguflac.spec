@@ -42,6 +42,16 @@ try:
 except Exception:
     pass
 
+# SpotiFLAC 1.6.0 imports pydoll at package-import time (core/solver.py and
+# core/signed_session_mono.py, reached via providers/amazon.py), so a missing
+# pydoll breaks `import SpotiFLAC` in the frozen app.
+try:
+    tmp_ret = collect_all('pydoll')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('pydoll')
+except Exception:
+    pass
+
 # rapidfuzz has C extensions and is imported at module level across multiple files.
 try:
     tmp_ret = collect_all('rapidfuzz')
@@ -206,8 +216,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.2.4',
-        'CFBundleVersion': '1.2.4',
+        'CFBundleShortVersionString': '1.2.5',
+        'CFBundleVersion': '1.2.5',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

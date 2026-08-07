@@ -48,6 +48,9 @@ def _collect_package(package_name, include_submodules=False):
 
 for _pkg in (
     'SpotiFLAC',
+    # SpotiFLAC 1.6.0 imports pydoll at package-import time (core/solver.py and
+    # core/signed_session_mono.py, reached via providers/amazon.py).
+    'pydoll',
     'torrfetch',
     'yt_dlp',
     'rapidfuzz',
