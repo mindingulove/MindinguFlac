@@ -2,8 +2,11 @@ __pycache__/
 .venv/
 venv/
 venv-macos/
+venv-macos-x86/
 venv-windows/
 .venv-build/
+# Local x86_64 Python used to drive the Intel macOS build under Rosetta.
+python-x86_64/
 data/
 .DS_Store
 codex.md
@@ -14,8 +17,15 @@ claude.md
 *.pyc
 build/
 dist/
+# Per-architecture PyInstaller output (--workpath / --distpath).
+build-arm/
+build-x86/
+dist-arm/
+dist-x86/
 *.spec
 Mindinguflac-macos-arm64.zip
+Mindinguflac-macos-x86_64.zip
+Mindinguflac-windows.zip
 !Mindinguflac.spec
 !Mindinguflac-windows.spec
 !Mindinguflac-launcher.spec
