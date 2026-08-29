@@ -205,22 +205,62 @@ def _numeric_plays(value: object) -> int:
         return 0
 
 
+def _metadata_text(value: object) -> str:
+    """Return provider metadata as text without leaking regex Match reprs.
+
+    Some SpotiFLAC/open-page fallback paths expose ``re.Match`` objects instead
+    of the captured value.  Stringifying those objects produces the literal
+    ``<re.Match object; ...>`` text seen in artist and search pages.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, re.Match):
+        for group in value.groups():
+            if group is not None:
+                return html.unescape(str(group)).strip()
+        return html.unescape(str(value.group(0) or "")).strip()
+    return html.unescape(str(value)).strip()
+
+
 def _legacy_track_item(item: object) -> dict:
     if isinstance(item, dict) and "name" in item:
-        return item
-    artist_names = [name.strip() for name in str(getattr(item, "artists", "") or "").split(",") if name.strip()]
-    cover_url = getattr(item, "cover_url", "") or ""
+        normalized = dict(item)
+        normalized["name"] = _metadata_text(item.get("name"))
+        normalized["id"] = _metadata_text(item.get("id"))
+        normalized["external_urls"] = dict(item.get("external_urls") or {})
+        normalized["external_ids"] = dict(item.get("external_ids") or {})
+        album = dict(item.get("album") or {})
+        album["name"] = _metadata_text(album.get("name"))
+        normalized["album"] = album
+        artists = []
+        raw_artists = item.get("artists") or []
+        if isinstance(raw_artists, str) or isinstance(raw_artists, re.Match):
+            artists = [
+                {"name": name.strip()}
+                for name in _metadata_text(raw_artists).split(",")
+                if name.strip()
+            ]
+        else:
+            for artist in raw_artists:
+                if isinstance(artist, dict):
+                    artist_copy = dict(artist)
+                    artist_copy["name"] = _metadata_text(artist.get("name"))
+                    artists.append(artist_copy)
+        normalized["artists"] = artists
+        return normalized
+    artist_names = [name.strip() for name in _metadata_text(getattr(item, "artists", "")).split(",") if name.strip()]
+    cover_url = _metadata_text(getattr(item, "cover_url", ""))
     return {
-        "id": getattr(item, "id", "") or "",
-        "name": getattr(item, "title", "") or "",
+        "id": _metadata_text(getattr(item, "id", "")),
+        "name": _metadata_text(getattr(item, "title", "")),
         "artists": [{"name": name} for name in artist_names],
         "album": {
-            "name": getattr(item, "album", "") or "",
+            "name": _metadata_text(getattr(item, "album", "")),
             "images": [{"url": cover_url}] if cover_url else [],
         },
         "duration_ms": getattr(item, "duration_ms", 0) or 0,
-        "external_urls": {"spotify": getattr(item, "external_url", "") or ""},
-        "external_ids": {"isrc": getattr(item, "isrc", "") or ""},
+        "external_urls": {"spotify": _metadata_text(getattr(item, "external_url", ""))},
+        "external_ids": {"isrc": _metadata_text(getattr(item, "isrc", ""))},
         "popularity": _numeric_plays(getattr(item, "plays", 0)) // 10000,
     }
 
@@ -233,14 +273,14 @@ def _track_artist_names(item: object) -> list[str]:
             for artist in raw_artists:
                 if not isinstance(artist, dict):
                     continue
-                name = str(artist.get("name") or "").strip()
+                name = _metadata_text(artist.get("name"))
                 if name:
                     names.append(name)
             return names
         if isinstance(raw_artists, str):
             return [name.strip() for name in raw_artists.split(",") if name.strip()]
-    raw_value = getattr(item, "artists", "")
-    return [name.strip() for name in str(raw_value or "").split(",") if name.strip()]
+    raw_value = _metadata_text(getattr(item, "artists", ""))
+    return [name.strip() for name in raw_value.split(",") if name.strip()]
 
 
 def _filter_search_tracks_for_artist(items: list[object], artist_name: str, limit: int) -> list[object]:
@@ -383,18 +423,24 @@ def _spotify_track_playcount(track_id: str, force_refresh: bool = False) -> int:
 
 
 def _legacy_simple_item(item: dict, kind: str) -> dict:
-    cover_url = item.get("cover_url", "")
+    cover_url = _metadata_text(item.get("cover_url"))
     artists = item.get("artists", "")
-    if isinstance(artists, str):
-        artists = [{"name": name.strip()} for name in artists.split(",") if name.strip()]
+    if isinstance(artists, list):
+        artists = [
+            {**artist, "name": _metadata_text(artist.get("name"))}
+            for artist in artists
+            if isinstance(artist, dict) and _metadata_text(artist.get("name"))
+        ]
+    else:
+        artists = [{"name": name.strip()} for name in _metadata_text(artists).split(",") if name.strip()]
     return {
-        "id": item.get("id", ""),
-        "name": item.get("name", ""),
+        "id": _metadata_text(item.get("id")),
+        "name": _metadata_text(item.get("name")),
         "artists": artists or [],
         "images": [{"url": cover_url}] if cover_url else [],
-        "release_date": item.get("release_date", ""),
-        "release_type": item.get("release_type", ""),
-        "external_urls": {"spotify": item.get("external_url", "")},
+        "release_date": _metadata_text(item.get("release_date")),
+        "release_type": _metadata_text(item.get("release_type")),
+        "external_urls": {"spotify": _metadata_text(item.get("external_url"))},
         "popularity": _numeric_plays(item.get("plays", 0)) // 10000,
         "type": kind,
     }
@@ -412,6 +458,7 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
     client = _get_spotify_client(force_refresh=force_refresh)
     if not client:
         return {"tracks": [], "albums": [], "artists": [], "playlists": []}
+    results = {}
     try:
         from spotiflac_compat import call_sync_or_async
 
@@ -422,7 +469,11 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
             "artists": list(results.get("artists", []) or []),
             "playlists": list(results.get("playlists", []) or []),
         }
-        if normalized["albums"] or normalized["artists"] or normalized["playlists"] or hasattr(client, "search"):
+        can_load_raw_categories = bool(
+            getattr(client, "web_client", None)
+            and getattr(client, "_search_payload", None)
+        )
+        if normalized["albums"] or normalized["artists"] or normalized["playlists"] or not can_load_raw_categories:
             if any(normalized.values()):
                 with _spotify_search_results_cache_lock:
                     _spotify_search_results_cache[key] = {name: tuple(values) for name, values in normalized.items()}
@@ -443,7 +494,7 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
             search_v2 = {}
         if search_v2:
             normalized = {
-                "tracks": list(results.get("tracks", []) if "results" in locals() else []),
+                "tracks": list(results.get("tracks", []) or []) or _raw_search_track_items(search_v2),
                 "albums": _raw_search_simple_items(client, query, limit, "album"),
                 "artists": _raw_search_simple_items(client, query, limit, "artist"),
                 "playlists": [],
@@ -469,6 +520,40 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
             while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
                 _spotify_search_results_cache.popitem(last=False)
     return normalized
+
+
+def _raw_search_track_items(search: dict) -> list[dict]:
+    """Convert the current Spotify web-search track shape to our legacy shape."""
+    tracks = []
+    section = search.get("tracksV2") or search.get("tracks") or {}
+    for wrapper in section.get("items", []) or []:
+        node = wrapper.get("item", {}).get("data") or wrapper.get("data") or {}
+        uri = _metadata_text(node.get("uri"))
+        spotify_id = _metadata_text(node.get("id")) or (uri.rsplit(":", 1)[-1] if uri else "")
+        title = _metadata_text(node.get("name"))
+        if not spotify_id or not title:
+            continue
+        album = node.get("albumOfTrack") or node.get("album") or {}
+        cover_url = _best_raw_image(album.get("coverArt") or {})
+        artist_items = (node.get("artists") or {}).get("items") or []
+        artist_names = [
+            _metadata_text((artist.get("profile") or {}).get("name") or artist.get("name"))
+            for artist in artist_items
+            if isinstance(artist, dict)
+        ]
+        tracks.append({
+            "id": spotify_id,
+            "name": title,
+            "artists": [{"name": name} for name in artist_names if name],
+            "album": {
+                "name": _metadata_text(album.get("name")),
+                "images": [{"url": cover_url}] if cover_url else [],
+            },
+            "duration_ms": int((node.get("trackDuration") or {}).get("totalMilliseconds") or 0),
+            "external_urls": {"spotify": f"https://open.spotify.com/track/{spotify_id}"},
+            "external_ids": {"isrc": _metadata_text(node.get("isrc"))},
+        })
+    return tracks
 
 
 def _best_artist_search_match(artist_name: str, items: list[dict]) -> dict:
@@ -1482,7 +1567,8 @@ def _extract_open_spotify_artist_top_tracks(html_text: str, artist_name: str, li
         )
         title = html.unescape((title_match.group(1) if title_match else "").strip())
         if not title:
-            title = html.unescape(str(re.search(r'aria-label="([^"]+)"', row) or "").strip())
+            aria_title_match = re.search(r'aria-label="([^"]+)"', row)
+            title = html.unescape((aria_title_match.group(1) if aria_title_match else "").strip())
         if not title:
             continue
         image_match = re.search(r'<img[^>]+src="([^"]+)"', row, re.IGNORECASE)
@@ -1727,24 +1813,26 @@ class SpotifyIndexer(BaseMusicIndexer):
 
         # Albums
         for album in results.get("albums", []):
-            cover = str(album.get("cover_url") or "").strip()
+            cover = _metadata_text(album.get("cover_url"))
+            album_name = _metadata_text(album.get("name")) or "Unknown"
+            album_artist = _metadata_text(album.get("artists"))
             items.append({
                 "type": "album",
-                "title": album.get("name", "Unknown"),
-                "artist": album.get("artists", ""),
+                "title": album_name,
+                "artist": album_artist,
                 "artist_id": "",
-                "album": album.get("name", ""),
+                "album": album_name,
                 "artwork_url": proxy_artwork_url(cover) if cover else "",
-                "spotify_id": album.get("id", ""),
+                "spotify_id": _metadata_text(album.get("id")),
                 "source": "Spotify",
                 "plays": 0,
             })
 
         # Artists
         for artist in results.get("artists", []):
-            cover = str(artist.get("cover_url") or "").strip()
-            name = artist.get("name", "Unknown")
-            artist_id = artist.get("id", "")
+            cover = _metadata_text(artist.get("cover_url"))
+            name = _metadata_text(artist.get("name")) or "Unknown"
+            artist_id = _metadata_text(artist.get("id"))
             items.append({
                 "type": "artist",
                 "title": name,
@@ -2197,7 +2285,16 @@ def _normalize_artist_about_payload(about: dict | None) -> dict:
     if not isinstance(gallery, list):
         gallery = []
     payload["gallery"] = gallery
-    payload["top_cities"] = payload.get("top_cities") or []
+    top_cities = []
+    for city in payload.get("top_cities") or []:
+        if not isinstance(city, dict):
+            continue
+        city_name = _metadata_text(city.get("city"))
+        country = _metadata_text(city.get("country"))
+        count = _numeric_plays(city.get("count") or city.get("numberOfListeners"))
+        if city_name and count:
+            top_cities.append({"city": city_name, "country": country, "count": count})
+    payload["top_cities"] = top_cities
     payload["related_artists"] = payload.get("related_artists") or []
     payload["monthly_listeners"] = int(payload.get("monthly_listeners") or 0)
     payload["followers"] = int(payload.get("followers") or 0)

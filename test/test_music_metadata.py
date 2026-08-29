@@ -1,3 +1,4 @@
+import re
 import unittest
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -218,6 +219,35 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(first, [])
         self.assertEqual(second[0]["title"], "Beat It")
+
+    def test_spotify_indexer_normalizes_match_values_without_changing_ids(self):
+        class MatchValueClient:
+            def search(self, query, limit=20):
+                return {
+                    "tracks": [FakeTrack(
+                        id="spotify-track-id",
+                        title=re.search(r"(Wish You Were Here)", "Wish You Were Here"),
+                        artists=re.search(r"(Pink Floyd)", "Pink Floyd"),
+                        album=re.search(r"(Wish You Were Here)", "Wish You Were Here"),
+                    )],
+                    "albums": [{
+                        "id": "spotify-album-id",
+                        "name": re.search(r"(The Dark Side of the Moon)", "The Dark Side of the Moon"),
+                        "artists": re.search(r"(Pink Floyd)", "Pink Floyd"),
+                        "cover_url": "",
+                    }],
+                    "artists": [],
+                }
+
+        with patch.object(music_metadata, "_spotify_client_cache", MatchValueClient()):
+            results = music_metadata.SpotifyIndexer().search("Pink Floyd")
+
+        self.assertEqual(results[0]["title"], "Wish You Were Here")
+        self.assertEqual(results[0]["album"], "Wish You Were Here")
+        self.assertEqual(results[0]["artist"], "Pink Floyd")
+        self.assertEqual(results[0]["spotify_id"], "spotify-track-id")
+        self.assertEqual(results[1]["title"], "The Dark Side of the Moon")
+        self.assertEqual(results[1]["spotify_id"], "spotify-album-id")
 
     def test_spotify_indexer_retries_after_transient_client_failure(self):
         class BrokenClient:
@@ -514,6 +544,29 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
         self.assertEqual([track["id"] for track in tracks], ["7J1uxwnxfQLu4APicE5Rnj", "3BovdzfaX4jb5KFQwoPfAw"])
         self.assertEqual(tracks[0]["name"], "Billie Jean")
         self.assertEqual(tracks[0]["popularity"] * 10000, 3040140000)
+
+    def test_open_spotify_top_track_aria_label_fallback_returns_text(self):
+        page = '''
+        <span>Popular</span>
+        <div data-testid="track-row" aria-label="Money">
+          <span data-uri="spotify:track:abc123"></span>
+          <span>1,234,567</span>
+        </div>
+        </body>
+        '''
+
+        tracks = music_metadata._extract_open_spotify_artist_top_tracks(page, "Pink Floyd")
+
+        self.assertEqual(tracks[0]["id"], "abc123")
+        self.assertEqual(tracks[0]["name"], "Money")
+        self.assertNotIn("re.Match", tracks[0]["name"])
+
+    def test_artist_about_preserves_listener_cities(self):
+        about = music_metadata._normalize_artist_about_payload({
+            "top_cities": [{"city": "Sao Paulo", "country": "BR", "numberOfListeners": "511,959"}],
+        })
+
+        self.assertEqual(about["top_cities"], [{"city": "Sao Paulo", "country": "BR", "count": 511959}])
 
     def test_spotify_artist_top_tracks_open_page_fallback_preserves_spotiflac_ids_and_isrc(self):
         with patch.object(music_metadata, "_spotify_search_results", return_value={

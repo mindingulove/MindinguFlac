@@ -18,6 +18,9 @@ All notable changes to Mindinguflac are documented here.
 - Visible Settings footer, HTTP server header, backend user-agent, release helper, and macOS About/bundle versions now report `1.2.6`.
 
 ### Fixed
+- Music search now recovers from an expired or transiently failing SpotiFLAC session and parses Spotify's current `tracksV2` fallback response instead of silently returning zero results.
+- Artist popular-track titles and album names are normalized at the metadata boundary, preventing Python regex objects from appearing in the interface while preserving Spotify IDs used by downloads and Torrent matching.
+- Artist biographies once again include Spotify's **Where people listen** cities and listener counts when those statistics are available.
 - YouTube jobs with missing or expired signed-in browser cookies now show an actionable macOS/Windows notification. The action opens YouTube in the system default browser and retries the same failed track automatically when the user returns to Mindinguflac.
 - YouTube login failures now also use the operating system notification service. macOS requests notification permission when the app first opens, making Mindinguflac available in System Settings before a download fails; clicking the native banner opens YouTube in the default browser, while the in-app action remains available if permission is denied.
 - Desktop side-effect endpoints now reject cross-site browser origins, while preserving native and same-port loopback requests. Codex tokens are never returned by the local status or login APIs.
