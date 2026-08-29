@@ -229,7 +229,7 @@ const STORAGE_KEYS = {
 
 let _lastPlaybackSnapshotWrite = 0;
 
-function storedPlaybackSnapshot() {
+function localPlaybackSnapshot() {
   try {
     const value = JSON.parse(localStorage.getItem(STORAGE_KEYS.playbackSession) || "null");
     if (!value || !value.track || typeof value.track !== "object") return null;
@@ -245,6 +245,12 @@ function storedPlaybackSnapshot() {
   } catch (error) {
     return null;
   }
+}
+
+async function storedPlaybackSnapshot() {
+  const persisted = await api("/api/playback/session").catch(() => null);
+  if (persisted?.track && typeof persisted.track === "object") return persisted;
+  return localPlaybackSnapshot();
 }
 
 function persistPlaybackSnapshot(force = false) {
@@ -263,14 +269,28 @@ function persistPlaybackSnapshot(force = false) {
     ? (state.manualPauseRequested || !state.nativeAudio.playing)
     : !audio || audio.paused;
   try {
-    localStorage.setItem(STORAGE_KEYS.playbackSession, JSON.stringify({
+    const snapshot = {
       track: state.currentTrack,
       libraryPath: state.currentLibraryPath || "",
       position: Number.isFinite(position) ? Math.max(0, position) : 0,
       duration: Number.isFinite(duration) ? Math.max(0, duration) : 0,
       paused,
       savedAt: now,
-    }));
+    };
+    const serialized = JSON.stringify(snapshot);
+    localStorage.setItem(STORAGE_KEYS.playbackSession, serialized);
+    if (force && navigator.sendBeacon) {
+      navigator.sendBeacon(
+        `${API_BASE}/api/playback/session`,
+        new Blob([serialized], { type: "application/json" })
+      );
+    } else {
+      api("/api/playback/session", {
+        method: "POST",
+        body: serialized,
+        timeout: 5000,
+      }).catch(() => {});
+    }
   } catch (error) {}
 }
 
@@ -5833,9 +5853,9 @@ function syncPlayPauseButton() {
 }
 
 let _lastDockPlayingState = null;
-function publishDockPlayingState(playing) {
+function publishDockPlayingState(playing, force = false) {
   const next = !!playing;
-  if (_lastDockPlayingState === next) return;
+  if (!force && _lastDockPlayingState === next) return;
   _lastDockPlayingState = next;
   api("/api/dock/playing-state", {
     method: "POST",
@@ -6261,6 +6281,9 @@ function bindPlayer() {
     // new-track action.
     state.autoplayWanted = false;
     state.activeJobPhase = "";
+    // `playing` is the browser's confirmed transition. Force this update so a
+    // newly started desktop/Dock process cannot retain an earlier paused state.
+    publishDockPlayingState(true, true);
     if (state.currentTrack) {
         const isCache = isLibraryStreamUrl(state.currentStreamUrl);
         if (isCache || (state.currentLibraryPath && !isActiveJobStreamUrl(state.currentStreamUrl))) {
@@ -7294,7 +7317,7 @@ async function restorePlaybackState() {
     console.warn("[Boot] Failed to restore playback state:", e);
   }
 
-  const saved = storedPlaybackSnapshot();
+  const saved = await storedPlaybackSnapshot();
   if (!saved) {
     publishDockPlayingState(false);
     return;

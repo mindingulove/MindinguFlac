@@ -205,6 +205,7 @@ DATA = app_data_dir()
 CONFIG_PATH = DATA / "config.json"
 PLAYLISTS_PATH = DATA / "playlists.json"
 DOCK_RECENTS_PATH = DATA / "dock_recents.json"
+PLAYBACK_SESSION_PATH = DATA / "playback_session.json"
 LYRICS_DIR = DATA / "lyrics"
 VIDEO_CACHE_PATH = DATA / "video_cache.json"
 VIDEO_FILES_DIR = DATA / "video_files"
@@ -269,6 +270,7 @@ playlists_lock = threading.Lock()
 album_playlist_backfill_lock = threading.Lock()
 album_playlist_backfill_in_progress: set[str] = set()
 dock_recent_items_lock = threading.Lock()
+playback_session_lock = threading.Lock()
 _dock_recent_items: list[dict] = []
 
 # Callbacks set by desktop.py for macOS Now Playing / Touch Bar integration
@@ -277,6 +279,15 @@ _np_state_fn = None    # (state: int) -> None
 _np_clear_fn = None    # () -> None
 _macos_media_command_fn = None   # (action: str) -> None
 _system_notification_fn = None   # (title: str, body: str, url: str) -> bool
+_dock_playing_state_fn = None   # (playing: bool) -> None
+
+
+def update_dock_playing_state(playing: bool) -> bool:
+    """Forward playback state to the desktop process that owns the Dock menu."""
+    if _dock_playing_state_fn is None:
+        return False
+    _dock_playing_state_fn(bool(playing))
+    return True
 
 
 def reverse_geocode_location(lat: float, lon: float) -> dict:
@@ -392,6 +403,59 @@ def load_playlists() -> list[dict]:
 
 def save_playlists(data: list[dict]) -> None:
     PLAYLISTS_PATH.write_text(json.dumps(data, indent=2), "utf-8")
+
+
+def valid_playback_session(value: object) -> dict:
+    """Return the safe, bounded subset of a persisted playback snapshot."""
+    if not isinstance(value, dict) or not isinstance(value.get("track"), dict):
+        return {}
+    track = value["track"]
+    try:
+        if len(json.dumps(track, ensure_ascii=False)) > 256_000:
+            return {}
+        position = max(0.0, float(value.get("position") or 0))
+        duration = max(0.0, float(value.get("duration") or 0))
+        saved_at = max(0, int(value.get("savedAt") or 0))
+    except (TypeError, ValueError, OverflowError):
+        return {}
+    return {
+        "track": track,
+        "libraryPath": str(value.get("libraryPath") or "")[:16_384],
+        "position": position,
+        "duration": duration,
+        "paused": bool(value.get("paused", True)),
+        "savedAt": saved_at,
+    }
+
+
+def load_playback_session() -> dict:
+    with playback_session_lock:
+        try:
+            return valid_playback_session(
+                json.loads(PLAYBACK_SESSION_PATH.read_text("utf-8"))
+            )
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+
+def save_playback_session(value: object) -> bool:
+    snapshot = valid_playback_session(value)
+    if not snapshot:
+        return False
+    with playback_session_lock:
+        try:
+            existing = valid_playback_session(
+                json.loads(PLAYBACK_SESSION_PATH.read_text("utf-8"))
+            )
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if int(existing.get("savedAt") or 0) > snapshot["savedAt"]:
+            return True
+        PLAYBACK_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = PLAYBACK_SESSION_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(snapshot, indent=2), "utf-8")
+        temporary.replace(PLAYBACK_SESSION_PATH)
+    return True
 
 
 def merge_nonempty_track_metadata(saved: dict, enriched: dict) -> dict:
@@ -1969,6 +2033,12 @@ class Handler(BaseHTTPRequestHandler):
                 settings_dict["native_now_playing_active"] = bool(_np_update_fn)
                 self.send_json(settings_dict)
                 return
+            if path == "/api/playback/session":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                self.send_json(load_playback_session())
+                return
             if path == "/api/lyrics":
                 payload = {key: values[0] for key, values in query.items() if values}
                 result = _fetch_lyrics(_lyrics_identity(payload))
@@ -2307,6 +2377,15 @@ class Handler(BaseHTTPRequestHandler):
                 set_dock_recent_items(body.get("entries") or [])
                 self.send_json({"ok": True})
                 return
+            if path == "/api/playback/session":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                if not save_playback_session(body):
+                    self.send_error_json("Invalid playback session", HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json({"ok": True})
+                return
             if path == "/api/system/open-url":
                 if not self.trusted_local_origin():
                     self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
@@ -2340,9 +2419,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": shown})
                 return
             if path == "/api/dock/playing-state":
-                import desktop as _desktop
-                _desktop._macos_dock_state["playing"] = bool(body.get("playing"))
-                self.send_json({"ok": True})
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                updated = update_dock_playing_state(bool(body.get("playing")))
+                self.send_json({"ok": True, "updated": updated})
                 return
             if path == "/api/now_playing":
                 if _np_update_fn:

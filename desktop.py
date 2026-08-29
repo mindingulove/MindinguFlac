@@ -359,6 +359,7 @@ def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> No
     if sys.platform != "darwin":
         return
     try:
+        import app as _app
         import objc
         from AppKit import NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem
         from Foundation import NSObject
@@ -409,6 +410,15 @@ def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> No
 
         handler = _DockMenuHandler.alloc().initWithWindow_(window)
         _macos_dock_state["handler"] = handler
+
+        def set_playing_state(playing: bool) -> None:
+            _macos_dock_state["playing"] = bool(playing)
+
+        # desktop.py is the PyInstaller entry point and therefore executes as
+        # __main__.  Register a callback on the already-loaded app module;
+        # importing `desktop` from app.py would create a second module with a
+        # different Dock state dictionary.
+        _app._dock_playing_state_fn = set_playing_state
 
         def build_dock_menu():
             dock_menu = NSMenu.alloc().initWithTitle_("Dock Menu")

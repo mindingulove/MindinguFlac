@@ -34,6 +34,60 @@ class LocalOriginSecurityTests(unittest.TestCase):
         self.assertFalse(self._handler("http://localhost:invalid").trusted_local_origin())
 
 
+class DockPlaybackStateTests(unittest.TestCase):
+    def test_playback_state_is_forwarded_to_registered_desktop_callback(self):
+        callback = MagicMock()
+        with patch.object(app, "_dock_playing_state_fn", callback):
+            self.assertTrue(app.update_dock_playing_state(True))
+            self.assertTrue(app.update_dock_playing_state(False))
+
+        self.assertEqual(callback.call_args_list, [unittest.mock.call(True), unittest.mock.call(False)])
+
+    def test_playback_state_reports_inactive_without_desktop_callback(self):
+        with patch.object(app, "_dock_playing_state_fn", None):
+            self.assertFalse(app.update_dock_playing_state(True))
+
+
+class PlaybackSessionPersistenceTests(unittest.TestCase):
+    def test_session_round_trip_preserves_track_and_exact_position(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "playback_session.json"
+            session = {
+                "track": {"spotify_id": "track-id", "title": "Song", "artist": "Artist"},
+                "libraryPath": "/Music/Artist/Song.flac",
+                "position": 42.375,
+                "duration": 180.0,
+                "paused": False,
+                "savedAt": 123456,
+            }
+            with patch.object(app, "PLAYBACK_SESSION_PATH", path):
+                self.assertTrue(app.save_playback_session(session))
+                restored = app.load_playback_session()
+
+        self.assertEqual(restored["track"]["spotify_id"], "track-id")
+        self.assertEqual(restored["position"], 42.375)
+        self.assertEqual(restored["libraryPath"], "/Music/Artist/Song.flac")
+
+    def test_older_async_snapshot_cannot_overwrite_newer_position(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "playback_session.json"
+            newer = {"track": {"title": "Song"}, "position": 50, "savedAt": 200}
+            older = {"track": {"title": "Song"}, "position": 10, "savedAt": 100}
+            with patch.object(app, "PLAYBACK_SESSION_PATH", path):
+                self.assertTrue(app.save_playback_session(newer))
+                self.assertTrue(app.save_playback_session(older))
+                restored = app.load_playback_session()
+
+        self.assertEqual(restored["position"], 50)
+
+    def test_invalid_or_oversized_session_is_rejected(self):
+        self.assertEqual(app.valid_playback_session({"position": 1}), {})
+        self.assertEqual(
+            app.valid_playback_session({"track": {"title": "x" * 256_001}}),
+            {},
+        )
+
+
 class SpotifyPlaylistImportTests(unittest.TestCase):
     def test_import_uses_public_playlist_client_and_preserves_track_ids(self):
         track = SimpleNamespace(
