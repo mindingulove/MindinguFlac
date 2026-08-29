@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "build-v*"
   workflow_dispatch:
     inputs:
       target:
@@ -48,15 +49,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes_file="RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          release_tag="${GITHUB_REF_NAME#build-}"
+          notes_file="RELEASE_NOTES_${release_tag}.md"
           if [[ ! -f "$notes_file" ]]; then
             notes_file=""
           fi
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if ! gh release view "$release_tag" >/dev/null 2>&1; then
             if [[ -n "$notes_file" ]]; then
-              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$notes_file"
+              gh release create "$release_tag" --title "$release_tag" --notes-file "$notes_file"
             else
-              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+              gh release create "$release_tag" --title "$release_tag" --generate-notes
             fi
           fi
 
@@ -64,7 +66,7 @@ jobs:
     name: macOS arm64
     needs: prepare-release
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') }}
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -107,13 +109,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-        run: gh release upload "$RELEASE_TAG" Mindinguflac-macos-arm64.zip --clobber
+        run: |
+          release_tag="${RELEASE_TAG#build-}"
+          gh release upload "$release_tag" Mindinguflac-macos-arm64.zip --clobber
 
   macos-x86_64:
     name: macOS x86_64
     needs: prepare-release
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') }}
-    runs-on: macos-13
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
@@ -148,7 +152,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-        run: gh release upload "$RELEASE_TAG" Mindinguflac-macos-x86_64.zip --clobber
+        run: |
+          release_tag="${RELEASE_TAG#build-}"
+          gh release upload "$release_tag" Mindinguflac-macos-x86_64.zip --clobber
 
   windows:
     name: Windows
@@ -189,4 +195,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-        run: gh release upload "$env:RELEASE_TAG" dist/Mindinguflac-windows.zip --clobber
+        run: |
+          $releaseTag = $env:RELEASE_TAG -replace '^build-', ''
+          gh release upload $releaseTag dist/Mindinguflac-windows.zip --clobber
