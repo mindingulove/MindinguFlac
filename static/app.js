@@ -42,6 +42,8 @@ const state = {
   currentStreamUrl: "",
   currentLibraryPath: "",
   pendingNativeStartAt: 0,
+  pendingResumePosition: 0,
+  restoredPlaybackPending: false,
   nativeAudio: { active: false, playing: false, position: 0, duration: 0, path: "", ended: false },
   nativeAudioPollTimer: null,
   prefetchedForRequestId: -1,
@@ -222,7 +224,55 @@ function updateEngineControls(engine, currentService, currentQuality) {
 const STORAGE_KEYS = {
   volume: "streambox.volume",
   dockRecents: "mindinguflac.dockRecents",
+  playbackSession: "mindinguflac.playbackSession.v1",
 };
+
+let _lastPlaybackSnapshotWrite = 0;
+
+function storedPlaybackSnapshot() {
+  try {
+    const value = JSON.parse(localStorage.getItem(STORAGE_KEYS.playbackSession) || "null");
+    if (!value || !value.track || typeof value.track !== "object") return null;
+    const position = Number(value.position || 0);
+    const duration = Number(value.duration || 0);
+    return {
+      track: value.track,
+      libraryPath: String(value.libraryPath || ""),
+      position: Number.isFinite(position) && position >= 0 ? position : 0,
+      duration: Number.isFinite(duration) && duration >= 0 ? duration : 0,
+      paused: value.paused !== false,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function persistPlaybackSnapshot(force = false) {
+  if (!state.currentTrack) return;
+  const now = Date.now();
+  if (!force && now - _lastPlaybackSnapshotWrite < 1000) return;
+  _lastPlaybackSnapshotWrite = now;
+  const audio = $("audioPlayer");
+  const position = state.nativeAudio.active
+    ? Number(state.nativeAudio.position || 0)
+    : Number(audio?.currentTime || state.pendingResumePosition || 0);
+  const duration = state.nativeAudio.active
+    ? Number(state.nativeAudio.duration || 0)
+    : Number(audio?.duration || Number(state.currentTrack.duration_ms || 0) / 1000 || 0);
+  const paused = state.nativeAudio.active
+    ? (state.manualPauseRequested || !state.nativeAudio.playing)
+    : !audio || audio.paused;
+  try {
+    localStorage.setItem(STORAGE_KEYS.playbackSession, JSON.stringify({
+      track: state.currentTrack,
+      libraryPath: state.currentLibraryPath || "",
+      position: Number.isFinite(position) ? Math.max(0, position) : 0,
+      duration: Number.isFinite(duration) ? Math.max(0, duration) : 0,
+      paused,
+      savedAt: now,
+    }));
+  } catch (error) {}
+}
 
 async function api(path, options = {}) {
   const { timeout = 15000, ...fetchOptions } = options;
@@ -246,65 +296,6 @@ async function api(path, options = {}) {
 }
 
 function $(id) { return document.getElementById(id); }
-
-// ---------------------------------------------------------------------------
-// DuckDuckGo duck.ai client (free, no API key). DDG gates every request behind
-// `x-vqd-hash-1`, a per-request anti-bot token produced by EXECUTING an
-// obfuscated JS challenge in a real browser DOM. This frontend IS a real browser
-// (WKWebView on macOS, Edge WebView2 on Windows), so we solve the challenge here;
-// the Python backend only relays the solved request to DDG (CORS forbids the
-// browser calling duckduckgo.com directly).
-// ---------------------------------------------------------------------------
-async function _sha256Base64(text) {
-  const data = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  let bin = "";
-  for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
-  return btoa(bin);
-}
-
-async function duckChatAsk(messages, model = "gpt-5-mini") {
-  // The backend now completely handles the anti-bot bypass.
-  // We just fetch the VQD token and pass it to the chat endpoint.
-  const status = await api("/api/ddg/status");
-  if (!status || !status.vqd_hash_1) throw new Error("DDG token unavailable: " + ((status && status.error) || "no token"));
-
-  return api("/api/ddg/chat", {
-    method: "POST",
-    body: JSON.stringify({
-      vqd_hash_1: status.vqd_hash_1,
-      model,
-      messages
-    }),
-  });
-}
-
-window.testDuck = async function (query) {
-  query = query || "Reply with exactly one word: pong";
-  console.log("%c[Duck] Running Hardcoded Bypass...", "color: #00ffff; font-weight: bold;");
-  try {
-    const st = await api("/api/ddg/status");
-    if (!st || !st.vqd_hash_1) {
-      console.error("[Duck] ❌ Failed to get token:", st.error);
-      return;
-    }
-    console.log("[Duck] Token obtained:", st.vqd_hash_1.substring(0, 15) + "...");
-
-    const res = await api("/api/ddg/chat", {
-      method: "POST",
-      body: JSON.stringify({ vqd_hash_1: st.vqd_hash_1, model: "gpt-5-mini", messages: [{ role: "user", content: query }] }),
-    });
-
-    if (res && res.ok) {
-      console.log("%c[Duck] ✅ SUCCESS! -> " + res.text, "color: #00ff00; font-weight: bold;");
-    } else {
-      console.warn(`%c[Duck] ❌ FAILED -> ${res.status} ${res.error}`, "color: #ff0000;");
-      console.log("[Duck] Error Body:", res.body);
-    }
-  } catch (e) {
-    console.error("[Duck] ❌ error:", e);
-  }
-};
 
 function dockRecentKey(entry) {
   const data = entry.data || {};
@@ -2442,6 +2433,11 @@ function seekAfterMetadata(audio, position) {
 
 async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library", startAt = 0) {
   if (requestId !== state.playbackRequestId) return;
+  const pendingResume = Number(state.pendingResumePosition || 0);
+  if ((!Number.isFinite(startAt) || startAt <= 0) && pendingResume > 0) {
+    startAt = pendingResume;
+  }
+  if (pendingResume > 0) state.pendingResumePosition = 0;
   console.log(`[Player] playFromLibraryPath: ${filePath} (startAt: ${startAt})`);
   state.currentLibraryPath = filePath;
   if (state.videoMode && isVideoLibraryPath(filePath)) {
@@ -2878,6 +2874,7 @@ function showToast(msg, durationMs = 3000) {
     document.body.appendChild(el);
   }
   el.textContent = msg;
+  el.classList.remove("app-toast-actionable");
   el.classList.remove("app-toast-hide");
   el.classList.add("app-toast-show");
   clearTimeout(el._hideTimer);
@@ -2885,6 +2882,100 @@ function showToast(msg, durationMs = 3000) {
     el.classList.remove("app-toast-show");
     el.classList.add("app-toast-hide");
   }, durationMs);
+}
+
+let youtubeLoginFlow = null;
+
+function showActionToast(message, actionLabel, onAction) {
+  let el = document.getElementById("appToast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "appToast";
+    el.className = "app-toast";
+    document.body.appendChild(el);
+  }
+  clearTimeout(el._hideTimer);
+  el.innerHTML = `<span>${esc(message)}</span><button type="button" class="app-toast-action">${esc(actionLabel)}</button>`;
+  el.classList.add("app-toast-actionable", "app-toast-show");
+  el.classList.remove("app-toast-hide");
+  el.querySelector(".app-toast-action").onclick = onAction;
+}
+
+function hideActionToast() {
+  const el = document.getElementById("appToast");
+  if (!el) return;
+  el.classList.remove("app-toast-show", "app-toast-actionable");
+  el.classList.add("app-toast-hide");
+}
+
+function requestYoutubeLoginAndRetry(job, retryDownload) {
+  if (youtubeLoginFlow) return;
+  const flow = { retrying: false };
+  youtubeLoginFlow = flow;
+  api("/api/system/notify", {
+    method: "POST",
+    body: JSON.stringify({
+      title: "YouTube login required",
+      message: "Click to sign in with your default browser, then return to retry the track.",
+      url: job.youtube_login_url || "https://www.youtube.com/",
+    }),
+  }).catch(() => {});
+
+  let retryArmed = false;
+  let leftApp = document.hidden || !document.hasFocus();
+  const cleanupReturnWatcher = () => {
+    window.removeEventListener("blur", onAway);
+    window.removeEventListener("focus", onReturn);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  };
+  const onAway = () => { leftApp = true; };
+  const onReturn = () => {
+    if (retryArmed && leftApp && document.visibilityState !== "hidden") {
+      cleanupReturnWatcher();
+      retryOnce();
+    }
+  };
+  const onVisibilityChange = () => {
+    if (document.hidden) onAway();
+    else onReturn();
+  };
+
+  const retryOnce = async () => {
+    if (flow.retrying) return;
+    flow.retrying = true;
+    cleanupReturnWatcher();
+    hideActionToast();
+    youtubeLoginFlow = null;
+    try {
+      await retryDownload();
+    } catch (error) {
+      showToast(error.message || "YouTube retry failed", 5000);
+    }
+  };
+
+  // Arm this before either notification is clicked. A native macOS/Windows
+  // banner opens the browser outside the webview, so it must share the same
+  // leave-app/return watcher as the in-app Log in button.
+  window.addEventListener("blur", onAway);
+  window.addEventListener("focus", onReturn);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  setTimeout(() => { retryArmed = true; }, 750);
+
+  showActionToast("YouTube login required to download this track.", "Log in", async () => {
+    try {
+      await api("/api/system/open-url", {
+        method: "POST",
+        body: JSON.stringify({ url: job.youtube_login_url || "https://www.youtube.com/" }),
+      });
+    } catch (error) {
+      cleanupReturnWatcher();
+      showToast(error.message || "Could not open the browser", 5000);
+      youtubeLoginFlow = null;
+      return;
+    }
+
+    showActionToast("Sign in to YouTube, then return to Mindinguflac.", "Retry now", retryOnce);
+  });
 }
 
 function renderSideVideoButton() {
@@ -4983,6 +5074,21 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
     if (jobId) {
       const data = await api("/api/service/downloads").catch(() => ({ jobs: [] }));
       const job = (data.jobs || []).find(item => item.id === jobId);
+      if (job && job.status === "error" && job.youtube_login_required) {
+        requestYoutubeLoginAndRetry(job, async () => {
+          if (button) {
+            button.dataset.cancelled = "";
+            updateLibraryProgressButton(button, { progress: 0, last_status: "Retrying after YouTube login..." });
+          }
+          const retryJob = await api("/api/service/download", {
+            method: "POST",
+            body: JSON.stringify(serviceDownloadPayload(track, "download")),
+          });
+          if (button) button.dataset.activeJobId = retryJob.id;
+          await waitForLibraryToggle(track, retryJob.id, button);
+        });
+        return null;
+      }
       if (job && job.status === "error") throw new Error(job.error || "Download failed");
       if (job && job.status === "finished") {
         updateLibraryProgressButton(button, { ...job, progress: 100 });
@@ -5012,7 +5118,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
     if (mode === "stream") {
       if (job.status === "finished" && job.library_path) {
         await playFromLibraryPath(job.library_path, track, requestId, job.id, "Playing from cache");
-      } else if (isNativeAudioSelected()) {
+      } else if (isNativeAudioSelected() || state.pendingResumePosition > 0) {
         // Skip browser playback for live jobs if native is selected.
         // NSSound doesn't support streaming URLs, so we wait for the file to finish.
         state.currentPlayableReady = false;
@@ -5056,6 +5162,13 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       const job = (data.jobs || []).find((item) => item.id === jobId);
       if (!job) return;
       if (job.status === "error") {
+        if (job.youtube_login_required) {
+          state.activeJobId = null;
+          setPlayerStatusIcon("error");
+          setPlayerStatus("YouTube login required", track, job);
+          requestYoutubeLoginAndRetry(job, () => startServiceDownload(track, mode, requestId));
+          return;
+        }
         if (mode === "stream") {
           const source = await api("/api/playback/source", {
             method: "POST",
@@ -5373,6 +5486,35 @@ function startCacheLogPolling() {
   state.cacheLogTimer = setInterval(refreshCacheLogs, 1000);
 }
 
+async function refreshCodexStatus() {
+  const label = $("codexAuthStatus");
+  if (!label) return false;
+  const status = await api("/api/codex/status").catch(() => null);
+  const authenticated = !!status?.authenticated;
+  label.textContent = authenticated ? `Signed in · ${status.model || "Codex"}` : "Not signed in";
+  return authenticated;
+}
+
+async function loginCodex() {
+  const button = $("codexLogin");
+  const label = $("codexAuthStatus");
+  if (button) button.disabled = true;
+  if (label) label.textContent = "Complete login in your browser…";
+  try {
+    const result = await api("/api/codex/login", { method: "POST", body: "{}", timeout: 0 });
+    if (!result.authenticated) throw new Error(result.error || "Codex login failed");
+    await refreshCodexStatus();
+    showToast("Codex login complete");
+    return true;
+  } catch (error) {
+    if (label) label.textContent = error.message || "Codex login failed";
+    showToast(error.message || "Codex login failed", 5000);
+    return false;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function renderSettings() {
   setActiveView("settings");
   startCacheLogPolling();
@@ -5403,10 +5545,19 @@ async function renderSettings() {
       const provider = aiProvider.value;
       $("duckModelRow")?.classList.toggle("hidden", provider !== "duckai");
       $("geminiModelRow")?.classList.toggle("hidden", provider !== "gemini");
+      $("codexAuthRow")?.classList.toggle("hidden", provider !== "codex");
     };
-    aiProvider.onchange = updateAiRows;
+    aiProvider.onchange = async () => {
+      updateAiRows();
+      if (aiProvider.value === "codex" && !(await refreshCodexStatus())) {
+        await loginCodex();
+      }
+    };
     updateAiRows();
+    if (aiProvider.value === "codex") refreshCodexStatus();
   }
+
+  if ($("codexLogin")) $("codexLogin").onclick = loginCodex;
 
   if ($("geminiModel")) {
     $("geminiModel").value = state.settings.gemini_model || "gemini-1.5-flash";
@@ -5425,7 +5576,6 @@ async function renderSettings() {
   if (demoMusicIndexer) demoMusicIndexer.checked = !!state.settings.demo_music_indexer;
   const strictTitleMatch = $("strictTitleMatch");
   if (strictTitleMatch) strictTitleMatch.checked = !!state.settings.strict_title_match;
-  $("qobuzToken").value = state.settings.qobuz_token || "";
   $("discogsToken").value = state.settings.discogs_token || "";
 
   try {
@@ -5458,7 +5608,6 @@ async function saveSettings(e) {
 
     demo_music_indexer: $("demoMusicIndexer") ? $("demoMusicIndexer").checked : !!state.settings.demo_music_indexer,
     strict_title_match: $("strictTitleMatch") ? $("strictTitleMatch").checked : !!state.settings.strict_title_match,
-    qobuz_token: $("qobuzToken").value.trim(),
     discogs_token: $("discogsToken").value.trim(),
     music_indexers: []
   };
@@ -5672,14 +5821,26 @@ async function toggleNativeAudioPlayback() {
 function syncPlayPauseButton() {
   const audio = $("audioPlayer");
   const playPause = $("playPause");
-  if (!playPause) return;
-  const icon = playPause.querySelector("i");
+  const paused = state.nativeAudio.active
+    ? (state.manualPauseRequested || !state.nativeAudio.playing)
+    : !audio || audio.paused;
+  const icon = playPause?.querySelector("i");
   if (icon) {
-    const paused = state.nativeAudio.active
-      ? (state.manualPauseRequested || !state.nativeAudio.playing)
-      : audio.paused;
     icon.className = paused ? "bi bi-play-fill" : "bi bi-pause-fill";
   }
+  publishDockPlayingState(!paused);
+  persistPlaybackSnapshot();
+}
+
+let _lastDockPlayingState = null;
+function publishDockPlayingState(playing) {
+  const next = !!playing;
+  if (_lastDockPlayingState === next) return;
+  _lastDockPlayingState = next;
+  api("/api/dock/playing-state", {
+    method: "POST",
+    body: JSON.stringify({ playing: next }),
+  }).catch(() => { _lastDockPlayingState = null; });
 }
 
 function syncVolumeBar() {
@@ -5941,6 +6102,18 @@ function bindPlayer() {
   audio.volume = storedVolume();
   syncVolumeBar();
   $("playPause").onclick = () => {
+    if (state.restoredPlaybackPending && state.currentTrack) {
+      const track = state.currentTrack;
+      const position = Number(state.pendingResumePosition || 0);
+      state.restoredPlaybackPending = false;
+      state.pendingResumePosition = position;
+      selectMusicItem(track, "stream", null, null).catch((error) => {
+        state.restoredPlaybackPending = true;
+        state.pendingResumePosition = position;
+        setPlayerStatus(error.message || "Playback failed", track);
+      });
+      return;
+    }
     if (state.nativeAudio.active) {
       toggleNativeAudioPlayback().catch((error) => {
         if (state.currentTrack) setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
@@ -5992,7 +6165,6 @@ function bindPlayer() {
   audio.onplay = audio.onpause = () => {
     syncPlayPauseButton();
     syncActiveTrackRows();
-    api("/api/dock/playing-state", { method: "POST", body: JSON.stringify({ playing: !audio.paused }) }).catch(() => {});
     const vid = $("sideVideoPlayer");
     if (vid && vid.tagName === "VIDEO") {
       if (!isPlaybackVisiblyActive()) vid.pause();
@@ -6048,6 +6220,7 @@ function bindPlayer() {
     $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
     syncLocalVideoOverlay(audio.currentTime);
     updateLyricsPosition(audio.currentTime);
+    persistPlaybackSnapshot();
     // Only prefetch from a stable browser source. Live active-job streams can
     // still be growing, and starting background downloads against them can
     // race the stream handoff and trigger an early advance.
@@ -6302,13 +6475,14 @@ function renderSidebarPlaylists() {
     const artIcon = art ? "" : `<i class="bi bi-music-note-list"></i>`;
     const origin = inferPlaylistOrigin(pl);
     const originLabel = origin === "album" ? "Album" : "Created";
+    const yearLabel = origin === "album" && pl.year ? ` · ${esc(pl.year)}` : "";
     const isActive = state.activePlaylistId === pl.id;
     return `
       <div class="sidebar-playlist-item${isActive ? " active" : ""}" data-playlist-id="${pl.id}">
         <div class="sidebar-playlist-art" ${artStyle}>${artIcon}</div>
         <div class="sidebar-playlist-info">
           <div class="sidebar-playlist-name">${esc(pl.name)}</div>
-          <div class="sidebar-playlist-count">${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""} · ${esc(originLabel)}</div>
+          <div class="sidebar-playlist-count">${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}${yearLabel} · ${esc(originLabel)}</div>
         </div>
         <button class="sidebar-playlist-delete" type="button" data-delete-playlist="${pl.id}" aria-label="Delete playlist" title="Delete playlist"><i class="bi bi-trash3"></i></button>
       </div>
@@ -6545,7 +6719,7 @@ async function hydrateAlbumPlaylistTracks(playlist, playbackContext = null) {
   const artistName = seed.artist || playlist.owner || "";
   const albumTitle = seed.album || playlist.name || "";
   const releaseId = seed.musicbrainz_release_id || "";
-  const spotifyId = seed.spotify_id || "";
+  const spotifyId = seed.album_spotify_id || seed.spotify_album_id || seed.metadata?.album_spotify_id || "";
   if (!artistName || !albumTitle) return playlist;
 
   try {
@@ -7109,14 +7283,46 @@ async function restorePlaybackState() {
       }
       
       syncNativeAudioUi();
-      renderNowPlaying();
       updateMediaSession(track);
+      syncPlayPauseButton();
+      persistPlaybackSnapshot(true);
       
       console.log("[Boot] Restored playback state for:", track.title);
+      return;
     }
   } catch (e) {
     console.warn("[Boot] Failed to restore playback state:", e);
   }
+
+  const saved = storedPlaybackSnapshot();
+  if (!saved) {
+    publishDockPlayingState(false);
+    return;
+  }
+  state.currentTrack = saved.track;
+  state.pendingResumePosition = saved.position;
+  state.restoredPlaybackPending = true;
+  state.manualPauseRequested = true;
+  state.autoplayWanted = false;
+  prepareSelectedTrackUi(
+    saved.track,
+    saved.position > 0 ? `Paused at ${formatTime(saved.position)}` : "Paused"
+  );
+  state.currentLibraryPath = saved.libraryPath;
+  state.pendingResumePosition = saved.position;
+  const duration = saved.duration || Number(saved.track.duration_ms || 0) / 1000;
+  if (duration > 0) {
+    const ratio = Math.max(0, Math.min(1, saved.position / duration));
+    $("seekBar").value = ratio * 1000;
+    $("seekBar").style.backgroundSize = `${ratio * 100}% 100%`;
+    $("currentTime").textContent = formatTime(saved.position);
+    $("durationTime").textContent = formatTime(duration);
+  }
+  setPlayerStatusIcon("ready");
+  syncPlayPauseButton();
+  updateMediaSession(saved.track);
+  publishNowPlayingState(2);
+  console.log("[Boot] Restored saved track at", saved.position, "seconds:", saved.track.title);
 }
 
 async function boot() {
@@ -8494,6 +8700,7 @@ $("ctxAlbumGoArtist")?.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  persistPlaybackSnapshot(true);
   beaconListeningSession("", "beforeunload");
 });
 

@@ -238,7 +238,7 @@ def _resolve_platform_url(candidate_url: str, service: str) -> str:
 
 def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "track", isrc: str = "") -> str:
     try:
-        from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
         from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
 
@@ -1833,6 +1833,13 @@ class ServiceDownloadManager:
             if job.get("mode", "stream") == "stream":
                 self._append_cache_event(job, "error", f"Cache job failed: {exc}")
             self._save_jobs()
+        finally:
+            if str(job.get("engine") or "").lower() == "ytp-dl":
+                try:
+                    import backend_ytpdl
+                    backend_ytpdl.cleanup_browser_cookie_export(job.get("id", ""))
+                except Exception:
+                    pass
 
     def _save_sidecar_files(self, directory: Path, job: dict) -> None:
         try:

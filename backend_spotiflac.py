@@ -341,7 +341,7 @@ def _spotiflac_url_for_options(url: str, include_featuring: bool) -> str:
     if not include_featuring:
         return url
     try:
-        from SpotiFLAC.providers.spotify_metadata import parse_spotify_url  # type: ignore
+        from SpotiFLAC.core.spotify_metadata import parse_spotify_url  # type: ignore
 
         parsed = parse_spotify_url(url)
     except Exception:
@@ -433,13 +433,13 @@ def _install_stream_capture() -> None:
                     job["active_stream_headers"] = extra_headers or {}
 
     if inspect.iscoroutinefunction(original):
-        async def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None):
+        async def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None, resume=True):
             _capture(url, dest_path, extra_headers)
-            return await original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event)
+            return await original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event, resume)
     else:
-        def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None):
+        def wrapped_stream_to_file(self, url, dest_path, progress_cb=None, chunk_size=256 * 1024, extra_headers=None, stop_event=None, resume=True):
             _capture(url, dest_path, extra_headers)
-            return original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event)
+            return original(self, url, dest_path, progress_cb, chunk_size, extra_headers, stop_event, resume)
 
     http_client_cls.stream_to_file = wrapped_stream_to_file
     _STREAM_CAPTURE_INSTALLED = True
@@ -453,7 +453,7 @@ def _ensure_spotiflac_metadata_patch() -> None:
         if _spotiflac_patch_installed:
             return
         try:
-            from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+            from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
             if hasattr(SpotifyMetadataClient, "get_track"):
                 _original_get_track = SpotifyMetadataClient.get_track
 

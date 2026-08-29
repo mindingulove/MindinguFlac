@@ -28,6 +28,8 @@ hiddenimports = [
     'service_downloader',
     'ai_reranker',
     'duck_proxy',
+    'codex_proxy',
+    'browser_worker_proxy',
     'ddg_browser',
     'tour_ai', 'gemini_proxy', 'gemini_browser',
     'native_audio',
@@ -48,15 +50,14 @@ def _collect_package(package_name, include_submodules=False):
 
 for _pkg in (
     'SpotiFLAC',
-    # SpotiFLAC 1.6.0 imports pydoll at package-import time (core/solver.py and
-    # core/signed_session_mono.py, reached via providers/amazon.py).
+    # SpotiFLAC 3.7.0 imports pydoll in its browser-backed session helpers.
     'pydoll',
     'torrfetch',
     'yt_dlp',
     'rapidfuzz',
     'pydantic', 'pydantic_core',
     'httpx', 'httpcore', 'h2', 'hpack', 'hyperframe',
-    'mutagen', 'cryptography',
+    'mutagen', 'cryptography', 'browser_cookie3', 'lz4', 'codex_auth', 'openai', 'httpx2', 'httpcore2',
     'countrystatecity_countries',
 ):
     _collect_package(_pkg)

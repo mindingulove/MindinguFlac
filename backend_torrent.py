@@ -1456,7 +1456,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     except Exception:
                         return
                     config = getattr(manager, "config", None)
-                    ai_provider = getattr(config, "ai_provider", "duckai")
+                    duck_model, ai_provider, gemini_model = ai_reranker.provider_settings(config)
                     if not ai_reranker.is_enabled(ai_provider):
                         return
                     snapshot = sorted(
@@ -1486,10 +1486,6 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                     "query": item.get("_query") or "",
                                     "magnet": m_link,  # lets the reranker read DN + trackers
                                 })
-                            config = getattr(manager, "config", None)
-                            duck_model = getattr(config, "duck_model", "1")
-                            ai_provider = getattr(config, "ai_provider", "duckai")
-                            gemini_model = getattr(config, "gemini_model", "gemini-1.5-flash")
                             ranked_ids = ai_reranker.rank_candidates(target, candidates, duck_model, ai_provider, gemini_model)
                             ranked_keys = [id_to_key[i] for i in ranked_ids if i in id_to_key]
                             if ranked_keys:

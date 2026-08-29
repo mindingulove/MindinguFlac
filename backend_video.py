@@ -550,7 +550,7 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path) -> bo
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
+def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None, advisor_config=None) -> bool:
     """Find and download the best music video clip for `identity` into `output_path`.
 
     Races torrent search against YouTube lookup; whichever produces a valid file wins.
@@ -694,8 +694,8 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
 
     def _run_ai_advisor():
         try:
-            import ai_reranker, config as _cfg
-            ai_provider = getattr(_cfg, "ai_provider", "duckai")
+            import ai_reranker
+            duck_model, ai_provider, gemini_model = ai_reranker.provider_settings(advisor_config)
             if not ai_reranker.is_enabled(ai_provider):
                 return
             ai_candidates = [
@@ -703,8 +703,6 @@ def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None) -> bool:
                  "magnet": r.get("magnet", ""), "score": int(r.get("_relevance", 0) * 100)}
                 for i, r in enumerate(torrent_candidates[:10])
             ]
-            duck_model = getattr(_cfg, "duck_model", "1")
-            gemini_model = getattr(_cfg, "gemini_model", "gemini-1.5-flash")
             ranked = ai_reranker.rank_candidates(
                 {"artist": artist, "title": title},
                 ai_candidates, duck_model, ai_provider, gemini_model,

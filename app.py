@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.request
 import uuid
+import webbrowser
 import rapidfuzz
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
@@ -275,6 +276,7 @@ _np_update_fn = None   # (info: dict) -> None
 _np_state_fn = None    # (state: int) -> None
 _np_clear_fn = None    # () -> None
 _macos_media_command_fn = None   # (action: str) -> None
+_system_notification_fn = None   # (title: str, body: str, url: str) -> bool
 
 
 def reverse_geocode_location(lat: float, lon: float) -> dict:
@@ -428,7 +430,12 @@ def _refresh_album_playlist_metadata(playlist: dict) -> bool:
     artist = str(seed.get("artist") or playlist.get("owner") or "").strip()
     album = str(seed.get("album") or playlist.get("name") or "").strip()
     release_id = str(seed.get("musicbrainz_release_id") or "").strip()
-    spotify_id = str(seed.get("spotify_id") or "").strip()
+    spotify_id = str(
+        seed.get("album_spotify_id")
+        or seed.get("spotify_album_id")
+        or (seed.get("metadata") or {}).get("album_spotify_id")
+        or ""
+    ).strip()
     if not artist or not album:
         return False
 
@@ -486,8 +493,25 @@ def start_album_playlist_backfill(playlist_id: str) -> None:
                 playlist = next((entry for entry in data if entry.get("id") == playlist_id), None)
                 if not playlist:
                     return
-                if not _refresh_album_playlist_metadata(playlist):
+                playlist = json.loads(json.dumps(playlist))
+            # Metadata resolution can retry remote services. Keep it outside
+            # playlists_lock so the sidebar API remains responsive meanwhile.
+            if not _refresh_album_playlist_metadata(playlist):
+                return
+            with playlists_lock:
+                data = load_playlists()
+                current = next((entry for entry in data if entry.get("id") == playlist_id), None)
+                if not current:
                     return
+                refreshed_by_key = {_track_match_key(track): track for track in playlist.get("tracks") or []}
+                current["tracks"] = [
+                    merge_nonempty_track_metadata(track, refreshed_by_key.get(_track_match_key(track), {}))
+                    for track in (current.get("tracks") or [])
+                ]
+                for key in ("artwork_url", "owner", "year", "metadata_fetched"):
+                    value = playlist.get(key)
+                    if value not in ("", None):
+                        current[key] = value
                 save_playlists(data)
         finally:
             with album_playlist_backfill_lock:
@@ -734,7 +758,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
     album_m = re.search(r"(?:album/|spotify:album:)([A-Za-z0-9]+)", spotify_url)
     
     try:
-        from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
         from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
         pl_year = ""
@@ -1377,7 +1401,7 @@ def _lookup_youtube_video(identity: dict) -> dict:
         suggested_url = ""
         try:
             import ai_reranker
-            ai_provider = getattr(app_config, "ai_provider", "duckai")
+            duck_model, ai_provider, gemini_model = ai_reranker.provider_settings(app_config)
             if ai_reranker.is_enabled(ai_provider) and scored:
                 target = {
                     "title": identity.get("title") or "",
@@ -1400,8 +1424,6 @@ def _lookup_youtube_video(identity: dict) -> dict:
                         "query": "youtube",
                         "url": url,
                     })
-                duck_model = getattr(app_config, "duck_model", "1")
-                gemini_model = getattr(app_config, "gemini_model", "gemini-1.5-flash")
                 ai_result: dict = {}
                 ai_done = threading.Event()
 
@@ -1567,7 +1589,9 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
                 _vid_title = f"{identity.get('artist', '')} – {identity.get('title', '')}".strip(" –")
                 def _vid_log(msg, _t=_vid_title):
                     service_downloader.append_cache_event("trying", msg, title=_t)
-                if backend_video.fetch_clip_to_path(identity, mp4_path, log_cb=_vid_log):
+                if backend_video.fetch_clip_to_path(
+                    identity, mp4_path, log_cb=_vid_log, advisor_config=app_config
+                ):
                     with _video_fetch_lock:
                         _video_fetch_jobs[key] = "ready"
                     return
@@ -1769,7 +1793,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.2.5"
+    server_version = "SpotiFLACStreamer/1.2.6"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -1812,6 +1836,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_cors_headers()
         self.end_headers()
+
+    def trusted_local_origin(self) -> bool:
+        """Reject cross-site browser calls to endpoints with desktop side effects."""
+        origin = str(self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        try:
+            parsed = urlparse(origin)
+            return (
+                parsed.scheme == "http"
+                and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost"}
+                and parsed.port == self.server.server_port
+            )
+        except (TypeError, ValueError):
+            return False
 
 
     def do_GET(self) -> None:
@@ -1987,7 +2026,7 @@ class Handler(BaseHTTPRequestHandler):
                             not (track.get("plays") or track.get("album") or track.get("artist"))
                             for track in tracks
                             if isinstance(track, dict)
-                        )
+                        ) or not playlist.get("year")
                         if needs_backfill:
                             start_album_playlist_backfill(playlist.get("id", ""))
                 self.send_json(playlists)
@@ -2110,13 +2149,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/audio/devices":
                 self.send_json({"devices": _list_audio_output_devices(), "native_available": native_audio.available()})
                 return
-            if path == "/api/ddg/status":
-                import duck_proxy
-                self.send_json(duck_proxy.fetch_status())
-                return
-            if path == "/api/gemini/status":
-                import gemini_proxy
-                self.send_json(gemini_proxy.fetch_status())
+            if path == "/api/codex/status":
+                import codex_proxy
+                self.send_json(codex_proxy.fetch_status())
                 return
             if path == "/api/location/reverse":
                 try:
@@ -2271,6 +2306,38 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/dock/recent":
                 set_dock_recent_items(body.get("entries") or [])
                 self.send_json({"ok": True})
+                return
+            if path == "/api/system/open-url":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                target = str(body.get("url") or "").strip()
+                parsed_target = urlparse(target)
+                host = (parsed_target.hostname or "").lower()
+                if parsed_target.scheme != "https" or host not in {"youtube.com", "www.youtube.com", "music.youtube.com"}:
+                    self.send_error_json("Only secure YouTube login URLs may be opened", HTTPStatus.BAD_REQUEST)
+                    return
+                opened = bool(webbrowser.open(target, new=2))
+                self.send_json({"ok": opened})
+                return
+            if path == "/api/system/notify":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                target = str(body.get("url") or "").strip()
+                parsed_target = urlparse(target)
+                host = (parsed_target.hostname or "").lower()
+                if parsed_target.scheme != "https" or host not in {"youtube.com", "www.youtube.com", "music.youtube.com"}:
+                    self.send_error_json("Only secure YouTube notification URLs are allowed", HTTPStatus.BAD_REQUEST)
+                    return
+                shown = False
+                if _system_notification_fn:
+                    shown = bool(_system_notification_fn(
+                        str(body.get("title") or "Mindinguflac")[:80],
+                        str(body.get("message") or "")[:240],
+                        target,
+                    ))
+                self.send_json({"ok": shown})
                 return
             if path == "/api/dock/playing-state":
                 import desktop as _desktop
@@ -2665,21 +2732,12 @@ class Handler(BaseHTTPRequestHandler):
                 ok = service_downloader.promote_job(body.get("job_id"))
                 self.send_json({"ok": ok})
                 return
-            if path == "/api/ddg/chat":
-                import duck_proxy
-                self.send_json(duck_proxy.send_chat(
-                    token=body.get("vqd_hash_1", ""),
-                    messages=body.get("messages", []),
-                    model=body.get("model", "gpt-5-mini"),
-                ))
-                return
-            if path == "/api/gemini/chat":
-                import gemini_proxy
-                self.send_json(gemini_proxy.send_chat(
-                    prompt=body.get("prompt", ""),
-                    messages=body.get("messages", []),
-                    ensure_model=body.get("model", "flash"),
-                ))
+            if path == "/api/codex/login":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                import codex_proxy
+                self.send_json(codex_proxy.login())
                 return
             if path == "/api/library/status":
                 self.send_json(service_downloader.library_status(body))

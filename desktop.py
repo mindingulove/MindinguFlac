@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import html
 import os
 import shutil
 import sys
@@ -9,6 +11,7 @@ import subprocess
 import traceback
 import time
 import webbrowser
+import uuid
 from pathlib import Path
 
 
@@ -19,6 +22,8 @@ _np_info: dict = {}
 _macos_now_playing_proc: subprocess.Popen[str] | None = None
 _macos_now_playing_stdin = None
 _macos_now_playing_lock = threading.Lock()
+_system_notification_delegate = None
+_system_notification_permission_request = None
 _macos_dock_state: dict[str, object] = {
     "handler": None,
     "shuffle": False,
@@ -466,6 +471,116 @@ def install_macos_dock_menu(window: webview.Window, recent_items_provider) -> No
         print(f"Unable to install macOS Dock menu: {exc}", file=sys.stderr)
 
 
+def install_system_notifications(window: webview.Window) -> None:
+    """Install clickable native notifications for actions that need attention."""
+    global _system_notification_delegate, _system_notification_permission_request
+    try:
+        import app as _app
+
+        if sys.platform == "darwin":
+            import objc
+            from Foundation import NSObject
+            from UserNotifications import (
+                UNAuthorizationOptionAlert,
+                UNAuthorizationOptionSound,
+                UNMutableNotificationContent,
+                UNNotificationPresentationOptionBanner,
+                UNNotificationPresentationOptionSound,
+                UNNotificationRequest,
+                UNUserNotificationCenter,
+            )
+
+            center = UNUserNotificationCenter.currentNotificationCenter()
+
+            class _NotificationDelegate(NSObject):
+                def userNotificationCenter_willPresentNotification_withCompletionHandler_(
+                    self, center_value, notification, completion_handler
+                ):
+                    completion_handler(
+                        UNNotificationPresentationOptionBanner |
+                        UNNotificationPresentationOptionSound
+                    )
+
+                def userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
+                    self, center_value, response, completion_handler
+                ):
+                    try:
+                        info = response.notification().request().content().userInfo() or {}
+                        target = str(info.get("url") or "")
+                        if target:
+                            webbrowser.open(target, new=2)
+                    finally:
+                        completion_handler()
+
+            delegate = _NotificationDelegate.alloc().init()
+            _system_notification_delegate = delegate
+            center.setDelegate_(delegate)
+
+            def request_permission() -> bool:
+                def completed(granted, error):
+                    if error is not None:
+                        print(f"Notification permission request failed: {error}", file=sys.stderr)
+                    elif not granted:
+                        print("Notification permission was not granted; using in-app alerts", file=sys.stderr)
+
+                center.requestAuthorizationWithOptions_completionHandler_(
+                    UNAuthorizationOptionAlert | UNAuthorizationOptionSound,
+                    completed,
+                )
+                return True
+
+            _system_notification_permission_request = request_permission
+
+            def show_notification(title: str, message: str, target: str) -> bool:
+                def deliver(granted, error):
+                    if not granted or error is not None:
+                        return
+                    content = UNMutableNotificationContent.alloc().init()
+                    content.setTitle_(title)
+                    content.setBody_(message)
+                    content.setSound_(None)
+                    content.setUserInfo_({"url": target})
+                    request = UNNotificationRequest.requestWithIdentifier_content_trigger_(
+                        f"youtube-login-{uuid.uuid4()}", content, None
+                    )
+                    center.addNotificationRequest_withCompletionHandler_(request, None)
+
+                center.requestAuthorizationWithOptions_completionHandler_(
+                    UNAuthorizationOptionAlert | UNAuthorizationOptionSound,
+                    deliver,
+                )
+                return True
+
+            _app._system_notification_fn = show_notification
+            return
+
+        if sys.platform == "win32":
+            def show_notification(title: str, message: str, target: str) -> bool:
+                toast_xml = (
+                    f'<toast launch="{html.escape(target, quote=True)}" activationType="protocol">'
+                    '<visual><binding template="ToastGeneric">'
+                    f'<text>{html.escape(title)}</text><text>{html.escape(message)}</text>'
+                    '</binding></visual></toast>'
+                )
+                script = (
+                    "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument;"
+                    f"$xml.LoadXml('{toast_xml.replace("'", "''")}');"
+                    "$toast = New-Object Windows.UI.Notifications.ToastNotification $xml;"
+                    "[Windows.UI.Notifications.ToastNotificationManager]::"
+                    "CreateToastNotifier('Mindinguflac').Show($toast)"
+                )
+                encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+                subprocess.Popen(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                return True
+
+            _app._system_notification_fn = show_notification
+    except Exception as exc:
+        print(f"Unable to install system notifications: {exc}", file=sys.stderr)
+
+
 import multiprocessing
 import ctypes
 
@@ -539,6 +654,7 @@ def main() -> None:
             background_color=DARK_BACKGROUND,
         )
         log_step("pywebview window object created")
+        install_system_notifications(window)
         install_macos_dock_menu(window, app.get_dock_recent_items)
 
         if sys.platform == "darwin":
@@ -564,6 +680,8 @@ def main() -> None:
         def on_shown():
             # macOS-specific helper and Darwin Now Playing
             install_now_playing(window, url)
+            if _system_notification_permission_request:
+                _system_notification_permission_request()
 
         window.events.shown += on_shown
         

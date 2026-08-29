@@ -7,14 +7,14 @@ import shutil
 
 try:
     from config import app_data_dir
-    import SpotiFLAC.core.endpoints as endpoints
+    import SpotiFLAC.core as endpoints
 
     cache_dir = app_data_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     writable_cache = cache_dir / "spotiflac_endpoints_cache.txt"
 
     seed_candidates = [
-        Path(getattr(sys, "_MEIPASS", "")) / "spotiflac_cache" / ".endpoints_cache.txt",
+        Path(getattr(sys, "_MEIPASS", "")) / "spotiflac_cache" / "endpoints_cache.txt",
         Path(getattr(endpoints, "_CACHE_FILE", "")),
     ]
     if not writable_cache.exists():
@@ -26,6 +26,7 @@ try:
                 except Exception:
                     pass
 
+    endpoints._CACHE_DIR = str(cache_dir)
     endpoints._CACHE_FILE = str(writable_cache)
 except Exception:
     pass

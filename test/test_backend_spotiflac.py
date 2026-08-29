@@ -68,6 +68,37 @@ class SpotiFLACProviderSelectionTests(unittest.TestCase):
 
         self.assertTrue(backend_spotiflac._is_decompression_error(exc))
 
+    def test_stream_capture_forwards_spotiflac_resume_option(self):
+        from SpotiFLAC.core.http import AsyncHttpClient
+
+        original = AsyncHttpClient.stream_to_file
+        original_installed = backend_spotiflac._STREAM_CAPTURE_INSTALLED
+        recorded = []
+
+        async def fake_stream(
+            self,
+            url,
+            dest_path,
+            progress_cb=None,
+            chunk_size=256 * 1024,
+            extra_headers=None,
+            stop_event=None,
+            resume=True,
+        ):
+            recorded.append(resume)
+
+        try:
+            AsyncHttpClient.stream_to_file = fake_stream
+            backend_spotiflac._STREAM_CAPTURE_INSTALLED = False
+            backend_spotiflac._install_stream_capture()
+            client = AsyncHttpClient("test")
+            asyncio.run(client.stream_to_file("https://example.test/audio", "/tmp/audio.flac", resume=False))
+        finally:
+            AsyncHttpClient.stream_to_file = original
+            backend_spotiflac._STREAM_CAPTURE_INSTALLED = original_installed
+
+        self.assertEqual(recorded, [False])
+
 
 if __name__ == "__main__":
     unittest.main()

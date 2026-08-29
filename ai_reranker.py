@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
-import shutil
-import subprocess
-import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -18,7 +15,13 @@ def is_enabled(ai_provider: str = "") -> bool:
     if provider in {"duck", "duck_chat", "duckai"}:
         return _duck_available()
     if provider == "gemini":
-        return True # Handled via playwright worker
+        return True
+    if provider == "codex":
+        try:
+            import codex_proxy
+            return bool(codex_proxy.fetch_status().get("authenticated"))
+        except Exception:
+            return False
     return False
 
 
@@ -53,6 +56,26 @@ def _duck_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def provider_settings(config: Any) -> tuple[str, str, str]:
+    """Return normalized advisor settings shared by every download backend."""
+    return (
+        str(getattr(config, "duck_model", "1") or "1"),
+        str(getattr(config, "ai_provider", "duckai") or "duckai"),
+        str(getattr(config, "gemini_model", "gemini-1.5-flash") or "gemini-1.5-flash"),
+    )
+
+
+def _ranking_messages(prompt: str) -> list[dict[str, str]]:
+    return [{
+        "role": "user",
+        "content": (
+            "You rank clean music candidates. Return only JSON. "
+            "Never promote adult, restricted, or unrelated candidates.\n\n"
+            f"{prompt}"
+        ),
+    }]
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -146,18 +169,6 @@ def _duck_model_key(override: str) -> str:
 def _duck_request(prompt: str, duck_model: str) -> dict[str, Any]:
     import duck_proxy
 
-    # We need to prepend system instructions since we are passing a single prompt
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "You rank clean music candidates. Return only JSON. "
-                "Never promote adult, restricted, or unrelated candidates.\n\n"
-                f"{prompt}"
-            ),
-        }
-    ]
-
     status = duck_proxy.fetch_status()
     vqd = status.get("vqd_hash_1", "")
     if not vqd:
@@ -173,26 +184,23 @@ def _duck_request(prompt: str, duck_model: str) -> dict[str, Any]:
     }
     model = models.get(model_key, "gpt-5-mini")
 
-    res = duck_proxy.send_chat(token=vqd, messages=messages, model=model)
+    res = duck_proxy.send_chat(token=vqd, messages=_ranking_messages(prompt), model=model)
     if res.get("ok"):
         return _parse_json_object(res.get("text", ""))
     return {}
 
 
 def _gemini_request(prompt: str, model: str = "gemini-1.5-flash") -> dict[str, Any]:
-    print(f"[ai_reranker] Sending request to Gemini ({model})...")
     import gemini_proxy
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                "You rank clean music candidates. Return only JSON. "
-                "Never promote adult, restricted, or unrelated candidates.\n\n"
-                f"{prompt}"
-            ),
-        }
-    ]
-    res = gemini_proxy.send_chat(prompt=prompt, messages=messages, ensure_model=model)
+    res = gemini_proxy.send_chat(prompt=prompt, messages=_ranking_messages(prompt), ensure_model=model)
+    if res.get("ok"):
+        return _parse_json_object(res.get("text", ""))
+    return {}
+
+
+def _codex_request(prompt: str) -> dict[str, Any]:
+    import codex_proxy
+    res = codex_proxy.send_chat(_ranking_messages(prompt)[0]["content"])
     if res.get("ok"):
         return _parse_json_object(res.get("text", ""))
     return {}
@@ -206,20 +214,15 @@ def _request(prompt: str, duck_model: str = "1", ai_provider: str = "duckai", ge
         return _openai_compatible_request(prompt)
     
     if provider in {"duck", "duck_chat", "duckai"}:
-        res = _duck_request(prompt, duck_model)
-        # Fallback to gemini if Duck.ai fails (e.g. rate limited)
-        if not res or (isinstance(res, dict) and res.get("rate_limited")):
-            print("[ai_reranker] Duck.ai limit reached or failed, falling back to Gemini")
-            return _gemini_request(prompt, gemini_model)
-        return res
+        return _duck_request(prompt, duck_model)
         
     if provider == "gemini":
         return _gemini_request(prompt, gemini_model)
+
+    if provider == "codex":
+        return _codex_request(prompt)
         
     return {}
-
-
-import urllib.parse
 
 
 def _parse_magnet(uri: str) -> dict[str, Any]:

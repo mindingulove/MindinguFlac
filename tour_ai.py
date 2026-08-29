@@ -273,6 +273,13 @@ def fetch_tour(artist_name: str, ai_provider: str = "duckai", gemini_model: str 
         except Exception as e:
             return {"error": str(e)}
 
+    def try_codex():
+        try:
+            import codex_proxy
+            return codex_proxy.send_chat(_prompt(artist_name))
+        except Exception as e:
+            return {"error": str(e)}
+
     started = time.time()
     res = {"ok": False}
     source_name = ""
@@ -280,14 +287,12 @@ def fetch_tour(artist_name: str, ai_provider: str = "duckai", gemini_model: str 
     if provider in {"duck", "duck_chat", "duckai"}:
         res = try_duck()
         source_name = "Duck.ai · GPT-5 Web Search"
-        # Fallback if Duck.ai fails or rate limited
-        if not res.get("ok") or res.get("rate_limited"):
-            print("[tour_ai] Duck.ai limit reached or failed, falling back to Gemini")
-            res = try_gemini()
-            source_name = f"Gemini ({gemini_model}) · Google Search"
     elif provider == "gemini":
         res = try_gemini()
         source_name = f"Gemini ({gemini_model}) · Google Search"
+    elif provider == "codex":
+        res = try_codex()
+        source_name = "Codex"
 
     if not res.get("ok"):
         return {"artist": artist_name, "events": [], "source": "", "error": res.get("error", "no reply")}

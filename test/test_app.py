@@ -1,10 +1,37 @@
 import unittest
 import tempfile
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import app
+
+
+class LocalOriginSecurityTests(unittest.TestCase):
+    def _handler(self, origin=None, port=43210):
+        handler = object.__new__(app.Handler)
+        headers = Message()
+        if origin is not None:
+            headers["Origin"] = origin
+        handler.headers = headers
+        handler.server = SimpleNamespace(server_port=port)
+        return handler
+
+    def test_native_requests_without_origin_are_allowed(self):
+        self.assertTrue(self._handler().trusted_local_origin())
+
+    def test_matching_loopback_origin_is_allowed(self):
+        self.assertTrue(
+            self._handler("http://127.0.0.1:43210").trusted_local_origin()
+        )
+
+    def test_cross_site_or_wrong_port_origins_are_rejected(self):
+        self.assertFalse(self._handler("https://attacker.example").trusted_local_origin())
+        self.assertFalse(
+            self._handler("http://localhost:9999").trusted_local_origin()
+        )
+        self.assertFalse(self._handler("http://localhost:invalid").trusted_local_origin())
 
 
 class SpotifyPlaylistImportTests(unittest.TestCase):
@@ -31,7 +58,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
             "/fallback-cover",
         ))
 
-        with patch("SpotiFLAC.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("SpotiFLAC.core.spotify_metadata.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("https://open.spotify.com/playlist/playlist-id?si=test")
 
         self.assertEqual(imported["name"], "Imported Playlist")
@@ -42,7 +69,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
     def test_import_accepts_spotify_playlist_uri(self):
         client = SimpleNamespace(get_playlist_tracks=lambda playlist_id: ({"name": playlist_id}, [], ""))
 
-        with patch("SpotiFLAC.providers.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("SpotiFLAC.core.spotify_metadata.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M")
 
         self.assertEqual(imported["name"], "37i9dQZF1DXcBWIGoYBM5M")

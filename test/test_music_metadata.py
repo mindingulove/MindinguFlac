@@ -175,6 +175,19 @@ OPEN_SPOTIFY_ARTIST_TOP_TRACKS_HTML = """
 
 
 class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
+    def test_musicbrainz_album_year_uses_first_release_date(self):
+        payload = {
+            "release-groups": [{
+                "title": "Thriller",
+                "first-release-date": "1982-11-30",
+                "score": "100",
+                "artist-credit": [{"name": "Michael Jackson"}],
+            }],
+        }
+        with patch.object(music_metadata, "get_json", return_value=payload):
+            year = music_metadata.musicbrainz_album_year("Michael Jackson", "Thriller")
+
+        self.assertEqual(year, "1982")
     def setUp(self):
         if hasattr(music_metadata, "clear_search_music_cache"):
             music_metadata.clear_search_music_cache()

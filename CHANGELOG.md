@@ -4,6 +4,29 @@ All notable changes to Mindinguflac are documented here.
 
 ---
 
+## [1.2.6] — 2026-08-29
+
+### Updated
+- SpotiFLAC download module updated from `1.6.0` to `3.7.0` at upstream commit `902bf67`. Mindinguflac now uses the relocated `SpotiFLAC.core.spotify_metadata` API, supports the downloader's resumable-stream argument, and keeps the frozen-app endpoint cache redirect compatible with the cache's move into `SpotiFLAC.core`.
+- SpotiFLAC 3.7.0 is extension-first: the built-in provider package has been removed. Existing provider names remain supported as aliases for installed extensions (`tidal-web`, `qobuz-web`, `amazon`, `deezer`, `soundcloud`, and `ytmusic-spotiflac`). A SpotiFLAC provider extension must be installed in `~/.spotiflac/extensions` for downloads to work.
+- The complete reviewed SpotiFLAC extension registry set is installed locally: Spotify Web, Amazon Music, Apple Music, SoundCloud, YouTube Music, Deezer, Pandora, Qobuz Web, and Tidal Web.
+- YouTube authentication now uses `browser_cookie3` discovery instead of a hardcoded browser list. Supported local cookie stores are checked fresh for every job; only YouTube-domain cookies are exported to a permission-restricted temporary job file, and that file is deleted when the job ends.
+- Settings now offers Codex with GPT-5.4 Mini as a third AI advisor. Selecting it starts a browser-based PKCE login through `codex-auth`; credentials remain in that package's permission-restricted token store and are refreshed by the authentication client.
+- The obsolete optional Qobuz user-token setting and persistence logic have been removed. Qobuz remains available through its SpotiFLAC provider extension without that legacy field.
+- Duck.ai and Gemini now share one browser-worker lifecycle manager, and all download backends use the same normalized advisor settings. Dead browser-side chat helpers and unauthenticated debug chat endpoints were removed.
+- AI requests stay with the provider explicitly selected in Settings instead of silently falling through to another provider. Video lookup now receives the saved provider/model settings correctly.
+- Visible Settings footer, HTTP server header, backend user-agent, release helper, and macOS About/bundle versions now report `1.2.6`.
+
+### Fixed
+- YouTube jobs with missing or expired signed-in browser cookies now show an actionable macOS/Windows notification. The action opens YouTube in the system default browser and retries the same failed track automatically when the user returns to Mindinguflac.
+- YouTube login failures now also use the operating system notification service. macOS requests notification permission when the app first opens, making Mindinguflac available in System Settings before a download fails; clicking the native banner opens YouTube in the default browser, while the in-app action remains available if permission is denied.
+- Desktop side-effect endpoints now reject cross-site browser origins, while preserving native and same-port loopback requests. Codex tokens are never returned by the local status or login APIs.
+- Album pages and saved/favorite album rows now recover missing original release years through MusicBrainz, including old saved entries without album IDs. The year appears beside the artist, track count, duration, and sidebar album label; same-named singles no longer override the album year.
+- Duck.ai's first readiness check now retries after Playwright's one-time Chromium installation, preventing a false unavailable status when the newly installed worker is already usable.
+- The macOS Dock command now reads the actual native-or-browser audio state: it says **Pause** while music is playing and **Play** while playback is paused or stopped.
+- Relaunching Mindinguflac restores the last selected song and its saved playback timestamp. The song opens paused at that position and resumes from there when Play is pressed.
+- Spotify track, album, artist, ISRC, and cross-service identifiers remain unchanged through the SpotiFLAC metadata migration. Torrent remains an independent engine with its source selection and shared-session behavior unchanged.
+
 ## [1.2.5] — 2026-08-07
 
 ### Fixed

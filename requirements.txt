@@ -1,10 +1,9 @@
 rapidfuzz
 free-proxy
 PySocks
-git+https://github.com/BartolomeoRusso9/SpotiFLAC-Module-Version.git@7ace1b123b59555543b4f5476e2dc07561df42c6#egg=SpotiFLAC
-# SpotiFLAC 1.6.0 hard-imports pydoll (core/solver.py, core/signed_session_mono.py,
-# reached from providers/amazon.py at import time) but only declares it in its own
-# requirements.txt, not in pyproject dependencies — so pip does not pull it in.
+git+https://github.com/BartolomeoRusso9/SpotiFLAC-Module-Version.git@902bf67bc02819af4e10a2bf32cd1cd60dada353#egg=SpotiFLAC
+# SpotiFLAC 3.7.0 imports pydoll in its browser-backed session helpers. Keep it
+# explicit so desktop dependency audits and frozen-build collection stay clear.
 pydoll-python>=2.9.0
 nodriver>=0.36
 pycryptodomex
@@ -18,6 +17,8 @@ pywebview>=6.2.1
 mutagen>=1.47.0
 pydantic>=2.7.0
 cryptography>=42.0.0,<47
+browser-cookie3==0.20.1
+codex-auth==0.1.1
 packaging>=23.0
 pycryptodome>=3.20.0
 yt-dlp>=2024.04.09
@@ -29,6 +30,7 @@ countrystatecity-countries>=1.0.2
 pyobjc-framework-IOBluetooth>=10.0; sys_platform == "darwin"
 pyobjc-framework-AVFoundation>=12.2; sys_platform == "darwin"
 pyobjc-framework-CoreAudio>=12.2; sys_platform == "darwin"
+pyobjc-framework-UserNotifications>=10.0; sys_platform == "darwin"
 bleak>=0.22.3; sys_platform == "win32"
 pythonnet>=3.0.4; sys_platform == "win32"
 sounddevice>=0.5.1; sys_platform == "win32"

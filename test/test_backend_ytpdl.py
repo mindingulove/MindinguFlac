@@ -7,6 +7,17 @@ import backend_ytpdl
 
 
 class TestBackendYtpDl(unittest.TestCase):
+    def test_missing_youtube_cookies_marks_job_for_login_notification(self):
+        job = {"id": "job-id"}
+        manager = MagicMock()
+
+        backend_ytpdl._mark_youtube_login_required(job, manager)
+
+        self.assertTrue(job["youtube_login_required"])
+        self.assertEqual(job["youtube_login_url"], "https://www.youtube.com/")
+        self.assertEqual(job["last_status"], "YouTube login required")
+        manager._append_cache_event.assert_called_once()
+
     def test_youtube_metadata_requests_identity_encoding(self):
         self.assertEqual(
             backend_ytpdl._youtube_metadata_opts()["http_headers"]["Accept-Encoding"],
@@ -143,44 +154,31 @@ class TestBackendYtpDl(unittest.TestCase):
                     patch("config.app_data_dir", return_value=Path(tmp)):
                 self.assertEqual(backend_ytpdl._youtube_cookie_file(), str(cookie_path))
 
-    def test_browser_cookie_order_is_platform_specific(self):
-        with patch("backend_ytpdl.sys.platform", "darwin"):
-            self.assertEqual(backend_ytpdl._youtube_browser_cookie_order(), ("safari", "chrome"))
-        with patch("backend_ytpdl.sys.platform", "win32"):
-            self.assertEqual(backend_ytpdl._youtube_browser_cookie_order(), ("edge", "chrome"))
+    def test_expired_youtube_auth_cookie_is_not_accepted(self):
+        cookie = MagicMock()
+        cookie.name = "LOGIN_INFO"
+        cookie.domain = ".youtube.com"
+        cookie.is_expired.return_value = True
 
-    def test_browser_cookie_loader_falls_back_to_chrome_when_safari_has_no_youtube_login(self):
-        calls = []
+        self.assertFalse(backend_ytpdl._has_youtube_auth_cookie([cookie]))
 
-        class Cookie:
-            def __init__(self, name, domain):
-                self.name = name
-                self.domain = domain
+    def test_browser_cookie_discovery_does_not_require_a_browser_name(self):
+        from http.cookiejar import Cookie, CookieJar
 
-        class FakeYoutubeDL:
-            def __init__(self, opts):
-                self.opts = opts
-                browser = opts["cookiesfrombrowser"][0]
-                calls.append(browser)
-                self.cookiejar = [Cookie("PREF", ".youtube.com")]
-                if browser == "chrome":
-                    self.cookiejar.append(Cookie("SID", ".youtube.com"))
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
+        cookies = CookieJar()
+        cookies.set_cookie(Cookie(
+            version=0, name="LOGIN_INFO", value="signed-in", port=None, port_specified=False,
+            domain=".youtube.com", domain_specified=True, domain_initial_dot=True,
+            path="/", path_specified=True, secure=True, expires=None, discard=False,
+            comment=None, comment_url=None, rest={}, rfc2109=False,
+        ))
         opts = {}
-        with patch("backend_ytpdl.sys.platform", "darwin"):
-            selected = backend_ytpdl._add_browser_youtube_cookies(
-                type("YtDlp", (), {"YoutubeDL": FakeYoutubeDL}), opts
-            )
-
-        self.assertEqual(selected, "chrome")
-        self.assertEqual(calls, ["safari", "chrome"])
-        self.assertEqual(opts["cookiesfrombrowser"], ("chrome",))
+        with tempfile.TemporaryDirectory() as tmp, patch("browser_cookie3.load", return_value=cookies) as load:
+            self.assertTrue(backend_ytpdl._add_browser_youtube_cookies(opts, Path(tmp), "job-id"))
+            self.assertTrue(Path(opts["cookiefile"]).is_file())
+            load.assert_called_once_with(domain_name="youtube.com")
+            backend_ytpdl.cleanup_browser_cookie_export("job-id")
+            self.assertFalse(Path(opts["cookiefile"]).exists())
 
     def test_youtube_search_retries_without_cookie_file_after_empty_results(self):
         calls = []

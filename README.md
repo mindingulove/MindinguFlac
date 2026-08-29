@@ -4,10 +4,24 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
 
+Mindinguflac uses SpotiFLAC `3.7.0` (`902bf67`) through its extension-first provider API. SpotiFLAC no longer bundles download providers; install the provider extensions you trust under `~/.spotiflac/extensions`. The legacy service selections in Mindinguflac map to their installed extension IDs automatically.
+
+## v1.2.6
+
+- Updates the SpotiFLAC engine from 1.6.0 to 3.7.0 and migrates Mindinguflac to its extension-first provider architecture.
+- Preserves Spotify track, album, artist, ISRC, and cross-service identifiers through the relocated metadata API.
+- Keeps Torrent as an independent download engine; its provider selection and shared-session handling are unchanged.
+- Updates the Settings version label and macOS About metadata to 1.2.6.
+- Restores the last selected song and its saved playback position when the app is reopened.
+- Keeps the macOS Dock command labeled **Pause** while playing and **Play** while paused.
+- Requests macOS notification permission at first launch so YouTube login alerts can appear, open the system default browser, and retry the failed track after login.
+- Adds Duck.ai, Gemini, and browser-authenticated Codex advisor choices, while keeping the selected provider isolated and removing the obsolete Qobuz user-token field.
+
 ## v1.2.4
 
-- YouTube fallback now automatically uses a signed-in browser session when YouTube presents its bot-verification challenge: Safari then Chrome on macOS, or Edge then Chrome on Windows.
+- YouTube fallback automatically discovers a signed-in browser session when YouTube presents its bot-verification challenge.
 - No manually exported `cookies.txt` is required when the selected browser is signed in to YouTube.
+- The YouTube download engine requires a signed-in YouTube session in a local browser. Mindinguflac discovers supported browser cookie stores through `browser_cookie3` instead of assuming a browser. If no login cookies are found, it shows both a native operating-system notification and an in-app login action on macOS and Windows. macOS requests notification permission the first time this is needed. Click the banner or **Log in** to open YouTube in the system default browser; after signing in, return to Mindinguflac and the failed track is retried automatically. If notification permission is denied, the in-app action still works.
 
 ## v1.2.3
 
@@ -261,13 +275,13 @@ library can exist on disk but is not usable for the Windows build.
 
 Open your browser to `http://127.0.0.1:8888`.
 
-### Optional Duck.ai advisor
+### Optional AI advisor
 
-The torrent engine runs an AI advisor in parallel with normal torrent probing by default (powered by DuckDuckGo's free Duck.ai chat API). It is advisory only: the deterministic filters, metadata checks, and libtorrent byte-progress race still decide what downloads.
+The torrent and YouTube matching engines can use Duck.ai, Gemini, or Codex (GPT-5.4 Mini) as an advisor. Choose the provider in Settings. Codex selection opens the system default browser for login and stores the resulting credentials in `codex-auth`'s private token cache. The advisor is advisory only: deterministic filters, metadata checks, and libtorrent byte-progress still decide what downloads.
 
 The AI receives the top 20 search results based on the local scoring algorithm. It evaluates their titles and metadata and returns a sorted list of the IDs it considers to be clean music matches. The torrent engine then attempts to download the AI's ranked candidates in the order provided (up to however many the AI selected), before falling back to the remaining unscored candidates.
 
-> **Note on DuckDuckGo Anti-Bot:** The built-in proxy bypasses DuckDuckGo's anti-bot challenges by using a long-running Playwright browser worker. This worker uses a real Chromium instance (headless) to handle the Duck.ai frontend and challenge flow, ensuring more reliable access than static header spoofing. On first run, the app automatically attempts to fetch the necessary browser binaries if they are missing.
+> **Note on browser-backed providers:** Duck.ai and Gemini use long-running Playwright workers that drive their real browser frontends. On first run, the app automatically attempts to fetch the required browser binaries if they are missing. `codex-auth` is an unofficial alpha dependency, so Codex advisor compatibility can change if its upstream service changes.
 
 To disable the advisor, explicitly set `MINDINGUFLAC_AI_RERANK_PROVIDER` to `none`:
 

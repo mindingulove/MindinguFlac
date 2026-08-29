@@ -32,6 +32,45 @@ def release_year(value: str) -> str:
     return (value or "")[:4] if value and len(value) >= 4 and value[:4].isdigit() else ""
 
 
+def musicbrainz_album_year(artist: str, album: str) -> str:
+    """Resolve a missing release year without depending on Spotify's reduced album payload."""
+    if not artist or not album:
+        return ""
+    query = f'releasegroup:"{album}" AND artist:"{artist}"'
+    url = (
+        "https://musicbrainz.org/ws/2/release-group?query="
+        f"{urllib.parse.quote(query)}&fmt=json&limit=8"
+    )
+    groups = []
+    for attempt in range(3):
+        try:
+            groups = get_json(url).get("release-groups") or []
+            break
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.75 * (attempt + 1))
+    if not groups:
+        return ""
+    wanted_album = norm_name(album)
+    wanted_artist = norm_name(artist)
+    ranked = []
+    for group in groups:
+        title_match = norm_name(str(group.get("title") or "")) == wanted_album
+        credited = " ".join(
+            str(item.get("name") or (item.get("artist") or {}).get("name") or "")
+            for item in (group.get("artist-credit") or [])
+            if isinstance(item, dict)
+        )
+        artist_match = not credited or wanted_artist in norm_name(credited) or norm_name(credited) in wanted_artist
+        year = release_year(str(group.get("first-release-date") or ""))
+        primary_type = str(group.get("primary-type") or "").strip().lower()
+        if year:
+            match_rank = (4 * int(title_match)) + (2 * int(artist_match)) + (2 * int(primary_type == "album"))
+            ranked.append((match_rank, int(group.get("score") or 0), year))
+    ranked.sort(reverse=True)
+    return ranked[0][2] if ranked and ranked[0][0] >= 1 else ""
+
+
 def norm_name(value: str) -> str:
     return "".join(char for char in value.lower() if char.isalnum())
 
@@ -115,7 +154,7 @@ def _get_spotify_client(force_refresh: bool = False):
         if _spotify_client_cache is not None:
             return _spotify_client_cache if _spotify_client_cache is not False else None
         try:
-            from SpotiFLAC.providers.spotify_metadata import SpotifyMetadataClient  # type: ignore
+            from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
             _spotify_client_cache = SpotifyMetadataClient()
             return _spotify_client_cache
         except ImportError:
@@ -1986,8 +2025,36 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
     album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
     cached = db.get_album_metadata(album_key)
     if cached:
-        print(f"[Metadata] Using cached album metadata for: {artist} - {album}")
-        return cached
+        cached_year = release_year(str(cached.get("year") or ""))
+        if not cached_year:
+            cached_year = next(
+                (
+                    release_year(str(track.get("year") or track.get("release_date") or ""))
+                    for track in (cached.get("tracks") or [])
+                    if release_year(str(track.get("year") or track.get("release_date") or ""))
+                ),
+                "",
+            )
+        if cached_year:
+            if cached.get("year") != cached_year:
+                cached = {**cached, "year": cached_year}
+                db.save_album_metadata(album_key, cached)
+            print(f"[Metadata] Using cached album metadata for: {artist} - {album}")
+            return cached
+        recovered_year = musicbrainz_album_year(artist, album)
+        if recovered_year:
+            cached = {**cached, "year": recovered_year}
+            cached["tracks"] = [
+                {**track, "year": track.get("year") or recovered_year}
+                for track in (cached.get("tracks") or [])
+            ]
+            db.save_album_metadata(album_key, cached)
+            print(f"[Metadata] Repaired cached album release year for: {artist} - {album}")
+            return cached
+        if not spotify_id and not release_id:
+            print(f"[Metadata] Using cached album metadata without release year for: {artist} - {album}")
+            return cached
+        print(f"[Metadata] Refreshing album metadata with missing release year: {artist} - {album}")
 
     tracks, art, yr, total_ms = [], "", "", 0
     release_genres = musicbrainz_genres_for_release(release_id) if release_id else []
@@ -2045,6 +2112,13 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
             if items and items[0].get("id") and items[0]["id"] != spotify_id:
                 return album_tracks(config, artist, album, "", items[0]["id"])
         except Exception: pass
+
+    if not yr:
+        yr = musicbrainz_album_year(artist, album)
+        if yr:
+            for track in tracks:
+                if not track.get("year"):
+                    track["year"] = yr
 
     if not art: art = spotify_album_artwork(artist, album)
     gallery_images = []

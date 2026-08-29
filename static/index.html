@@ -148,6 +148,7 @@
                 <select id="aiProvider">
                   <option value="duckai">Duck.ai</option>
                   <option value="gemini">Gemini</option>
+                  <option value="codex">Codex</option>
                 </select>
               </div>
             </div>
@@ -176,6 +177,15 @@
                   <option value="flash">3.5 Flash (All-around)</option>
                   <option value="pro">3.1 Pro (Advanced)</option>
                 </select>
+              </div>
+            </div>
+            <div class="settings-row hidden" id="codexAuthRow">
+              <div class="settings-info">
+                <strong>Codex account</strong>
+                <span id="codexAuthStatus">Not signed in</span>
+              </div>
+              <div class="settings-control">
+                <button id="codexLogin" type="button">Log in with Codex</button>
               </div>
             </div>
             <div class="settings-row">
@@ -241,15 +251,6 @@
             <h2 class="settings-section-title">Search & Metadata</h2>
             <div class="settings-row">
               <div class="settings-info">
-                <label>Qobuz token</label>
-                <span>Optional <code>user_auth_token</code> for better Qobuz stability.</span>
-              </div>
-              <div class="settings-control">
-                <input type="password" id="qobuzToken" autocomplete="off" placeholder="Optional Qobuz user token">
-              </div>
-            </div>
-            <div class="settings-row">
-              <div class="settings-info">
                 <label>Discogs personal token</label>
                 <span>Loads vinyl sleeve and booklet images in album galleries.</span>
               </div>
@@ -262,7 +263,7 @@
 
           <div class="settings-footer" style="display: flex; justify-content: space-between; align-items: center;">
             <div style="font-size: 12px; color: var(--muted);">
-              Mindingulove © 2026 | Version 1.2.5
+              Mindingulove © 2026 | Version 1.2.6
             </div>
             <button class="primary" type="submit">Save settings</button>
           </div>
