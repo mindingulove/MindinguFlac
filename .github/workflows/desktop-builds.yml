@@ -1,6 +1,9 @@
 name: Desktop Builds
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       target:
@@ -34,9 +37,33 @@ permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    name: Prepare GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release for pushed version tag
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes_file="RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          if [[ ! -f "$notes_file" ]]; then
+            notes_file=""
+          fi
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            if [[ -n "$notes_file" ]]; then
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$notes_file"
+            else
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            fi
+          fi
+
   macos-arm64:
     name: macOS arm64
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') }}
+    needs: prepare-release
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') }}
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -76,14 +103,16 @@ jobs:
           path: Mindinguflac-macos-arm64.zip
 
       - name: Attach release asset
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.release_tag }}" Mindinguflac-macos-arm64.zip --clobber
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" Mindinguflac-macos-arm64.zip --clobber
 
   macos-x86_64:
     name: macOS x86_64
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') }}
+    needs: prepare-release
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') }}
     runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
@@ -115,14 +144,16 @@ jobs:
           path: Mindinguflac-macos-x86_64.zip
 
       - name: Attach release asset
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.release_tag }}" Mindinguflac-macos-x86_64.zip --clobber
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" Mindinguflac-macos-x86_64.zip --clobber
 
   windows:
     name: Windows
-    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'windows' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'windows' || github.event.inputs.target == 'all') }}
+    needs: prepare-release
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'windows' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'windows' || github.event.inputs.target == 'all') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -154,7 +185,8 @@ jobs:
           if-no-files-found: error
 
       - name: Attach release asset
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.release_tag }}" dist/Mindinguflac-windows.zip --clobber
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: gh release upload "$env:RELEASE_TAG" dist/Mindinguflac-windows.zip --clobber
