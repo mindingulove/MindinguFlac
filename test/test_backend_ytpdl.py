@@ -162,7 +162,7 @@ class TestBackendYtpDl(unittest.TestCase):
 
         self.assertFalse(backend_ytpdl._has_youtube_auth_cookie([cookie]))
 
-    def test_browser_cookie_discovery_does_not_require_a_browser_name(self):
+    def test_browser_cookie_import_does_not_require_a_browser_name(self):
         from http.cookiejar import Cookie, CookieJar
 
         cookies = CookieJar()
@@ -172,13 +172,26 @@ class TestBackendYtpDl(unittest.TestCase):
             path="/", path_specified=True, secure=True, expires=None, discard=False,
             comment=None, comment_url=None, rest={}, rfc2109=False,
         ))
-        opts = {}
         with tempfile.TemporaryDirectory() as tmp, patch("browser_cookie3.load", return_value=cookies) as load:
-            self.assertTrue(backend_ytpdl._add_browser_youtube_cookies(opts, Path(tmp), "job-id"))
-            self.assertTrue(Path(opts["cookiefile"]).is_file())
+            cookie_path = backend_ytpdl.import_youtube_browser_cookies(Path(tmp) / "cookies.txt")
+            self.assertIsNotNone(cookie_path)
+            self.assertTrue(cookie_path.is_file())
             load.assert_called_once_with(domain_name="youtube.com")
-            backend_ytpdl.cleanup_browser_cookie_export("job-id")
-            self.assertFalse(Path(opts["cookiefile"]).exists())
+            self.assertEqual(cookie_path.stat().st_mode & 0o777, 0o600)
+
+    def test_youtube_login_available_detects_signed_in_browser_cookies(self):
+        from http.cookiejar import Cookie, CookieJar
+
+        cookies = CookieJar()
+        cookies.set_cookie(Cookie(
+            version=0, name="LOGIN_INFO", value="signed-in", port=None, port_specified=False,
+            domain=".youtube.com", domain_specified=True, domain_initial_dot=True,
+            path="/", path_specified=True, secure=True, expires=None, discard=False,
+            comment=None, comment_url=None, rest={}, rfc2109=False,
+        ))
+        with patch("browser_cookie3.load", return_value=cookies) as load:
+            self.assertTrue(backend_ytpdl.youtube_login_available())
+            load.assert_called_once_with(domain_name="youtube.com")
 
     def test_youtube_search_retries_without_cookie_file_after_empty_results(self):
         calls = []

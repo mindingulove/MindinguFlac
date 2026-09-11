@@ -217,8 +217,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.2.6',
-        'CFBundleVersion': '1.2.6',
+        'CFBundleShortVersionString': '1.2.7',
+        'CFBundleVersion': '1.2.7',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

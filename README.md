@@ -6,6 +6,12 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 
 Mindinguflac uses SpotiFLAC `3.7.0` (`902bf67`) through its extension-first provider API. SpotiFLAC no longer bundles download providers; install the provider extensions you trust under `~/.spotiflac/extensions`. The legacy service selections in Mindinguflac map to their installed extension IDs automatically.
 
+## v1.2.7
+
+- Fixes YouTube sign-in handoff in packaged macOS and Windows apps: a signed-in browser session is now imported into Mindinguflac's private application data instead of being kept only in a temporary download cache.
+- Polls the private session after opening YouTube, so the failed download retries even when macOS does not deliver a browser focus-return event.
+- Keeps the imported session readable only by the current user and never includes browser cookies in release assets or source control.
+
 ## v1.2.6
 
 - Updates the SpotiFLAC engine from 1.6.0 to 3.7.0 and migrates Mindinguflac to its extension-first provider architecture.

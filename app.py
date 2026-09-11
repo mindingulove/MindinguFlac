@@ -1857,7 +1857,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.2.6"
+    server_version = "SpotiFLACStreamer/1.2.7"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -2398,6 +2398,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 opened = bool(webbrowser.open(target, new=2))
                 self.send_json({"ok": opened})
+                return
+            if path == "/api/system/youtube-login-status":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                import backend_ytpdl
+                self.send_json({"ok": True, "signed_in": backend_ytpdl.youtube_login_available()})
                 return
             if path == "/api/system/notify":
                 if not self.trusted_local_origin():

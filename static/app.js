@@ -2930,7 +2930,7 @@ function hideActionToast() {
 
 function requestYoutubeLoginAndRetry(job, retryDownload) {
   if (youtubeLoginFlow) return;
-  const flow = { retrying: false };
+  const flow = { retrying: false, loginOpened: false, loginPoll: null };
   youtubeLoginFlow = flow;
   api("/api/system/notify", {
     method: "POST",
@@ -2963,6 +2963,7 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
   const retryOnce = async () => {
     if (flow.retrying) return;
     flow.retrying = true;
+    if (flow.loginPoll) clearInterval(flow.loginPoll);
     cleanupReturnWatcher();
     hideActionToast();
     youtubeLoginFlow = null;
@@ -2994,6 +2995,17 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
       return;
     }
 
+    flow.loginOpened = true;
+    // Opening the system browser does not reliably blur/focus the macOS
+    // webview.  Poll the local cookie store so a completed sign-in retries
+    // even when those browser events are never delivered.
+    flow.loginPoll = setInterval(async () => {
+      if (flow.retrying || !flow.loginOpened) return;
+      try {
+        const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
+        if (status && status.signed_in) await retryOnce();
+      } catch (_) {}
+    }, 2000);
     showActionToast("Sign in to YouTube, then return to Mindinguflac.", "Retry now", retryOnce);
   });
 }

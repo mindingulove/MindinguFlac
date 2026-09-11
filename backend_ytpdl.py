@@ -105,18 +105,58 @@ def _has_youtube_auth_cookie(cookiejar) -> bool:
         return False
 
 
-def _add_browser_youtube_cookies(opts: dict, output_dir: Path, job_id: str) -> bool:
-    """Discover signed-in YouTube cookies without selecting or naming a browser."""
+def youtube_login_available() -> bool:
+    """Return whether a local, signed-in YouTube session can be used safely.
+
+    The desktop UI uses this after it sends the user to the browser.  Checking
+    the cookie store rather than assuming that a window-focus event happened
+    makes the login hand-off work when macOS keeps the webview focused.
+    """
+    try:
+        import browser_cookie3
+
+        if _has_youtube_auth_cookie(browser_cookie3.load(domain_name="youtube.com")):
+            return True
+    except Exception as exc:
+        logger.info("Browser cookie discovery unavailable while checking YouTube login: %s", exc)
+
+    cookie_file = _youtube_cookie_file()
+    if not cookie_file:
+        return False
+    try:
+        from http.cookiejar import MozillaCookieJar
+
+        cookies = MozillaCookieJar(cookie_file)
+        cookies.load(ignore_discard=True, ignore_expires=True)
+        return _has_youtube_auth_cookie(cookies)
+    except Exception:
+        return False
+
+
+def _youtube_imported_cookie_file() -> Path:
+    """Location for the browser session imported by the desktop app."""
+    from config import app_data_dir
+
+    return app_data_dir() / "cookies.txt"
+
+
+def import_youtube_browser_cookies(target_file: Path | None = None) -> Path | None:
+    """Import the signed-in YouTube session into Mindinguflac's private store.
+
+    A job-specific export is deleted as soon as its job ends.  Keeping the
+    browser import under the application's data directory means a successful
+    sign-in continues to work for later downloads and avoids relying on a
+    focus/return event from the system browser.
+    """
     try:
         import browser_cookie3
         from http.cookiejar import MozillaCookieJar
 
         discovered = browser_cookie3.load(domain_name="youtube.com")
         if not _has_youtube_auth_cookie(discovered):
-            return False
-        cookie_dir = output_dir / ".cache"
-        cookie_dir.mkdir(parents=True, exist_ok=True)
-        cookie_path = cookie_dir / "youtube-browser-cookies.txt"
+            return None
+        cookie_path = target_file or _youtube_imported_cookie_file()
+        cookie_path.parent.mkdir(parents=True, exist_ok=True)
         exported = MozillaCookieJar(str(cookie_path))
         for cookie in discovered:
             domain = str(getattr(cookie, "domain", "")).lstrip(".").lower()
@@ -127,16 +167,20 @@ def _add_browser_youtube_cookies(opts: dict, output_dir: Path, job_id: str) -> b
             cookie_path.chmod(0o600)
         except OSError:
             pass
-        with _BROWSER_COOKIE_EXPORTS_LOCK:
-            previous = _BROWSER_COOKIE_EXPORTS.pop(job_id, None)
-            _BROWSER_COOKIE_EXPORTS[job_id] = cookie_path
-        if previous and previous != cookie_path:
-            previous.unlink(missing_ok=True)
-        opts["cookiefile"] = str(cookie_path)
-        return True
+        return cookie_path
     except Exception as exc:
-        logger.info("Browser cookie discovery unavailable: %s", exc)
+        logger.info("Browser cookie import unavailable: %s", exc)
+        return None
+
+
+def _add_browser_youtube_cookies(opts: dict, output_dir: Path, job_id: str) -> bool:
+    """Import a signed-in browser session for YouTube downloads."""
+    del output_dir, job_id  # Kept in the call signature for compatibility.
+    cookie_path = import_youtube_browser_cookies()
+    if not cookie_path:
         return False
+    opts["cookiefile"] = str(cookie_path)
+    return True
 
 
 def cleanup_browser_cookie_export(job_id: str) -> None:
