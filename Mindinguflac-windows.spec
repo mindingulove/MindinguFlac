@@ -50,7 +50,7 @@ def _collect_package(package_name, include_submodules=False):
 
 for _pkg in (
     'SpotiFLAC',
-    # SpotiFLAC 3.7.0 imports pydoll in its browser-backed session helpers.
+    # SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers.
     'pydoll',
     'torrfetch',
     'yt_dlp',

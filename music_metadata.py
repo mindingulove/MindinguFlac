@@ -174,7 +174,7 @@ def _reset_spotify_client_cache() -> None:
 _spotify_artist_id_cache_lock = threading.Lock()
 _spotify_artist_id_cache: OrderedDict[str, str] = OrderedDict()
 _spotify_artist_top_tracks_cache_lock = threading.Lock()
-_spotify_artist_top_tracks_cache: OrderedDict[tuple[str, int, str], list[dict]] = OrderedDict()
+_spotify_artist_top_tracks_cache: OrderedDict[tuple[str, int, str, bool], list[dict]] = OrderedDict()
 _SPOTIFY_ARTIST_CACHE_SIZE = 128
 _spotify_album_id_cache_lock = threading.Lock()
 _spotify_album_id_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
@@ -322,6 +322,24 @@ def _filter_search_tracks_for_artist(items: list[object], artist_name: str, limi
     return matches[:limit]
 
 
+def _artist_track_recording_key(item: object) -> tuple[str, ...]:
+    """Identify repeat editions of the same recording within one artist page.
+
+    Spotify gives compilation/reissue editions distinct track IDs. Artist pages
+    combine the artist overview with search results, so an ID-only comparison
+    displayed those editions twice. Title plus whole-second duration is a
+    conservative same-recording key for the already artist-filtered candidates.
+    It is used even if only one source exposes an ISRC.
+    """
+    track = _legacy_track_item(item)
+    title = norm_name(_metadata_text(track.get("name")))
+    try:
+        duration_seconds = int(int(track.get("duration_ms") or 0) / 1000)
+    except (TypeError, ValueError):
+        duration_seconds = 0
+    return ("title-duration", title, str(duration_seconds)) if title and duration_seconds else ()
+
+
 def _search_track_by_spotify_id(items: list[object], spotify_id: str) -> object | None:
     target = str(spotify_id or "").strip()
     if not target:
@@ -374,6 +392,13 @@ def _resolve_spotify_album_id(artist_name: str, album_name: str) -> str:
 
 
 def _spotify_track_playcount(track_id: str, force_refresh: bool = False) -> int:
+    """Return Spotify's track play count through SpotiFLAC's metadata client.
+
+    Spotify has changed the raw GraphQL ``playcount`` field between a scalar
+    and an object.  Calling ``web_client.query`` here bypassed SpotiFLAC's
+    normalization and converted the object form to zero.  Keep this lookup at
+    the supported client boundary so the module owns that protocol detail.
+    """
     track_id = str(track_id or "").strip()
     if not track_id:
         return 0
@@ -385,40 +410,34 @@ def _spotify_track_playcount(track_id: str, force_refresh: bool = False) -> int:
                 return int(cached or 0)
 
     client = _get_spotify_client(force_refresh=force_refresh)
-    web_client = getattr(client, "web_client", None) if client else None
-    if not web_client:
+    if not client:
         return 0
-    payload = {
-        "operationName": "getTrack",
-        "variables": {"uri": f"spotify:track:{track_id}"},
-        "extensions": {
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": "612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294",
-            }
-        },
-    }
     playcount = 0
     for attempt in range(2):
         try:
-            data = web_client.query(payload) or {}
-            track_union = data.get("data", {}).get("trackUnion", {}) or {}
-            playcount = _numeric_plays(track_union.get("playcount"))
+            from spotiflac_compat import call_sync_or_async
+
+            track = call_sync_or_async(client, "get_track", "get_track_async", track_id)
+            raw_plays = track.get("plays") if isinstance(track, dict) else getattr(track, "plays", 0)
+            playcount = _numeric_plays(raw_plays)
         except Exception:
             playcount = 0
         if playcount > 0 or attempt > 0:
             break
         _reset_spotify_client_cache()
         client = _get_spotify_client(force_refresh=True)
-        web_client = getattr(client, "web_client", None) if client else None
-        if not web_client:
+        if not client:
             break
 
-    with _spotify_track_playcount_cache_lock:
-        _spotify_track_playcount_cache[track_id] = playcount
-        _spotify_track_playcount_cache.move_to_end(track_id)
-        while len(_spotify_track_playcount_cache) > 512:
-            _spotify_track_playcount_cache.popitem(last=False)
+    # A transient Spotify/session failure must not leave a zero cached for the
+    # lifetime of the app. Positive values are stable enough for this small
+    # in-memory cache and avoid repeated per-track requests.
+    if playcount > 0:
+        with _spotify_track_playcount_cache_lock:
+            _spotify_track_playcount_cache[track_id] = playcount
+            _spotify_track_playcount_cache.move_to_end(track_id)
+            while len(_spotify_track_playcount_cache) > 512:
+                _spotify_track_playcount_cache.popitem(last=False)
     return playcount
 
 
@@ -1622,7 +1641,9 @@ def spotify_artist_top_tracks(
     # resolved yet, which used to raise AttributeError here and 500 the request.
     artist_name = (artist_name or "").strip()
     artist_id = (artist_id or "").strip()
-    key = (artist_name.lower(), int(limit or 0), artist_id)
+    # A sidebar preview deliberately skips the slower per-track metadata calls.
+    # It must not satisfy a later artist-page request that needs play counts.
+    key = (artist_name.lower(), int(limit or 0), artist_id, bool(enrich_missing_playcounts))
     with _spotify_artist_top_tracks_cache_lock:
         cached = _spotify_artist_top_tracks_cache.get(key)
         if cached is not None:
@@ -1656,13 +1677,23 @@ def spotify_artist_top_tracks(
             for track in base_tracks
             if str((track.get("id") if isinstance(track, dict) else getattr(track, "id", "")) or "").strip()
         }
+        seen_recordings = {
+            recording_key
+            for track in base_tracks
+            if (recording_key := _artist_track_recording_key(track))
+        }
         if search_tracks:
             for track in search_tracks:
                 track_id = str((track.get("id") if isinstance(track, dict) else getattr(track, "id", "")) or "").strip()
                 if track_id and track_id in seen_track_ids:
                     continue
+                recording_key = _artist_track_recording_key(track)
+                if recording_key and recording_key in seen_recordings:
+                    continue
                 if track_id:
                     seen_track_ids.add(track_id)
+                if recording_key:
+                    seen_recordings.add(recording_key)
                 base_tracks.append(track)
                 if len(base_tracks) >= limit:
                     break
@@ -1992,20 +2023,10 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
     
     yield {"type": "artist_info", "artist": artist, "artist_id": resolved_artist_id, "artwork_url": art}
 
-    def _sort_artist_tracks(tracks: list[dict]) -> list[dict]:
-        rows = list(tracks or [])
-        rows.sort(
-            key=lambda track: (
-                db.get_taste_score_for_track(str(track.get("track_key") or track.get("spotify_id") or "")),
-                db.get_taste_score_for_artist(str(track.get("artist") or artist or "")),
-                int(track.get("plays") or 0),
-            ),
-            reverse=True,
-        )
-        return rows
-
     def _load_top_tracks_payload() -> list[dict]:
-        return _sort_artist_tracks(spotify_artist_top_tracks(artist, artist_id=resolved_artist_id))
+        # Spotify's artist overview is already ranked.  Do not mix in personal
+        # taste here: this section is explicitly the artist's popular tracks.
+        return spotify_artist_top_tracks(artist, artist_id=resolved_artist_id)
 
     def _load_albums_payload() -> list[dict]:
         album_items = []
@@ -2082,7 +2103,6 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
             artist_id=resolved_artist_id,
             enrich_missing_playcounts=False,
         )
-    fast_top_tracks = _sort_artist_tracks(fast_top_tracks)
     yield {"type": "top_tracks", "tracks": fast_top_tracks, "loading": True}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:

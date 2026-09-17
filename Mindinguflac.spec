@@ -45,7 +45,7 @@ try:
 except Exception:
     pass
 
-# SpotiFLAC 3.7.0 imports pydoll in its browser-backed session helpers.
+# SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers.
 try:
     tmp_ret = collect_all('pydoll')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -91,8 +91,8 @@ try:
 except Exception:
     pass
 
-# mutagen, cryptography, pywebview bundled for completeness.
-for _pkg in ('mutagen', 'cryptography', 'pywebview', 'browser_cookie3', 'lz4', 'codex_auth', 'openai', 'httpx2', 'httpcore2'):
+# mutagen, cryptography, Pillow, and pywebview bundled for completeness.
+for _pkg in ('mutagen', 'cryptography', 'PIL', 'pywebview', 'browser_cookie3', 'lz4', 'codex_auth', 'openai', 'httpx2', 'httpcore2'):
     try:
         tmp_ret = collect_all(_pkg)
         datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -217,8 +217,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.2.7',
-        'CFBundleVersion': '1.2.7',
+        'CFBundleShortVersionString': '1.2.8',
+        'CFBundleVersion': '1.2.8',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

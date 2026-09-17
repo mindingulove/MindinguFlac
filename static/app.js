@@ -63,6 +63,7 @@ const state = {
   playlistRecommendationState: {},
   activePlaylistId: null,
   activeLibraryPill: "home",
+  detailsExpanded: false,
   statsPeriod: "month",
   playlistContinuationLoads: new Set(),
   videoMode: false,
@@ -567,6 +568,25 @@ function renderSidebarLibraryPills() {
   document.querySelectorAll(".library-pill").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.libraryPill === state.activeLibraryPill);
   });
+}
+
+function setDetailsExpanded(expanded) {
+  state.detailsExpanded = Boolean(expanded);
+  const panel = document.querySelector(".details-panel");
+  const button = $("detailsExpandBtn");
+  panel?.classList.toggle("is-expanded", state.detailsExpanded);
+  document.body.classList.toggle("details-expanded", state.detailsExpanded);
+  if (!button) return;
+  const label = state.detailsExpanded ? "Collapse now playing" : "Expand now playing";
+  button.setAttribute("aria-pressed", String(state.detailsExpanded));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.querySelector("path")?.setAttribute(
+    "d",
+    state.detailsExpanded
+      ? "M9 4v5H4M15 4v5h5M20 15h-5v5M4 15h5v5"
+      : "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"
+  );
 }
 
 function setActiveView(id) {
@@ -7264,6 +7284,7 @@ function bindPlaylistDialogs() {
   creator.addEventListener("click", (e) => { if (e.target === creator) creator.close(); });
 
   $("createPlaylistBtn").onclick = () => openCreatePlaylistDialog();
+  $("detailsExpandBtn").onclick = () => setDetailsExpanded(!state.detailsExpanded);
 
   $("playerStatusIcon").addEventListener("click", (event) => {
     event.preventDefault();

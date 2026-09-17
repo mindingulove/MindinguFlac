@@ -289,6 +289,31 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(tracks[0]["title"], "Beat It")
 
+    def test_track_playcount_uses_normalized_spotiflac_metadata(self):
+        class MetadataClient:
+            def get_track(self, track_id):
+                self.track_id = track_id
+                return FakeTrack(id=track_id, plays="570788822")
+
+        client = MetadataClient()
+        music_metadata.clear_spotify_artist_caches()
+        with patch.object(music_metadata, "_get_spotify_client", return_value=client):
+            plays = music_metadata._spotify_track_playcount("ordinary-world-id")
+
+        self.assertEqual(plays, 570788822)
+        self.assertEqual(client.track_id, "ordinary-world-id")
+
+    def test_track_playcount_supports_async_only_spotiflac_metadata(self):
+        class AsyncMetadataClient:
+            async def get_track_async(self, track_id):
+                return {"plays": "1832455943"}
+
+        music_metadata.clear_spotify_artist_caches()
+        with patch.object(music_metadata, "_get_spotify_client", return_value=AsyncMetadataClient()):
+            plays = music_metadata._spotify_track_playcount("beat-it-id")
+
+        self.assertEqual(plays, 1832455943)
+
     def test_spotify_artist_top_tracks_falls_back_to_search_tracks_when_top_tracks_empty(self):
         class EmptyTopTracksClient(FakePublicSpotifyClient):
             def __init__(self):
@@ -374,6 +399,49 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
         self.assertEqual(tracks[0]["spotify_id"], "ordinary-world-id")
         self.assertEqual(tracks[0]["plays"], 570780000)
 
+    def test_artist_top_tracks_does_not_reuse_unenriched_sidebar_cache(self):
+        class PreviewClient(FakePublicSpotifyClient):
+            def search(self, query, limit=20):
+                return {"tracks": [FakeTrack(plays="0")], "albums": [], "artists": [], "playlists": []}
+
+        with patch.object(music_metadata, "_get_spotify_client", return_value=PreviewClient()):
+            with patch.object(music_metadata, "_spotify_track_playcount", return_value=570788822) as playcount:
+                preview = music_metadata.spotify_artist_top_tracks(
+                    "Michael Jackson", artist_id="artist-id", enrich_missing_playcounts=False
+                )
+                full = music_metadata.spotify_artist_top_tracks(
+                    "Michael Jackson", artist_id="artist-id", enrich_missing_playcounts=True
+                )
+
+        self.assertEqual(preview[0]["plays"], 0)
+        self.assertEqual(full[0]["plays"], 570788822)
+        playcount.assert_called_once_with("track-id")
+
+    def test_artist_top_tracks_deduplicates_compilation_editions(self):
+        class ArtistOverviewClient(FakePublicSpotifyClient):
+            def __init__(self):
+                self.web_client = self
+
+            def query(self, payload):
+                return {"data": {"artistUnion": {"discography": {"topTracks": {"items": [{
+                    "track": {
+                        "id": "original-edition", "name": "Song 2",
+                        "artists": {"items": [{"profile": {"name": "Peter T. Wright"}}]},
+                        "duration": {"totalMilliseconds": 126720}, "playcount": "390000",
+                    }
+                }]}}}}}
+
+            def search(self, query, limit=20):
+                return {"tracks": [
+                    FakeTrack(id="original-edition", title="Song 2", artists="Peter T. Wright", duration_ms=126720),
+                    FakeTrack(id="compilation-edition", title="Song 2", artists="Peter T. Wright", duration_ms=126720),
+                ], "albums": [], "artists": [], "playlists": []}
+
+        with patch.object(music_metadata, "_get_spotify_client", return_value=ArtistOverviewClient()):
+            tracks = music_metadata.spotify_artist_top_tracks("Peter T. Wright", artist_id="artist-id")
+
+        self.assertEqual([track["spotify_id"] for track in tracks], ["original-edition"])
+
     def test_spotify_artist_top_tracks_does_not_reuse_smaller_cached_search_result(self):
         class LimitSensitiveClient(FakePublicSpotifyClient):
             def __init__(self):
@@ -433,6 +501,22 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(parts[1]["tracks"][0]["title"], "Beat It")
         self.assertEqual([item["title"] for item in parts[-2]["albums"]], ["First Album", "Second Album"])
+
+    def test_artist_page_keeps_spotify_popular_track_order(self):
+        spotify_order = [
+            {"title": "Spotify number one", "spotify_id": "first", "plays": 1},
+            {"title": "Spotify number two", "spotify_id": "second", "plays": 999999},
+        ]
+        with patch.object(music_metadata, "spotify_artist_artwork", return_value=""):
+            with patch.object(music_metadata, "spotify_artist_top_tracks", return_value=spotify_order):
+                with patch.object(music_metadata, "_get_spotify_client", return_value=None):
+                    parts = list(music_metadata.artist_page(AppConfig(), "Michael Jackson", artist_id="artist-id"))
+
+        completed_top_tracks = [part for part in parts if part.get("type") == "top_tracks" and not part.get("loading")]
+        self.assertEqual(
+            [track["title"] for track in completed_top_tracks[-1]["tracks"]],
+            ["Spotify number one", "Spotify number two"],
+        )
 
     def test_public_client_search_is_exposed_to_search_and_artwork_helpers(self):
         with patch.object(music_metadata, "_spotify_client_cache", FakePublicSpotifyClient()):

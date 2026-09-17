@@ -4,7 +4,14 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
 
-Mindinguflac uses SpotiFLAC `3.7.0` (`902bf67`) through its extension-first provider API. SpotiFLAC no longer bundles download providers; install the provider extensions you trust under `~/.spotiflac/extensions`. The legacy service selections in Mindinguflac map to their installed extension IDs automatically.
+Mindinguflac uses SpotiFLAC `3.9.0` (`a471fdc`) through its extension-first provider API. SpotiFLAC no longer bundles download providers; install the provider extensions you trust under `~/.spotiflac/extensions`. The legacy service selections in Mindinguflac map to their installed extension IDs automatically.
+
+## v1.2.8
+
+- Updates the SpotiFLAC engine to 3.9.0 and reads normalized Spotify play counts from its metadata client.
+- Prevents un-enriched sidebar cache entries from suppressing artist-page play counts.
+- Removes duplicate compilation editions and preserves Spotify's Popular Tracks ordering on artist pages.
+- Adds an expandable Now Playing view with a wide 16:9 video stage and responsive artist, credits, tour, and queue sections.
 
 ## v1.2.7
 

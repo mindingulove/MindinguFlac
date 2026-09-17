@@ -3,6 +3,18 @@
 All notable changes to Mindinguflac are documented here.
 
 ---
+## [1.2.8] — 2026-09-16
+
+### Updated
+- Updated SpotiFLAC to 3.9.0 at upstream commit `a471fdc`, including its current normalized track metadata and play-count surface.
+- Added a Spotify-style expanded Now Playing view that covers the app above the player, uses a full-width 16:9 video stage, and lays out related music, artist details, credits, tour dates, and queue content responsively.
+- Updated the Settings footer, HTTP server header, backend user-agent, macOS bundle metadata, and release helper to version 1.2.8.
+
+### Fixed
+- Artist-page play counts now remain enriched even when the fast sidebar preview populated its cache first.
+- Duplicate track editions from compilation search results are collapsed by recording identity.
+- Artist Popular Tracks retain Spotify's original order instead of being re-ranked by the local taste profile.
+
 ## [1.2.7] — 2026-09-11
 
 ### Updated

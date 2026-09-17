@@ -1,8 +1,8 @@
 rapidfuzz
 free-proxy
 PySocks
-git+https://github.com/BartolomeoRusso9/SpotiFLAC-Module-Version.git@902bf67bc02819af4e10a2bf32cd1cd60dada353#egg=SpotiFLAC
-# SpotiFLAC 3.7.0 imports pydoll in its browser-backed session helpers. Keep it
+git+https://github.com/BartolomeoRusso9/SpotiFLAC-Module-Version.git@a471fdc5374101a53137949d449f41e76249148c#egg=SpotiFLAC
+# SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers. Keep it
 # explicit so desktop dependency audits and frozen-build collection stay clear.
 pydoll-python>=2.9.0
 nodriver>=0.36
@@ -12,18 +12,22 @@ hishel
 socksio
 aiofiles>=23.2.1
 tenacity>=8.3.0
-tqdm>=4.66.0
+tqdm>=4.66.3
 pywebview>=6.2.1
 mutagen>=1.47.0
 pydantic>=2.7.0
-cryptography>=42.0.0,<47
+cryptography>=50.0.0
 browser-cookie3==0.20.1
 codex-auth==0.1.1
 packaging>=23.0
 pycryptodome>=3.20.0
-yt-dlp>=2024.04.09
+yt-dlp>=2026.7.4
 imageio-ffmpeg>=0.5.1
-python-dotenv>=1.0.0
+python-dotenv>=1.2.2
+requests>=2.33.0
+Pillow>=12.3.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
 GitPython>=3.1.43
 countrystatecity-countries>=1.0.2
 
