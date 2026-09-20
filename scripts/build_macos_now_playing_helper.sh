@@ -15,15 +15,14 @@ export SWIFT_MODULECACHE_PATH="$CACHE_DIR"
 
 PLIST="$ROOT/macos/MindinguflacNowPlayingHelper-Info.plist"
 
-TARGET_ARGS=()
+TARGET_ARGS=(-parse-as-library)
 if [[ -n "${MACOS_ARCH:-}" ]]; then
   DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
-  TARGET_ARGS=(-target "${MACOS_ARCH}-apple-macosx${DEPLOYMENT_TARGET}")
+  TARGET_ARGS=(-target "${MACOS_ARCH}-apple-macosx${DEPLOYMENT_TARGET}" -parse-as-library)
 fi
 
 swiftc -O \
   "${TARGET_ARGS[@]}" \
-  -parse-as-library \
   -module-cache-path "$CACHE_DIR" \
   -framework AppKit \
   -framework Foundation \
