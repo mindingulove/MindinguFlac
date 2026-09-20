@@ -1,4 +1,4 @@
-"""
+r"""
 launcher.py — Mindinguflac first-run extractor + launcher.
 
 First run (or after a version change):
@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import threading
 import zipfile
+
+from windows_bundle import windows_safe_destination
 
 
 # ---------------------------------------------------------------------------
@@ -233,13 +235,28 @@ def _extract_with_progress(bundle: pathlib.Path, target: pathlib.Path,
         members = zf.infolist()
         total = max(len(members), 1)
         for i, member in enumerate(members, 1):
-            zf.extract(member, target)
+            _extract_member(zf, member, target)
             progress_ref[0] = int(i / total * 100)
 
 
 def _extract_silent(bundle: pathlib.Path, target: pathlib.Path) -> None:
     with zipfile.ZipFile(bundle) as zf:
-        zf.extractall(target)
+        for member in zf.infolist():
+            _extract_member(zf, member, target)
+
+
+def _extract_member(zf: zipfile.ZipFile, member: zipfile.ZipInfo,
+                    target: pathlib.Path) -> None:
+    """Extract one member using a Windows-safe, traversal-safe path."""
+    destination = windows_safe_destination(target, member.filename)
+    is_directory = member.is_dir() or member.filename.endswith(("/", "\\"))
+    if is_directory:
+        destination.mkdir(parents=True, exist_ok=True)
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with zf.open(member) as source, destination.open("wb") as output:
+        shutil.copyfileobj(source, output, length=1024 * 1024)
 
 
 # ---------------------------------------------------------------------------

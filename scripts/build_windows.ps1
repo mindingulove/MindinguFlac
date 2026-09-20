@@ -346,12 +346,12 @@ Write-Host "--- Removing stale SpotiFLAC installs ---"
 & $python -m pip uninstall -y SpotiFLAC | Out-Host
 Invoke-Checked { & $python -c "import pathlib, shutil, site; roots=site.getsitepackages()+[site.getusersitepackages()]; [shutil.rmtree(p, ignore_errors=True) for root in roots if root for pattern in ('SpotiFLAC*', 'spotiflac*') for p in pathlib.Path(root).glob(pattern)]" }
 Invoke-Checked { & $python -m pip install --only-binary=cryptography --prefer-binary -r requirements.txt -r requirements-desktop.txt }
-$spotiflacUrl = "git+https://github.com/BartolomeoRusso9/SpotiFLAC-Module-Version.git@dcd52deef64fd577a00b691fb6c83cf7dbbe99ba#egg=SpotiFLAC"
-Write-Host "--- Pinning SpotiFLAC v1.5.2 ---"
+$spotiflacUrl = "git+https://github.com/BartolomeoRusso9/SpotiFLAC-Module-Version.git@a471fdc5374101a53137949d449f41e76249148c#egg=SpotiFLAC"
+Write-Host "--- Pinning SpotiFLAC 3.9.0 ---"
 & $python -m pip uninstall -y SpotiFLAC | Out-Host
 Invoke-Checked { & $python -c "import pathlib, shutil, site; roots=site.getsitepackages()+[site.getusersitepackages()]; [shutil.rmtree(p, ignore_errors=True) for root in roots if root for pattern in ('SpotiFLAC*', 'spotiflac*') for p in pathlib.Path(root).glob(pattern)]" }
 Invoke-Checked { & $python -m pip install --upgrade --force-reinstall --no-cache-dir $spotiflacUrl }
-Invoke-Checked { & $python -c "import importlib.metadata as m; version=m.version('SpotiFLAC'); print('SpotiFLAC', version); raise SystemExit(0 if version == '1.5.2' else 1)" }
+Invoke-Checked { & $python -c "import importlib.metadata as m; version=m.version('SpotiFLAC'); print('SpotiFLAC', version); raise SystemExit(0 if version == '3.9.0' else 1)" }
 Invoke-Checked { & $python -m pip install --only-binary=libtorrent libtorrent }
 # libtorrent's win_amd64 wheel links OpenSSL 1.1 (libssl-1_1-x64.dll /
 # libcrypto-1_1-x64.dll), which Python 3.12 (OpenSSL 3, libcrypto-3.dll) does
@@ -385,11 +385,12 @@ $buildId = (& $python -c "import re; m = re.search(r'SpotiFLACStreamer/([^\x22]+
 Write-Host "Build ID: $buildId"
 [System.IO.File]::WriteAllText((Join-Path $root "_build_id.txt"), $buildId)
 
-# Zip the onedir app — launcher will extract this on first user run
+# Zip the onedir app with portable separators and Windows-reserved path names
+# sanitized. The launcher repeats this validation defensively at extraction.
 $bundleZip = Join-Path $root "dist\bundle.zip"
 if (Test-Path $bundleZip) { Remove-Item $bundleZip -Force }
 Write-Host "Creating bundle.zip from $appDir ..."
-Compress-Archive -Path "$appDir\*" -DestinationPath $bundleZip
+Invoke-Checked { & $python -m scripts.create_windows_bundle $appDir $bundleZip }
 Write-Host "bundle.zip created: $([math]::Round((Get-Item $bundleZip).Length / 1MB, 1)) MB"
 
 # Build the tiny launcher (onefile) that wraps bundle.zip + shows progress bar

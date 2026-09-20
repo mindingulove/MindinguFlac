@@ -324,6 +324,8 @@ def search_location_suggestions(term: str, limit: int = 6, country_code: str = "
     state = str(state_code or "").strip().upper()
     if code:
         try:
+            from windows_bundle import install_countrystatecity_windows_path_compat
+            install_countrystatecity_windows_path_compat()
             from countrystatecity_countries import get_country_by_code, get_state_by_code, search_cities
             country = get_country_by_code(code)
             if country:
@@ -1857,7 +1859,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.2.8"
+    server_version = "SpotiFLACStreamer/1.2.9"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:

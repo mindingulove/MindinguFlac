@@ -3,6 +3,18 @@
 All notable changes to Mindinguflac are documented here.
 
 ---
+## [1.2.9] — 2026-09-20
+
+### Fixed
+- Windows first-run extraction now sanitizes reserved device names such as `CON` before creating directories, preventing `WinError 267` when bundled dependency data contains a reserved path component.
+- The Windows build now writes portable ZIP member paths, checks the completed bundle for corruption and unsafe names, and fails the build on case-insensitive path collisions.
+- Location suggestions preserve the real `GB-CON` state code while loading Cornwall city data from the sanitized `_CON` directory used in Windows bundles.
+- The launcher rejects absolute paths and parent-directory traversal in its embedded ZIP before writing files.
+
+### Updated
+- Updated the Settings footer, HTTP server header, backend user-agent, macOS bundle metadata, and release helper to version 1.2.9.
+- Aligned the Windows build's forced SpotiFLAC install with the repository's pinned 3.9.0 commit so every desktop artifact uses the same provider version.
+
 ## [1.2.8] — 2026-09-16
 
 ### Updated

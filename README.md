@@ -6,6 +6,13 @@ Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both 
 
 Mindinguflac uses SpotiFLAC `3.9.0` (`a471fdc`) through its extension-first provider API. SpotiFLAC no longer bundles download providers; install the provider extensions you trust under `~/.spotiflac/extensions`. The legacy service selections in Mindinguflac map to their installed extension IDs automatically.
 
+## v1.2.9
+
+- Makes Windows first-run extraction sanitize reserved device names such as `CON`, even if a dependency ships one inside the embedded ZIP.
+- Creates the Windows bundle with portable ZIP paths and validates every member before the launcher is built.
+- Keeps the real `GB-CON` state code while reading Cornwall city data from its Windows-safe `_CON` directory.
+- Rejects absolute and parent-traversal ZIP entries before writing any bundled file.
+
 ## v1.2.8
 
 - Updates the SpotiFLAC engine to 3.9.0 and reads normalized Spotify play counts from its metadata client.
