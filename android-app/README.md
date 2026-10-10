@@ -49,6 +49,32 @@ a kill/relaunch. Lossy sources are never labelled FLAC: the YouTube engine's
 qualities are `best`/`m4a` only, the torrent engine's is `LOSSLESS` only, and
 the native bridge selects a lossless file or fails.
 
+## Playback on the phone
+
+Audio plays in the WebView, which the system would otherwise stop the moment
+the app leaves the screen. Two pieces keep it alive:
+
+- `MediaPlaybackService` is a `mediaPlayback` foreground service holding a
+  `MediaSession`, so the process stays at foreground importance and the track
+  gets a notification, lock-screen controls and the system media-button
+  session. It never touches audio itself — every control is relayed back to the
+  page's own transport, so the page remains the single source of truth.
+- `MainActivity` uses a `WebView` subclass that ignores the hidden-window
+  notification. Chromium suspends media when the WebView's window goes away,
+  and the foreground service alone does not prevent that.
+
+The service holds audio focus but deliberately ignores focus *changes*: the
+page's own `<audio>` element requests focus too, so reacting to the resulting
+transient loss paused whichever track had just started. Chromium already
+handles real interruptions from other apps for its element.
+
+The arm64 JNI library is repacked from the upstream jar as plain
+`libjlibtorrent.so`. Under its versioned name jlibtorrent finds it as a
+classpath resource — the APK is the classpath root — and extracts a second copy
+into writable cache on every cold start, which Android 16 already warns will
+throw on a future release. Renaming it makes that lookup miss so
+`System.loadLibrary` resolves it read-only from inside the APK instead.
+
 ## On-device AI ranking
 
 The Android build keeps the desktop ranking workflow in the Python backend,
@@ -101,27 +127,45 @@ set matches the APK's. The focused unit tests are
 `../test/test_android_runtime.py` (run from the repository root with
 `PYTHONPATH=. python test/test_android_runtime.py`).
 
-### Results, 2026-10-09 (macOS arm64 host, no phone attached)
+### Results, 2026-10-10
 
-- `test/test_android_runtime.py`: 55/55 pass.
+Host checks (macOS arm64):
+
+- `test/test_android_runtime.py`: 57/57 pass.
 - `tools/audit_android_imports.py`: every module in the Android backend
   surface imports, no failures.
-- `tools/verify_android_runtime.py`: 21/21 pass against the live network —
-  including search (60 results), artist top tracks (23, all with artwork),
-  related artists (8), a 14-track album tracklist, lyrics, a real `ytp-dl`
-  download reporting byte progress, cancellation, duplicate-job adoption,
-  independent prefetch, and `200`/`206`/`416` range responses.
-- `tools/inspect_apk.py`: all checks pass for both the debug and release APK.
-- `./gradlew :app:assembleDebug` from a clean `build/` and `./gradlew
-  :app:assembleRelease`: both succeed; `compileDebugJavaWithJavac` compiles the
-  jlibtorrent bridge against the shipped jar.
+- `tools/verify_android_runtime.py`: 25/25 pass against the live network —
+  capability report, settings persistence across two kill/relaunch cycles,
+  search, artist top tracks, related artists, album tracklist, a Spotify album
+  import that persists, lyrics, a real `ytp-dl` download reporting byte
+  progress, cancellation, duplicate-job adoption, independent prefetch, cache
+  cleanup, and `200`/`206`/`416` range responses.
+- `tools/inspect_apk.py`: all checks pass on both the debug and release APK.
+- `./gradlew :app:assembleDebug :app:assembleRelease` from a deleted `build/`,
+  `.gradle/` and root `build/`: succeeds in one pass.
 
-**Not yet verified:** everything that needs real arm64 hardware — the
-jlibtorrent JNI library actually loading, a real FLAC selection and download
-over BitTorrent, playback through the WebView, and the on-device Gemini
-Nano/Gemma advisors. The capability probe reports the torrent engine as
-unavailable off-device rather than pretending otherwise. The visual comparison
-against the supplied phone reference screenshots is also outstanding.
+Device checks — **Nothing A065 (`Pong`), Android 16, API 36, `arm64-v8a`,
+1080x2412 @ 420dpi**, debug build installed fresh over USB:
+
+- Starts clean: authenticated preflight passes, no folder prompt, no Advisor
+  tab, zero `FATAL EXCEPTION` entries in logcat.
+- jlibtorrent loads read-only from inside the APK
+  (`base.apk!/lib/arm64-v8a/libjlibtorrent.so`), reporting jlibtorrent
+  2.0.12.9 / libtorrent 2.0.12.0.
+- Both engines work: `ytp-dl` plays and advances the queue, and the torrent
+  engine selects and downloads a real FLAC through the native bridge.
+- Playback survives backgrounding — measured advancing 44s → 69s with the
+  launcher in the foreground — with lock-screen and notification transport
+  controls, and the app holding the system media-button session.
+- The local Gemma bundle ranks real candidates: the cache log records
+  `YouTube AI advisor ranked 5 candidates first`, i.e. it beat the
+  deterministic selector rather than timing out.
+- Settings, the imported playlist and the managed storage root all survive a
+  kill/relaunch.
+
+**Not verified:** the visual comparison against the project's phone reference
+screenshots, which are not in the repository, and the screen-size, orientation
+and dark-mode matrix — everything above is one phone in portrait.
 
 ## Third-party versions and hashes
 
@@ -133,7 +177,7 @@ CPython 3.10, JDK 17.
 | --- | --- | --- |
 | `jlibtorrent-2.0.12.9.jar` (Java/SWIG bindings) | 2.0.12.9 | `c96316e640397249ecfbbe56c355afef472190b8d47d51a94a03e47eb60c219a` |
 | `jlibtorrent-android-arm64-2.0.12.9.jar` (arm64 JNI) | 2.0.12.9 | `8e48600b74a9f497ce2c7e1e6a025ce550f039658baef986ad634298758d5b9d` |
-| `lib/arm64-v8a/libjlibtorrent-2.0.12.9.so` as packaged | 2.0.12.9 | `56b23c87f1b1b9acba37eccab31d7a055543c3b3dbb8fec4c04e04234f9237cd` |
+| `lib/arm64-v8a/libjlibtorrent.so` as packaged | 2.0.12.9 | `56b23c87f1b1b9acba37eccab31d7a055543c3b3dbb8fec4c04e04234f9237cd` |
 | `com.google.mlkit:genai-prompt` | 1.0.0-beta4 | resolved from Google's Maven repository |
 | `com.google.mediapipe:tasks-genai` | 0.10.21 | resolved from Google's Maven repository |
 
@@ -159,12 +203,17 @@ pinned set is: `yt-dlp 2026.8.19`, `requests 2.34.2`, `mutagen 1.48.1`,
 `pycryptodome 3.21.0`, `urllib3 2.8.0`, `charset-normalizer 3.5.2`,
 `idna 3.20`, `certifi 2026.7.22`.
 
-### Built artifacts, 2026-10-09
+### Built artifacts, 2026-10-10
+
+Produced by a clean `./gradlew :app:assembleDebug :app:assembleRelease`.
 
 | APK | Size | SHA-256 |
 | --- | --- | --- |
-| `app/build/outputs/apk/debug/app-debug.apk` | 61,156,002 bytes | `ca8781956b2668f683f4a9bf4c26f1e0455cfba8582def8b6e44a83c08a8e47d` |
-| `app/build/outputs/apk/release/app-release-unsigned.apk` | 55,341,024 bytes | `08ea2021f65da86474b209323d7f1bd999b49dbcb568917b9742aabdd60afed3` |
+| `app/build/outputs/apk/debug/app-debug.apk` | 61,322,863 bytes | `b6dcbbd45bf7ef40d72a75af98805c15f3c53af7a564bf60b23027cf8f59a761` |
+| `app/build/outputs/apk/release/app-release-unsigned.apk` | 55,527,803 bytes | `ddbb57a2cd2e662c060597d10787fc1abfd4bce094133ed9e4e2e71656473575` |
+
+The release APK is unsigned: there is no signing config in this repository, so
+sign it before distributing.
 
 ## Local development notes
 

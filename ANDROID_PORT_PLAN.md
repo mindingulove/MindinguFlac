@@ -4,11 +4,12 @@ Status: active implementation. The Android port is not complete until every
 required runtime below is present in the APK and the device verification gates
 pass. A successful Gradle compile by itself is not completion.
 
-Last verification pass: 2026-10-09 on a macOS arm64 host with **no Android
-device attached**. Everything that can be proved without hardware is now
-proved and ticked; everything that needs an arm64 phone is still open and is
-listed under "Outstanding" at the end. See `android-app/README.md` for the
-reproducible commands and the recorded results.
+Last verification pass: 2026-10-10 on a **Nothing A065 (device `Pong`),
+Android 16, API 36, `arm64-v8a`**, over USB with the debug build installed
+fresh. Every gate below that can be proved is now proved on that hardware; the
+two that remain open need input this pass could not supply and are listed under
+"Outstanding". See `android-app/README.md` for the reproducible commands,
+recorded versions and artifact hashes.
 
 ## Product requirements
 
@@ -57,13 +58,16 @@ reproducible commands and the recorded results.
 - [x] Add an Android jlibtorrent bridge which fetches magnet metadata, examines
   torrent files, selects the matching lossless track, prioritizes that file,
   and reports real byte/peer progress to the Python job manager.
-- [ ] Compile and device-test the jlibtorrent bridge, including native library
-  loading on an ARM64 phone and a real FLAC selection/download. — **compile
-  done**: `compileDebugJavaWithJavac` builds the bridge against the shipped
-  jar, every jlibtorrent API it calls is confirmed present by `javap`, and
-  `lib/arm64-v8a/libjlibtorrent-2.0.12.9.so` (13,384,864 bytes) is in both
-  APKs. The bridge's JSON contract and job loop are covered by unit tests with
-  a fake engine. **Device test still outstanding.**
+- [x] Compile and device-test the jlibtorrent bridge, including native library
+  loading on an ARM64 phone and a real FLAC selection/download. — the JNI
+  library loads read-only from inside the APK
+  (`base.apk!/lib/arm64-v8a/libjlibtorrent.so`), `runtimeStatus()` reports
+  jlibtorrent 2.0.12.9 / libtorrent 2.0.12.0, and a real FLAC download
+  completed on device. Three bugs had to be fixed first: a fresh session per
+  candidate (so every magnet started from a cold DHT and burned its metadata
+  timeout), no DHT bootstrap nodes at all, and `session.stop()` on a failed
+  candidate discarding what warmth there was. The session is now shared and
+  bootstrapped, and magnets without trackers get the desktop engine's list.
 - [x] Package yt-dlp, Requests, PySocks, and Mutagen for the Android-compatible
   YouTube fallback path.
 - [x] Audit every imported backend module and produce a packaged/imported
@@ -157,19 +161,19 @@ reproducible commands and the recorded results.
   Python runtime, jlibtorrent Java classes, and ARM64 `libjlibtorrent` binary are
   present. — `android-app/tools/inspect_apk.py`, all checks pass on both the
   debug and release APK.
-- [ ] A fresh install starts without desktop-only imports, folder prompts, or an
-  Advisor tab. — the three components are individually verified off-device
-  (the import audit shows no desktop-only module loads; the settings view
-  hides both folder inputs and rewrites any attempt to set them; the mobile
-  navigation is Home/Search/Library only and the desktop advisor rows are
-  CSS-hidden). Starting a fresh install still needs a device.
-- [ ] On an ARM64 Android device: search returns music, artist/album/playlist
+- [x] A fresh install starts without desktop-only imports, folder prompts, or an
+  Advisor tab. — uninstalled and reinstalled on the phone: the backend reaches
+  its authenticated health/settings preflight, no folder prompt appears, and
+  the navigation is Home / Search / Your Library / Statistics with no Advisor
+  tab. Zero `FATAL EXCEPTION` entries in logcat across the launch.
+- [x] On an ARM64 Android device: search returns music, artist/album/playlist
   pages load, YouTube audio plays, a selected FLAC is chosen by filename and
   metadata, torrent bytes advance, and the resulting FLAC plays through the
-  range-stream endpoint. — the backend halves of these pass against the real
-  embedded server on the host (search/artist/album/playlist, a `ytp-dl`
-  download advancing real bytes, `200`/`206`/`416` range responses). WebView
-  playback and the torrent half need a device.
+  range-stream endpoint. — all confirmed on the phone. Playback also survives
+  backgrounding (measured advancing from 44s to 69s with the launcher in the
+  foreground), which required a WebView subclass that ignores the hidden-window
+  notification; Chromium otherwise suspends the audio element regardless of the
+  foreground service.
 - [x] Kill/relaunch retains settings and library data under the single managed
   storage root. — verified against the real backend: engine, service, quality,
   the imported playlist and both managed directories survive two
@@ -193,26 +197,30 @@ reproducible commands and the recorded results.
   `08ea2021f65da86474b209323d7f1bd999b49dbcb568917b9742aabdd60afed3`
   (55,341,024 bytes). There is no signing config in the repository, so the
   release APK must be signed before distribution.
-- [ ] Report device/API/ABI tested, engines tested, and any feature that remains
-  unavailable. Do not describe the port as complete while a required gate above
-  is unchecked.
+- [x] Report device/API/ABI tested, engines tested, and any feature that remains
+  unavailable. — **Device:** Nothing A065 (`Pong`), Android 16, API 36,
+  `arm64-v8a`, 1080x2412 @ 420dpi. **Engines tested on device:** `ytp-dl`
+  (plays, backgrounds, advances the queue) and `torrent` (FLAC selected and
+  downloaded through the native bridge). **Unavailable by design:** the
+  SpotiFLAC download engine, because its provider extensions need Node.js or an
+  installed Python provider and neither ships in the APK — it is withheld with
+  that reason shown in Settings. **Advisor:** Gemini Nano is unavailable (no
+  AICore on this device); a local Gemma 3 1B bundle is installed and ranked
+  real candidates; deterministic ranking remains the offline floor.
 
 ## Outstanding
 
-Everything still unchecked needs one of two things this pass could not supply.
-
-**An ARM64 Android device or emulator image** (no device was attached and no
-emulator system image is installed in the SDK):
-
-- jlibtorrent JNI library loading and a real FLAC selection/download.
-- Fresh-install startup, WebView playback, and the on-device Gemini
-  Nano/Gemma advisors.
-- The screen-size, orientation, dark-mode, system-bar, keyboard,
-  back-navigation and external-link matrix.
-- The final device/API/ABI report.
+Two items remain, both blocked on input rather than on work.
 
 **The supplied phone reference screenshots**, which are not in the repository:
 
 - The visual comparison of spacing, typography, cards, lists, artist/profile
   details, now playing, lyrics, library filters, mini-player and safe-area
-  handling.
+  handling. `docs/screenshots/` holds desktop captures only; the phone
+  references need to be supplied again before this can be judged.
+
+**More than one device**:
+
+- The screen-size, orientation, dark-mode, system-bar, keyboard and
+  external-link matrix. Everything so far is one phone in portrait, so small
+  and large screens and landscape are untested.
