@@ -2,87 +2,11 @@
 
 A high-performance, private music meta-search and personal streaming platform. Mindinguflac allows users to aggregate metadata from multiple open sources, discover new artists through high-fidelity discography mapping, play audio and music videos, follow synced lyrics, and manage a local media library with a modern, responsive interface.
 
-Built with a Python backend and a Vanilla JS/CSS frontend, it functions as both a local web server and a native desktop application for macOS and Windows.
+Built with a Python backend and a Vanilla JS/CSS frontend, it functions as a local web server, a native desktop application for macOS and Windows, and an Android app that embeds the same Python backend on the phone (see [android-app/README.md](android-app/README.md)).
 
 Mindinguflac uses SpotiFLAC `3.9.0` (`a471fdc`) through its extension-first provider API. SpotiFLAC no longer bundles download providers; install the provider extensions you trust under `~/.spotiflac/extensions`. The legacy service selections in Mindinguflac map to their installed extension IDs automatically.
 
-## v1.2.9
-
-- Makes Windows first-run extraction sanitize reserved device names such as `CON`, even if a dependency ships one inside the embedded ZIP.
-- Creates the Windows bundle with portable ZIP paths and validates every member before the launcher is built.
-- Keeps the real `GB-CON` state code while reading Cornwall city data from its Windows-safe `_CON` directory.
-- Rejects absolute and parent-traversal ZIP entries before writing any bundled file.
-
-## v1.2.8
-
-- Updates the SpotiFLAC engine to 3.9.0 and reads normalized Spotify play counts from its metadata client.
-- Prevents un-enriched sidebar cache entries from suppressing artist-page play counts.
-- Removes duplicate compilation editions and preserves Spotify's Popular Tracks ordering on artist pages.
-- Adds an expandable Now Playing view with a wide 16:9 video stage and responsive artist, credits, tour, and queue sections.
-
-## v1.2.7
-
-- Fixes YouTube sign-in handoff in packaged macOS and Windows apps: a signed-in browser session is now imported into Mindinguflac's private application data instead of being kept only in a temporary download cache.
-- Polls the private session after opening YouTube, so the failed download retries even when macOS does not deliver a browser focus-return event.
-- Keeps the imported session readable only by the current user and never includes browser cookies in release assets or source control.
-
-## v1.2.6
-
-- Updates the SpotiFLAC engine from 1.6.0 to 3.7.0 and migrates Mindinguflac to its extension-first provider architecture.
-- Preserves Spotify track, album, artist, ISRC, and cross-service identifiers through the relocated metadata API.
-- Keeps Torrent as an independent download engine; its provider selection and shared-session handling are unchanged.
-- Updates the Settings version label and macOS About metadata to 1.2.6.
-- Restores the last selected song and its saved playback position when the app is reopened.
-- Keeps the macOS Dock command labeled **Pause** while playing and **Play** while paused.
-- Requests macOS notification permission at first launch so YouTube login alerts can appear, open the system default browser, and retry the failed track after login.
-- Adds Duck.ai, Gemini, and browser-authenticated Codex advisor choices, while keeping the selected provider isolated and removing the obsolete Qobuz user-token field.
-
-## v1.2.4
-
-- YouTube fallback automatically discovers a signed-in browser session when YouTube presents its bot-verification challenge.
-- No manually exported `cookies.txt` is required when the selected browser is signed in to YouTube.
-- The YouTube download engine requires a signed-in YouTube session in a local browser. Mindinguflac discovers supported browser cookie stores through `browser_cookie3` instead of assuming a browser. If no login cookies are found, it shows both a native operating-system notification and an in-app login action on macOS and Windows. macOS requests notification permission the first time this is needed. Click the banner or **Log in** to open YouTube in the system default browser; after signing in, return to Mindinguflac and the failed track is retried automatically. If notification permission is denied, the in-app action still works.
-
-## v1.2.3
-
-- Prevented duplicate Mindinguflac desktop instances from opening a second app window on macOS relaunch.
-- Connected Bluetooth devices in the Connect panel now try to activate the matching audio output instead of remaining a dead connected row.
-- When a Bluetooth output is saved or selected but not reachable, playback now falls back to `This computer`.
-- Side video playback now stays active when audio is routed through the native output path, including tracks started from Recently Played.
-- SpotiFLAC now uses the 1.5.2 download engine, with its current async provider pipeline and browser-backed provider fallback support.
-- The desktop builds include the required `nodriver` runtime dependency for that provider path.
-
-## v1.2.0
-
-- Added expanded synced lyrics support through Spotify, Apple, Musixmatch, LRCLIB, and Amazon lyric providers where available.
-- Added richer music-video playback/fallback behavior, including reusable video cache records and persisted video overrides.
-- Improved YouTube fallback matching for music videos while keeping metadata checks, blacklist handling, and local scoring safeguards.
-- Updated SpotiFLAC to `1.3.1`, including resolver validation, Spotify token auto-renewal, Tidal proxy fixes, and downloader validation updates.
-
-
-<p align="center">
-  <img src="docs/screenshots/video.png" width="800" alt="Music video clip playback in the now playing sidebar">
-  <br><i>Music video clip playback with a quick switch back to audio</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/lyrics.png" width="800" alt="Synced lyrics overlay with timing offset controls">
-  <br><i>Synced lyrics overlay with compact timing offset controls</i>
-</p>
-
-## v1.1.1
-
-- Artist pages now recover live Spotify top tracks again when the direct artist top-tracks endpoint is empty.
-- Artist identity resolution prefers the live Spotify lookup path and only falls back to cached discovery data if needed.
-
-## v1.1.0
-
-- Local taste profiles now learn from actual listening, likes, dislikes, and blacklists.
-- Playlist recommendations continue from the end of manual playlists with dynamic replenishment; add or dismiss individual suggestions with automatic replacement.
-- Playlist origins are stored explicitly so album-derived playlists stay separate from user-created playlists.
-- Search, artist pages, and playlist recommendations now favor ID-first matching and taste-aware ranking.
-- Stats month picker rebuilt as a proper dropdown overlay; home pill shows a house icon.
-- Fixed SQLite database lock storms caused by background migration threads cascading on startup.
+Release history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Core Philosophy
 
@@ -117,114 +41,56 @@ Mindinguflac uses SpotiFLAC `3.9.0` (`a471fdc`) through its extension-first prov
 
 ## Screenshots
 
+### Desktop
+
 <p align="center">
-  <img src="docs/screenshots/home.png" width="800" alt="Home Screen">
-  <br><i>Home - Discover and search your music</i>
+  <img src="docs/screenshots/home.png" width="820" alt="Home">
+  <br><i>Home — discovery, recently played, and global charts</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/artists.png" width="800" alt="Artists Screen">
-  <br><i>Artists - Explore your library by artist</i>
+  <img src="docs/screenshots/artist_detail.png" width="820" alt="Artist detail">
+  <br><i>Artist — discography, top tracks, and biography</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/artist_detail.png" width="800" alt="Artist Detail">
-  <br><i>Artist Detail - Rich metadata and discography browsing</i>
+  <img src="docs/screenshots/albums.png" width="820" alt="Albums">
+  <br><i>Albums — high-fidelity browsing with Discogs artwork</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/artist_about.png" width="800" alt="About Artist">
-  <br><i>About Artist - Extended biographies, follower counts, and global listening stats</i>
+  <img src="docs/screenshots/lyrics.png" width="820" alt="Lyrics">
+  <br><i>Lyrics — time-synced, with per-track offset correction</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/albums.png" width="800" alt="Albums Screen">
-  <br><i>Albums - High-fidelity album browsing</i>
+  <img src="docs/screenshots/queue.png" width="820" alt="Queue">
+  <br><i>Queue — now playing and upcoming tracks, drag to reorder</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/album_booklet.png" width="800" alt="Album Booklet">
-  <br><i>Album Booklet - View high-resolution liner notes and booklets (Discogs integration)</i>
+  <img src="docs/screenshots/stats_1.png" width="820" alt="Listening statistics">
+  <br><i>Statistics — listening history by period, artist, and genre</i>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/playlist.png" width="800" alt="Playlist Screen">
-  <br><i>Playlists - Import and manage your Spotify collections</i>
+  <img src="docs/screenshots/settings.png" width="820" alt="Settings">
+  <br><i>Settings — download engine, provider, and quality</i>
 </p>
 
-<p align="center">
-  <img src="docs/screenshots/sidebar_queue.png" width="800" alt="Queue Panel">
-  <br><i>Queue - Now playing and upcoming tracks with drag-to-reorder</i>
-</p>
+### Android
 
 <p align="center">
-  <img src="docs/screenshots/sidebar_now_playing.png" width="330" alt="Now Playing Sidebar">
-  <br><i>Now Playing Sidebar - Artwork, quality badge, and related music</i>
+  <img src="docs/screenshots/mobile/mobile_home.png" width="230" alt="Mobile home">
+  <img src="docs/screenshots/mobile/mobile_album.png" width="230" alt="Mobile album">
+  <img src="docs/screenshots/mobile/mobile_now_playing.png" width="230" alt="Mobile now playing">
 </p>
-
 <p align="center">
-  <img src="docs/screenshots/Tour_sidebar.png" width="330" alt="Sidebar tour dates and next in queue">
-  <br><i>Tour Sidebar - Live tour dates and the next-in-queue preview</i>
+  <img src="docs/screenshots/mobile/mobile_library.png" width="230" alt="Mobile library">
+  <img src="docs/screenshots/mobile/mobile_track_options.png" width="230" alt="Mobile track options">
 </p>
-
 <p align="center">
-  <img src="docs/screenshots/credits_modal.png" width="800" alt="Credits modal">
-  <br><i>Credits - Full artist, composer, writer, and performer credits</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/tour_page.png" width="800" alt="Tour page">
-  <br><i>Tour Page - "All events" page with location-aware "near me" grouping</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/Tour_page_events.png" width="800" alt="Tour events by country">
-  <br><i>Tour Page - Upcoming concerts by country with venue, date, and time</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/sidebar_recently_played.png" width="800" alt="Recently Played Queue">
-  <br><i>Recently Played - Full playback history inside the queue panel</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/sidebar_related.png" width="800" alt="Now Playing Sidebar">
-  <br><i>Now Playing Sidebar - Cover art, HI-RES/HQ badge, and related music</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/sidebar_about_tour.png" width="800" alt="Sidebar About and Tour">
-  <br><i>Sidebar - About the artist, credits, and live tour dates (sourced on-demand via AI web search)</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/context_menu.png" width="800" alt="Context Menu">
-  <br><i>Context Menu - Advanced track actions (Queue, Playlist, Exact Native Links)</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/settings_discogs.png" width="800" alt="Discogs Settings">
-  <br><i>Settings - Integration with Qobuz and Discogs for enhanced metadata</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/stats_1.png" width="800" alt="Your Listening Stats with period picker and monthly breakdown">
-  <br><i>Personal listening stats with time-based filtering and listening-over-time chart</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/stats_2.png" width="800" alt="Top listened tracks and top listened artists">
-  <br><i>Top tracks ranked by play count and listened time, with top artists discovery</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/recomended-right_click_new_sidebar.png" width="800" alt="Playlist with Recommended section and context menu">
-  <br><i>Playlist recommendations based on listening taste with quick-action context menu</i>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/stats_3.png" width="800" alt="Top listened albums and top genres with bar chart">
-  <br><i>Genre affinity chart and top albums derived from real listening history</i>
+  <i>Android — home, album, now playing, library, and the track options sheet</i>
 </p>
 
 ## Setup & Usage

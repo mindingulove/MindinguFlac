@@ -34,3 +34,10 @@ plans/
 debug_*.py
 run_stats_backfill*.py
 torrent_catalog.json
+
+# Android/Gradle local state and generated packages.
+android-app/.gradle/
+android-app/local.properties
+android-app/**/build/
+# Generated from the root web UI by the Android Gradle sync task.
+android-app/app/src/main/python/android_runtime/static/

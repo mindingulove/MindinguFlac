@@ -1078,8 +1078,25 @@ class ServiceDownloadManager:
             if incoming.get(key):
                 job[key] = incoming[key]
 
+    def _requested_engine(self, payload: dict) -> tuple[str, str, str]:
+        """Engine/service/quality for a download payload.
+
+        On Android the result is clamped to an engine the capability probe
+        proved usable, so a stale client cannot name a desktop-only engine and
+        reach an import error instead of a download.
+        """
+        engine = (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower()
+        service = (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower()
+        quality = payload.get("quality") or getattr(self.config, "default_quality", "flac") or "flac"
+        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+            from android_runtime import capabilities
+
+            engine, service, quality = capabilities.clamp_choice(engine, service, quality)
+        return engine, service, quality
+
     def _job_from_payload(self, payload: dict, mode: str = "download") -> dict:
         meta = _payload_metadata(payload)
+        engine_choice = self._requested_engine(payload)
         return {
             "id": str(uuid.uuid4()),
             "artist": clean_part(meta.get("artist") or "Unknown Artist"),
@@ -1090,9 +1107,9 @@ class ServiceDownloadManager:
             "mode": mode,
             "isrc": meta.get("isrc") or "",
             "metadata": meta,
-            "service": (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower(),
-            "engine": (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower(),
-            "quality": payload.get("quality") or getattr(self.config, "default_quality", "flac") or "flac",
+            "service": engine_choice[1],
+            "engine": engine_choice[0],
+            "quality": engine_choice[2],
             "status": "finished",
             "progress": 100,
             "created_at": time.time(),
@@ -1581,10 +1598,13 @@ class ServiceDownloadManager:
         identity = _track_identity_from_payload(payload)
         track_key = identity["track_key"]
 
-        engine = (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower()
-        service = (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower()
+        engine, service, _requested_quality = self._requested_engine(payload)
         metadata = _enrich_download_metadata_for_search(payload, engine, metadata)
-        payload = {**payload, "metadata": metadata}
+        # Only the engine is pinned onto the payload: the clamp above may have
+        # changed it, and every downstream reader must agree with the job the
+        # payload will produce. ``quality`` is deliberately left untouched —
+        # its absence is what signals "not a video request" further down.
+        payload = {**payload, "metadata": metadata, "engine": engine, "service": service}
         resolved_url = ""
         fallback_resolved_url = ""
 

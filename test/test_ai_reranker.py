@@ -73,6 +73,19 @@ class TestAiReranker(unittest.TestCase):
         duck_request.assert_called_once()
         gemini_request.assert_not_called()
 
+    def test_android_ranking_prefers_nano_without_playwright(self):
+        with patch("ai_reranker._android_nano_text", return_value='{"ranked_ids":[2,1]}'):
+            with patch("ai_reranker._android_gemma_text") as local_gemma:
+                result = ai_reranker._android_request("{}", "flash-lite")
+        self.assertEqual(result["ranked_ids"], [2, 1])
+        local_gemma.assert_not_called()
+
+    def test_android_ranking_uses_local_gemma_then_deterministic(self):
+        prompt = '{"candidates":[{"id":1,"local_score":12},{"id":2,"local_score":50}]}'
+        with patch("ai_reranker._android_nano_text", return_value=""):
+            with patch("ai_reranker._android_gemma_text", return_value=""):
+                result = ai_reranker._android_request(prompt, "flash-lite")
+        self.assertEqual(result["ranked_ids"], [2, 1])
 
 if __name__ == "__main__":
     unittest.main()

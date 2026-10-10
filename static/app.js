@@ -1,4 +1,6 @@
 const API_BASE = "";
+const IS_ANDROID = /Mindinguflac-Android/i.test(navigator.userAgent) || !!window.MindinguflacAndroid;
+if (IS_ANDROID) document.documentElement.classList.add("is-android");
 const CATALOG_REFRESH_MS = 15 * 60 * 1000;
 const ARTIST_TRACK_PREVIEW_COUNT = 5;
 const ARTIST_ALBUM_PREVIEW_COUNT = 6;
@@ -7,6 +9,7 @@ const PREFETCH_AHEAD_COUNT = 5;
 
 const state = {
   viewStack: [],
+  runtime: null,
   catalog: { artists: [], albums: [], top_tracks: [], personal_tracks: [], recent_tracks: [] },
   settings: {},
   playlists: [],
@@ -128,7 +131,9 @@ const SERVICE_QUALITIES = {
 };
 
 const ENGINE_PROVIDERS = {
-  "ytp-dl": [],
+  "ytp-dl": [
+    { value: "youtube", label: "YouTube" },
+  ],
   torrent: [
     { value: "all",           label: "All Trackers (Parallel)" },
     { value: "torlock",       label: "TorLock" },
@@ -175,6 +180,54 @@ function updateQualityOptions(service, currentQuality) {
   }
 }
 
+async function loadRuntimeCapabilities() {
+  if (state.runtime) return state.runtime;
+  try {
+    state.runtime = await api("/api/runtime");
+  } catch (_) {
+    state.runtime = null;
+  }
+  return state.runtime;
+}
+
+function runtimeEngine(engine) {
+  return (state.runtime && state.runtime.engines && state.runtime.engines[engine]) || null;
+}
+
+// On Android the engine picker is built from the backend's measured capability
+// report, so an engine whose runtime is missing from the APK is never offered.
+function androidEngineOptions() {
+  const engines = (state.runtime && state.runtime.engines) || {};
+  const order = ["torrent", "ytp-dl", "spotiflac"];
+  const labels = { "torrent": "FLAC / BitTorrent (libtorrent)", "ytp-dl": "YouTube audio" };
+  return order
+    .filter(name => engines[name] && engines[name].available)
+    .map(name => ({ value: name, label: labels[name] || engines[name].label || name }));
+}
+
+// Say plainly why an engine is missing instead of quietly dropping it from
+// the picker, so a user looking for FLAC/BitTorrent learns what is wrong.
+function renderAndroidEngineNotes() {
+  const row = $("androidEngineNotesRow");
+  const list = $("androidEngineNotes");
+  if (!row || !list) return;
+  const engines = (state.runtime && state.runtime.engines) || {};
+  const notes = ["torrent", "ytp-dl", "spotiflac"]
+    .filter(name => engines[name] && !engines[name].available)
+    .map(name => {
+      const entry = engines[name];
+      const label = esc(entry.label || name);
+      const reason = esc(entry.reason || "Runtime not packaged in this build.");
+      return `<li><strong>${label}</strong>${reason}</li>`;
+    });
+  const missing = ((state.runtime && state.runtime.dependencies) || {}).missing || [];
+  if (missing.length) {
+    notes.push(`<li><strong>Missing packaged runtimes</strong>${esc(missing.join(", "))}</li>`);
+  }
+  list.innerHTML = notes.join("");
+  row.classList.toggle("hidden", !notes.length);
+}
+
 function updateEngineControls(engine, currentService, currentQuality) {
   const serviceRow = $("serviceRow");
   const retriesRow = $("retriesRow");
@@ -182,8 +235,21 @@ function updateEngineControls(engine, currentService, currentQuality) {
   const qualitySel = $("defaultQuality");
   if (!serviceRow || !serviceSel || !qualitySel) return;
 
-  const providers = ENGINE_PROVIDERS[engine] || ENGINE_PROVIDERS.spotiflac;
-  const engineQualities = ENGINE_QUALITIES[engine];
+  let providers = ENGINE_PROVIDERS[engine] || ENGINE_PROVIDERS.spotiflac;
+  let engineQualities = ENGINE_QUALITIES[engine];
+  const capability = IS_ANDROID ? runtimeEngine(engine) : null;
+  if (capability) {
+    // Keep only the sources and qualities this engine's Android backend
+    // actually implements. Offering the rest would either silently search
+    // something else or label lossy output as FLAC.
+    providers = providers.filter(option => (capability.services || []).includes(option.value));
+    if (engineQualities) {
+      engineQualities = engineQualities.filter(option => (capability.qualities || []).includes(option.value));
+    }
+  } else if (IS_ANDROID && engine === "ytp-dl") {
+    engineQualities = ENGINE_QUALITIES[engine].filter(option => option.value !== "mp3");
+  }
+  if (engineQualities && !engineQualities.length) engineQualities = ENGINE_QUALITIES[engine];
 
   // Show/hide service row
   serviceRow.style.display = providers.length > 0 ? "" : "none";
@@ -301,6 +367,7 @@ async function api(path, options = {}) {
   const id = controller ? setTimeout(() => controller.abort(), timeout) : null;
   try {
     const resp = await fetch(`${API_BASE}${path}`, {
+      credentials: "same-origin",
       ...fetchOptions,
       signal: controller ? controller.signal : undefined,
     });
@@ -530,7 +597,17 @@ function bindEntityLinks(root = document) {
   });
 }
 
+// The collapsed player draws its progress as a gradient stop on .player::before,
+// so it needs the same updates the full seek bar gets.
+function setMiniPlayerProgress(ratio) {
+  const player = document.querySelector(".player");
+  if (!player) return;
+  const pct = Math.min(100, Math.max(0, (Number(ratio) || 0) * 100));
+  player.style.setProperty("--player-progress", `${pct}%`);
+}
+
 function resetSeekUi() {
+  setMiniPlayerProgress(0);
   const seek = $("seekBar");
   if (seek) {
     seek.value = 0;
@@ -570,23 +647,182 @@ function renderSidebarLibraryPills() {
   });
 }
 
-function setDetailsExpanded(expanded) {
-  state.detailsExpanded = Boolean(expanded);
-  const panel = document.querySelector(".details-panel");
+let _nowPlayingCloseTimer = null;
+let _nowPlayingRestoreTimer = null;
+
+function syncDetailsExpandButton(expanded) {
   const button = $("detailsExpandBtn");
-  panel?.classList.toggle("is-expanded", state.detailsExpanded);
-  document.body.classList.toggle("details-expanded", state.detailsExpanded);
   if (!button) return;
-  const label = state.detailsExpanded ? "Collapse now playing" : "Expand now playing";
-  button.setAttribute("aria-pressed", String(state.detailsExpanded));
+  const label = expanded ? "Collapse now playing" : "Expand now playing";
+  button.setAttribute("aria-pressed", String(expanded));
   button.setAttribute("aria-label", label);
   button.title = label;
   button.querySelector("path")?.setAttribute(
     "d",
-    state.detailsExpanded
+    expanded
       ? "M9 4v5H4M15 4v5h5M20 15h-5v5M4 15h5v5"
       : "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"
   );
+}
+
+function setDetailsExpanded(expanded) {
+  const wantExpanded = Boolean(expanded);
+  const onPhone = window.matchMedia("(max-width: 900px)").matches;
+  const body = document.body;
+  const panel = document.querySelector(".details-panel");
+
+  clearTimeout(_nowPlayingCloseTimer);
+  clearTimeout(_nowPlayingRestoreTimer);
+  body.classList.remove("now-playing-closing", "now-playing-restored");
+
+  // Closing on a phone plays the sheet back down before the screen is torn
+  // apart. The panel and the transport bar are separate fixed elements, so
+  // both have to travel together — and the mini bar has to be faded back in
+  // afterwards, otherwise it pops into place the instant the classes drop.
+  if (!wantExpanded && state.detailsExpanded && onPhone && body.classList.contains("mobile-now-playing")) {
+    state.detailsExpanded = false;
+    syncDetailsExpandButton(false);
+    body.classList.add("now-playing-closing");
+    _nowPlayingCloseTimer = setTimeout(() => {
+      body.classList.remove("now-playing-closing", "mobile-now-playing", "details-expanded");
+      panel?.classList.remove("is-expanded");
+      body.classList.add("now-playing-restored");
+      _nowPlayingRestoreTimer = setTimeout(
+        () => body.classList.remove("now-playing-restored"), 220);
+    }, 210);
+    return;
+  }
+
+  state.detailsExpanded = wantExpanded;
+  panel?.classList.toggle("is-expanded", state.detailsExpanded);
+  body.classList.toggle("details-expanded", state.detailsExpanded);
+  body.classList.toggle("mobile-now-playing", state.detailsExpanded && onPhone);
+  syncDetailsExpandButton(state.detailsExpanded);
+}
+
+function setMobileNavActive(name) {
+  document.querySelectorAll("[data-mobile-nav]").forEach(button => {
+    button.classList.toggle("active", button.dataset.mobileNav === name);
+  });
+}
+
+function mobileLibraryItemsHtml(playlists) {
+  if (!playlists.length) return '<div class="mobile-empty-state">Your playlists will appear here.</div>';
+  return playlists.map(pl => {
+    const art = pl.artwork_url || (pl.tracks?.[0] || {}).artwork_url || "";
+    return `<button class="mobile-library-item" type="button" data-mobile-playlist-id="${esc(pl.id)}">
+      <span class="mobile-library-art" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : '<i class="bi bi-music-note-list"></i>'}</span>
+      <span><strong>${esc(pl.name)}</strong><small>Playlist · ${pl.tracks?.length || 0} songs</small></span>
+    </button>`;
+  }).join("");
+}
+
+function bindMobileLibraryItems() {
+  document.querySelectorAll("[data-mobile-playlist-id]").forEach(button => {
+    button.onclick = () => {
+      const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
+      if (playlist) pushPage(() => renderPlaylistPage(playlist));
+    };
+  });
+}
+
+// Repaint Your Library in place when the playlist set changes. The phone never
+// shows the desktop sidebar, so refreshing only that left a newly created
+// playlist invisible until the app was restarted.
+function refreshMobileLibraryList() {
+  const container = $("mobileLibraryItems");
+  if (!container) return;
+  container.innerHTML = mobileLibraryItemsHtml(state.playlists || []);
+  bindMobileLibraryItems();
+}
+
+function renderMobileLibraryPage() {
+  setActiveView("home");
+  setMobileNavActive("library");
+  const playlists = state.playlists || [];
+  $("pageContent").innerHTML = `
+    <div class="scroll-area mobile-library-page">
+      <div class="mobile-page-title">
+        <div class="mobile-profile-dot">M</div>
+        <h1>Your Library</h1>
+        <button class="mobile-title-action" type="button" data-mobile-search aria-label="Search library"><i class="bi bi-search"></i></button>
+        <button class="mobile-title-action" type="button" id="mobileCreatePlaylist" aria-label="Create playlist"><i class="bi bi-plus-lg"></i></button>
+      </div>
+      <div class="mobile-filter-pills"><span>Playlists</span><span>Albums</span><span>Artists</span></div>
+      <div class="mobile-library-sort"><strong><i class="bi bi-arrow-down-up"></i> Recents</strong><i class="bi bi-grid"></i></div>
+      <div id="mobileLibraryItems" class="mobile-library-items">
+        ${mobileLibraryItemsHtml(playlists)}
+      </div>
+    </div>`;
+  bindMobileLibraryItems();
+  document.querySelector("[data-mobile-search]")?.addEventListener("click", focusMobileSearch);
+  const create = $("mobileCreatePlaylist");
+  if (create && $("createPlaylistBtn")) create.onclick = () => $("createPlaylistBtn").click();
+}
+
+function advisorStatusText(kind, status) {
+  const labels = {
+    available: "ready",
+    downloadable: "download available",
+    downloading: "downloading",
+    installed: "ready",
+    not_installed: "not installed",
+    unavailable: "unavailable on this device",
+  };
+  return `${kind}: ${labels[status] || status || "unavailable"}`;
+}
+
+function refreshAndroidAdvisorStatus() {
+  const row = $("androidAdvisorRow");
+  if (!row) return;
+  row.classList.toggle("hidden", !IS_ANDROID);
+  if (!IS_ANDROID || !window.MindinguflacAndroid) return;
+  try {
+    $("nanoAdvisorStatus").textContent = advisorStatusText("Gemini Nano", window.MindinguflacAndroid.nanoStatus());
+    $("gemmaAdvisorStatus").textContent = advisorStatusText("Local Gemma", window.MindinguflacAndroid.gemmaStatus());
+  } catch (_) {
+    $("nanoAdvisorStatus").textContent = advisorStatusText("Gemini Nano", "unavailable");
+    $("gemmaAdvisorStatus").textContent = advisorStatusText("Local Gemma", "not_installed");
+  }
+  const install = $("installGemmaModel");
+  if (install) install.onclick = () => window.MindinguflacAndroid.installGemma();
+}
+
+window.onGemmaInstalled = installed => {
+  refreshAndroidAdvisorStatus();
+  if (!installed) alert("That local Gemma model could not be installed. Choose a compatible MediaPipe .task bundle.");
+};
+
+function focusMobileSearch() {
+  setMobileNavActive("search");
+  const input = $("searchInput");
+  input?.focus();
+  input?.select();
+}
+
+function bindMobileNavigation() {
+  document.querySelectorAll("[data-mobile-nav]").forEach(button => {
+    button.onclick = () => {
+      const target = button.dataset.mobileNav;
+      if (target === "home") {
+        setMobileNavActive("home");
+        replacePage(renderHomePage);
+      } else if (target === "search") {
+        focusMobileSearch();
+      } else if (target === "library") {
+        replacePage(renderMobileLibraryPage);
+      } else if (target === "stats") {
+        setMobileNavActive("stats");
+        setActiveLibraryPill("stats");
+        replacePage(() => renderStatsPage(state.statsPeriod || "month"));
+      }
+    };
+  });
+  document.querySelector(".player-track")?.addEventListener("click", event => {
+    if (window.matchMedia("(max-width: 900px)").matches && !event.target.closest("#playerStatusIcon")) {
+      setDetailsExpanded(true);
+    }
+  });
 }
 
 function setActiveView(id) {
@@ -600,6 +836,26 @@ function setActiveView(id) {
   const view = $(id);
   if (view) view.classList.add("active");
 }
+
+// Android's back gesture. The interface is a JS view stack, not WebView
+// history, so WebView.canGoBack() is always false and the system would just
+// finish the Activity — which is why back closed the app instead of navigating.
+// Java routes the gesture here; we unwind whatever is on top, and only ask to
+// exit once there is genuinely nothing left to go back to.
+window.__androidBack = function () {
+  try {
+    if (state.lyrics?.open) { closeLyricsPanel(); return; }
+    const queue = $("queuePanel");
+    if (queue && !queue.hidden) { closeQueuePanel(); return; }
+    const connect = $("connectPanel");
+    if (connect && !connect.hidden) { closeConnectPanel(); return; }
+    if (state.detailsExpanded) { setDetailsExpanded(false); return; }
+    if (state.viewStack.length > 1) { popPage(); return; }
+  } catch (_) {
+    // Never trap the user in the app because a panel check threw.
+  }
+  try { window.MindinguflacAndroid?.exitApp(); } catch (_) {}
+};
 
 function pushPage(renderFn) {
   if (state.viewStack.length > 0) {
@@ -812,6 +1068,7 @@ function renderHomePage() {
     return;
   }
   setActiveLibraryPill("home");
+  setMobileNavActive("home");
   setActiveView("home");
   
   const personalTracks = (state.catalog.personal_tracks || []).slice(0, 6);
@@ -820,54 +1077,66 @@ function renderHomePage() {
   const topArtists = (state.catalog.artists || []).slice(0, 6);
   const topAlbums = (state.catalog.albums || []).slice(0, 6);
 
+  // The hero used to sit outside .scroll-area, so it stayed pinned while the
+  // sections moved under it. Inside the scroller it scrolls away, which is what
+  // lets the first section header take the top spot.
   let html = `
-    <div class="library-hero compact-hero">
-      <div>
-        <span class="eyebrow">Personal Music Discovery</span>
-        <h1>Welcome Home</h1>
-      </div>
-    </div>
-
-    <div class="scroll-area">`;
+    <div class="scroll-area">
+      <div class="library-hero compact-hero">
+        <div>
+          <span class="eyebrow">Personal Music Discovery</span>
+          <h1>Welcome Home</h1>
+        </div>
+      </div>`;
 
   if (recentTracks.length) {
     html += `
+        <section class="home-section">
         <div class="section-head sticky-head">
           <h2>Recently Played</h2>
           <button class="see-more" id="seeMoreRecent">See all <i class="bi bi-chevron-right"></i></button>
         </div>
         <div id="recentTracksGrid" class="grid"></div>
+        </section>
     `;
   }
 
   if (personalTracks.length) {
     html += `
+        <section class="home-section">
         <div class="section-head sticky-head">
           <h2>Your Most Listened</h2>
           <button class="see-more" id="seeMorePersonal">See all <i class="bi bi-chevron-right"></i></button>
         </div>
         <div id="personalTracksGrid" class="grid"></div>
+        </section>
     `;
   }
 
   html += `
-      <div class="section-head sticky-head">
+<section class="home-section">
+            <div class="section-head sticky-head">
         <h2>Top Songs (Global)</h2>
         <button class="see-more" id="seeMoreGlobalTracks">See all <i class="bi bi-chevron-right"></i></button>
       </div>
       <div id="topTracksGrid" class="grid"></div>
+      </section>
 
-      <div class="section-head sticky-head">
+<section class="home-section">
+            <div class="section-head sticky-head">
         <h2>Top Artists (Global)</h2>
         <button class="see-more" id="seeMoreArtists">See all <i class="bi bi-chevron-right"></i></button>
       </div>
       <div id="topArtistsGrid" class="grid"></div>
+      </section>
 
-      <div class="section-head sticky-head">
+<section class="home-section">
+            <div class="section-head sticky-head">
         <h2>Top Albums (Global)</h2>
         <button class="see-more" id="seeMoreAlbums">See all <i class="bi bi-chevron-right"></i></button>
       </div>
       <div id="topAlbumsGrid" class="grid"></div>
+      </section>
     </div>
   `;
 
@@ -1698,6 +1967,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
         <div class="track-extra">${col4}</div>
         <div class="track-time">${col5}</div>
         <div class="track-status-icon">${col6}</div>
+        <button class="track-actions" type="button" data-track-actions="${idx}" aria-label="More options for ${esc(item.title || item.name || "track")}"><i class="bi bi-three-dots-vertical"></i></button>
       </div>
     `;
   }).join("");
@@ -1717,8 +1987,16 @@ function renderTrackList(containerId, items, context = "general", playbackContex
     const item = items[Number(el.dataset.itemIdx)];
     el.onclick = (event) => {
       if (event.target.closest("[data-library-action]")) return;
+      if (event.target.closest("[data-track-actions]")) return;
       selectMusicItem(item, "stream", playbackQueueItems, playbackContext);
     };
+    // There is no right-click on a phone, so the overflow button opens the
+    // same menu — download, add to playlist, queue, go to artist/album.
+    el.querySelector("[data-track-actions]")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showTrackContextMenu(event, item, playbackContext || {});
+    });
     if (playableQueueItem(item)) {
       el.oncontextmenu = (event) => {
         event.preventDefault();
@@ -4411,6 +4689,23 @@ async function sortNearTourEvents(groupedEvents, location = {}) {
 function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
   const spotifyId = trackIdentityValue(track, "spotify_id");
   const isrc = trackIdentityValue(track, "isrc");
+  const selectedEngine = state.settings?.download_engine || "ytp-dl";
+  // Keep the phone payload inside what the backend reported it can run. The
+  // backend clamps this again, but matching here keeps the requested engine
+  // and the job's engine identical so the UI never shows a quality it did
+  // not actually ask for.
+  const androidCapability = runtimeEngine(selectedEngine);
+  const androidEngine = androidCapability ? selectedEngine : (selectedEngine === "torrent" ? "torrent" : "ytp-dl");
+  const androidServices = androidCapability?.services || (androidEngine === "torrent"
+    ? ["all", "torlock", "torrentdownloads", "limetorrents", "1337x", "kickass"]
+    : ["youtube"]);
+  const androidQualities = androidCapability?.qualities || (androidEngine === "torrent" ? ["LOSSLESS"] : ["best", "m4a"]);
+  const androidQuality = androidQualities.includes(state.settings?.default_quality)
+    ? state.settings.default_quality
+    : androidQualities[0];
+  const androidService = androidServices.includes(state.settings?.download_service)
+    ? state.settings.download_service
+    : androidServices[0];
   return {
     kind: "track",
     mode,
@@ -4418,9 +4713,9 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
     artist: track.artist || "",
     album: track.album || "",
     title: track.title || "",
-    quality: state.settings.default_quality || "LOSSLESS",
-    service: state.settings.download_service || "tidal",
-    engine: state.settings.download_engine || "spotiflac",
+    quality: IS_ANDROID ? androidQuality : (state.settings.default_quality || "LOSSLESS"),
+    service: IS_ANDROID ? androidService : (state.settings.download_service || "tidal"),
+    engine: IS_ANDROID ? androidEngine : (state.settings.download_engine || "spotiflac"),
     track,
     metadata: track.metadata || track,
     spotify_id: spotifyId,
@@ -4476,9 +4771,21 @@ function parseLyrics(raw) {
     const stamps = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g)]
       .map(match => parseLrcTimestamp(match[1]))
       .filter(value => value !== null);
-    if (!stamps.length) return;
-    const content = line.replace(/\[[^\]]+\]/g, "").trim();
-    stamps.forEach(time => lines.push({ time, text: content, instrumental: !content }));
+    // Enhanced ("word-synced" / A2) LRC puts a <mm:ss.xx> tag in front of every
+    // word. Those are timing data, not words: leaving them in printed the raw
+    // markup into the lyrics panel, and a file carrying only word tags produced
+    // no lines at all because it has no [mm:ss.xx] line stamp to key off.
+    const wordStamps = [...line.matchAll(/<(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)>/g)]
+      .map(match => parseLrcTimestamp(match[1]))
+      .filter(value => value !== null);
+    const times = stamps.length ? stamps : wordStamps.slice(0, 1);
+    if (!times.length) return;
+    const content = line
+      .replace(/\[[^\]]*\]/g, "")
+      .replace(/<\d{1,2}:\d{2}(?:[.:]\d{1,3})?>/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    times.forEach(time => lines.push({ time, text: content, instrumental: !content }));
   });
   return lines.sort((a, b) => a.time - b.time);
 }
@@ -5571,6 +5878,7 @@ async function renderSettings() {
   setActiveView("settings");
   startCacheLogPolling();
   state.settings = await api("/api/settings");
+  if (IS_ANDROID) await loadRuntimeCapabilities();
 
   $("cacheDir").value = state.settings.cache_dir || "";
   $("cacheDir").title = state.settings.cache_dir || "";
@@ -5578,9 +5886,28 @@ async function renderSettings() {
   $("musicDir").value = state.settings.music_dir || "";
   $("musicDir").title = state.settings.music_dir || "";
 
-  const engine = state.settings.download_engine || "spotiflac";
+  $("storageSection")?.classList.toggle("hidden", IS_ANDROID);
+  $("aiProviderRow")?.classList.toggle("hidden", IS_ANDROID);
+
+  let engine = state.settings.download_engine || (IS_ANDROID ? "ytp-dl" : "spotiflac");
+  if (IS_ANDROID) {
+    const options = androidEngineOptions();
+    if (options.length) {
+      $("downloadEngine").innerHTML = options
+        .map(option => `<option value="${option.value}">${option.label}</option>`)
+        .join("");
+      if (!options.some(option => option.value === engine)) engine = options[0].value;
+      $("downloadEngine").disabled = options.length < 2;
+    }
+    $("downloadService").disabled = false;
+    renderAndroidEngineNotes();
+  }
   $("downloadEngine").value = engine;
-  updateEngineControls(engine, state.settings.download_service || "tidal", state.settings.default_quality || "LOSSLESS");
+  updateEngineControls(
+    engine,
+    state.settings.download_service || (IS_ANDROID && engine === "torrent" ? "all" : "youtube"),
+    state.settings.default_quality || (IS_ANDROID && engine === "torrent" ? "LOSSLESS" : "m4a"),
+  );
   $("downloadEngine").onchange = () => {
     const newEngine = $("downloadEngine").value;
     updateEngineControls(newEngine, $("downloadService").value, $("defaultQuality").value);
@@ -5592,7 +5919,8 @@ async function renderSettings() {
 
   const aiProvider = $("aiProvider");
   if (aiProvider) {
-    aiProvider.value = state.settings.ai_provider || "duckai";
+    aiProvider.value = IS_ANDROID ? "android" : (state.settings.ai_provider || "duckai");
+    aiProvider.disabled = IS_ANDROID;
     const updateAiRows = () => {
       const provider = aiProvider.value;
       $("duckModelRow")?.classList.toggle("hidden", provider !== "duckai");
@@ -5608,6 +5936,7 @@ async function renderSettings() {
     updateAiRows();
     if (aiProvider.value === "codex") refreshCodexStatus();
   }
+  refreshAndroidAdvisorStatus();
 
   if ($("codexLogin")) $("codexLogin").onclick = loginCodex;
 
@@ -5645,7 +5974,7 @@ async function saveSettings(e) {
     cache_dir: $("cacheDir").value,
     music_dir: $("musicDir").value,
     download_engine: $("downloadEngine").value,
-    ai_provider: $("aiProvider") ? $("aiProvider").value : "duckai",
+    ai_provider: IS_ANDROID ? "android" : ($("aiProvider") ? $("aiProvider").value : "duckai"),
     duck_model: $("duckModel") ? $("duckModel").value : "1",
     gemini_model: $("geminiModel") ? $("geminiModel").value : "gemini-1.5-flash",
     tour_source: $("tourSource") ? $("tourSource").value : "ai",
@@ -5653,7 +5982,7 @@ async function saveSettings(e) {
     tour_lat: $("tourLat") ? $("tourLat").value.trim() : "",
     tour_lon: $("tourLon") ? $("tourLon").value.trim() : "",
     download_service: $("downloadService").value,
-    default_quality: $("defaultQuality").value,
+    default_quality: $("defaultQuality").value || (IS_ANDROID ? "m4a" : "LOSSLESS"),
     track_max_retries: parseInt($("trackMaxRetries").value),
 
     cache_cleanup_frequency: $("cacheCleanupFrequency").value,
@@ -6037,6 +6366,11 @@ function bindKeyboardControls() {
 }
 
 function storedVolume() {
+  // On a phone the hardware keys and the system volume panel own playback
+  // volume. Keeping a second software attenuation in the page meant the audio
+  // could be quiet with the system volume at full and no obvious reason why,
+  // so Android always plays at unity gain.
+  if (IS_ANDROID) return 1;
   const fromSettings = state.settings && state.settings.volume !== undefined ? Number(state.settings.volume) : NaN;
   if (Number.isFinite(fromSettings)) return Math.max(0, Math.min(1, fromSettings));
   const local = Number(localStorage.getItem(STORAGE_KEYS.volume));
@@ -6075,11 +6409,37 @@ function shouldExposeNowPlaying() {
   return !!state.currentTrack;
 }
 
+// On Android the page's audio element is the player, but the system knows
+// nothing about it: there is no notification, no lock-screen controls, and the
+// WebView is free to be suspended once the app is backgrounded. Mirroring the
+// state into the native bridge gives the foreground media service something to
+// show and keeps playback alive while the app is not on screen.
+function pushAndroidNowPlaying(payload, playing) {
+  if (!IS_ANDROID || !window.MindinguflacAndroid?.updateNowPlaying) return;
+  try {
+    window.MindinguflacAndroid.updateNowPlaying(JSON.stringify({
+      title: payload.title || "",
+      artist: payload.artist || "",
+      album: payload.album || "",
+      artwork_url: payload.artwork_url || "",
+      duration_ms: Math.max(0, Math.round((payload.duration || 0) * 1000)),
+      position_ms: Math.max(0, Math.round((payload.position || 0) * 1000)),
+      playing: Boolean(playing),
+    }));
+  } catch (_) {}
+}
+
+function clearAndroidNowPlaying() {
+  if (!IS_ANDROID || !window.MindinguflacAndroid?.clearNowPlaying) return;
+  try { window.MindinguflacAndroid.clearNowPlaying(); } catch (_) {}
+}
+
 function clearMediaSession() {
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = null;
     navigator.mediaSession.playbackState = "none";
   }
+  clearAndroidNowPlaying();
   _callNowPlaying("clear_now_playing");
 }
 
@@ -6107,6 +6467,9 @@ function updateMediaSession(track) {
     position,
     artwork_url: art,
   };
+
+  const audioElement = $("audioPlayer");
+  pushAndroidNowPlaying(payload, Boolean(audioElement && !audioElement.paused));
 
   if (state.settings?.native_now_playing_active) {
     // If the desktop native helper is active, use it as the primary source.
@@ -6270,6 +6633,7 @@ function bindPlayer() {
     $("currentTime").textContent = formatTime(audio.currentTime);
     $("durationTime").textContent = formatTime(audio.duration);
     $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
+    setMiniPlayerProgress(audio.currentTime / audio.duration);
     syncLocalVideoOverlay(audio.currentTime);
     updateLyricsPosition(audio.currentTime);
     persistPlaybackSnapshot();
@@ -6518,6 +6882,9 @@ function trackInPlaylist(playlist, track) {
 }
 
 function renderSidebarPlaylists() {
+  // Both creation paths funnel through here, so this is where the phone's
+  // Your Library list has to be kept in step with the desktop sidebar.
+  refreshMobileLibraryList();
   const list = $("sidebarPlaylistList");
   if (!list) return;
   if (!state.playlists.length) {
@@ -6584,6 +6951,7 @@ function formatDuration(tracks) {
 
 function renderPlaylistPage(playlist) {
   setActiveView("home");
+  if (window.matchMedia("(max-width: 900px)").matches) setMobileNavActive("library");
   document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
     el.classList.toggle("active", el.dataset.playlistId === playlist.id);
   });
@@ -7381,13 +7749,214 @@ async function restorePlaybackState() {
   console.log("[Boot] Restored saved track at", saved.position, "seconds:", saved.track.title);
 }
 
+const SCROLLBAR_TARGETS = ".scroll-area, .queue-content-area, .playlist-picker-body, .lyrics-content";
+
+// Overlay scrollbars for the app's inner scroll regions.
+//
+// Android WebView draws nothing for a non-root scroller, and a native
+// ::-webkit-scrollbar wide enough to drag with a thumb would permanently eat
+// ~30px of a 411px screen. So the native bar is hidden in CSS and this draws a
+// fixed-position one over the container instead: a 6px bar inside a 30px touch
+// strip, visible only while scrolling or being dragged.
+function bindCustomScrollbars() {
+  const MIN_THUMB = 52;
+  const IDLE_MS = 1100;
+  const bars = [];
+
+  function recordFor(el) {
+    let found = null;
+    // Pages re-render by replacing innerHTML, so scroll containers are
+    // discarded constantly. Prune detached ones here rather than leaking an
+    // overlay per navigation.
+    for (let i = bars.length - 1; i >= 0; i--) {
+      const entry = bars[i];
+      if (!entry.el.isConnected) {
+        entry.root.remove();
+        bars.splice(i, 1);
+      } else if (entry.el === el) {
+        found = entry;
+      }
+    }
+    if (found) return found;
+
+    const root = document.createElement("div");
+    root.className = "vscrollbar";
+    const thumb = document.createElement("div");
+    thumb.className = "vscrollbar-thumb";
+    root.appendChild(thumb);
+    document.body.appendChild(root);
+    const entry = { el, root, thumb, hideTimer: 0, dragging: false };
+    bars.push(entry);
+    attachDrag(entry);
+    return entry;
+  }
+
+  function scrollable(el) {
+    return el.scrollHeight - el.clientHeight > 2;
+  }
+
+  function layout(entry) {
+    const { el, root, thumb } = entry;
+    const box = el.getBoundingClientRect();
+    if (!scrollable(el) || box.height <= 0) {
+      root.classList.remove("is-visible");
+      return false;
+    }
+    root.style.top = `${box.top}px`;
+    root.style.left = `${box.right - root.offsetWidth}px`;
+    root.style.height = `${box.height}px`;
+    const height = Math.max(MIN_THUMB, Math.round(box.height * (el.clientHeight / el.scrollHeight)));
+    const travel = Math.max(0, box.height - height);
+    const progress = el.scrollTop / (el.scrollHeight - el.clientHeight);
+    thumb.style.height = `${height}px`;
+    thumb.style.top = `${Math.round(travel * Math.min(1, Math.max(0, progress)))}px`;
+    return true;
+  }
+
+  function show(el) {
+    const entry = recordFor(el);
+    if (!layout(entry)) return;
+    entry.root.classList.add("is-visible");
+    clearTimeout(entry.hideTimer);
+    entry.hideTimer = setTimeout(() => {
+      if (!entry.dragging) entry.root.classList.remove("is-visible");
+    }, IDLE_MS);
+  }
+
+  function attachDrag(entry) {
+    const { el, root, thumb } = entry;
+    let grabOffset = 0;
+
+    root.addEventListener("pointerdown", (event) => {
+      const box = el.getBoundingClientRect();
+      const thumbTop = box.top + thumb.offsetTop;
+      // Tapping the track jumps the thumb to the finger; otherwise keep the
+      // grab point so the bar does not leap on contact.
+      const inside = event.clientY >= thumbTop && event.clientY <= thumbTop + thumb.offsetHeight;
+      grabOffset = inside ? event.clientY - thumbTop : thumb.offsetHeight / 2;
+      entry.dragging = true;
+      root.classList.add("is-dragging");
+      try { root.setPointerCapture(event.pointerId); } catch (_) {}
+      dragTo(event.clientY);
+      event.preventDefault();
+    });
+
+    root.addEventListener("pointermove", (event) => {
+      if (!entry.dragging) return;
+      dragTo(event.clientY);
+      event.preventDefault();
+    });
+
+    const release = (event) => {
+      if (!entry.dragging) return;
+      entry.dragging = false;
+      root.classList.remove("is-dragging");
+      try { root.releasePointerCapture(event.pointerId); } catch (_) {}
+      show(el);
+    };
+    root.addEventListener("pointerup", release);
+    root.addEventListener("pointercancel", release);
+
+    function dragTo(clientY) {
+      const box = el.getBoundingClientRect();
+      const travel = Math.max(1, box.height - thumb.offsetHeight);
+      const position = clientY - box.top - grabOffset;
+      const progress = Math.min(1, Math.max(0, position / travel));
+      el.scrollTop = progress * (el.scrollHeight - el.clientHeight);
+      layout(entry);
+    }
+  }
+
+  document.addEventListener("scroll", (event) => {
+    const el = event.target;
+    if (!el || el.nodeType !== 1 || !el.matches?.(SCROLLBAR_TARGETS)) return;
+    show(el);
+  }, true);
+
+  // Keep a visible bar aligned if the window changes shape mid-scroll.
+  window.addEventListener("resize", () => {
+    bars.forEach(entry => { if (entry.el.isConnected) layout(entry); });
+  });
+}
+
+// Spotify-style vertical gestures on the player: swipe up on the mini bar to
+// open the full now-playing screen, swipe down to dismiss it.
+function bindNowPlayingSwipe() {
+  const SWIPE_PX = 46;   // far enough that a tap never counts as a swipe
+  const SLOP_PX = 44;    // ignore gestures that are mostly horizontal
+
+  function onVerticalSwipe(el, handler, canStart) {
+    let startX = 0;
+    let startY = 0;
+    let active = false;
+    el.addEventListener("touchstart", (event) => {
+      active = event.touches.length === 1 && (!canStart || canStart());
+      if (!active) return;
+      startX = event.touches[0].clientX;
+      startY = event.touches[0].clientY;
+    }, { passive: true });
+    el.addEventListener("touchend", (event) => {
+      if (!active) return;
+      active = false;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      if (Math.abs(touch.clientX - startX) > SLOP_PX) return;
+      handler(touch.clientY - startY);
+    }, { passive: true });
+  }
+
+  const player = document.querySelector(".player");
+  if (player) {
+    onVerticalSwipe(player, (dy) => {
+      if (dy < -SWIPE_PX) setDetailsExpanded(true);
+    }, () => !state.detailsExpanded);
+  }
+
+  const panel = document.querySelector(".details-panel");
+  if (panel) {
+    onVerticalSwipe(panel, (dy) => {
+      if (dy > SWIPE_PX) setDetailsExpanded(false);
+      // Only from the top of the panel, otherwise a downward swipe meant to
+      // scroll the queue back up would dismiss the screen instead.
+    }, () => state.detailsExpanded && panel.scrollTop <= 0);
+  }
+}
+
 async function boot() {
   state.dockRecentItems = storedDockRecentItems();
   bindSearch();
   bindPlayer();
   bindKeyboardControls();
   bindPlaylistDialogs();
-  state.settings = await api("/api/settings").catch(() => ({}));
+  bindMobileNavigation();
+  bindCustomScrollbars();
+  bindNowPlayingSwipe();
+  if (IS_ANDROID) {
+    const health = await api("/api/health");
+    if (!health.ok || !health.android) throw new Error("The embedded Android backend did not pass its health check");
+    state.settings = await api("/api/settings");
+    await loadRuntimeCapabilities();
+    if (state.settings.ai_provider !== "android") {
+      throw new Error("Android backend setting ai_provider is not wired correctly");
+    }
+    // The engine is the user's choice and persists across launches, so check
+    // that the saved engine is one the backend can run rather than pinning it
+    // to YouTube/M4A — that check used to make a saved torrent engine fail boot.
+    const saved = runtimeEngine(state.settings.download_engine);
+    if (!saved || !saved.available) {
+      throw new Error(
+        `Android backend engine ${state.settings.download_engine || "(unset)"} is not available: `
+        + ((saved && saved.reason) || "not reported by the runtime capability probe"));
+    }
+    if (!(saved.services || []).includes(state.settings.download_service)
+        || !(saved.qualities || []).includes(state.settings.default_quality)) {
+      throw new Error(
+        `Android backend setting mismatch: ${state.settings.download_engine}`
+        + `/${state.settings.download_service}/${state.settings.default_quality}`);
+    }
+  } else {
+    state.settings = await api("/api/settings").catch(() => ({}));
+  }
   const _audio = $("audioPlayer");
   _audio.volume = storedVolume();
   syncVolumeBar();
@@ -7454,11 +8023,21 @@ async function boot() {
   replacePage(renderHomePage);
 }
 
-boot().catch(console.error);
+boot().catch(error => {
+  console.error(error);
+  const content = $("pageContent");
+  if (content) {
+    content.innerHTML = `<div class="mobile-empty-state"><strong>Backend unavailable</strong><br>${esc(error?.message || error || "Unknown startup error")}</div>`;
+  }
+});
 
 // Global keyboard shortcuts
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (document.body.classList.contains("mobile-now-playing")) {
+      setDetailsExpanded(false);
+      return;
+    }
     const openModals = document.querySelectorAll("dialog[open]");
     if (openModals.length > 0) {
       event.preventDefault();
@@ -7782,7 +8361,12 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
   // Section: available output devices.
   const items = [];
   // "This computer" is our universal "Default" which handles built-in speakers automatically.
-  items.push({ name: "This computer", deviceId: "", icon: "bi-laptop", sub: "Default output" });
+  items.push({
+    name: IS_ANDROID ? "This phone" : "This computer",
+    deviceId: "",
+    icon: IS_ANDROID ? "bi-phone" : "bi-laptop",
+    sub: "Default output",
+  });
 
   const filterKeywords = ["speaker", "internal speaker", "built-in", "microphone", "input", "driver", "background music", "teams", "zoom"];
 
@@ -8345,9 +8929,119 @@ function ensureContextMenuLibrary() {
   }
 }
 
+// On a phone a floating menu anchored to a tap point is the wrong shape, so
+// the same menu is presented as a bottom sheet instead — the pattern every
+// mobile music app uses, and the one that gives each row a real touch target.
+function openContextSheet(menu) {
+  menu.hidden = false;
+  menu.style.display = "block";
+  menu.style.left = "";
+  menu.style.top = "";
+  // Clear anything a previous drag left behind, so the open animation runs.
+  menu.style.transform = "";
+  menu.style.transition = "";
+  menu.style.animation = "";
+  menu.classList.add("as-sheet");
+  attachSheetDrag(menu);
+
+  let scrim = $("contextSheetScrim");
+  if (!scrim) {
+    scrim = document.createElement("div");
+    scrim.id = "contextSheetScrim";
+    scrim.className = "context-sheet-scrim";
+    scrim.addEventListener("click", () => {
+      document.querySelectorAll(".context-menu.as-sheet").forEach(el => { el.hidden = true; });
+    });
+    document.body.appendChild(scrim);
+  }
+  scrim.hidden = false;
+
+  // Every existing close path just sets `hidden`, so rather than editing all of
+  // them, watch the attribute and tear the sheet down when it flips.
+  if (!menu.dataset.sheetObserved) {
+    menu.dataset.sheetObserved = "1";
+    new MutationObserver(() => {
+      if (!menu.hidden) return;
+      menu.classList.remove("as-sheet");
+      const open = document.querySelectorAll(".context-menu.as-sheet:not([hidden])").length;
+      if (!open && $("contextSheetScrim")) $("contextSheetScrim").hidden = true;
+    }).observe(menu, { attributes: true, attributeFilter: ["hidden"] });
+  }
+}
+
+// Drag the sheet down to dismiss it.
+//
+// This uses touch events rather than pointer events on purpose. The sheet is an
+// overflow-y:auto scroller, so Chromium treats a vertical drag as a scroll
+// gesture and cancels the pointer stream part-way through — which is why a
+// pointer-based version looked right in a synthetic test and did nothing under
+// a real finger. Calling preventDefault() on touchmove claims the gesture, and
+// it is only claimed for downward drags that start at the top of the sheet, so
+// scrolling a long list still works normally.
+function attachSheetDrag(menu) {
+  if (menu.dataset.sheetDrag) return;
+  menu.dataset.sheetDrag = "1";
+  const DISMISS_PX = 100;
+  let startY = 0;
+  let offset = 0;
+  let dragging = false;
+  let moved = false;
+
+  menu.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1 || menu.scrollTop > 0) {
+      dragging = false;
+      return;
+    }
+    dragging = true;
+    moved = false;
+    offset = 0;
+    startY = event.touches[0].clientY;
+    // The open animation uses fill:both, which would otherwise outrank the
+    // inline transform the drag sets.
+    menu.style.animation = "none";
+    menu.style.transition = "none";
+  }, { passive: true });
+
+  menu.addEventListener("touchmove", (event) => {
+    if (!dragging) return;
+    const dy = event.touches[0].clientY - startY;
+    if (dy <= 0) return;
+    offset = dy;
+    if (dy > 6) moved = true;
+    event.preventDefault();
+    menu.style.transform = `translateY(${dy}px)`;
+  }, { passive: false });
+
+  const settle = () => {
+    if (!dragging) return;
+    dragging = false;
+    menu.style.transition = "transform 190ms ease";
+    if (offset > DISMISS_PX) {
+      menu.style.transform = "translateY(100%)";
+      setTimeout(() => { menu.hidden = true; }, 190);
+    } else {
+      menu.style.transform = "";
+    }
+  };
+  menu.addEventListener("touchend", settle, { passive: true });
+  menu.addEventListener("touchcancel", settle, { passive: true });
+
+  // A drag must not also fire the action row it started on.
+  menu.addEventListener("click", (event) => {
+    if (!moved) return;
+    moved = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+}
+
 function openContextMenu(event, menu) {
   if (!menu) return;
   event.preventDefault();
+  if (window.matchMedia("(max-width: 900px)").matches) {
+    openContextSheet(menu);
+    return;
+  }
   ensureContextMenuLibrary();
   menu.hidden = false;
   menu.style.display = "none";

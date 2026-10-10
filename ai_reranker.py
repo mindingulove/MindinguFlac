@@ -9,6 +9,8 @@ from typing import Any
 
 
 def is_enabled(ai_provider: str = "") -> bool:
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        return True
     provider = _selected_provider(ai_provider) if ai_provider else _provider()
     if provider == "openai":
         return bool(os.environ.get("MINDINGUFLAC_AI_RERANK_URL"))
@@ -206,7 +208,70 @@ def _codex_request(prompt: str) -> dict[str, Any]:
     return {}
 
 
+def _android_nano_text(prompt: str) -> str:
+    """Use Gemini Nano through the tiny Java bridge bundled in the APK."""
+    if os.environ.get("MINDINGUFLAC_ANDROID") != "1":
+        return ""
+    try:
+        from java import jclass  # type: ignore
+
+        advisor = jclass("com.mindinguflac.android.NanoAdvisor")
+        return str(advisor.generate(prompt) or "").strip()
+    except Exception:
+        return ""
+
+
+def _android_gemma_text(prompt: str) -> str:
+    """Use a user-installed Gemma task bundle entirely on the phone."""
+    if os.environ.get("MINDINGUFLAC_ANDROID") != "1":
+        return ""
+    try:
+        from java import jclass  # type: ignore
+
+        advisor = jclass("com.mindinguflac.android.LocalGemmaAdvisor")
+        return str(advisor.generate(prompt) or "").strip()
+    except Exception:
+        return ""
+
+
+def _deterministic_ranking(prompt: str) -> dict[str, Any]:
+    """Final offline fallback for Android candidate selection."""
+    try:
+        payload = json.loads(prompt)
+        candidates = payload.get("candidates") or []
+    except Exception:
+        candidates = []
+    ranked = sorted(
+        (item for item in candidates if isinstance(item, dict) and item.get("id") is not None),
+        key=lambda item: (
+            int(float(item.get("local_score") or 0)),
+            int(float(item.get("seeders") or 0)),
+            -int(item.get("id") or 0),
+        ),
+        reverse=True,
+    )
+    ids = [int(item["id"]) for item in ranked]
+    urls = [
+        str(item.get("url") or "").strip()
+        for item in ranked
+        if str(item.get("url") or "").strip()
+    ]
+    return {"ranked_ids": ids, "ranked_urls": urls, "suggested_url": ""}
+
+
+def _android_request(prompt: str, gemini_model: str) -> dict[str, Any]:
+    nano = _parse_json_object(_android_nano_text(prompt))
+    if nano:
+        return nano
+    gemma = _parse_json_object(_android_gemma_text(prompt))
+    if gemma:
+        return gemma
+    return _deterministic_ranking(prompt)
+
+
 def _request(prompt: str, duck_model: str = "1", ai_provider: str = "duckai", gemini_model: str = "gemini-1.5-flash") -> dict[str, Any]:
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        return _android_request(prompt, gemini_model)
     # Prefer the saved/app-selected provider. Environment override is only a fallback.
     provider = _selected_provider(ai_provider)
     

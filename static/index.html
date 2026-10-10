@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#090b10">
   <title>Mindinguflac</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  <link rel="stylesheet" href="assets/vendor/bootstrap-icons/bootstrap-icons.css">
   <link rel="stylesheet" href="assets/vendor/tippy/tippy.css">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -75,7 +75,7 @@
         </div>
         <form id="settingsForm" class="settings-panel">
           
-          <div class="settings-section">
+          <div class="settings-section" id="storageSection">
             <h2 class="settings-section-title">Storage</h2>
             <div class="settings-row">
               <div class="settings-info">
@@ -99,7 +99,7 @@
 
           <div class="settings-section">
             <h2 class="settings-section-title">Playback</h2>
-            <div class="settings-row">
+            <div class="settings-row" id="downloadEngineRow">
               <div class="settings-info">
                 <strong>Download engine</strong>
                 <span>Core module used to fetch audio.</span>
@@ -112,6 +112,15 @@
                 </select>
               </div>
             </div>
+            <div class="settings-row hidden" id="androidEngineNotesRow">
+              <div class="settings-info">
+                <strong>Engines unavailable on this phone</strong>
+                <span>Measured from the runtime packaged in this build, so an engine is only offered when it can actually download.</span>
+              </div>
+              <div class="settings-control">
+                <ul id="androidEngineNotes" class="android-engine-notes"></ul>
+              </div>
+            </div>
             <div class="settings-row" id="serviceRow">
               <div class="settings-info">
                 <strong>Service source</strong>
@@ -121,7 +130,7 @@
                 <select id="downloadService"></select>
               </div>
             </div>
-            <div class="settings-row">
+            <div class="settings-row" id="defaultQualityRow">
               <div class="settings-info">
                 <strong>Default quality</strong>
                 <span>Preferred bitrate for streaming and downloads.</span>
@@ -139,7 +148,7 @@
                 <input id="trackMaxRetries" type="number" min="0" max="5" value="1" style="width: 60px; text-align: center;">
               </div>
             </div>
-            <div class="settings-row">
+            <div class="settings-row desktop-ai-settings" id="aiProviderRow">
               <div class="settings-info">
                 <strong>AI Advisor Provider</strong>
                 <span>Backend for torrent/YouTube ranking and AI tour fallback.</span>
@@ -152,7 +161,18 @@
                 </select>
               </div>
             </div>
-            <div class="settings-row" id="duckModelRow">
+            <div class="settings-row hidden" id="androidAdvisorRow">
+              <div class="settings-info">
+                <strong>On-device ranking</strong>
+                <span>The same backend ranking flow used by desktop runs through Gemini Nano, then a local Gemma model, then deterministic Python.</span>
+              </div>
+              <div class="settings-control android-advisor-control">
+                <span id="nanoAdvisorStatus" class="android-advisor-status">Nano: checking…</span>
+                <span id="gemmaAdvisorStatus" class="android-advisor-status">Gemma: checking…</span>
+                <button id="installGemmaModel" class="button secondary" type="button">Install local Gemma model</button>
+              </div>
+            </div>
+            <div class="settings-row desktop-ai-settings" id="duckModelRow">
               <div class="settings-info">
                 <strong>Duck.ai model</strong>
                 <span>Model to use when Duck.ai is the provider.</span>
@@ -166,7 +186,7 @@
                 </select>
               </div>
             </div>
-            <div class="settings-row hidden" id="geminiModelRow">
+            <div class="settings-row hidden desktop-ai-settings" id="geminiModelRow">
               <div class="settings-info">
                 <strong>Gemini model</strong>
                 <span>Model to use when Gemini is the provider.</span>
@@ -179,7 +199,7 @@
                 </select>
               </div>
             </div>
-            <div class="settings-row hidden" id="codexAuthRow">
+            <div class="settings-row hidden desktop-ai-settings" id="codexAuthRow">
               <div class="settings-info">
                 <strong>Codex account</strong>
                 <span id="codexAuthStatus">Not signed in</span>
@@ -330,6 +350,13 @@
       <button class="lyrics-offset-btn" id="lyricsOffsetUp" type="button" title="Advance lyrics">+</button>
     </div>
   </section>
+
+  <nav class="mobile-bottom-nav" aria-label="Primary navigation">
+    <button class="mobile-nav-item active" type="button" data-mobile-nav="home"><i class="bi bi-house-fill"></i><span>Home</span></button>
+    <button class="mobile-nav-item" type="button" data-mobile-nav="search"><i class="bi bi-search"></i><span>Search</span></button>
+    <button class="mobile-nav-item" type="button" data-mobile-nav="library"><i class="bi bi-collection-fill"></i><span>Your Library</span></button>
+    <button class="mobile-nav-item" type="button" data-mobile-nav="stats"><i class="bi bi-bar-chart-fill"></i><span>Statistics</span></button>
+  </nav>
 
   <footer class="player">
     <div class="player-track">

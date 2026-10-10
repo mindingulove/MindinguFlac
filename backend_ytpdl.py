@@ -176,6 +176,8 @@ def import_youtube_browser_cookies(target_file: Path | None = None) -> Path | No
 def _add_browser_youtube_cookies(opts: dict, output_dir: Path, job_id: str) -> bool:
     """Import a signed-in browser session for YouTube downloads."""
     del output_dir, job_id  # Kept in the call signature for compatibility.
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        return False
     cookie_path = import_youtube_browser_cookies()
     if not cookie_path:
         return False
@@ -1651,9 +1653,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
             with manager._lock:
                 job["last_status"] = "Finalizing YouTube download..."
 
-    postprocessors = [{"key": "FFmpegMetadata"}]
-    if codec:
-        postprocessors.insert(0, {"key": "FFmpegExtractAudio", "preferredcodec": codec, "preferredquality": "0"})
+    ffmpeg_path = _ffmpeg_location()
+    is_android = os.environ.get("MINDINGUFLAC_ANDROID") == "1"
+    postprocessors = []
+    if ffmpeg_path:
+        postprocessors.append({"key": "FFmpegMetadata"})
+        if codec:
+            postprocessors.insert(0, {"key": "FFmpegExtractAudio", "preferredcodec": codec, "preferredquality": "0"})
 
     ydl_opts = {
         "format": format_selector,
@@ -1672,14 +1678,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
         "http_headers": {"Accept-Encoding": "identity"},
         "progress_hooks": [progress_cb],
 
-        "writethumbnail": True,
-        "addmetadata": True,
+        # The Android APK intentionally doesn't ship FFmpeg. Keep its download
+        # path codec-native and avoid metadata/thumbnail post-processing which
+        # would otherwise make a successful audio fetch fail at finalization.
+        "writethumbnail": not is_android,
+        "addmetadata": bool(ffmpeg_path),
         "postprocessors": postprocessors,
     }
     if video_mode:
         ydl_opts["merge_output_format"] = "mp4"
 
-    ffmpeg_path = _ffmpeg_location()
     if ffmpeg_path:
         ydl_opts["ffmpeg_location"] = ffmpeg_path
 
@@ -1691,7 +1699,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     if not _has_youtube_auth_opts(ydl_opts):
         _add_youtube_cookie_file(ydl_opts)
 
-    if not _has_youtube_auth_opts(ydl_opts):
+    if not _has_youtube_auth_opts(ydl_opts) and not is_android:
         _mark_youtube_login_required(job, manager)
         raise RuntimeError(
             "YouTube login required. Click the Mindinguflac notification, sign in in your browser, then return to retry."
@@ -1706,6 +1714,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
     label = "video" if video_mode else (codec.upper() if codec else "best native audio")
     if browser_cookie_source:
         manager._append_cache_event(job, "trying", "Using signed-in YouTube cookies discovered from the system browsers")
+    elif is_android:
+        manager._append_cache_event(job, "trying", "Using Android guest YouTube access")
     manager._append_cache_event(job, "trying", f"Downloading via ytp-dl ({label})...")
 
     try:

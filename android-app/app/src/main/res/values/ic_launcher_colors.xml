@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Sampled from the backdrop of the Mindinguflac mark, so the layer behind
+         the artwork matches it and the launcher mask has no seam to show. -->
+    <color name="ic_launcher_background">#7F9719</color>
+</resources>

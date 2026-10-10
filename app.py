@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import signal
+import sys
 import tempfile
 import threading
 import time
@@ -42,7 +43,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from catalog import discover_catalog
-from config import AppConfig, app_data_dir, load_config, save_config
+from config import AppConfig, app_data_dir, default_cache_dir, default_music_dir, load_config, save_config
 import db
 from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, release_year, search_music, search_relevance, track_credits
 from playlist_recommender import generate_one_replacement_recommendation, generate_playlist_recommendations, get_playlist_track_keys, record_recommendation_feedback
@@ -197,7 +198,8 @@ try {
 
 
 ROOT = Path(__file__).resolve().parent
-STATIC = ROOT / "static"
+STATIC = Path(os.environ.get("MINDINGUFLAC_STATIC_DIR") or (ROOT / "static"))
+API_TOKEN = str(os.environ.get("MINDINGUFLAC_API_TOKEN") or "").strip()
 
 print(f"[Debug] ROOT: {ROOT}")
 print(f"[Debug] STATIC: {STATIC} (exists: {STATIC.exists()})")
@@ -241,7 +243,51 @@ def _writable_cache_fallback() -> Path:
     return candidates[-1]
 
 
+def runtime_capability_report(refresh: bool = False) -> dict:
+    """Which download engines this build can actually run, and why not.
+
+    On Android the answer is measured: ``android_runtime.capabilities`` imports
+    each packaged runtime and probes the jlibtorrent JNI library, so the phone
+    UI can build its engine picker from capability instead of a hard-coded
+    list. On desktop the engine set is the historical one and the frontend
+    keeps using its static options, but the endpoint still answers so one
+    frontend code path works on both.
+    """
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        from android_runtime import capabilities
+
+        return capabilities.runtime_report(refresh=refresh)
+    return {
+        "android": False,
+        "dependencies": {"runtimes": {}, "missing": [], "ok": True},
+        "engines": {},
+        "available_engines": ["spotiflac", "ytp-dl", "torrent", "monochrome"],
+        "storage_root": str(DATA),
+    }
+
+
+def android_engine_choice(engine: str, service: str, quality: str) -> tuple[str, str, str]:
+    """Clamp an engine/service/quality to something the phone build can run."""
+    from android_runtime import capabilities
+
+    return capabilities.clamp_choice(engine, service, quality)
+
+
 def _sanitize_runtime_config(config: AppConfig) -> AppConfig:
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        # Phone storage and providers are app-managed. Never let an old desktop
+        # config or a partial settings POST disconnect the embedded backend, or
+        # select an engine whose runtime is not in the APK.
+        config.cache_dir = default_cache_dir()
+        config.music_dir = default_music_dir()
+        (
+            config.download_engine,
+            config.download_service,
+            config.default_quality,
+        ) = android_engine_choice(
+            config.download_engine, config.download_service, config.default_quality
+        )
+        config.ai_provider = "android"
     DATA.mkdir(parents=True, exist_ok=True)
     config.music_dir.mkdir(parents=True, exist_ok=True)
     LYRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1894,7 +1940,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, DELETE, PUT")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Duck-UA")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Duck-UA, X-Mindinguflac-Token")
         self.send_header("Access-Control-Allow-Credentials", "true")
         self.send_header("Access-Control-Max-Age", "86400")
 
@@ -1918,13 +1964,57 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return False
 
+    def authorized_api_request(self, path: str) -> bool:
+        """Protect the optional Android loopback API from other local apps.
+
+        Desktop builds don't set ``MINDINGUFLAC_API_TOKEN`` and retain their
+        existing behavior. The Android shell sets a random per-process token in
+        both a cookie and request header before making API calls.
+        """
+        if not path.startswith("/api/") or not API_TOKEN:
+            return True
+        header_token = str(self.headers.get("X-Mindinguflac-Token") or "").strip()
+        if header_token == API_TOKEN:
+            return True
+        cookie = str(self.headers.get("Cookie") or "")
+        for part in cookie.split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator and name == "mindinguflac_token" and value == API_TOKEN:
+                return True
+        return False
+
+    def require_api_authorization(self, path: str) -> bool:
+        if self.authorized_api_request(path):
+            return True
+        self.send_error_json("Unauthorized local API request", HTTPStatus.UNAUTHORIZED)
+        return False
+
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
 
+        if not self.require_api_authorization(path):
+            return
+
         try:
+            if path == "/api/health":
+                self.send_json({
+                    "ok": True,
+                    "platform": sys.platform,
+                    "android": os.environ.get("MINDINGUFLAC_ANDROID") == "1",
+                    "data_dir": str(DATA),
+                })
+                return
+            if path == "/api/runtime":
+                # Measured runtime capability. The phone UI builds its engine
+                # picker from this so it can never offer an engine whose
+                # runtime is absent from the APK.
+                self.send_json(runtime_capability_report(
+                    refresh=query.get("refresh", ["0"])[0] == "1"
+                ))
+                return
             if path == "/api/discover":
                 refresh_global = query.get("refresh", ["1"])[0] != "0"
                 catalog = discover_catalog(app_config, refresh_global=refresh_global)
@@ -2373,6 +2463,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         global app_config, service_downloader
         path = urlparse(self.path).path
+        if not self.require_api_authorization(path):
+            return
         body = read_body(self)
         try:
             if path == "/api/dock/recent":
@@ -2881,6 +2973,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if not self.require_api_authorization(path):
+            return
         try:
             if path == "/api/playlists":
                 body = read_body(self)
@@ -2998,6 +3092,10 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                         self.send_cors_headers()
                         self.send_header("Content-Range", f"bytes */{size}")
+                        # Without an explicit length a keep-alive client waits
+                        # for a body that never comes, so a bad range read as a
+                        # hung socket instead of an error the player can report.
+                        self.send_header("Content-Length", "0")
                         self.end_headers()
                         return
                     end = min(end, size - 1)

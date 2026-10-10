@@ -12,17 +12,31 @@ import concurrent.futures
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import urllib.request
-import torrfetch
 try:
-    import libtorrent as lt
+    import torrfetch
+except ImportError:
+    torrfetch = None
+
+_IS_ANDROID = os.environ.get("MINDINGUFLAC_ANDROID") == "1"
+try:
+    if _IS_ANDROID:
+        lt = None
+    else:
+        import libtorrent as lt
 except (ImportError, OSError) as _lt_exc:
     # On Windows the win_amd64 libtorrent wheel needs the x64 VC++ runtime,
     # which is absent on a fresh Windows-on-ARM box. Try to install it, then
     # retry the import; if that's not possible this raises an actionable,
     # link-bearing error that the cache-job UI surfaces to the user.
-    from vcredist import ensure_vc_redist_for_libtorrent
-    ensure_vc_redist_for_libtorrent(_lt_exc)
-    import libtorrent as lt
+    if _IS_ANDROID:
+        lt = None
+    else:
+        from vcredist import ensure_vc_redist_for_libtorrent
+        ensure_vc_redist_for_libtorrent(_lt_exc)
+        import libtorrent as lt
+# RapidFuzz's pure-Python source distribution is bundled in the APK, so the
+# deterministic fuzzy matching below runs on Android too; only the native
+# libtorrent wheel is desktop-only.
 import rapidfuzz
 
 logger = logging.getLogger(__name__)
@@ -292,7 +306,7 @@ def _create_optimized_session():
         s.add_dht_router(r_host, r_port)
     return s
 
-_GLOBAL_SES = _create_optimized_session()
+_GLOBAL_SES = None if _IS_ANDROID else _create_optimized_session()
 
 def _torrent_key(magnet: str) -> str:
     try:
@@ -396,6 +410,14 @@ def _unregister_job_from_torrent(magnet: str, job_id: str) -> bool:
 def _unregister_all_for_job(job_id: str, delete_files: bool = True) -> None:
     """Drop all references this job holds to any active torrent sessions,
     and optionally delete their files if this was the last job referencing them."""
+    if _IS_ANDROID:
+        try:
+            from android_runtime.torrent_backend import cancel
+            cancel(job_id)
+        except Exception:
+            pass
+        return
+
     with _SESSIONS_LOCK:
         to_unregister = []
         for key, entry in list(_ACTIVE_SESSIONS.items()):
@@ -447,6 +469,11 @@ def _dedupe_results(results: list[dict]) -> list[dict]:
     return deduped
 
 def run(output_dir: Path, job: dict, manager) -> None:
+    if _IS_ANDROID:
+        from android_runtime.torrent_backend import run as run_android_torrent
+        run_android_torrent(output_dir, job, manager)
+        return
+
     # 0. Setup
     job_id = job["id"]
     is_prefetch = bool(job.get("prefetch"))

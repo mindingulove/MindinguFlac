@@ -1,0 +1,408 @@
+"""SpotiFLAC/client.py."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+from typing_extensions import Self
+
+from .core.http import NetworkManager
+from .core.spotify_metadata import SpotifyMetadataClient, parse_spotify_url
+from .downloader import DownloadOptions, SpotiflacDownloader
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    from .core.models import TrackMetadata
+
+logger = logging.getLogger("SpotiFLAC")
+
+
+class _CleanConsoleFormatter(logging.Formatter):
+    """Same as logging.Formatter, except it drops the full exception
+    traceback from console output for anything logged via
+    logger.exception()/logger.error(..., exc_info=True).
+
+    Providers and extensions are expected to fail sometimes (missing API
+    config, a track not found, a timed-out request, ...) — that's a normal,
+    surfaced-as-DownloadResult.fail() condition, not a crash. But several
+    call sites (ours and, we've seen, third-party extensions) log those
+    with exc_info=True anyway, which used to dump a full multi-frame
+    traceback into the middle of the progress output for every single
+    provider fallback. This keeps the console to one clean line per event
+    while still showing the real traceback when actually debugging
+    (log_level == DEBUG), since that's when you'd want it.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.exc_info and self.level_allows_traceback():
+            return super().format(record)
+        record_copy = logging.makeLogRecord(record.__dict__)
+        record_copy.exc_info = None
+        record_copy.exc_text = None
+        return super().format(record_copy)
+
+    def level_allows_traceback(self) -> bool:
+        return logger.getEffectiveLevel() <= logging.DEBUG
+
+
+def _setup_logger(level: int) -> logging.Logger:
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            _CleanConsoleFormatter("[%(levelname)s] %(name)s: %(message)s")
+        )
+        logger.addHandler(handler)
+        logger.propagate = False
+    logger.setLevel(level)
+    return logger
+
+
+class AsyncSpotiFLAC:
+    """Native asynchronous client for SpotiFLAC.
+
+    Recommended usage (guarantees clean shutdown of HTTP resources):
+
+        async with AsyncSpotiFLAC(output_dir="./downloads") as client:
+            await client.download_track("https://open.spotify.com/track/...")
+            playlist_meta, tracks = await client.get_playlist("https://...")
+
+    If used without a context manager, remember to call `await client.aclose()`.
+
+    The `registries` parameter lets you add custom extension registry URLs
+    without having to set `SPOTIFLAC_REGISTRIES` at the environment or `.env`
+    file level: the URLs passed here are persisted via
+    `extensions.registry_config.add_registry()` on context manager entry
+    (`__aenter__`), before `ExtensionManager` is started, and from that point
+    on behave exactly like registries added from the GUI (they remain valid
+    on subsequent runs until removed).
+    """
+
+    def __init__(
+        self,
+        output_dir: str,
+        services: list[str] | None = None,
+        filename_format: str | Callable[..., str] = "{title} - {artist}",
+        use_track_numbers: bool = False,
+        use_album_track_numbers: bool = False,
+        use_artist_subfolders: bool = False,
+        use_album_subfolders: bool = False,
+        create_playlist_subfolders: bool = False,
+        allow_fallback: bool = True,
+        quality: str = "LOSSLESS",
+        first_artist_only: bool = False,
+        include_featuring: bool = True,
+        artist_separator: str | None = None,
+        log_level: int = logging.WARNING,
+        output_path: str | None = None,
+        embed_lyrics: bool = True,
+        lyrics_providers: list[str] | None = None,
+        apple_lyrics_word_by_word: bool = True,
+        save_lrc: bool = False,
+        lrc_library_dir: str | None = None,
+        enrich_metadata: bool = True,
+        enrich_providers: list[str] | None = None,
+        qobuz_token: str | None = None,
+        qobuz_local_api_url: str | None = None,
+        track_max_retries: int = 0,
+        post_download_action: str = "none",
+        post_download_command: str = "",
+        resume: bool = True,
+        post_download_hooks: list[str] | None = None,
+        transcode_to: str | None = None,
+        transcode_bitrate: str = "320k",
+        transcode_keep_original: bool = False,
+        tidal_custom_api: str | None = None,
+        timeout_s: int | None = None,
+        max_concurrent_downloads: int = 2,
+        sync_extensions: bool = True,
+        registries: list[str] | None = None,
+        verify_hires: bool = False,
+    ) -> None:
+        self._logger = _setup_logger(log_level)
+        self._sync_extensions_on_enter = sync_extensions
+        self._registries = list(registries) if registries else []
+        self._entered = False
+
+        self._opts = DownloadOptions(
+            output_dir=output_dir,
+            services=services or ["ext:tidal-web"],
+            filename_format=filename_format,
+            use_track_numbers=use_track_numbers,
+            use_album_track_numbers=use_album_track_numbers,
+            use_artist_subfolders=use_artist_subfolders,
+            use_album_subfolders=use_album_subfolders,
+            create_playlist_subfolders=create_playlist_subfolders,
+            allow_fallback=allow_fallback,
+            quality=quality,
+            first_artist_only=first_artist_only,
+            include_featuring=include_featuring,
+            artist_separator=artist_separator,
+            output_path=output_path,
+            embed_lyrics=embed_lyrics,
+            lyrics_providers=lyrics_providers
+            or ["spotify", "apple", "musixmatch", "lrclib", "amazon"],
+            apple_lyrics_word_by_word=apple_lyrics_word_by_word,
+            save_lrc=save_lrc,
+            lrc_library_dir=lrc_library_dir,
+            enrich_metadata=enrich_metadata,
+            enrich_providers=enrich_providers or ["deezer", "apple", "qobuz", "tidal"],
+            qobuz_token=qobuz_token,
+            qobuz_local_api_url=qobuz_local_api_url,
+            track_max_retries=track_max_retries,
+            post_download_action=post_download_action,
+            post_download_command=post_download_command,
+            resume=resume,
+            post_download_hooks=post_download_hooks or [],
+            transcode_to=transcode_to,
+            transcode_bitrate=transcode_bitrate,
+            transcode_keep_original=transcode_keep_original,
+            tidal_custom_api=tidal_custom_api,
+            timeout_s=timeout_s,
+            max_concurrent_downloads=max_concurrent_downloads,
+            verify_hires=verify_hires,
+        )
+
+        self._downloader = SpotiflacDownloader(self._opts)
+        self._metadata_client: SpotifyMetadataClient | None = None
+
+    # ------------------------------------------------------------------
+    # Async context manager
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> Self:
+        await NetworkManager.get_async_client_safe()
+
+        if self._registries:
+            await asyncio.to_thread(self._register_extra_registries)
+
+        if self._sync_extensions_on_enter:
+            try:
+                from .extensions.manager import ExtensionManager
+
+                await asyncio.to_thread(ExtensionManager, auto_install_downloads=True)
+            except Exception as exc:
+                self._logger.warning("[client] Extension sync skipped: %s", exc)
+
+        self._entered = True
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await NetworkManager.aclose_loop_client()
+        self._entered = False
+
+    # ------------------------------------------------------------------
+    # API asincrona pubblica
+    # ------------------------------------------------------------------
+
+    async def download_track(
+        self,
+        url: str,
+        *,
+        loop_minutes: int | None = None,
+    ) -> list[TrackMetadata]:
+        self._ensure_entered()
+
+        failed_tracks: list[TrackMetadata] | None = None
+        while True:
+            failed_tracks = await self._downloader._run_once_async(
+                url,
+                target_tracks=failed_tracks,
+            )
+            if not loop_minutes or loop_minutes <= 0 or not failed_tracks:
+                break
+            await asyncio.sleep(loop_minutes * 60)
+
+        return failed_tracks or []
+
+    async def download_batch(
+        self,
+        urls: list[str],
+        *,
+        loop_minutes: int | None = None,
+    ) -> None:
+        self._ensure_entered()
+        await self._downloader.run_async(urls, loop_minutes=loop_minutes)
+
+    async def get_playlist(self, url: str) -> tuple[dict, list[TrackMetadata]]:
+        self._ensure_entered()
+        collection_name, tracks, info = await self._downloader._resolve_metadata_async(
+            url,
+        )
+        return {"name": collection_name, **info}, tracks
+
+    async def get_track_metadata(self, url_or_id: str) -> TrackMetadata:
+        self._ensure_entered()
+        client = self._get_metadata_client()
+        if url_or_id.startswith(("http", "spotify:")):
+            info = parse_spotify_url(url_or_id)
+            return await client.get_track_async(info["id"])
+        return await client.get_track_async(url_or_id)
+
+    async def search(self, query: str, limit: int = 20) -> dict[str, list]:
+        self._ensure_entered()
+        client = self._get_metadata_client()
+        return await client.search_async(query, limit=limit)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _register_extra_registries(self) -> None:
+        """Persists any extra registry URLs passed to the constructor via
+        `extensions.registry_config`, so they are picked up by
+        `ExtensionManager` (through `registry_config.effective_urls()`) the
+        same way GUI-added or `.env`/environment-sourced ones are.
+        """
+        try:
+            from .extensions import registry_config
+        except Exception as exc:
+            self._logger.warning(
+                "[client] Could not load registry_config; skipping registries=%s: %s",
+                self._registries,
+                exc,
+            )
+            return
+
+        for url in self._registries:
+            try:
+                registry_config.add_registry(url)
+            except Exception as exc:
+                self._logger.warning(
+                    "[client] Failed to register registry '%s': %s", url, exc
+                )
+
+    def _get_metadata_client(self) -> SpotifyMetadataClient:
+        if self._metadata_client is None:
+            self._metadata_client = SpotifyMetadataClient()
+        return self._metadata_client
+
+    def _ensure_entered(self) -> None:
+        if not self._entered:
+            self._logger.debug(
+                "[client] AsyncSpotiFLAC used outside of 'async with' — "
+                "resources will not be closed automatically.",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible synchronous wrapper
+# ---------------------------------------------------------------------------
+
+
+def SpotiFLAC(
+    url: str | list[str],
+    output_dir: str,
+    services: list[str] | None = None,
+    filename_format: str | Callable[..., str] = "{title} - {artist}",
+    use_track_numbers: bool = False,
+    use_album_track_numbers: bool = False,
+    use_artist_subfolders: bool = False,
+    use_album_subfolders: bool = False,
+    create_playlist_subfolders: bool = False,
+    loop: int | None = None,
+    allow_fallback: bool = True,
+    quality: str = "LOSSLESS",
+    first_artist_only: bool = False,
+    include_featuring: bool = True,
+    artist_separator: str | None = None,
+    log_level: int = logging.WARNING,
+    output_path: str | None = None,
+    embed_lyrics: bool = True,
+    lyrics_providers: list[str] | None = None,
+    apple_lyrics_word_by_word: bool = True,
+    save_lrc: bool = False,
+    lrc_library_dir: str | None = None,
+    enrich_metadata: bool = True,
+    enrich_providers: list[str] | None = None,
+    qobuz_token: str | None = None,
+    qobuz_local_api_url: str | None = None,
+    track_max_retries: int = 0,
+    post_download_action: str = "none",
+    post_download_command: str = "",
+    resume: bool = True,
+    post_download_hooks: list[str] | None = None,
+    transcode_to: str | None = None,
+    transcode_bitrate: str = "320k",
+    transcode_keep_original: bool = False,
+    tidal_custom_api: str | None = None,
+    timeout_s: int | None = None,
+    max_concurrent_downloads: int = 2,
+    sync_extensions: bool = True,
+    registries: list[str] | None = None,
+    verify_hires: bool = False,
+) -> None:
+    """Backwards-compatible SYNCHRONOUS wrapper.
+
+    Signature and observable behavior identical to the old `SpotiFLAC()`:
+    callers from synchronous code need to change nothing. Internally it
+    instantiates `AsyncSpotiFLAC` and runs it with `asyncio.run()`, guaranteeing
+    a single clean event loop for the execution.
+    """
+
+    async def _run() -> None:
+        async with AsyncSpotiFLAC(
+            output_dir=output_dir,
+            services=services,
+            filename_format=filename_format,
+            use_track_numbers=use_track_numbers,
+            use_album_track_numbers=use_album_track_numbers,
+            use_artist_subfolders=use_artist_subfolders,
+            use_album_subfolders=use_album_subfolders,
+            create_playlist_subfolders=create_playlist_subfolders,
+            allow_fallback=allow_fallback,
+            quality=quality,
+            first_artist_only=first_artist_only,
+            include_featuring=include_featuring,
+            artist_separator=artist_separator,
+            log_level=log_level,
+            output_path=output_path,
+            embed_lyrics=embed_lyrics,
+            lyrics_providers=lyrics_providers,
+            apple_lyrics_word_by_word=apple_lyrics_word_by_word,
+            save_lrc=save_lrc,
+            lrc_library_dir=lrc_library_dir,
+            enrich_metadata=enrich_metadata,
+            enrich_providers=enrich_providers,
+            qobuz_token=qobuz_token,
+            qobuz_local_api_url=qobuz_local_api_url,
+            track_max_retries=track_max_retries,
+            post_download_action=post_download_action,
+            post_download_command=post_download_command,
+            resume=resume,
+            post_download_hooks=post_download_hooks or [],
+            transcode_to=transcode_to,
+            transcode_bitrate=transcode_bitrate,
+            transcode_keep_original=transcode_keep_original,
+            tidal_custom_api=tidal_custom_api,
+            timeout_s=timeout_s,
+            max_concurrent_downloads=max_concurrent_downloads,
+            sync_extensions=sync_extensions,
+            registries=registries,
+            verify_hires=verify_hires,
+        ) as client:
+            await client.download_batch(
+                [url] if isinstance(url, str) else list(url),
+                loop_minutes=loop,
+            )
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logger.exception("Critical error during execution: %s", e)
+
+
+__all__ = ["AsyncSpotiFLAC", "SpotiFLAC"]

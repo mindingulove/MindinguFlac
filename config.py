@@ -24,7 +24,26 @@ def _windows_dir(env_name: str, fallback: Path) -> Path:
     return Path(value) if value else fallback
 
 
+def _environment_path(name: str) -> Path | None:
+    """Return an absolute path supplied by a platform host, when present.
+
+    Android embeds the Python runtime inside the APK, so its source directory is
+    read-only.  The host activity supplies app-private writable directories via
+    these environment variables before importing the backend.
+    """
+    value = str(os.environ.get(name) or "").strip()
+    if not value:
+        return None
+    try:
+        return Path(value).expanduser().absolute()
+    except Exception:
+        return Path(value)
+
+
 def app_data_dir() -> Path:
+    override = _environment_path("MINDINGUFLAC_DATA_DIR")
+    if override is not None:
+        return override
     if not is_desktop_mode():
         return ROOT / "data"
     try:
@@ -40,6 +59,9 @@ def app_data_dir() -> Path:
 
 
 def default_cache_dir() -> Path:
+    override = _environment_path("MINDINGUFLAC_CACHE_DIR")
+    if override is not None:
+        return override
     if not is_desktop_mode():
         return ROOT / "data" / "cache"
     try:
@@ -55,6 +77,9 @@ def default_cache_dir() -> Path:
 
 
 def default_music_dir() -> Path:
+    override = _environment_path("MINDINGUFLAC_MUSIC_DIR")
+    if override is not None:
+        return override
     if not is_desktop_mode():
         return ROOT / "data" / "music"
     try:

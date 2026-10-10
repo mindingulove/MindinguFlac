@@ -1,0 +1,14 @@
+mutagen
+requests
+PySocks
+yt-dlp>=2026.7.4
+httpx[http2,socks]==0.28.1
+aiofiles==25.1.0
+tenacity==9.2.1
+tqdm==4.70.1
+packaging==26.2
+python-dotenv==1.2.4
+typing-extensions==4.16.0
+cryptography==42.0.8
+Pillow==11.0.0
+pycryptodome==3.21.0

@@ -33,6 +33,25 @@ class LocalOriginSecurityTests(unittest.TestCase):
         )
         self.assertFalse(self._handler("http://localhost:invalid").trusted_local_origin())
 
+    def test_android_api_token_accepts_header_or_cookie(self):
+        handler = self._handler()
+        handler.path = "/api/health"
+        with patch.object(app, "API_TOKEN", "secret"):
+            self.assertFalse(handler.authorized_api_request("/api/health"))
+            handler.path = "/api/health?token=secret"
+            self.assertFalse(handler.authorized_api_request("/api/health"))
+            handler.headers["X-Mindinguflac-Token"] = "secret"
+            self.assertTrue(handler.authorized_api_request("/api/health"))
+            del handler.headers["X-Mindinguflac-Token"]
+            handler.headers["Cookie"] = "theme=dark; mindinguflac_token=secret"
+            self.assertTrue(handler.authorized_api_request("/api/health"))
+
+    def test_desktop_api_remains_tokenless(self):
+        handler = self._handler()
+        handler.path = "/api/health"
+        with patch.object(app, "API_TOKEN", ""):
+            self.assertTrue(handler.authorized_api_request("/api/health"))
+
 
 class DockPlaybackStateTests(unittest.TestCase):
     def test_playback_state_is_forwarded_to_registered_desktop_callback(self):

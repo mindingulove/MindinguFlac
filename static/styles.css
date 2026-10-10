@@ -420,6 +420,58 @@ button, input, select { font: inherit; }
   scrollbar-gutter: stable;
 }
 
+/* Scroll position indicator.
+   Android WebView draws no scrollbar for inner scrollers (only the root
+   document gets one), so long lists — playlists most obviously — gave no hint
+   of how far through you were. A native ::-webkit-scrollbar wide enough to
+   grab with a thumb would steal ~28px of content width on a 411px screen, so
+   the native bar stays hidden and bindCustomScrollbars() in app.js overlays a
+   real one instead: slim to look at, wide to touch, and costing no layout. */
+.scroll-area,
+.queue-content-area,
+.playlist-picker-body,
+.lyrics-content {
+  scrollbar-width: none;
+}
+
+.scroll-area::-webkit-scrollbar,
+.queue-content-area::-webkit-scrollbar,
+.playlist-picker-body::-webkit-scrollbar,
+.lyrics-content::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.vscrollbar {
+  position: fixed;
+  width: 30px;            /* touch target */
+  z-index: 950;
+  opacity: 0;
+  pointer-events: none;
+  touch-action: none;
+  transition: opacity 180ms ease;
+}
+
+.vscrollbar.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.vscrollbar-thumb {
+  position: absolute;
+  right: 7px;
+  width: 6px;             /* what you actually see */
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.42);
+  transition: width 120ms ease, background 120ms ease;
+}
+
+.vscrollbar.is-dragging .vscrollbar-thumb {
+  width: 10px;
+  right: 5px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
 .sticky-head {
   position: sticky;
   top: 0;
@@ -2414,6 +2466,18 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
 }
 
 .track-row:hover { background: rgba(255, 255, 255, 0.08); }
+
+.track-actions {
+  display: none;            /* desktop keeps right-click; see the mobile block */
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  padding: 6px 2px;
+  cursor: pointer;
+}
+
+.track-actions:hover { color: var(--text); }
 
 .track-list-header {
   position: sticky;
@@ -4417,4 +4481,769 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
 .app-toast.app-toast-hide {
   opacity: 0;
   transform: translateX(-50%) translateY(8px);
+}
+
+.mobile-bottom-nav { display: none; }
+
+.is-android .desktop-ai-settings { display: none !important; }
+
+.android-advisor-control {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.android-advisor-status {
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.045);
+  color: var(--muted);
+  padding: 7px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.android-engine-notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 420px;
+  text-align: right;
+}
+
+.android-engine-notes li {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.android-engine-notes li strong {
+  color: var(--text);
+  display: block;
+  font-size: 12px;
+  margin-bottom: 1px;
+}
+
+@media (max-width: 900px) {
+  .android-engine-notes {
+    max-width: none;
+    text-align: left;
+  }
+}
+
+@media (max-width: 900px) {
+  :root {
+    --mobile-nav-height: 70px;
+    --mobile-player-height: 66px;
+    /* 64px of chrome *below* the status bar. The bar used to be a flat 64px
+       while also padding its content down by the status-bar inset, so the
+       search field hung off the bottom of its own background. */
+    --mobile-topbar-height: calc(64px + env(safe-area-inset-top));
+    /* Height of the expanded now-playing transport. The panel's bottom padding
+       is derived from this: when the two were written out separately the
+       padding kept the old 178px figure after the tools row grew the bar to
+       226px, so the end of the queue sat underneath the controls with no way
+       to scroll to it. */
+    --mobile-nowplaying-player: calc(226px + env(safe-area-inset-bottom));
+  }
+
+  html, body { height: 100%; }
+  body {
+    display: block;
+    height: 100dvh;
+    min-height: 100dvh;
+    background: #0b0b0c;
+    overflow: hidden;
+  }
+
+  .sidebar { display: none; }
+  .shell {
+    display: flex;
+    width: 100%;
+    height: 100dvh;
+    padding: var(--mobile-topbar-height) 0 calc(var(--mobile-nav-height) + var(--mobile-player-height) + env(safe-area-inset-bottom));
+    background: #0b0b0c;
+  }
+  .view, #pageContent { min-height: 0; }
+  .scroll-area {
+    padding: 14px 16px 32px;
+    scrollbar-gutter: auto;
+    /* Nothing on a phone page should scroll the page sideways. Wide content
+       (carousels, tables) carries its own scroller. */
+    overflow-x: hidden;
+  }
+
+  /* The desktop entity hero is a row: a fixed 232px cover, a 32px gap, then the
+     text column, bled to the window edge with negative margins sized for the
+     desktop scroll-area padding (clamp(28px, 4vw, 54px)). On a phone the
+     scroll-area padding is 16px, so those margins made the hero 435px wide
+     inside a 411px viewport and the whole album page scrolled sideways, cutting
+     off the album title and every track name. Stack it and match the margins to
+     the mobile padding instead. */
+  .entity-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+    min-height: 0;
+    padding: 18px 16px 20px;
+    margin: -14px -16px 0;
+  }
+  .album-gallery-wrap {
+    width: min(56vw, 232px);
+    max-width: 100%;
+    /* Spotify centres the cover and left-aligns the text beneath it. */
+    margin-inline: auto;
+  }
+  .entity-hero .entity-art {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1 / 1;
+  }
+  /* The text column is the hero's last child and has no class of its own. */
+  .entity-hero > :last-child { width: 100%; min-width: 0; }
+  .entity-hero h1 {
+    font-size: clamp(22px, 6.4vw, 30px);
+    line-height: 1.16;
+    margin: 2px 0 0;
+    overflow-wrap: anywhere;
+  }
+  .hero-meta-row {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    margin-top: 10px;
+    font-size: 13px;
+  }
+  .hero-artist-link { max-width: 100%; }
+  .gallery-arrow { width: 34px; height: 34px; }
+
+  .topbar {
+    position: fixed;
+    inset: 0 0 auto;
+    z-index: 500;
+    height: var(--mobile-topbar-height);
+    min-height: var(--mobile-topbar-height);
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: calc(8px + env(safe-area-inset-top)) 14px 8px;
+    background: rgba(18,18,18,0.98);
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .history-controls { gap: 0; }
+  #forwardButton { display: none; }
+  .history-btn { font-size: 27px; }
+  .search-box {
+    width: 100%;
+    min-width: 0;
+    height: 42px;
+    padding: 0 14px;
+    background: #242424;
+  }
+  .search-box input { min-width: 0; font-size: 15px; }
+  .settings-shortcut { font-size: 21px; padding: 6px; }
+
+  .library-hero,
+  .compact-hero {
+    min-height: 150px;
+    margin: 0;
+    padding: 34px 18px 20px;
+    background: linear-gradient(155deg, rgba(32,212,102,0.20), #0b0b0c 72%);
+  }
+  /* .eyebrow carries a desktop margin-left of 5.5em, which on the album page
+     pushed "ALBUM" into the middle while the title below it sat flush left. */
+  .library-hero .eyebrow,
+  .compact-hero .eyebrow,
+  .entity-hero .eyebrow { margin-left: 0; }
+  .library-hero h1,
+  .compact-hero h1 { margin-left: 0; font-size: 38px; letter-spacing: -1.4px; }
+  .section-head,
+  .sticky-head {
+    position: static;
+    transform: none;
+    margin: 26px 0 14px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+
+  /* Home section headers pin while their own section is on screen and are
+     pushed out by the next one. The wrapper is what makes that work: sticky
+     resolves against the nearest scrolling ancestor, so as flat siblings every
+     header would pin at the same top:0 and simply stack on top of each other
+     instead of handing over. */
+  .home-section { position: relative; }
+  .home-section > .section-head {
+    position: sticky;
+    /* .scroll-area carries 14px of top padding and a sticky `top` is measured
+       from the content edge, so top:0 pinned the title 14px below the topbar
+       and let card artwork scroll through the gap. Pin into the padding band
+       instead and give the same 14px back as padding, which leaves the text in
+       exactly the same place while the background covers the whole strip. */
+    top: -14px;
+    z-index: 6;
+    /* Bleed through the scroller's 16px side padding so the pinned background
+       spans the full screen; without this, card artwork scrolled up the strip
+       on either side of the title. The padding puts the text back where it was. */
+    margin: 0 -16px 12px;
+    padding: 24px 16px 8px;
+    background: #0b0b0c;
+  }
+  .home-section + .home-section { margin-top: 4px; }
+  /* The hero kept the desktop's generous top padding, which under a 112px
+     topbar left a large empty band before "Welcome Home". Now that it scrolls
+     with the content it only needs enough room to breathe. */
+  .scroll-area > .library-hero.compact-hero {
+    /* min-height was the real driver of the empty band, not the padding: the
+       hero reserved a fixed block regardless of how little is in it. */
+    min-height: 0;
+    padding-top: 2px;
+    padding-bottom: 10px;
+    margin-bottom: 0;
+  }
+  .scroll-area > .library-hero.compact-hero h1 { font-size: 30px; letter-spacing: -1px; }
+  .section-head h1 { margin: 0; font-size: 34px; }
+  .section-head h2 { font-size: 22px; }
+  .section-head > span { display: none; }
+
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 17px 12px;
+  }
+  .round-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .music-card {
+    padding: 0;
+    border-radius: 7px;
+    background: transparent;
+  }
+  .music-card:hover { transform: none; background: transparent; }
+  .music-card .card-art { border-radius: 7px; }
+  .music-card strong { margin-top: 9px; font-size: 14px; }
+  .music-card > span { font-size: 12px; }
+
+  .track,
+  .track-row {
+    grid-template-columns: 48px minmax(0, 1fr) auto auto !important;
+    gap: 12px;
+    padding: 9px 2px;
+  }
+  .track > :nth-child(n+4) { display: none; }
+  /* Keep artwork, title block, the downloaded/library state icon and the
+     overflow button; drop the desktop-only plays/album/duration columns. */
+  .track-row > :nth-child(3),
+  .track-row > :nth-child(4),
+  .track-row > :nth-child(5) { display: none; }
+  .track-row .track-actions {
+    display: grid;
+    place-items: center;
+    min-width: 34px;
+    min-height: 34px;
+    font-size: 19px;
+  }
+  .track-list-header { display: none !important; }
+
+  .player {
+    position: fixed;
+    z-index: 720;
+    left: 8px;
+    right: 8px;
+    bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom));
+    width: auto;
+    /* The base .player rule pins height/min-height/max-height to 96px. Only
+       overriding `height` here left min-height winning, so the mini-player was
+       96px tall — 30px more than the layout reserves for it, which is why it
+       covered the last row of every list. */
+    height: var(--mobile-player-height);
+    min-height: var(--mobile-player-height);
+    max-height: var(--mobile-player-height);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 54px;
+    grid-template-rows: 1fr;
+    gap: 4px;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 9px;
+    background: rgba(32,32,37,0.98);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.48);
+  }
+  .player::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2px;
+    /* Driven by --player-progress from the timeupdate handler. It used to be a
+       hard-coded 38% stop, so the mini player showed a white line frozen in the
+       middle regardless of where the track actually was. */
+    background: linear-gradient(
+      90deg,
+      #fff 0 var(--player-progress, 0%),
+      rgba(255, 255, 255, 0.22) var(--player-progress, 0%)
+    );
+    border-radius: 0 0 9px 9px;
+    pointer-events: none;
+  }
+  .player-track { min-width: 0; gap: 10px; cursor: pointer; }
+  .player-cover { width: 50px; height: 50px; border-radius: 5px; }
+  .player-copy { min-width: 0; }
+  .player-copy strong,
+  .player-copy span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .player-copy strong { font-size: 14px; }
+  .player-copy span { font-size: 12px; }
+  #playerMeta { display: none; }
+  .player-status { margin-left: auto; }
+  .player-controls { display: grid; place-items: center; min-width: 0; }
+  .player-controls .transport { display: contents; }
+  .player-controls .transport .transport-btn { display: none; }
+  .player-controls .play-round {
+    width: 46px;
+    height: 46px;
+    font-size: 29px;
+    background: transparent;
+    color: #fff;
+  }
+  .player-controls .progress-row,
+  .player-tools { display: none; }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    z-index: 700;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom));
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    padding: 7px 5px calc(5px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, rgba(12,12,13,0.94), #050506 30%);
+    border-top: 1px solid rgba(255,255,255,0.06);
+  }
+  .mobile-nav-item {
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: 2px;
+    border: 0;
+    background: transparent;
+    color: #9d9da2;
+    font-size: 10px;
+    font-weight: 650;
+    padding: 3px;
+  }
+  .mobile-nav-item i { font-size: 24px; line-height: 1; }
+  .mobile-nav-item.active { color: #fff; }
+
+  .mobile-page-title {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    gap: 12px;
+    align-items: center;
+    margin: 18px 0 20px;
+  }
+  .mobile-page-title h1 { margin: 0; font-size: 29px; letter-spacing: -1px; }
+  .mobile-profile-dot {
+    width: 42px;
+    height: 42px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: #ee6d9b;
+    color: #111;
+    font-size: 20px;
+    font-weight: 800;
+  }
+  .mobile-title-action {
+    border: 0;
+    background: transparent;
+    color: #fff;
+    font-size: 27px;
+    padding: 4px;
+  }
+  .mobile-filter-pills { display: flex; gap: 8px; margin-bottom: 24px; }
+  .mobile-filter-pills span {
+    border: 0;
+    border-radius: 999px;
+    background: #252527;
+    color: #fff;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  .mobile-library-sort {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 4px 14px;
+    font-size: 14px;
+  }
+  .mobile-library-sort strong { display: flex; gap: 10px; align-items: center; }
+  .mobile-library-items { display: grid; gap: 10px; }
+  .mobile-library-item {
+    display: grid;
+    grid-template-columns: 66px minmax(0, 1fr);
+    gap: 14px;
+    align-items: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #fff;
+    text-align: left;
+  }
+  .mobile-library-art {
+    width: 66px;
+    height: 66px;
+    display: grid;
+    place-items: center;
+    border-radius: 4px;
+    background: #27272a center/cover no-repeat;
+    font-size: 24px;
+  }
+  .mobile-library-item > span:last-child { min-width: 0; display: grid; gap: 3px; }
+  .mobile-library-item strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 16px; }
+  .mobile-library-item small { color: var(--muted); }
+
+  .details-panel { display: none; }
+  body.mobile-now-playing .shell,
+  body.mobile-now-playing .topbar { visibility: hidden; }
+  body.mobile-now-playing .mobile-bottom-nav { display: none; }
+  body.mobile-now-playing .details-panel.is-expanded {
+    position: fixed;
+    z-index: 680;
+    inset: 0;
+    display: block;
+    width: 100%;
+    max-width: none;
+    height: 100dvh;
+    padding: calc(62px + env(safe-area-inset-top)) 16px calc(var(--mobile-nowplaying-player) + 20px);
+    overflow-y: auto;
+    background: #0b0b0c;
+    border: 0;
+  }
+  body.mobile-now-playing .details-head {
+    position: fixed;
+    z-index: 2;
+    inset: 0 0 auto;
+    height: calc(58px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 56px 0;
+    display: grid;
+    place-content: center;
+    background: rgba(24,24,25,0.96);
+    text-align: center;
+  }
+  body.mobile-now-playing .details-head strong { font-size: 19px; }
+  body.mobile-now-playing #sideMeta { display: none; }
+  body.mobile-now-playing .details-expand-btn {
+    position: fixed;
+    z-index: 4;
+    left: 16px;
+    top: calc(12px + env(safe-area-inset-top));
+    display: grid;
+    width: 38px;
+    height: 38px;
+    background: rgba(0,0,0,0.32);
+  }
+  body.mobile-now-playing .details-cover,
+  body.mobile-now-playing .details-panel.is-expanded .details-cover {
+    width: 100%;
+    max-width: none;
+    aspect-ratio: 1;
+    margin: 0 0 18px;
+    border-radius: 7px;
+  }
+  body.mobile-now-playing .details-rich-content,
+  body.mobile-now-playing .details-panel.is-expanded .details-rich-content {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+    margin: 0;
+  }
+  body.mobile-now-playing .side-artist-image { height: min(84vw, 430px); }
+  body.mobile-now-playing .player {
+    z-index: 900;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    /* Without lifting the base rule's min/max-height the expanded player stayed
+       96px tall, so its second row — the whole transport and the seek bar —
+       rendered below the viewport and was clipped by overflow: hidden. That is
+       why the full now-playing screen had no controls at all. */
+    height: var(--mobile-nowplaying-player);
+    min-height: var(--mobile-nowplaying-player);
+    max-height: var(--mobile-nowplaying-player);
+    overflow: visible;
+    grid-template-columns: 1fr;
+    grid-template-rows: 58px 104px 48px;
+    padding: 8px 18px calc(8px + env(safe-area-inset-bottom));
+    border-radius: 0;
+    /* Fully opaque: at 0.98 the page scrolling underneath showed through the
+       transport row. */
+    background: #121214;
+  }
+  body.mobile-now-playing .player::before { display: none; }
+  body.mobile-now-playing .player-track { cursor: default; }
+  body.mobile-now-playing .player-controls { display: grid; align-content: center; gap: 6px; }
+  body.mobile-now-playing .player-controls .transport {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 22px;
+  }
+  body.mobile-now-playing .player-controls .transport .transport-btn { display: grid; font-size: 24px; }
+  body.mobile-now-playing .player-controls .play-round {
+    width: 58px;
+    height: 58px;
+    border-radius: 50%;
+    background: #fff;
+    color: #080808;
+  }
+  body.mobile-now-playing .player-controls .progress-row {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) 36px;
+    width: 100%;
+    font-size: 11px;
+  }
+  /* Lyrics, queue, output device and volume live in .player-tools, which the
+     compact mini-player hides for space. The full now-playing screen has room
+     for them, and without this row they are unreachable on a phone. */
+  body.mobile-now-playing .player-tools {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    align-self: center;
+    width: 100%;
+  }
+  body.mobile-now-playing .player-tools .transport-btn {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    flex: 0 0 auto;
+    font-size: 20px;
+  }
+  /* Volume is Android's job: the hardware keys and the system panel control
+     the media stream directly, so an in-app slider is a second, confusing
+     attenuation on top of it. */
+  body.mobile-now-playing .player-tools .volume,
+  body.mobile-now-playing .player-tools #muteToggle { display: none; }
+  body.mobile-now-playing .player-tools { justify-content: space-evenly; }
+  .lyrics-panel { z-index: 1100; }
+
+  /* Track options as a bottom sheet rather than a floating desktop menu. */
+  .context-menu.as-sheet {
+    position: fixed !important;
+    inset: auto 0 0 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    max-height: 82dvh;
+    overflow-y: auto;
+    border: 0;
+    border-radius: 18px 18px 0 0;
+    padding: 0 0 calc(12px + env(safe-area-inset-bottom));
+    background: #1c1c1e;
+    box-shadow: 0 -18px 48px rgba(0, 0, 0, 0.62);
+    z-index: 1400;
+    animation: contextSheetIn 240ms cubic-bezier(0.2, 0.75, 0.3, 1) both;
+  }
+
+  /* Grab handle, so it reads as a sheet you can dismiss. */
+  .context-menu.as-sheet::before {
+    content: "";
+    display: block;
+    width: 38px;
+    height: 4px;
+    margin: 10px auto 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .context-menu.as-sheet .context-menu-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 22px 16px;
+  }
+  .context-menu.as-sheet .context-menu-header-art {
+    width: 54px;
+    height: 54px;
+    border-radius: 4px;
+    background-size: cover;
+    background-position: center;
+    flex-shrink: 0;
+  }
+  .context-menu.as-sheet .context-menu-header-info strong { font-size: 17px; }
+
+  .context-menu.as-sheet .context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    width: 100%;
+    padding: 15px 22px;
+    font-size: 16px;
+    border-radius: 0;
+  }
+  .context-menu.as-sheet .context-menu-item i { font-size: 20px; width: 24px; text-align: center; }
+
+  /* A nested fly-out has nowhere to go in a sheet, so Share opens inline. */
+  .context-menu.as-sheet .context-submenu {
+    position: static;
+    display: block;
+    width: 100%;
+    box-shadow: none;
+    background: transparent;
+    border: 0;
+    padding: 0;
+  }
+  /* Share is a wrapper div holding its own icon, label and the submenu, so it
+     cannot use the plain item layout: lay it out as a wrapping flex row and let
+     the submenu take a full-width line of its own underneath. */
+  .context-menu.as-sheet .has-submenu {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    /* Only a column gap. `gap` also applies between wrapped lines, so a shared
+       value pushed the submenu 20px away from the Share label and made the row
+       visibly taller than every other one. */
+    column-gap: 20px;
+    row-gap: 0;
+    padding: 15px 22px 0;
+    font-size: 16px;
+  }
+  .context-menu.as-sheet .has-submenu > i { font-size: 20px; width: 24px; text-align: center; }
+  .context-menu.as-sheet .has-submenu > .context-submenu {
+    flex: 1 0 100%;
+    /* Stands in for the bottom padding the wrapper no longer has, so the step
+       down to the first share row matches the gap between any two rows. */
+    margin-top: 15px;
+    /* Bleed back out through the wrapper's own 22px padding, otherwise every
+       share row starts 22px further in than the rest of the sheet. */
+    margin-inline: -22px;
+    width: calc(100% + 44px);
+  }
+  /* Flush with every other row. Indenting them under Share left the share
+     targets sitting at a different x to the rest of the sheet, which just read
+     as misalignment — a sheet is a flat list of actions, not a tree. */
+  .context-menu.as-sheet .context-submenu .context-menu-item { padding-left: 22px; }
+  .context-menu.as-sheet .context-submenu-icon { display: none; }
+
+  .context-sheet-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 1399;
+    background: rgba(0, 0, 0, 0.55);
+    animation: contextScrimIn 200ms ease both;
+  }
+  .context-sheet-scrim[hidden] { display: none; }
+
+  /* These panels are position:fixed at top:0 with no inset handling, so on a
+     phone the Queue / Recently played tabs rendered underneath the status bar
+     clock and could not be tapped. */
+  .connect-panel {
+    left: 0;
+    width: 100%;
+    top: env(safe-area-inset-top);
+    height: calc(100dvh - env(safe-area-inset-top));
+    border-left: 0;
+  }
+  .connect-panel-head,
+  .queue-panel-head { padding-top: 12px; }
+
+  /* Both controls were pinned to bottom: 118px — Sync centred and the delay bar
+     at right: 22px. That only clears on a wide window; at 411px the delay pill
+     landed on top of the Sync button. Put them on one row at the bottom of the
+     panel instead, Sync centred and the delay control to its right. */
+  .lyrics-sync {
+    bottom: calc(20px + env(safe-area-inset-bottom));
+    font-size: 15px;
+    font-weight: 700;
+    padding: 11px 18px;
+    gap: 8px;
+  }
+  .lyrics-offset-bar {
+    right: 12px;
+    bottom: calc(24px + env(safe-area-inset-bottom));
+    gap: 5px;
+    padding: 5px 8px;
+  }
+  .lyrics-offset-btn { width: 26px; height: 26px; font-size: 16px; }
+  .lyrics-offset-label { min-width: 32px; font-size: 12px; }
+  .lyrics-content {
+    padding-bottom: calc(86px + env(safe-area-inset-bottom));
+  }
+
+  .settings-panel { padding: 0; }
+  /* .settings-row is display:flex, so `grid-template-columns` alone did
+     nothing and every settings row stayed side-by-side on a phone. The
+     on-device ranking row has wide nowrap status pills, which then spilled
+     leftwards across its own description text. Make the row an actual
+     single-column grid so the control sits under the label. */
+  .settings-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    align-items: start;
+  }
+  .settings-control { min-width: 0 !important; width: 100%; }
+  .android-advisor-control {
+    justify-content: flex-start;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+  /* The pills carry full sentences ("unavailable on this device"); nowrap is
+     what made them wider than the column. */
+  .android-advisor-status { white-space: normal; text-align: left; }
+  .android-advisor-control .button { width: 100%; white-space: nowrap; }
+  .settings-control input,
+  .settings-control select { width: 100%; }
+  .about-modal { width: 100vw; height: 100dvh; border-radius: 0; }
+  .about-modal-content { padding: 24px 18px; }
+  .about-modal-grid { grid-template-columns: 1fr; gap: 24px; }
+}
+
+/* The full now-playing screen is two separate fixed elements — the sheet and
+   the transport bar — so both are driven by the same keyframes to travel as
+   one. The mini bar is faded back in after the close completes because by then
+   it has returned to a different position and would otherwise pop. */
+@media (max-width: 900px) {
+  body.mobile-now-playing .details-panel.is-expanded,
+  body.mobile-now-playing .player {
+    animation: nowPlayingIn 250ms cubic-bezier(0.2, 0.75, 0.3, 1) both;
+  }
+
+  body.mobile-now-playing.now-playing-closing .details-panel.is-expanded,
+  body.mobile-now-playing.now-playing-closing .player {
+    animation: nowPlayingOut 210ms cubic-bezier(0.4, 0, 0.9, 0.45) both;
+  }
+
+  body.now-playing-restored .player {
+    animation: nowPlayingMiniIn 200ms ease both;
+  }
+}
+
+@keyframes nowPlayingIn {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes nowPlayingOut {
+  from { transform: translateY(0); }
+  to { transform: translateY(100%); }
+}
+
+@keyframes nowPlayingMiniIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes contextSheetIn {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes contextScrimIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }

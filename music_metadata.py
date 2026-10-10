@@ -14,6 +14,7 @@ from collections import OrderedDict
 import urllib.error
 import urllib.parse
 import urllib.request
+import logging
 import rapidfuzz
 import re
 import threading
@@ -139,6 +140,9 @@ def proxy_artwork_url(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+
 # SpotiFLAC / Spotify helpers
 # ---------------------------------------------------------------------------
 
@@ -157,10 +161,17 @@ def _get_spotify_client(force_refresh: bool = False):
             from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
             _spotify_client_cache = SpotifyMetadataClient()
             return _spotify_client_cache
-        except ImportError:
+        except ImportError as exc:
+            # Permanent: the package is not installed. Cache the negative.
+            logger.error("Spotify metadata client is unavailable: %s", exc)
             _spotify_client_cache = False
             return None
-        except Exception:
+        except Exception as exc:
+            # Transient (network, token, provider change). Do not cache, but do
+            # not fail silently either: every search, artist and album page goes
+            # through this client, so a swallowed error here reads downstream as
+            # "no results" with nothing to act on.
+            logger.exception("Spotify metadata client could not be created: %s", exc)
             _spotify_client_cache = None
             return None
 
@@ -1968,7 +1979,13 @@ def search_music(config: AppConfig, query: str) -> list[dict]:
             return [dict(r) for r in cached]
 
     results, seen = [], set()
-    for idx in build_music_indexers(None):
+    indexers = build_music_indexers(None)
+    if not indexers:
+        logger.error(
+            "Music search for %r ran with no indexers: the Spotify metadata "
+            "client could not be created, so there is nothing to search.", query)
+        return []
+    for idx in indexers:
         try:
             for res in idx.search(query):
                 sid = res.get("spotify_id")
@@ -1981,7 +1998,9 @@ def search_music(config: AppConfig, query: str) -> list[dict]:
                     seen.add(norm_key)
                 res["_relevance"] = search_relevance(query, res)
                 results.append(res)
-        except Exception: pass
+        except Exception as exc:
+            logger.exception(
+                "Music indexer %s failed for %r: %s", type(idx).__name__, query, exc)
     results.sort(key=lambda x: x.get("_relevance", (0, 0, 0, 0)), reverse=True)
     for r in results: r.pop("_relevance", None)
     cached_results = tuple(results)

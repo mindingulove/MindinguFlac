@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer: the Mindingu mark reduced to a flat silhouette — hat,
+     seated figure on a rock, stone held to the ear, one music note.
+
+     Launchers that force monochrome icons (Nothing OS does it to every app)
+     otherwise derive a silhouette from the colour artwork themselves, and a
+     detailed illustration reduces to an unreadable blob. The shapes here are
+     deliberately few and fat, with real gaps, because this is drawn at roughly
+     48dp. Geometry is fitted inside the 66dp safe circle of the 108dp canvas,
+     so no launcher mask clips it. The system tints the fill; the colour below
+     is only a placeholder.
+
+     Generated from android-app/tools/make_glyph.py — edit that, not this. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#000000"
+        android:pathData="M34.3521,72.8293a19.6479,6.13997 0 1,0 39.2958,0a19.6479,6.13997 0 1,0 -39.2958,0ZM40.9014,62.1866a11.4613,8.18663 0 1,0 22.9226,0a11.4613,8.18663 0 1,0 -22.9226,0ZM43.3574,49.088a7.36797,7.36797 0 1,0 14.7359,0a7.36797,7.36797 0 1,0 -14.7359,0ZM44.0123,38.8547a6.71304,4.42078 0 1,0 13.4261,0a6.71304,4.42078 0 1,0 -13.4261,0ZM39.2641,42.948a11.4613,2.78345 0 1,0 22.9226,0a11.4613,2.78345 0 1,0 -22.9226,0ZM60.0139,58.87L62.4699,51.502L57.81,49.9487L55.354,57.3167ZM55.228,58.0933a2.45599,2.45599 0 1,0 4.91198,0a2.45599,2.45599 0 1,0 -4.91198,0ZM57.684,50.7253a2.45599,2.45599 0 1,0 4.91198,0a2.45599,2.45599 0 1,0 -4.91198,0ZM56.7835,48.2694a3.76585,3.76585 0 1,0 7.5317,0a3.76585,3.76585 0 1,0 -7.5317,0ZM66.7711,45.8134a3.60212,3.60212 0 1,0 7.20424,0a3.60212,3.60212 0 1,0 -7.20424,0ZM72.5018,35.1707H74.1391V45.8134H72.5018ZM72.5018,35.1707L78.5599,32.7148L78.5599,35.5801L72.5018,38.0361Z" />
+</vector>
