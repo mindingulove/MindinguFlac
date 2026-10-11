@@ -53,6 +53,8 @@ const state = {
   preMuteVolume: 1,
   catalogRefreshTimer: null,
   cacheLogTimer: null,
+  pairingPollTimer: null,
+  pairingBeforeInvite: [],
   progressLogOpen: false,
   progressLogTimer: null,
   progressLogTippy: null,
@@ -6232,7 +6234,114 @@ async function renderSettings() {
     const sizeText = sizeMB >= 1024 ? `${(sizeMB / 1024).toFixed(1)} GB` : `${sizeMB.toFixed(1)} MB`;
     $("cacheUsage").textContent = `${sizeText} used by ${stats.files} files`;
   } catch (e) {}
+  setupPairingSettings();
 }
+
+function setupPairingSettings() {
+  $("pairingDesktopActions")?.classList.toggle("hidden", IS_ANDROID);
+  $("pairingAndroidActions")?.classList.toggle("hidden", !IS_ANDROID);
+  const makeQr = $("createPairingQr");
+  if (makeQr) makeQr.onclick = async () => {
+    makeQr.disabled = true;
+    try {
+      const before = await api("/api/pairing/status");
+      state.pairingBeforeInvite = (before.devices || []).map(device => device.device_id);
+      const invite = await api("/api/pairing/invitation", { method: "POST", body: "{}" });
+      $("pairingQrImage").src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(invite.qr_svg)}`;
+      $("pairingInvitation").classList.remove("hidden");
+      $("pairingQrExpiry").textContent = `This one-time code expires at ${new Date(invite.expires_at * 1000).toLocaleTimeString()}.`;
+      refreshPairingSettings();
+    } catch (error) {
+      showToast(error.message || "Could not create a pairing code", 5000);
+    } finally {
+      makeQr.disabled = false;
+    }
+  };
+  const dismiss = $("cancelPairingQr");
+  if (dismiss) dismiss.onclick = () => $("pairingInvitation").classList.add("hidden");
+  const scan = $("scanPairingQr");
+  if (scan) scan.onclick = () => {
+    if (window.MindinguflacAndroid?.scanDevicePairingQr) window.MindinguflacAndroid.scanDevicePairingQr();
+    else showToast("The QR scanner is only available in the Android app", 4000);
+  };
+  if (state.pairingPollTimer) clearInterval(state.pairingPollTimer);
+  refreshPairingSettings();
+  state.pairingPollTimer = setInterval(refreshPairingSettings, 2500);
+}
+
+async function refreshPairingSettings() {
+  const statusEl = $("pairingStatus");
+  const list = $("pairedDeviceList");
+  if (!statusEl || !list) return;
+  try {
+    const data = await api("/api/pairing/status");
+    list.replaceChildren();
+    if (data.role === "desktop") {
+      const devices = data.devices || [];
+      statusEl.textContent = devices.length ? `${devices.length} paired device${devices.length === 1 ? "" : "s"} · syncing over Wi-Fi` : "No devices paired";
+      if (devices.some(device => !state.pairingBeforeInvite.includes(device.device_id))) {
+        $("pairingInvitation")?.classList.add("hidden");
+      }
+      for (const device of devices) {
+        const row = document.createElement("div");
+        row.className = "paired-device-row";
+        const info = document.createElement("div");
+        const name = document.createElement("strong");
+        name.textContent = device.name || "Android device";
+        const detail = document.createElement("span");
+        detail.textContent = `Paired ${new Date((device.paired_at || 0) * 1000).toLocaleString()} · last sync ${new Date((device.last_seen || 0) * 1000).toLocaleTimeString()}`;
+        info.append(name, detail);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "danger";
+        remove.textContent = "Remove";
+        remove.onclick = async () => {
+          remove.disabled = true;
+          try {
+            await api("/api/pairing/remove", { method: "POST", body: JSON.stringify({ device_id: device.device_id }) });
+            await refreshPairingSettings();
+          } catch (error) { showToast(error.message || "Could not remove device", 5000); remove.disabled = false; }
+        };
+        row.append(info, remove);
+        list.append(row);
+      }
+    } else {
+      const pair = data.pair || {};
+      if (data.paired) {
+        statusEl.textContent = `Paired with ${pair.name || "desktop"}${data.last_sync ? ` · synced ${new Date(data.last_sync * 1000).toLocaleTimeString()}` : " · syncing…"}`;
+        const row = document.createElement("div");
+        row.className = "paired-device-row";
+        const info = document.createElement("div");
+        const name = document.createElement("strong"); name.textContent = pair.name || "Mindinguflac desktop";
+        const detail = document.createElement("span"); detail.textContent = data.last_error || "Recently played, settings and listening statistics sync automatically.";
+        info.append(name, detail);
+        const remove = document.createElement("button"); remove.type = "button"; remove.className = "danger"; remove.textContent = "Remove pairing";
+        remove.onclick = async () => {
+          remove.disabled = true;
+          try { await api("/api/pairing/remove", { method: "POST", body: "{}" }); await refreshPairingSettings(); }
+          catch (error) { showToast(error.message || "Could not send the removal message", 5000); remove.disabled = false; }
+        };
+        row.append(info, remove); list.append(row);
+      } else {
+        const nearby = (data.discovered || []).map(item => item.name).filter(Boolean);
+        statusEl.textContent = data.last_error || (nearby.length ? `Nearby: ${nearby.join(", ")}` : "Waiting for a desktop on this Wi-Fi network");
+      }
+    }
+  } catch (error) {
+    statusEl.textContent = error.message || "Pairing status unavailable";
+  }
+}
+
+window.handleDevicePairingUrl = async function (value) {
+  if (!IS_ANDROID) return;
+  try {
+    await api("/api/pairing/connect", { method: "POST", body: JSON.stringify({ invitation: String(value || "") }), timeout: 30000 });
+    await renderSettings();
+    showToast("Device paired. Syncing over Wi-Fi.");
+  } catch (error) {
+    showToast(error.message || "Pairing failed", 6000);
+  }
+};
 
 async function saveSettings(e) {
   e.preventDefault();

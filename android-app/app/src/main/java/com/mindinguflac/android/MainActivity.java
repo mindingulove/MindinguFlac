@@ -32,6 +32,9 @@ import android.widget.TextView;
 import com.chaquo.python.PyObject;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
+import com.journeyapps.barcodescanner.ScanContract;
+import com.journeyapps.barcodescanner.ScanOptions;
+import com.journeyapps.barcodescanner.ScanIntentResult;
 
 import java.io.File;
 import java.util.UUID;
@@ -41,10 +44,12 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity implements MediaCommandRelay.Listener {
     private static final int REQUEST_GEMMA_MODEL = 3401;
     private static final int REQUEST_POST_NOTIFICATIONS = 3402;
+    private static final int REQUEST_PAIRING_QR = 3403;
     private final ExecutorService startupExecutor = Executors.newSingleThreadExecutor();
     private WebView webView;
     private View loadingView;
     private String apiToken;
+    private String pendingPairingUrl;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,6 +62,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         getWindow().setNavigationBarColor(Color.rgb(5, 6, 8));
         setContentView(createContentView());
         configureWebView();
+        if (getIntent() != null && getIntent().getData() != null) pendingPairingUrl = getIntent().getData().toString();
         LocalModelAdvisor.initialize(getApplicationContext());
         // Auto-download runs on its own over Wi-Fi; on mobile data it waits
         // for the user to explicitly ask for it (the Settings "Download now"
@@ -147,8 +153,28 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
                 loadingView.animate().alpha(0f).setDuration(180).withEndAction(() -> {
                     loadingView.setVisibility(View.GONE);
                 }).start();
+                dispatchPendingPairingUrl();
             }
         });
+    }
+
+    private void dispatchPendingPairingUrl() {
+        if (pendingPairingUrl == null || webView == null) return;
+        String value = pendingPairingUrl;
+        pendingPairingUrl = null;
+        webView.evaluateJavascript(
+                "window.handleDevicePairingUrl && window.handleDevicePairingUrl(" +
+                        org.json.JSONObject.quote(value) + ")", null);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && intent.getData() != null) {
+            pendingPairingUrl = intent.getData().toString();
+            dispatchPendingPairingUrl();
+        }
     }
 
     private void startPythonBackend() {
@@ -298,6 +324,15 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_PAIRING_QR) {
+            ScanIntentResult result = ScanIntentResult.parseActivityResult(resultCode, data);
+            if (result.getContents() != null && webView != null) {
+                webView.evaluateJavascript(
+                        "window.handleDevicePairingUrl && window.handleDevicePairingUrl(" +
+                                org.json.JSONObject.quote(result.getContents()) + ")", null);
+            }
+            return;
+        }
         if (requestCode != REQUEST_GEMMA_MODEL || resultCode != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
@@ -433,6 +468,18 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     }
 
     public final class AndroidBridge {
+        @JavascriptInterface
+        public void scanDevicePairingQr() {
+            runOnUiThread(() -> {
+                ScanOptions options = new ScanOptions();
+                options.setPrompt("Scan the QR code shown in Mindinguflac desktop Settings");
+                options.setBeepEnabled(false);
+                options.setOrientationLocked(false);
+                options.setDesiredBarcodeFormats(ScanOptions.QR_CODE);
+                startActivityForResult(options.createScanIntent(MainActivity.this), REQUEST_PAIRING_QR);
+            });
+        }
+
         @JavascriptInterface
         public String platform() {
             return "android";

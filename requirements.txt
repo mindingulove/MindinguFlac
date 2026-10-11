@@ -17,6 +17,7 @@ pywebview>=6.2.1
 mutagen>=1.47.0
 pydantic>=2.7.0
 cryptography>=50.0.0
+qrcode>=8.2
 browser-cookie3==0.20.1
 codex-auth==0.1.1
 packaging>=23.0

@@ -2125,6 +2125,10 @@ class Handler(BaseHTTPRequestHandler):
                 settings_dict["native_now_playing_active"] = bool(_np_update_fn)
                 self.send_json(settings_dict)
                 return
+            if path == "/api/pairing/status":
+                import device_sync
+                self.send_json(device_sync.status())
+                return
             if path == "/api/playback/session":
                 if not self.trusted_local_origin():
                     self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
@@ -2803,6 +2807,18 @@ class Handler(BaseHTTPRequestHandler):
                     save_config(CONFIG_PATH, app_config)
                     service_downloader.update_config(app_config)
                 self.send_json({"ok": True})
+                return
+            if path == "/api/pairing/invitation":
+                import device_sync
+                self.send_json(device_sync.invitation())
+                return
+            if path == "/api/pairing/connect":
+                import device_sync
+                self.send_json(device_sync.pair(str(body.get("invitation") or "")))
+                return
+            if path == "/api/pairing/remove":
+                import device_sync
+                self.send_json(device_sync.remove(str(body.get("device_id") or "")))
                 return
             if path == "/api/playlists":
                 user_name = body.get("name", "").strip()

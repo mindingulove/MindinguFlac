@@ -129,4 +129,5 @@ dependencies {
     implementation(files("libs/jlibtorrent-2.0.12.9.jar"))
     implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
     implementation("com.google.mediapipe:tasks-genai:0.10.21")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

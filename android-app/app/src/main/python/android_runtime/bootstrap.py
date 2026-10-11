@@ -170,6 +170,8 @@ def start(data_path: str, cache_path: str, music_path: str, token: str) -> int:
     # process. Refresh the per-launch token explicitly instead of leaving the
     # cached module bound to a dead session.
     app.API_TOKEN = token
+    import device_sync
+    device_sync.start_android_pairing(data_dir)
     _server = app.create_server("127.0.0.1", 0)
     _thread = threading.Thread(
         target=_server.serve_forever,
@@ -191,6 +193,11 @@ def start(data_path: str, cache_path: str, music_path: str, token: str) -> int:
 
 def stop() -> None:
     global _server, _thread
+    try:
+        import device_sync
+        device_sync.stop_android_pairing()
+    except Exception:
+        pass
     if _server is not None:
         try:
             _server.shutdown()

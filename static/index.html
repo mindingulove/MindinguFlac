@@ -235,6 +235,38 @@
             </div>
           </div>
 
+          <div class="settings-section" id="pairingSection">
+            <h2 class="settings-section-title">Sync over Wi-Fi</h2>
+            <div class="settings-row" id="pairingDesktopActions">
+              <div class="settings-info">
+                <strong>Pair an Android device</strong>
+                <span>Scan this one-time QR code while both devices are on the same Wi-Fi network.</span>
+              </div>
+              <div class="settings-control">
+                <button id="createPairingQr" class="primary" type="button">Show pairing QR code</button>
+              </div>
+            </div>
+            <div id="pairingInvitation" class="pairing-invitation hidden">
+              <img id="pairingQrImage" alt="One-time Mindinguflac device pairing QR code">
+              <div>
+                <strong>Scan with Mindinguflac on Android</strong>
+                <p id="pairingQrExpiry">This code expires in three minutes.</p>
+                <button id="cancelPairingQr" type="button">Dismiss QR code</button>
+              </div>
+            </div>
+            <div class="settings-row" id="pairingAndroidActions">
+              <div class="settings-info">
+                <strong>Pair this phone</strong>
+                <span>Scan the QR code shown in desktop Settings, or open it with Google Lens.</span>
+              </div>
+              <div class="settings-control">
+                <button id="scanPairingQr" class="primary" type="button">Pair device</button>
+              </div>
+            </div>
+            <div id="pairingStatus" class="pairing-status" aria-live="polite"></div>
+            <div id="pairedDeviceList" class="paired-device-list"></div>
+          </div>
+
           <div class="settings-section">
             <h2 class="settings-section-title">Maintenance</h2>
             <div class="settings-row">

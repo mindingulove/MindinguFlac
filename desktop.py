@@ -649,6 +649,12 @@ def main() -> None:
         thread = threading.Thread(target=server.serve_forever, name="mindinguflac-http", daemon=True)
         thread.start()
         log_step(f"server started on port {port}")
+        try:
+            import device_sync
+            device_sync.start_desktop_pairing()
+            log_step("LAN device pairing service started")
+        except Exception as exc:
+            log_step(f"LAN device pairing service unavailable: {exc}")
 
         icon_path = resource_path("static/assets/app_icon.png")
         url = f"http://127.0.0.1:{port}/index.html"

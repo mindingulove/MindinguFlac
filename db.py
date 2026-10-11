@@ -17,6 +17,67 @@ from config import app_data_dir
 _DB_PATH = app_data_dir() / "mindinguflac.db"
 _local = threading.local()
 
+_SYNC_EVENT_TABLES = (
+    "listening_events",
+    "track_listen_stats_events",
+    "artist_listen_stats_events",
+    "album_listen_stats_events",
+    "genre_listen_stats_events",
+)
+
+
+def sync_export(since: float = 0) -> dict:
+    """Export append-only listening/statistics rows for a paired device."""
+    conn = _get_conn()
+    result: dict[str, list[dict]] = {}
+    cursor = 0.0
+    for table in _SYNC_EVENT_TABLES:
+        columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if not columns:
+            continue
+        time_columns = [name for name in ("created_at", "event_timestamp", "started_at") if name in columns]
+        if time_columns:
+            time_expr = "COALESCE(" + ",".join(time_columns) + ",0)"
+            row = conn.execute(f"SELECT MAX({time_expr}) AS cursor FROM {table}").fetchone()
+            cursor = max(cursor, float(row["cursor"] or 0))
+            rows = conn.execute(
+                f"SELECT * FROM {table} WHERE {time_expr} > ? ORDER BY {time_expr} LIMIT 20000",
+                (float(since or 0),),
+            ).fetchall()
+        else:
+            rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT 20000").fetchall()
+        result[table] = [dict(row) for row in rows]
+    return {"tables": result, "cursor": cursor}
+
+
+def sync_import(payload: dict) -> int:
+    """Merge listening/statistics rows without copying cache paths or settings."""
+    tables = payload.get("tables") if isinstance(payload, dict) else None
+    if not isinstance(tables, dict):
+        return 0
+    conn = _get_conn()
+    inserted = 0
+    for table in _SYNC_EVENT_TABLES:
+        rows = tables.get(table)
+        if not isinstance(rows, list):
+            continue
+        columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        safe_columns = [name for name in columns if name != "id"]
+        if not safe_columns:
+            continue
+        names_sql = ",".join(f'"{name}"' for name in safe_columns)
+        values_sql = ",".join("?" for _ in safe_columns)
+        statement = f'INSERT OR IGNORE INTO "{table}" ({names_sql}) VALUES ({values_sql})'
+        for item in rows[:20000]:
+            if not isinstance(item, dict):
+                continue
+            values = [item.get(name) for name in safe_columns]
+            before = conn.total_changes
+            conn.execute(statement, values)
+            inserted += conn.total_changes - before
+    conn.commit()
+    return inserted
+
 
 def _get_conn():
     if not hasattr(_local, "conn"):

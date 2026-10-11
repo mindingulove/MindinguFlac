@@ -29,6 +29,7 @@ hiddenimports = [
     'backend_ytpdl',
     'catalog',
     'service_downloader',
+    'device_sync',
     'ai_reranker',
     'duck_proxy',
     'codex_proxy',
@@ -37,6 +38,7 @@ hiddenimports = [
     'tour_ai', 'hypebot_tour', 'gemini_proxy', 'gemini_browser',
     'db'
 ]
+hiddenimports += collect_submodules('qrcode')
 # SpotiFLAC — all imports now use 'SpotiFLAC.*' (updated from old 'backend.*' API).
 try:
     tmp_ret = collect_all('SpotiFLAC')

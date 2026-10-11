@@ -26,6 +26,7 @@ hiddenimports = [
     'backend_ytpdl',
     'catalog',
     'service_downloader',
+    'device_sync',
     'ai_reranker',
     'duck_proxy',
     'codex_proxy',
@@ -35,6 +36,7 @@ hiddenimports = [
     'native_audio',
     'db',
 ]
+hiddenimports += collect_submodules('qrcode')
 
 def _collect_package(package_name, include_submodules=False):
     try:
