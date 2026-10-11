@@ -1,4 +1,5 @@
 # Native dependencies match the bundled CPython 3.12 Android arm64 wheels.
+# Native build provenance is recorded in app/python-wheels/BUILD_INFO.json.
 mutagen
 requests
 PySocks
