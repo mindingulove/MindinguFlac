@@ -5,7 +5,11 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.Manifest;
+import android.content.ContentValues;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.media.AudioManager;
 import android.graphics.Color;
 import android.net.Uri;
@@ -53,7 +57,14 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         getWindow().setNavigationBarColor(Color.rgb(5, 6, 8));
         setContentView(createContentView());
         configureWebView();
-        LocalGemmaAdvisor.initialize(getApplicationContext());
+        LocalModelAdvisor.initialize(getApplicationContext());
+        // Auto-download runs on its own over Wi-Fi; on mobile data it waits
+        // for the user to explicitly ask for it (the Settings "Download now"
+        // button), rather than silently spending a ~1.5 GB data allowance.
+        LocalModelAdvisor.maybeAutoDownload();
+        // Starts the AICore feature download immediately if it is downloadable,
+        // instead of waiting for the first on-device ranking request.
+        NanoAdvisor.maybeStartDownload();
         MediaCommandRelay.setListener(this);
         registerBackHandler();
         requestNotificationPermission();
@@ -292,11 +303,11 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         }
         Uri source = data.getData();
         startupExecutor.execute(() -> {
-            boolean installed = LocalGemmaAdvisor.install(getContentResolver(), source);
+            boolean installed = LocalModelAdvisor.install(getContentResolver(), source);
             runOnUiThread(() -> {
                 if (webView != null) {
                     webView.evaluateJavascript(
-                            "window.onGemmaInstalled && window.onGemmaInstalled(" + installed + ")",
+                            "window.onLocalModelInstalled && window.onLocalModelInstalled(" + installed + ")",
                             null);
                 }
             });
@@ -352,6 +363,75 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         }
     }
 
+    /**
+     * Copy a file the backend already saved into the app's private storage
+     * into the phone's shared Music library (MediaStore), so it shows up in
+     * the system Music app, a file manager, and other music apps — not just
+     * inside this one. The private copy under getExternalFilesDir() is left
+     * alone; this adds a second, MediaStore-registered copy rather than
+     * moving anything, so nothing the backend already tracks by path changes.
+     *
+     * Desktop is unaffected: this method only exists on the Android build and
+     * is only ever called from the phone frontend.
+     */
+    private boolean exportToSharedMusicLibrary(String sourcePath, String displayName, String mimeType) {
+        if (sourcePath == null || sourcePath.isEmpty()) return false;
+        File source = new File(sourcePath);
+        if (!source.isFile()) return false;
+
+        String name = (displayName == null || displayName.isEmpty())
+                ? source.getName() : displayName;
+        String type = (mimeType == null || mimeType.isEmpty()) ? "audio/mpeg" : mimeType;
+
+        android.content.ContentResolver resolver = getContentResolver();
+        android.net.Uri collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        String relativePath = Environment.DIRECTORY_MUSIC + "/Mindinguflac";
+
+        // Skip re-exporting a file already registered under this name and
+        // path, so repeat "add to library" calls (resume after a restart,
+        // retrying a stuck UI) do not pile up duplicate MediaStore rows.
+        try (Cursor existing = resolver.query(collection,
+                new String[]{MediaStore.Audio.Media._ID},
+                MediaStore.Audio.Media.DISPLAY_NAME + "=? AND " + MediaStore.Audio.Media.RELATIVE_PATH + "=?",
+                new String[]{name, relativePath + "/"}, null)) {
+            if (existing != null && existing.getCount() > 0) return true;
+        } catch (Throwable ignored) {
+        }
+
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Audio.Media.DISPLAY_NAME, name);
+        values.put(MediaStore.Audio.Media.MIME_TYPE, type);
+        values.put(MediaStore.Audio.Media.RELATIVE_PATH, relativePath);
+        values.put(MediaStore.Audio.Media.IS_PENDING, 1);
+
+        android.net.Uri item = null;
+        try {
+            item = resolver.insert(collection, values);
+            if (item == null) return false;
+            try (java.io.OutputStream out = resolver.openOutputStream(item);
+                 java.io.InputStream in = new java.io.FileInputStream(source)) {
+                if (out == null) return false;
+                byte[] buffer = new byte[256 * 1024];
+                int count;
+                while ((count = in.read(buffer)) != -1) out.write(count == buffer.length ? buffer : java.util.Arrays.copyOf(buffer, count));
+            }
+            values.clear();
+            values.put(MediaStore.Audio.Media.IS_PENDING, 0);
+            resolver.update(item, values, null, null);
+            return true;
+        } catch (Throwable error) {
+            // A half-written row is worse than none: drop it rather than leave
+            // a broken, unplayable entry in the user's Music library.
+            if (item != null) {
+                try {
+                    resolver.delete(item, null, null);
+                } catch (Throwable ignoredDelete) {
+                }
+            }
+            return false;
+        }
+    }
+
     public final class AndroidBridge {
         @JavascriptInterface
         public String platform() {
@@ -364,13 +444,20 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         }
 
         @JavascriptInterface
-        public String gemmaStatus() {
-            return LocalGemmaAdvisor.status();
+        public String localModelStatus() {
+            return LocalModelAdvisor.status();
         }
 
+        /** Pick a .task bundle manually — a different model, or a retry via a browser download. */
         @JavascriptInterface
-        public void installGemma() {
+        public void installLocalModel() {
             runOnUiThread(MainActivity.this::chooseGemmaModel);
+        }
+
+        /** Force the auto-download now, including over a metered connection. */
+        @JavascriptInterface
+        public void downloadLocalModel() {
+            startupExecutor.execute(LocalModelAdvisor::forceDownload);
         }
 
         /**
@@ -401,6 +488,16 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         @JavascriptInterface
         public void exitApp() {
             runOnUiThread(MainActivity.this::finish);
+        }
+
+        /**
+         * Called once a track finishes an explicit "add to library" download.
+         * Copies it into the phone's shared Music library in the background;
+         * never blocks or fails the download itself if this fails.
+         */
+        @JavascriptInterface
+        public void exportDownloadToMusicLibrary(String path, String displayName, String mimeType) {
+            startupExecutor.execute(() -> exportToSharedMusicLibrary(path, displayName, mimeType));
         }
 
         @JavascriptInterface

@@ -2990,6 +2990,26 @@ class Handler(BaseHTTPRequestHandler):
                 service_downloader.cancel_job(body.get("job_id"))
                 self.send_json({"ok": True})
                 return
+            if path == "/api/stats/remove":
+                body = read_body(self)
+                kind = str(body.get("kind") or "").strip().lower()
+                key = str(body.get("key") or "").strip()
+                if kind == "track":
+                    deleted = db.delete_track_from_stats(key)
+                elif kind == "artist":
+                    deleted = db.delete_artist_from_stats(key)
+                elif kind == "album":
+                    deleted = db.delete_album_from_stats(key)
+                else:
+                    self.send_error_json("kind must be track, artist, or album", HTTPStatus.BAD_REQUEST)
+                    return
+                self.send_json({"ok": True, "deleted": deleted})
+                return
+            if path == "/api/service/recent":
+                body = read_body(self)
+                hidden = service_downloader.hide_from_recent(body)
+                self.send_json({"ok": True, "hidden": hidden})
+                return
             if path == "/api/cache":
                 result = service_downloader.clear_cache()
                 app_config.last_cache_cleanup = time.time()

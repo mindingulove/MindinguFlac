@@ -908,6 +908,27 @@ class ServiceDownloadManager:
         except Exception:
             pass
 
+    def hide_from_recent(self, payload: dict) -> int:
+        """Remove a track from the "Recently Played" list without touching its
+        cached file or job state — anything else that reuses this job (library
+        promotion, cache lookups, prefetch) keeps working exactly as before.
+
+        catalog.py builds "Recently Played" straight from jobs.json's finished
+        jobs; a track can appear there via multiple job entries (replays,
+        re-downloads), so every matching job is flagged, not just one row.
+        """
+        identity = _track_identity_from_payload(payload or {})
+        hidden = 0
+        with self._lock:
+            for job in self.jobs.values():
+                if job.get("status") == "finished" and _job_matches_identity(job, identity):
+                    if not job.get("hidden_from_recent"):
+                        job["hidden_from_recent"] = True
+                        hidden += 1
+        if hidden:
+            self._save_jobs()
+        return hidden
+
     def promote_to_library(self, job_id: str) -> dict | None:
         with self._lock:
             job = self.jobs.get(job_id)
@@ -962,12 +983,18 @@ class ServiceDownloadManager:
 
     def library_status_batch(self, payloads: list) -> list:
         library_files = self._library_file_index()
-        return [self.library_status(payload, library_files) for payload in payloads]
+        cache_pool = self._cache_candidate_pool()
+        return [self.library_status(payload, library_files, cache_pool) for payload in payloads]
 
-    def library_status(self, payload: dict, library_files: dict[str, list[Path]] | None = None) -> dict:
+    def library_status(
+        self,
+        payload: dict,
+        library_files: dict[str, list[Path]] | None = None,
+        cache_pool: list[dict] | None = None,
+    ) -> dict:
         identity = _track_identity_from_payload(payload)
         library = self._find_library_entry(identity, library_files)
-        cache = self._find_cache_entry(identity)
+        cache = self._find_cache_entry(identity, cache_pool)
         active = self._find_active_library_job(identity)
         if active:
             self._refresh_job_file_progress(active.get("id", ""))
@@ -1158,11 +1185,44 @@ class ServiceDownloadManager:
         matches.sort(key=lambda item: (item["quality"], item["path"].stat().st_mtime), reverse=True)
         return matches[0]
 
-    def _find_cache_entry(self, identity: dict) -> dict | None:
+    def _find_cache_entry(self, identity: dict, pool: dict | None = None) -> dict | None:
+        # `pool` separates what _cache_candidate_pool() could resolve to a
+        # concrete track without knowing what we are searching for (a
+        # "finished" job's own file, or a cache file with a metadata.json
+        # sidecar) from files that carry no identity of their own and can
+        # only be tested against ONE specific search (a bare audio file with
+        # no sidecar, matched by guessing its filename contains the searched
+        # title/artist). The first group is built once per batch instead of
+        # once per track — a playlist of a few hundred tracks used to mean a
+        # few hundred full re-walks of the cache directory and re-checks of
+        # every job's file on disk for the exact same answer every time,
+        # which could take minutes or simply never return, leaving every
+        # "downloaded" badge stuck on its placeholder. The second group has
+        # no shortcut and is still tested per track, but it is normally a
+        # small remainder — the backend writes a metadata.json sidecar next
+        # to its own downloads, so most cache files resolve through the first
+        # group.
+        owns_pool = pool is None
+        if owns_pool:
+            pool = self._cache_candidate_pool()
+        matches = [entry for entry in pool["resolved"] if _job_matches_identity(entry["job"], identity)]
+        for path in pool["unresolved_paths"]:
+            job = self._cache_job_from_filename(path, identity)
+            if job:
+                matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (item["quality"], item["path"].stat().st_mtime), reverse=True)
+        return matches[0]
+
+    def _cache_candidate_pool(self) -> dict:
+        """Cache candidates split into what can be resolved to a concrete
+        track without knowing the search identity (run once per batch) and
+        what cannot (tested per track, see _find_cache_entry)."""
         changed = False
+        resolved: list[dict] = []
         with self._lock:
             jobs = list(self.jobs.values())
-        matches = []
         for job in jobs:
             if self._repair_finished_audio_path(job):
                 changed = True
@@ -1170,27 +1230,26 @@ class ServiceDownloadManager:
             if job.get("status") == "finished" and job.get("mode", "stream") == "stream" and path_text:
                 path = Path(path_text)
                 matches_audio, _ = downloaded_track_matches_request(path, job) if path.exists() else (False, "")
-                if path.exists() and is_valid_audio_file(path) and matches_audio and _job_matches_identity(job, identity):
+                if path.exists() and is_valid_audio_file(path) and matches_audio:
                     normalized = self._normalize_downloaded_audio(path, job)
                     if normalized != path:
                         with self._lock:
                             job["library_path"] = str(normalized)
                         path = normalized
                         changed = True
-                    matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
-        matches.extend(self._find_cache_files_on_disk(identity))
+                    resolved.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
+        disk_resolved, unresolved_paths = self._find_cache_files_on_disk()
+        resolved.extend(disk_resolved)
         if changed:
             self._save_jobs()
-        if not matches:
-            return None
-        matches.sort(key=lambda item: (item["quality"], item["path"].stat().st_mtime), reverse=True)
-        return matches[0]
+        return {"resolved": resolved, "unresolved_paths": unresolved_paths}
 
-    def _find_cache_files_on_disk(self, identity: dict) -> list[dict]:
+    def _find_cache_files_on_disk(self) -> tuple[list[dict], list[Path]]:
         cache_dir = Path(self.config.cache_dir)
         if not cache_dir.exists():
-            return []
-        matches = []
+            return [], []
+        resolved = []
+        unresolved: list[Path] = []
         known_paths = set()
         with self._lock:
             for job in self.jobs.values():
@@ -1200,13 +1259,32 @@ class ServiceDownloadManager:
         for path in _find_audio_files(cache_dir):
             if str(path) in known_paths:
                 continue
-            job = self._cache_job_from_sidecar(path, identity) or self._cache_job_from_filename(path, identity)
-            if not job:
-                continue
-            matches.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
-        return matches
+            # Sidecar-backed files resolve to one concrete track regardless of
+            # what is being searched for — walking the directory tree and
+            # reading each metadata.json is the expensive part, and it is now
+            # done exactly once. Files with no sidecar have no identity of
+            # their own; they fall through to _find_cache_entry's per-track
+            # filename test, same as before this change.
+            job = self._cache_job_from_sidecar(path)
+            if job:
+                resolved.append({"path": path, "job": job, "quality": _quality_rank(path, job.get("quality"))})
+            else:
+                unresolved.append(path)
+        return resolved, unresolved
 
-    def _cache_job_from_sidecar(self, path: Path, identity: dict) -> dict | None:
+    def _cache_job_from_sidecar(self, path: Path) -> dict | None:
+        # No `identity` parameter: this resolves what track a path's own
+        # metadata.json sidecar says it is, independent of any particular
+        # search, so _cache_candidate_pool() can call it once per file
+        # instead of once per (file, track) pair. The one behavior change
+        # from that: a sidecar entry missing its OWN artist/album used to
+        # fall back to the identity being *searched for*, which made its
+        # artist/album comparison trivially succeed for whatever search
+        # triggered it. That fallback no longer has a search identity to
+        # borrow, so it now falls back to "Unknown Artist"/"Unknown Album"
+        # instead — a sidecar this incomplete can still match by ISRC,
+        # Spotify id or MusicBrainz id in _job_matches_identity, just not by
+        # a borrowed artist/album name.
         info_path = path.parent / "metadata.json"
         if not info_path.exists():
             return None
@@ -1221,22 +1299,20 @@ class ServiceDownloadManager:
         for title, meta in tracks.items():
             if not isinstance(meta, dict):
                 continue
-            artist = meta.get("artist") or album_info.get("artist") or identity.get("artist_part") or "Unknown Artist"
+            artist = meta.get("artist") or album_info.get("artist") or "Unknown Artist"
             if not _audio_path_matches_track(path, str(title), str(artist)):
                 continue
-            job = {
+            return {
                 "id": path.parent.name,
                 "mode": "stream",
                 "status": "finished",
                 "artist": clean_part(artist),
-                "album": clean_part(meta.get("album") or album_info.get("album") or identity.get("album_part") or "Unknown Album"),
+                "album": clean_part(meta.get("album") or album_info.get("album") or "Unknown Album"),
                 "title": clean_part(meta.get("title") or title),
                 "metadata": _merge_nonempty_metadata(dict(album_info), meta),
                 "output_dir": str(path.parent),
                 "library_path": str(path),
             }
-            if _job_matches_identity(job, identity):
-                return job
         return None
 
     def _cache_job_from_filename(self, path: Path, identity: dict) -> dict | None:

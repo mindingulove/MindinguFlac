@@ -221,14 +221,15 @@ def _android_nano_text(prompt: str) -> str:
         return ""
 
 
-def _android_gemma_text(prompt: str) -> str:
-    """Use a user-installed Gemma task bundle entirely on the phone."""
+def _android_local_model_text(prompt: str) -> str:
+    """Use the phone's own locally installed model (auto-downloaded or
+    manually installed; see LocalModelAdvisor on the Java side)."""
     if os.environ.get("MINDINGUFLAC_ANDROID") != "1":
         return ""
     try:
         from java import jclass  # type: ignore
 
-        advisor = jclass("com.mindinguflac.android.LocalGemmaAdvisor")
+        advisor = jclass("com.mindinguflac.android.LocalModelAdvisor")
         return str(advisor.generate(prompt) or "").strip()
     except Exception:
         return ""
@@ -263,9 +264,9 @@ def _android_request(prompt: str, gemini_model: str) -> dict[str, Any]:
     nano = _parse_json_object(_android_nano_text(prompt))
     if nano:
         return nano
-    gemma = _parse_json_object(_android_gemma_text(prompt))
-    if gemma:
-        return gemma
+    local_model = _parse_json_object(_android_local_model_text(prompt))
+    if local_model:
+        return local_model
     return _deterministic_ranking(prompt)
 
 

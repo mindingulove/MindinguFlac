@@ -207,6 +207,63 @@ class AndroidEngineClampTest(unittest.TestCase):
             )
 
 
+class AndroidWarmRestartAuthTest(unittest.TestCase):
+    """A warm Activity-only restart must adopt its new token, not keep the old one.
+
+    The Python interpreter and HTTP server survive an Activity recreate within
+    the same process — Android reclaiming the Activity under memory pressure
+    without killing the process, common after repeated open/close. Java always
+    generates a fresh per-launch token and cookie regardless of whether this
+    happens; bootstrap.start() has to make the server adopt it, or every
+    authenticated request — search, downloads, and the stream endpoint
+    playback depends on — starts failing with 401 against a cookie the server
+    no longer recognizes, with nothing distinguishing it from any other
+    playback failure.
+    """
+
+    def test_a_second_start_call_adopts_its_new_token(self):
+        import tempfile
+        import urllib.error
+        import urllib.request
+
+        from android_runtime import bootstrap
+
+        with tempfile.TemporaryDirectory() as tmp:
+            files = str(Path(tmp) / "files")
+            cache = str(Path(tmp) / "cache")
+            music = str(Path(tmp) / "music")
+            # Settings validation is covered elsewhere; skip it here so this
+            # test stays about token adoption only. `app`'s module-level
+            # config path is computed once, the first time it is imported in
+            # the process, so whichever test imports it first under a real
+            # (non-Android) environment permanently fixes it for every test
+            # that runs after — coupling this test to _preflight's settings
+            # check would make it depend on suite ordering it has no control
+            # over.
+            with patch.object(capabilities, "runtime_report", return_value=_report()), \
+                    patch.object(bootstrap, "_preflight", lambda *a, **k: None):
+                port_cold = bootstrap.start(files, cache, music, "token-one")
+                try:
+                    port_warm = bootstrap.start(files, cache, music, "token-two")
+
+                    def health(token):
+                        request = urllib.request.Request(
+                            f"http://127.0.0.1:{port_warm}/api/health",
+                            headers={"X-Mindinguflac-Token": token},
+                        )
+                        try:
+                            with urllib.request.urlopen(request, timeout=3) as response:
+                                return response.status
+                        except urllib.error.HTTPError as exc:
+                            return exc.code
+
+                    self.assertEqual(port_warm, port_cold)
+                    self.assertEqual(health("token-two"), 200)
+                    self.assertEqual(health("token-one"), 401)
+                finally:
+                    bootstrap.stop()
+
+
 class AndroidBootstrapConfigTest(unittest.TestCase):
     def _write_config(self, directory: Path, value: dict) -> Path:
         path = directory / "config.json"
@@ -578,17 +635,17 @@ class AndroidAdvisorFallbackTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}, clear=False), \
                 patch.object(ai_reranker, "_android_nano_text", return_value='{"ranked_ids":[1,2]}'), \
-                patch.object(ai_reranker, "_android_gemma_text", return_value='{"ranked_ids":[2,1]}'):
+                patch.object(ai_reranker, "_android_local_model_text", return_value='{"ranked_ids":[2,1]}'):
             result = ai_reranker._android_request(self._prompt(), "")
 
         self.assertEqual(result["ranked_ids"], [1, 2])
 
-    def test_a_local_gemma_model_answers_when_nano_is_unavailable(self):
+    def test_a_local_model_answers_when_nano_is_unavailable(self):
         import ai_reranker
 
         with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}, clear=False), \
                 patch.object(ai_reranker, "_android_nano_text", return_value=""), \
-                patch.object(ai_reranker, "_android_gemma_text", return_value='{"ranked_ids":[2,1]}'):
+                patch.object(ai_reranker, "_android_local_model_text", return_value='{"ranked_ids":[2,1]}'):
             result = ai_reranker._android_request(self._prompt(), "")
 
         self.assertEqual(result["ranked_ids"], [2, 1])
@@ -598,7 +655,7 @@ class AndroidAdvisorFallbackTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}, clear=False), \
                 patch.object(ai_reranker, "_android_nano_text", return_value=""), \
-                patch.object(ai_reranker, "_android_gemma_text", return_value=""):
+                patch.object(ai_reranker, "_android_local_model_text", return_value=""):
             result = ai_reranker._android_request(self._prompt(), "")
 
         # Highest local score first: the deterministic ranker never defers to
@@ -610,7 +667,7 @@ class AndroidAdvisorFallbackTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}, clear=False), \
                 patch.object(ai_reranker, "_android_nano_text", return_value=""), \
-                patch.object(ai_reranker, "_android_gemma_text", return_value=""), \
+                patch.object(ai_reranker, "_android_local_model_text", return_value=""), \
                 patch.object(ai_reranker, "_duck_request", side_effect=AssertionError("Duck.ai called")), \
                 patch.object(ai_reranker, "_gemini_request", side_effect=AssertionError("Gemini called")), \
                 patch.object(ai_reranker, "_codex_request", side_effect=AssertionError("Codex called")), \

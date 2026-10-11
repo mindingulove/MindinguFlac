@@ -25,6 +25,26 @@ public final class NanoAdvisor {
     private NanoAdvisor() {
     }
 
+    /**
+     * Kick off the AICore feature download at app start rather than waiting
+     * for the first ranking prompt. Does nothing unless AICore is present on
+     * this device and the feature is DOWNLOADABLE — there is no way to install
+     * AICore itself; that is a Play Services device allowlist, not something
+     * an app can request.
+     */
+    public static void maybeStartDownload() {
+        try {
+            MODEL.checkStatus().addListener(() -> {
+                try {
+                    int status = MODEL.checkStatus().get();
+                    if (status == FeatureStatus.DOWNLOADABLE) requestDownload();
+                } catch (Throwable ignored) {
+                }
+            }, Runnable::run);
+        } catch (Throwable ignored) {
+        }
+    }
+
     public static String status() {
         try {
             int status = MODEL.checkStatus().get(4, TimeUnit.SECONDS);

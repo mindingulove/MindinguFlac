@@ -109,7 +109,7 @@ def discover_catalog(config, refresh_global: bool = True) -> dict:
                 jobs = json.load(f)
                 jobs.sort(key=lambda x: x.get("created_at", 0), reverse=True)
                 for job in jobs[:100]:
-                    if job.get("status") == "finished":
+                    if job.get("status") == "finished" and not job.get("hidden_from_recent"):
                         recent.append({
                             "type": "track",
                             "id": job["id"],

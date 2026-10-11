@@ -63,6 +63,110 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertEqual([status["in_library"] for status in statuses], [True, True])
         self.assertEqual(find_audio.call_count, 1)
 
+    def test_library_status_batch_walks_the_cache_directory_only_once(self):
+        # _find_cache_entry used to re-walk the entire cache directory and
+        # re-check every job's file on disk for every single track in a
+        # batch — a playlist of a few hundred tracks meant a few hundred full
+        # re-walks for the exact same, search-independent answer each time,
+        # which could take minutes or simply never return. The cache side of
+        # the fix mirrors the music-library side tested just above.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cache_track = root / "cache" / "job-1" / "For Your Babies - Simply Red.m4a"
+            cache_track.parent.mkdir(parents=True)
+            cache_track.write_bytes(b"ftyp" + b"\0" * (101 * 1024))
+            (cache_track.parent / "metadata.json").write_text(
+                '{"tracks": {"For Your Babies": {"artist": "Simply Red", "album": "Stars"}}}',
+                encoding="utf-8",
+            )
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="tidal",
+                default_quality="LOSSLESS",
+            )
+            payload = {"artist": "Simply Red", "album": "Stars", "title": "For Your Babies"}
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                manager = service_downloader.ServiceDownloadManager(config)
+                with patch.object(service_downloader, "_find_audio_files", wraps=service_downloader._find_audio_files) as find_audio:
+                    statuses = manager.library_status_batch([payload, payload, payload])
+
+        self.assertEqual([status["in_library"] for status in statuses], [False, False, False])
+        self.assertTrue(all(status["cached"] for status in statuses))
+        self.assertEqual([status["cache_path"] for status in statuses], [str(cache_track)] * 3)
+        # Once for the music-library walk, once for the cache-directory walk
+        # — not once per track for either.
+        self.assertEqual(find_audio.call_count, 2)
+
+    def test_cache_status_still_matches_a_sidecar_entry_missing_its_own_artist(self):
+        # _cache_job_from_sidecar used to fall back to the identity being
+        # *searched for* when a sidecar entry had no artist/album of its own,
+        # which made that one comparison trivially succeed. It now falls back
+        # to a neutral "Unknown Artist" instead, since there is no search
+        # identity at the point this now runs — ISRC/Spotify id/MusicBrainz
+        # id matching in _job_matches_identity still finds it regardless.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cache_track = root / "cache" / "job-1" / "Mystery Track.m4a"
+            cache_track.parent.mkdir(parents=True)
+            cache_track.write_bytes(b"ftyp" + b"\0" * (101 * 1024))
+            (cache_track.parent / "metadata.json").write_text(
+                '{"tracks": {"Mystery Track": {"isrc": "USUM71700001"}}}',
+                encoding="utf-8",
+            )
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="tidal",
+                default_quality="LOSSLESS",
+            )
+            payload = {"artist": "Any Artist", "album": "Any Album", "title": "Mystery Track", "isrc": "USUM71700001"}
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                manager = service_downloader.ServiceDownloadManager(config)
+                status = manager.library_status(payload)
+
+        self.assertTrue(status["cached"])
+        self.assertEqual(status["cache_path"], str(cache_track))
+
+    def test_hide_from_recent_flags_every_job_matching_the_track_not_just_one(self):
+        # A replayed track can have multiple finished jobs (replays,
+        # re-downloads) — "remove from recently played" must hide all of
+        # them, or the row would just reappear from an older job on refresh.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = SimpleNamespace(
+                music_dir=root / "music",
+                cache_dir=root / "cache",
+                download_service="tidal",
+                default_quality="LOSSLESS",
+            )
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"):
+                manager = service_downloader.ServiceDownloadManager(config)
+                manager.jobs["job-1"] = {
+                    "id": "job-1", "status": "finished", "mode": "stream",
+                    "title": "Thriller", "artist": "Michael Jackson", "album": "Thriller",
+                    "spotify_id": "2LlQb7Uoj1kKyGhlkBf9aC", "created_at": 100,
+                }
+                manager.jobs["job-2"] = {
+                    "id": "job-2", "status": "finished", "mode": "stream",
+                    "title": "Thriller", "artist": "Michael Jackson", "album": "Thriller",
+                    "spotify_id": "2LlQb7Uoj1kKyGhlkBf9aC", "created_at": 200,
+                }
+                manager.jobs["job-3"] = {
+                    "id": "job-3", "status": "finished", "mode": "stream",
+                    "title": "Beat It", "artist": "Michael Jackson", "album": "Thriller",
+                    "spotify_id": "3BovdzfaX4jb5KFQwoPfAw", "created_at": 150,
+                }
+                hidden = manager.hide_from_recent({
+                    "artist": "Michael Jackson", "album": "Thriller", "title": "Thriller",
+                    "spotify_id": "2LlQb7Uoj1kKyGhlkBf9aC",
+                })
+
+        self.assertEqual(hidden, 2)
+        self.assertTrue(manager.jobs["job-1"]["hidden_from_recent"])
+        self.assertTrue(manager.jobs["job-2"]["hidden_from_recent"])
+        self.assertFalse(manager.jobs["job-3"].get("hidden_from_recent"))
+
     def test_selected_track_metadata_replaces_unknown_provider_artist(self):
         class Track:
             title = "Two Hearts"

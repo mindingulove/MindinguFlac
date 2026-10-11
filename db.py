@@ -27,6 +27,18 @@ def _get_conn():
     return _local.conn
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
+    """Add `column` to `table` if an older schema version created it without one.
+
+    CREATE TABLE IF NOT EXISTS only applies to brand-new databases — an
+    existing table silently keeps whatever columns it had when it was first
+    created, even after the CREATE statement in this file gains new ones.
+    """
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def _init_db(conn: sqlite3.Connection):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -304,6 +316,13 @@ def _init_db(conn: sqlite3.Connection):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_track_video_overrides_musicbrainz_recording_id ON track_video_overrides(musicbrainz_recording_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_track_video_overrides_youtube_video_id ON track_video_overrides(youtube_video_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_youtube_videos_channel_id ON youtube_videos(channel_id)")
+    # artist_affinity.spotify_artist_id was added to the CREATE TABLE statement
+    # by the per-listen-stats refactor (plans/mindinguflac_per_listen_stats_refactor.md),
+    # which only takes effect for a brand-new database — CREATE TABLE IF NOT EXISTS
+    # is a no-op against a table that already existed from before that refactor.
+    # Without this, update_artist_affinity() (called on every play/skip) throws
+    # "no column named spotify_artist_id" on any such pre-existing database.
+    _ensure_column(conn, "artist_affinity", "spotify_artist_id", "TEXT")
     # ── Per-listen append-only stats tables ────────────────────────────────────
     # Part of the refactor described in plans/mindinguflac_per_listen_stats_refactor.md
     # One row per playback session per track/artist/album/genre.
@@ -2032,9 +2051,22 @@ def process_listening_event(event: dict) -> dict:
     # update_genre_affinity calls _extract_metadata_bundle which includes MusicBrainz lookup
     # for genres; reuse its metadata to also populate the per-listen stats tables.
     # See plans/mindinguflac_per_listen_stats_refactor.md
-    affinity = update_track_affinity({**event, "created_at": saved.get("created_at"), "event_id": saved.get("event_id")})
-    artist_aff = update_artist_affinity(event)
-    genre_aff = update_genre_affinity(event)
+    # Each of these three is independently best-effort: save_listening_event()
+    # above already committed the authoritative event row, so one of these
+    # throwing (e.g. a schema drift on an older database) must not turn an
+    # otherwise-successful event write into a request-level failure.
+    try:
+        affinity = update_track_affinity({**event, "created_at": saved.get("created_at"), "event_id": saved.get("event_id")})
+    except Exception:
+        affinity = {}
+    try:
+        artist_aff = update_artist_affinity(event)
+    except Exception:
+        artist_aff = {}
+    try:
+        genre_aff = update_genre_affinity(event)
+    except Exception:
+        genre_aff = {}
     # Write per-listen stats event rows (append-only, one row per session per dimension).
     try:
         from taste_profile import extract_genres_from_metadata
@@ -2510,6 +2542,79 @@ def get_top_listened_albums(period: str, limit: int = 10, offset: int = 0, year:
             "completion_rate": (completed / max(plays, 1)) * 100.0,
         })
     return {"period": period, "items": items, "total": int((total_row["total"] if total_row else 0) or 0)}
+
+
+# ── Removal from statistics ─────────────────────────────────────────────────
+# User-initiated "remove from statistics" (right-click / long-press on a stats
+# row). get_top_listened_tracks and the summary cards read listening_events
+# directly (track_listen_stats_events is write-only — nothing queries it), while
+# get_top_listened_artists/_albums/_genres read their own *_listen_stats_events
+# table as the primary source. Deleting only the *_listen_stats_events rows is
+# therefore a no-op for the track view and the summary cards — listening_events
+# must be included in every cascade, not just the newer per-listen tables.
+
+_STATS_EVENT_TABLES = (
+    "listening_events",
+    "track_listen_stats_events",
+    "artist_listen_stats_events",
+    "album_listen_stats_events",
+    "genre_listen_stats_events",
+)
+
+
+def delete_track_from_stats(track_key: str) -> int:
+    """Remove every stats event for track_key, across all five tables."""
+    track_key = (track_key or "").strip()
+    if not track_key:
+        return 0
+    conn = _get_conn()
+    deleted = 0
+    for table in _STATS_EVENT_TABLES:
+        deleted += conn.execute(f"DELETE FROM {table} WHERE track_key = ?", (track_key,)).rowcount
+    conn.commit()
+    return deleted
+
+
+def delete_artist_from_stats(artist_key: str) -> int:
+    """Remove this artist's own stats row plus every track they're credited on."""
+    artist_key = (artist_key or "").strip()
+    if not artist_key:
+        return 0
+    conn = _get_conn()
+    track_keys = [r[0] for r in conn.execute(
+        "SELECT DISTINCT track_key FROM artist_listen_stats_events WHERE artist_key = ? AND track_key != ''",
+        (artist_key,),
+    ).fetchall()]
+    deleted = 0
+    for track_key in track_keys:
+        for table in ("listening_events", "track_listen_stats_events", "album_listen_stats_events", "genre_listen_stats_events"):
+            deleted += conn.execute(f"DELETE FROM {table} WHERE track_key = ?", (track_key,)).rowcount
+    deleted += conn.execute(
+        "DELETE FROM artist_listen_stats_events WHERE artist_key = ?", (artist_key,)
+    ).rowcount
+    conn.commit()
+    return deleted
+
+
+def delete_album_from_stats(album_key: str) -> int:
+    """Remove this album's own stats row plus every track on it."""
+    album_key = (album_key or "").strip()
+    if not album_key:
+        return 0
+    conn = _get_conn()
+    track_keys = [r[0] for r in conn.execute(
+        "SELECT DISTINCT track_key FROM album_listen_stats_events WHERE album_key = ? AND track_key != ''",
+        (album_key,),
+    ).fetchall()]
+    deleted = 0
+    for track_key in track_keys:
+        for table in ("listening_events", "track_listen_stats_events", "artist_listen_stats_events", "genre_listen_stats_events"):
+            deleted += conn.execute(f"DELETE FROM {table} WHERE track_key = ?", (track_key,)).rowcount
+    deleted += conn.execute(
+        "DELETE FROM album_listen_stats_events WHERE album_key = ?", (album_key,)
+    ).rowcount
+    conn.commit()
+    return deleted
 
 
 _MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]

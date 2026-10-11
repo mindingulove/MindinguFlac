@@ -81,7 +81,8 @@ The Android build keeps the desktop ranking workflow in the Python backend,
 but replaces desktop-only providers with this order:
 
 1. Gemini Nano through Android AICore and ML Kit Prompt API.
-2. A local Gemma MediaPipe `.task` bundle selected from the app's model picker.
+2. A local model run through MediaPipe's LLM Inference API
+   (`LocalModelAdvisor.java`).
 3. The deterministic Python ranker, which is always available offline.
 
 Ranking only *reorders* candidates that already passed deterministic and
@@ -89,9 +90,18 @@ RapidFuzz filtering; it cannot introduce a candidate the filter rejected, and
 no Android path reaches a cloud provider. Open Settings to inspect the
 on-device model status. There is no separate AI Advisor tab. If Nano is
 supported but not downloaded, the app requests its AICore feature download.
-For the second stage, choose **Install local Gemma model** and select a
-compatible MediaPipe task bundle. The model is copied into private app storage;
-no API key is stored or transmitted.
+
+The second stage is Qwen2.5 1.5B Instruct (Apache-2.0, Alibaba), converted by
+LiteRT Community — unlike Gemma's official MediaPipe bundle, that conversion
+is **not** license-gated, so the app downloads and installs it itself: at
+launch, automatically, if nothing is installed yet and the device is on an
+unmetered (Wi-Fi) connection, since the bundle is ~1.5 GB. **Download now** in
+Settings forces it immediately, including over mobile data. **Install from
+file** keeps the old manual flow — pick any compatible MediaPipe `.task`
+bundle, for a different model or a retry via a browser download — and shares
+the same install slot, so whichever install (automatic or manual) finished
+most recently is what ranking uses. No API key or account is ever stored or
+transmitted.
 
 ## Storage
 

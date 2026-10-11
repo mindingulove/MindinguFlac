@@ -4349,6 +4349,9 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   background-color: var(--surface-3);
   flex-shrink: 0;
 }
+.context-menu-header-art.round {
+  border-radius: 50%;
+}
 .context-menu-header-info {
   display: flex;
   flex-direction: column;
@@ -4657,7 +4660,39 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
      pushed "ALBUM" into the middle while the title below it sat flush left. */
   .library-hero .eyebrow,
   .compact-hero .eyebrow,
-  .entity-hero .eyebrow { margin-left: 0; }
+  .entity-hero .eyebrow,
+  .playlist-hero-info .eyebrow { margin-left: 0; }
+
+  /* The playlist page never shared .entity-hero with the album page — it has
+     its own, separate .playlist-hero markup that still carried every desktop
+     assumption .entity-hero had before being fixed: a flex row instead of a
+     stack, fixed-width art that doesn't shrink, negative margins sized for
+     the desktop scroll-area padding, and an unclamped h1. Mirror the same
+     fix here so a playlist's header looks and behaves like an album's. */
+  .playlist-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+    min-height: 0;
+    padding: 18px 16px 20px;
+    margin: -14px -16px 0;
+  }
+  .playlist-hero-art {
+    width: min(56vw, 232px);
+    max-width: 100%;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    margin-inline: auto;
+    font-size: 32px;
+  }
+  .playlist-hero-info h1 {
+    font-size: clamp(22px, 6.4vw, 30px);
+    line-height: 1.16;
+    margin: 2px 0 0;
+    overflow-wrap: anywhere;
+  }
+  .playlist-hero-desc { max-width: none; }
+  .hero-meta-row { flex-wrap: wrap; row-gap: 8px; }
   .library-hero h1,
   .compact-hero h1 { margin-left: 0; font-size: 38px; letter-spacing: -1.4px; }
   .section-head,
@@ -5072,6 +5107,9 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
     background-size: cover;
     background-position: center;
     flex-shrink: 0;
+  }
+  .context-menu.as-sheet .context-menu-header-art.round {
+    border-radius: 50%;
   }
   .context-menu.as-sheet .context-menu-header-info strong { font-size: 17px; }
 

@@ -118,7 +118,24 @@ def start(data_path: str, cache_path: str, music_path: str, token: str) -> int:
     """Start the real Mindinguflac backend on an authenticated loopback port."""
     global _server, _thread
     if _server is not None:
-        return int(_server.server_address[1])
+        # The Python interpreter and HTTP server survive an Activity-only
+        # recreate within the same process — Android reclaiming the Activity
+        # under memory pressure without killing the process is common after
+        # the app has been opened and closed repeatedly. MainActivity always
+        # generates a fresh per-launch token and cookie regardless, so the
+        # server has to adopt it here too. This branch used to return the
+        # cached port without touching app.API_TOKEN, so the server kept
+        # enforcing whatever token the *previous* launch had set; the new
+        # cookie never matched it, and every authenticated request — search,
+        # downloads, and the range-stream endpoint playback depends on —
+        # started failing with 401 from that point on, with nothing in the UI
+        # distinguishing it from any other playback failure.
+        import app
+
+        app.API_TOKEN = token
+        port = int(_server.server_address[1])
+        _preflight(port, token, Path(cache_path), Path(music_path))
+        return port
 
     data_dir = Path(data_path) / "mindinguflac"
     cache_dir = Path(cache_path)

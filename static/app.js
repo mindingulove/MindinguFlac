@@ -525,6 +525,15 @@ function spotifyAlbumId(album = {}) {
   return match ? match[1] : String(value).trim();
 }
 
+function spotifyArtistUrl(artist = {}) {
+  const target = artistTarget(artist);
+  const url = target.spotify_url || (target.external_urls && target.external_urls.spotify) || "";
+  if (url && /open\.spotify\.com\/artist\//.test(url)) return url;
+  let id = target.spotify_artist_id || target.spotify_id || target.artist_id || "";
+  if (id && id.includes(":")) id = id.split(":").pop();
+  return id ? `https://open.spotify.com/artist/${id}` : "";
+}
+
 function spotifyAlbumUrl(album = {}) {
   const url = album.spotify_url || album.external_url || (album.external_urls && album.external_urls.spotify) || "";
   if (url && /open\.spotify\.com\/album\//.test(url)) return url;
@@ -674,6 +683,13 @@ function setDetailsExpanded(expanded) {
   clearTimeout(_nowPlayingCloseTimer);
   clearTimeout(_nowPlayingRestoreTimer);
   body.classList.remove("now-playing-closing", "now-playing-restored");
+  // The settle() listener below sets this to "none" after the open animation
+  // finishes, to stop its lingering transform from leaking into the
+  // containing block for fixed children (see the comment there). An inline
+  // style always beats a class selector, so without clearing it here every
+  // open and close after the first ran with no animation at all — not fast,
+  // just silently skipped.
+  if (panel) panel.style.animation = "";
 
   // Closing on a phone plays the sheet back down before the screen is torn
   // apart. The panel and the transport bar are separate fixed elements, so
@@ -682,6 +698,14 @@ function setDetailsExpanded(expanded) {
   if (!wantExpanded && state.detailsExpanded && onPhone && body.classList.contains("mobile-now-playing")) {
     state.detailsExpanded = false;
     syncDetailsExpandButton(false);
+    // See the matching comment below: nothing floating over this screen makes
+    // sense once it is gone, and this is the path a swipe or the collapse
+    // button actually takes.
+    if (state.lyrics?.open) closeLyricsPanel();
+    const queue = $("queuePanel");
+    if (queue && !queue.hidden) closeQueuePanel();
+    const connect = $("connectPanel");
+    if (connect && !connect.hidden) closeConnectPanel();
     body.classList.add("now-playing-closing");
     _nowPlayingCloseTimer = setTimeout(() => {
       body.classList.remove("now-playing-closing", "mobile-now-playing", "details-expanded");
@@ -698,6 +722,32 @@ function setDetailsExpanded(expanded) {
   body.classList.toggle("details-expanded", state.detailsExpanded);
   body.classList.toggle("mobile-now-playing", state.detailsExpanded && onPhone);
   syncDetailsExpandButton(state.detailsExpanded);
+
+  // Exiting the fullscreen screen closes whatever was open over it; none of
+  // them make sense floating above a screen that is no longer there.
+  if (!state.detailsExpanded) {
+    if (state.lyrics?.open) closeLyricsPanel();
+    const queue = $("queuePanel");
+    if (queue && !queue.hidden) closeQueuePanel();
+    const connect = $("connectPanel");
+    if (connect && !connect.hidden) closeConnectPanel();
+  }
+
+  if (state.detailsExpanded && panel) {
+    // The open animation uses fill-mode: both, which leaves the panel's
+    // computed transform at translateY(0) — not "none" — once it finishes.
+    // A non-none transform on an ancestor changes the containing block for any
+    // position:fixed descendant, and #queuePanel/#connectPanel live inside
+    // .details-panel: that is what made the queue scroll away with the
+    // panel's own content instead of staying pinned to the viewport. Dropping
+    // the animation once it completes restores "transform: none" (nothing
+    // else sets it) without disturbing the slide-in itself.
+    panel.addEventListener("animationend", function settle(event) {
+      if (event.target !== panel) return;
+      panel.removeEventListener("animationend", settle);
+      if (state.detailsExpanded) panel.style.animation = "none";
+    });
+  }
 }
 
 function setMobileNavActive(name) {
@@ -772,25 +822,45 @@ function advisorStatusText(kind, status) {
   return `${kind}: ${labels[status] || status || "unavailable"}`;
 }
 
+function stopAndroidAdvisorPolling() {
+  if (state.androidAdvisorTimer) {
+    clearInterval(state.androidAdvisorTimer);
+    state.androidAdvisorTimer = null;
+  }
+}
+
+// The local model download can run for minutes; without polling, the status
+// line only ever showed whatever it said the moment Settings was opened.
+function startAndroidAdvisorPolling() {
+  if (!IS_ANDROID || state.androidAdvisorTimer) return;
+  state.androidAdvisorTimer = setInterval(refreshAndroidAdvisorStatus, 3000);
+}
+
 function refreshAndroidAdvisorStatus() {
   const row = $("androidAdvisorRow");
   if (!row) return;
   row.classList.toggle("hidden", !IS_ANDROID);
   if (!IS_ANDROID || !window.MindinguflacAndroid) return;
+  startAndroidAdvisorPolling();
   try {
     $("nanoAdvisorStatus").textContent = advisorStatusText("Gemini Nano", window.MindinguflacAndroid.nanoStatus());
-    $("gemmaAdvisorStatus").textContent = advisorStatusText("Local Gemma", window.MindinguflacAndroid.gemmaStatus());
+    $("localModelStatus").textContent = advisorStatusText("Local model", window.MindinguflacAndroid.localModelStatus());
   } catch (_) {
     $("nanoAdvisorStatus").textContent = advisorStatusText("Gemini Nano", "unavailable");
-    $("gemmaAdvisorStatus").textContent = advisorStatusText("Local Gemma", "not_installed");
+    $("localModelStatus").textContent = advisorStatusText("Local model", "not_installed");
   }
-  const install = $("installGemmaModel");
-  if (install) install.onclick = () => window.MindinguflacAndroid.installGemma();
+  // "Download now" auto-starts over Wi-Fi already; this button is for forcing
+  // it over mobile data, or retrying after a failed attempt. "Install from
+  // file" stays for picking a different model, or a manual browser download.
+  const download = $("downloadLocalModel");
+  if (download) download.onclick = () => window.MindinguflacAndroid.downloadLocalModel();
+  const install = $("installLocalModel");
+  if (install) install.onclick = () => window.MindinguflacAndroid.installLocalModel();
 }
 
-window.onGemmaInstalled = installed => {
+window.onLocalModelInstalled = installed => {
   refreshAndroidAdvisorStatus();
-  if (!installed) alert("That local Gemma model could not be installed. Choose a compatible MediaPipe .task bundle.");
+  if (!installed) alert("That model could not be installed. Choose a compatible MediaPipe .task bundle.");
 };
 
 function focusMobileSearch() {
@@ -826,7 +896,7 @@ function bindMobileNavigation() {
 }
 
 function setActiveView(id) {
-  if (id !== "settings") stopCacheLogPolling();
+  if (id !== "settings") { stopCacheLogPolling(); stopAndroidAdvisorPolling(); }
   if (window.artistEvtSource) {
     window.artistEvtSource.close();
     window.artistEvtSource = null;
@@ -858,6 +928,16 @@ window.__androidBack = function () {
 };
 
 function pushPage(renderFn) {
+  // A link clicked from inside the fullscreen now-playing screen (a tour
+  // event, a related artist, a credit, "go to album") updates #pageContent
+  // like any other navigation, but that content sits behind the fullscreen
+  // overlay — the user would see nothing happen until they separately
+  // swiped it away themselves. Collapsing it first, through the same close
+  // animation swiping down already uses, makes the destination page the
+  // thing that becomes visible.
+  if (document.body.classList.contains("mobile-now-playing")) {
+    setDetailsExpanded(false);
+  }
   if (state.viewStack.length > 0) {
     const activeScrollArea = document.querySelector(".active .scroll-area");
     state.viewStack[state.viewStack.length - 1].scroll = activeScrollArea ? activeScrollArea.scrollTop : 0;
@@ -1144,6 +1224,7 @@ function renderHomePage() {
 
   if (recentTracks.length) {
     renderCards("recentTracksGrid", recentTracks, "track", state.catalog.recent_tracks);
+    bindRecentTrackContextMenus("recentTracksGrid", recentTracks);
     $("seeMoreRecent").onclick = () => pushPage(renderRecentTracksPage);
   }
 
@@ -1327,7 +1408,7 @@ function renderRecentTracksPage() {
     </div>
   `;
   const tracks = uniqueRecentTracks(state.catalog.recent_tracks || []);
-  renderTrackList("fullRecentTracks", tracks);
+  renderTrackList("fullRecentTracks", tracks, "general", { kind: "recent" });
 }
 
 function renderGlobalTracksPage() {
@@ -1558,19 +1639,17 @@ function renderStatsTrackRows(items = []) {
   `;
 }
 
-function bindStatsTrackRows(containerId, items = []) {
+function bindStatsTrackRows(containerId, items = [], onRemoved = null) {
   const container = $(containerId);
   if (!container) return;
   container.querySelectorAll(".stats-track-row").forEach(el => {
     const item = items[Number(el.dataset.itemIdx)];
     if (!item) return;
     el.onclick = () => selectMusicItem(item, "stream", items);
-    if (playableQueueItem(item)) {
-      el.oncontextmenu = (event) => {
-        event.preventDefault();
-        showTrackContextMenu(event, item);
-      };
-    }
+    el.oncontextmenu = (event) => {
+      event.preventDefault();
+      showTrackContextMenu(event, item, { kind: "stats", onRemoved });
+    };
   });
   bindEntityLinks(container);
 }
@@ -1643,17 +1722,33 @@ function _applyStatsSummary(summary, activePeriod) {
 }
 function _applyStatsTracks(tracks, activePeriod) {
   const items = (tracks && tracks.items) || [];
-  if ($("statsTracks")) { $("statsTracks").innerHTML = renderStatsTrackRows(items); bindStatsTrackRows("statsTracks", items); }
+  if ($("statsTracks")) { $("statsTracks").innerHTML = renderStatsTrackRows(items); bindStatsTrackRows("statsTracks", items, () => renderStatsPage(activePeriod)); }
   if ($("statsSeeAllTracks")) $("statsSeeAllTracks").onclick = () => pushPage(() => renderStatsTracksPage(activePeriod));
 }
+// get_top_listened_artists/albums rows carry artist_name/no `type` field — stats
+// cards are the only renderCards consumers reading those rows, so normalizing
+// here (not inside the shared artistTarget/cardsHtml) can't affect other callers.
+function _normalizeStatsArtistItem(item) {
+  return { ...item, type: "artist", name: item.artist_name || item.name || "", artist: item.artist_name || item.artist || "" };
+}
+function _normalizeStatsAlbumItem(item) {
+  return { ...item, type: "album" };
+}
+
 function _applyStatsArtists(artists, activePeriod) {
-  const items = (artists && artists.items) || [];
-  if ($("statsArtists")) renderCards("statsArtists", items, "artist");
+  const items = ((artists && artists.items) || []).map(_normalizeStatsArtistItem);
+  if ($("statsArtists")) {
+    renderCards("statsArtists", items, "artist");
+    bindStatsEntityContextMenus("statsArtists", items, "artist", () => renderStatsPage(activePeriod));
+  }
   if ($("statsSeeAllArtists")) $("statsSeeAllArtists").onclick = () => pushPage(() => renderStatsArtistsPage(activePeriod));
 }
 function _applyStatsAlbums(albums, activePeriod) {
-  const items = (albums && albums.items) || [];
-  if ($("statsAlbums")) renderCards("statsAlbums", items, "album");
+  const items = ((albums && albums.items) || []).map(_normalizeStatsAlbumItem);
+  if ($("statsAlbums")) {
+    renderCards("statsAlbums", items, "album");
+    bindStatsEntityContextMenus("statsAlbums", items, "album", () => renderStatsPage(activePeriod));
+  }
   if ($("statsSeeAllAlbums")) $("statsSeeAllAlbums").onclick = () => pushPage(() => renderStatsAlbumsPage(activePeriod));
 }
 function _applyStatsTimeline(timeline) {
@@ -1817,13 +1912,13 @@ async function renderStatsTracksPage(period = "month") {
   const q = () => statsQueryParams({ period: activePeriod }).toString();
   const first = await api(`/api/stats/top-listened-tracks?${q()}&limit=10&offset=0`).catch(() => ({ items: [], total: 0 }));
   allItems.push(...(first.items || []));
-  if (container) { container.innerHTML = renderStatsTrackRows(allItems); bindStatsTrackRows("statsTracksFull", allItems); }
+  if (container) { container.innerHTML = renderStatsTrackRows(allItems); bindStatsTrackRows("statsTracksFull", allItems, () => replacePage(() => renderStatsTracksPage(activePeriod))); }
   const total = first.total || 0;
   for (let offset = 10; offset < Math.min(total, 200); offset += 20) {
     if (!$("statsTracksFull")) break;
     const chunk = await api(`/api/stats/top-listened-tracks?${q()}&limit=20&offset=${offset}`).catch(() => ({ items: [] }));
     allItems.push(...(chunk.items || []));
-    if ($("statsTracksFull")) { $("statsTracksFull").innerHTML = renderStatsTrackRows(allItems); bindStatsTrackRows("statsTracksFull", allItems); }
+    if ($("statsTracksFull")) { $("statsTracksFull").innerHTML = renderStatsTrackRows(allItems); bindStatsTrackRows("statsTracksFull", allItems, () => replacePage(() => renderStatsTracksPage(activePeriod))); }
     if (!(chunk.items || []).length) break;
   }
 }
@@ -1850,16 +1945,17 @@ async function renderStatsArtistsPage(period = "month") {
   _bindStatsMonthPicker(() => { if ((state.statsMonths||[]).length && !state.statsYear) state.statsYear = String(new Date().getFullYear()); state.statsPeriod = "custom"; reloadStats(); });
   // Progressive loading
   const allItems = [];
+  const onRemoved = () => replacePage(() => renderStatsArtistsPage(activePeriod));
   const q = () => statsQueryParams({ period: activePeriod }).toString();
   const first = await api(`/api/stats/top-listened-artists?${q()}&limit=10&offset=0`).catch(() => ({ items: [], total: 0 }));
-  allItems.push(...(first.items || []));
-  if ($("statsArtistsFull")) { renderCards("statsArtistsFull", allItems, "artist"); bindEntityLinks($("pageContent")); }
+  allItems.push(...(first.items || []).map(_normalizeStatsArtistItem));
+  if ($("statsArtistsFull")) { renderCards("statsArtistsFull", allItems, "artist"); bindEntityLinks($("pageContent")); bindStatsEntityContextMenus("statsArtistsFull", allItems, "artist", onRemoved); }
   const total = first.total || 0;
   for (let offset = 10; offset < Math.min(total, 200); offset += 20) {
     if (!$("statsArtistsFull")) break;
     const chunk = await api(`/api/stats/top-listened-artists?${q()}&limit=20&offset=${offset}`).catch(() => ({ items: [] }));
-    allItems.push(...(chunk.items || []));
-    if ($("statsArtistsFull")) { renderCards("statsArtistsFull", allItems, "artist"); bindEntityLinks($("pageContent")); }
+    allItems.push(...(chunk.items || []).map(_normalizeStatsArtistItem));
+    if ($("statsArtistsFull")) { renderCards("statsArtistsFull", allItems, "artist"); bindEntityLinks($("pageContent")); bindStatsEntityContextMenus("statsArtistsFull", allItems, "artist", onRemoved); }
     if (!(chunk.items || []).length) break;
   }
 }
@@ -1886,16 +1982,17 @@ async function renderStatsAlbumsPage(period = "month") {
   _bindStatsMonthPicker(() => { if ((state.statsMonths||[]).length && !state.statsYear) state.statsYear = String(new Date().getFullYear()); state.statsPeriod = "custom"; reloadStats(); });
   // Progressive loading
   const allItems = [];
+  const onRemoved = () => replacePage(() => renderStatsAlbumsPage(activePeriod));
   const q = () => statsQueryParams({ period: activePeriod }).toString();
   const first = await api(`/api/stats/top-listened-albums?${q()}&limit=10&offset=0`).catch(() => ({ items: [], total: 0 }));
-  allItems.push(...(first.items || []));
-  if ($("statsAlbumsFull")) { renderCards("statsAlbumsFull", allItems, "album"); bindEntityLinks($("pageContent")); }
+  allItems.push(...(first.items || []).map(_normalizeStatsAlbumItem));
+  if ($("statsAlbumsFull")) { renderCards("statsAlbumsFull", allItems, "album"); bindEntityLinks($("pageContent")); bindStatsEntityContextMenus("statsAlbumsFull", allItems, "album", onRemoved); }
   const total = first.total || 0;
   for (let offset = 10; offset < Math.min(total, 200); offset += 20) {
     if (!$("statsAlbumsFull")) break;
     const chunk = await api(`/api/stats/top-listened-albums?${q()}&limit=20&offset=${offset}`).catch(() => ({ items: [] }));
-    allItems.push(...(chunk.items || []));
-    if ($("statsAlbumsFull")) { renderCards("statsAlbumsFull", allItems, "album"); bindEntityLinks($("pageContent")); }
+    allItems.push(...(chunk.items || []).map(_normalizeStatsAlbumItem));
+    if ($("statsAlbumsFull")) { renderCards("statsAlbumsFull", allItems, "album"); bindEntityLinks($("pageContent")); bindStatsEntityContextMenus("statsAlbumsFull", allItems, "album", onRemoved); }
     if (!(chunk.items || []).length) break;
   }
 }
@@ -2016,12 +2113,22 @@ function renderTrackList(containerId, items, context = "general", playbackContex
   }, []);
   if (!trackIdxs.length) return;
 
-  api("/api/library/status/batch", {
-    method: "POST",
-    body: JSON.stringify({ tracks: trackIdxs.map(idx => serviceDownloadPayload(items[idx], "download")) }),
-  }).then(statuses => {
+  // One request for the whole list used to mean one slow or hung response
+  // left every row stuck on its Phase 1 placeholder — on a large playlist (a
+  // few hundred tracks is not unusual), that single call could take minutes
+  // or simply never resolve, and the existing .catch(() => {}) swallowed
+  // that with no retry, so the page looked permanently out of date after any
+  // revisit. Chunking bounds each request's worst case and lets the tracks a
+  // user can actually see update quickly regardless of how many more are
+  // further down the list.
+  const CHUNK_SIZE = 40;
+  const CHUNK_TIMEOUT_MS = 12000;
+  const chunks = [];
+  for (let i = 0; i < trackIdxs.length; i += CHUNK_SIZE) chunks.push(trackIdxs.slice(i, i + CHUNK_SIZE));
+
+  function applyStatuses(chunkIdxs, statuses) {
     if (!container.isConnected) return;
-    trackIdxs.forEach((itemIdx, i) => {
+    chunkIdxs.forEach((itemIdx, i) => {
       const btn = container.querySelector(`[data-library-action="${itemIdx}"]`);
       if (!btn) return;
       const status = statuses[i] || {};
@@ -2038,7 +2145,36 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       }
     });
     bindLibraryButtons();
-  }).catch(() => {});
+  }
+
+  async function runChunk(chunkIdxs) {
+    try {
+      // api() runs its own AbortController internally and ignores a `signal`
+      // passed through options (its own always wins), so the timeout has to
+      // go through its supported `timeout` option instead.
+      const statuses = await api("/api/library/status/batch", {
+        method: "POST",
+        timeout: CHUNK_TIMEOUT_MS,
+        body: JSON.stringify({ tracks: chunkIdxs.map(idx => serviceDownloadPayload(items[idx], "download")) }),
+      });
+      applyStatuses(chunkIdxs, statuses);
+    } catch (_) {
+      // This chunk's rows keep their Phase 1 placeholder; the rest of the
+      // list is unaffected, and nothing here blocks the other chunks.
+    }
+  }
+
+  // A few chunks in flight at once, not all of them — a playlist of several
+  // hundred tracks would otherwise open dozens of simultaneous connections.
+  const CONCURRENCY = 3;
+  let next = 0;
+  async function worker() {
+    while (next < chunks.length) {
+      const chunk = chunks[next++];
+      await runChunk(chunk);
+    }
+  }
+  Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));
 }
 
 // ---------------------------------------------------------------------------
@@ -4716,11 +4852,43 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
     quality: IS_ANDROID ? androidQuality : (state.settings.default_quality || "LOSSLESS"),
     service: IS_ANDROID ? androidService : (state.settings.download_service || "tidal"),
     engine: IS_ANDROID ? androidEngine : (state.settings.download_engine || "spotiflac"),
-    track,
-    metadata: track.metadata || track,
+    // A bare identity snapshot, not the raw `track` object. The backend only
+    // ever reads identity fields out of `track`/`metadata` (see
+    // _payload_metadata on the server), never the whole object — but
+    // `track: track` here used to embed it directly, and `track` itself was
+    // very often ITSELF a previous payload's `.track`, complete with its own
+    // nested `track`/`metadata`. Every play or download added one more
+    // nesting level with no way to unwind it, so a track replayed over months
+    // of use could carry a payload many layers deep. A 572-track playlist's
+    // batch status check — one POST, one payload per track — stopped
+    // completing at all once enough tracks had grown large enough, which is
+    // why their download badges silently never updated after a page revisit.
+    track: trackIdentitySnapshot(track),
+    metadata: trackIdentitySnapshot(track.metadata || track),
     spotify_id: spotifyId,
     isrc,
     track_key: trackKey(track),
+  };
+}
+
+// Just the fields identity/display logic actually reads, never a previous
+// payload's own `track`/`metadata`, which is what let serviceDownloadPayload
+// compound without bound across repeated plays of the same track.
+function trackIdentitySnapshot(track) {
+  if (!track || typeof track !== "object") return {};
+  return {
+    type: track.type || "track",
+    title: track.title || "",
+    artist: track.artist || "",
+    artist_id: track.artist_id || "",
+    album: track.album || "",
+    year: track.year || "",
+    artwork_url: track.artwork_url || "",
+    spotify_id: track.spotify_id || "",
+    spotify_url: track.spotify_url || "",
+    duration_ms: track.duration_ms || 0,
+    isrc: track.isrc || "",
+    track_key: track.track_key || trackKey(track),
   };
 }
 
@@ -4994,6 +5162,7 @@ function openLyricsPanel() {
   if (!panel) return;
   state.lyrics.open = true;
   panel.hidden = false;
+  attachPanelSwipeClose(panel, () => $("lyricsContent"), closeLyricsPanel);
   const bg = $("lyricsBg");
   if (bg) bg.hidden = false;
   $("btnLyrics")?.classList.add("active");
@@ -5160,6 +5329,54 @@ function uniqueRecentTracks(items = []) {
     out.push(item);
   }
   return out;
+}
+
+// Hides every finished download/stream job matching this track's identity
+// from "Recently Played" (server-side, persists across restarts) without
+// touching the cached file or job state anything else still relies on, then
+// mirrors the removal into local state and re-renders whichever "Recently
+// Played" surfaces (Home grid, full page, Queue panel's Recent tab) are
+// currently mounted.
+async function removeFromRecentlyPlayed(track) {
+  await api("/api/service/recent", {
+    method: "DELETE",
+    body: JSON.stringify(serviceDownloadPayload(track, "stream")),
+  }).catch(() => {});
+
+  const removedKey = recentTrackKey(track);
+  if (state.catalog && state.catalog.recent_tracks) {
+    state.catalog.recent_tracks = state.catalog.recent_tracks.filter(t => recentTrackKey(t) !== removedKey);
+  }
+
+  if ($("recentTracksGrid")) {
+    const recentTracks = uniqueRecentTracks(state.catalog.recent_tracks || []).slice(0, 6);
+    renderCards("recentTracksGrid", recentTracks, "track", state.catalog.recent_tracks);
+    bindRecentTrackContextMenus("recentTracksGrid", recentTracks);
+  }
+  if ($("fullRecentTracks")) {
+    const tracks = uniqueRecentTracks(state.catalog.recent_tracks || []);
+    renderTrackList("fullRecentTracks", tracks, "general", { kind: "recent" });
+  }
+  if ($("queueRecentList") && !$("queuePanel").hidden) {
+    renderQueueTracks("queueRecentList", state.catalog.recent_tracks || [], true);
+  }
+}
+
+// Mirrors bindStatsEntityContextMenus: re-binds oncontextmenu on the Home
+// page's "Recently Played" card grid (renderCards/bindCardClicks has no
+// contextInfo hook) without touching the generic card-click binder shared by
+// every other kind="track" grid on the Home page.
+function bindRecentTrackContextMenus(containerId, items) {
+  const container = $(containerId);
+  if (!container) return;
+  container.querySelectorAll("[data-card]").forEach((button) => {
+    const item = items[Number(button.dataset.card)];
+    if (!item || !playableQueueItem(item)) return;
+    button.oncontextmenu = (event) => {
+      event.preventDefault();
+      showTrackContextMenu(event, item, { kind: "recent" });
+    };
+  });
 }
 
 function playableQueueItem(item) {
@@ -5398,6 +5615,24 @@ async function cancelLibraryDownload(track, button, refresh) {
   if (typeof refresh === "function") refresh();
 }
 
+// Android keeps downloaded files in this app's private storage (not visible
+// to other apps or a file manager), so an explicit "add to library" download
+// also copies the file into the phone's shared Music library. Desktop writes
+// straight into the user's chosen Music folder already, so this is a no-op
+// there — nothing about desktop's save path or behaviour changes.
+function exportLibraryDownloadToPhone(libraryPath) {
+  if (!IS_ANDROID || !libraryPath || !window.MindinguflacAndroid?.exportDownloadToMusicLibrary) return;
+  const name = libraryPath.split("/").pop() || "";
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  const mime = {
+    flac: "audio/flac", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac",
+    ogg: "audio/ogg", opus: "audio/opus", wav: "audio/wav", alac: "audio/alac",
+  }[ext] || "audio/mpeg";
+  try {
+    window.MindinguflacAndroid.exportDownloadToMusicLibrary(libraryPath, name, mime);
+  } catch (_) {}
+}
+
 function updateLibraryProgressButton(button, status) {
   if (!button) return;
   button.classList.add("progress");
@@ -5405,14 +5640,45 @@ function updateLibraryProgressButton(button, status) {
   button.innerHTML = progressButtonMarkup(s);
 }
 
+// The track list re-renders constantly — the Phase 2 batch status fetch
+// replaces every button node once real status is known, switching tabs
+// rebuilds the whole container, scrolling a virtualized grid recreates rows.
+// None of that means the download stopped; it means the DOM node a poller
+// started with is gone. Re-find whatever button currently represents this
+// same track (by stable identity, not by index) so the poller can keep
+// animating it instead of just going dark.
+function findLiveLibraryButtonForTrack(track) {
+  const key = trackKey(track);
+  for (const candidate of document.querySelectorAll("[data-library-action]")) {
+    const row = candidate.closest("[data-item-data]");
+    if (!row || !row.dataset.itemData) continue;
+    try {
+      if (trackKey(JSON.parse(row.dataset.itemData)) === key) return candidate;
+    } catch (_) {
+      // Not this row's track; keep looking.
+    }
+  }
+  return null;
+}
+
 async function waitForLibraryToggle(track, jobId = "", button = null) {
   for (let attempt = 0; attempt < 900; attempt++) {
     if (button && button.dataset.cancelled === "1") return null;
-    // Stop polling a button that has been removed from the DOM (e.g. the tab
-    // was re-rendered); a fresh poller is attached to the replacement button.
-    if (button && !button.isConnected) return null;
+    // The button that started this poll may have been replaced by a later
+    // render. Re-acquire the current one for this same track by identity
+    // before deciding there is nothing left to update — losing a DOM
+    // reference used to be treated as "give up," which left the backend job
+    // running to completion with no button left tracking it: the spinner
+    // just stopped, with no checkmark and no error, because nothing told the
+    // user it had quietly detached from the download it still owned.
+    if (button && !button.isConnected) {
+      button = findLiveLibraryButtonForTrack(track);
+    }
     await new Promise(resolve => setTimeout(resolve, 1000));
-    if (button && (button.dataset.cancelled === "1" || !button.isConnected)) return null;
+    if (button && button.dataset.cancelled === "1") return null;
+    if (button && !button.isConnected) {
+      button = findLiveLibraryButtonForTrack(track);
+    }
     const status = await api("/api/library/status", {
       method: "POST",
       body: JSON.stringify(serviceDownloadPayload(track, "download")),
@@ -5428,6 +5694,7 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
         button.classList.add("downloaded");
         button.innerHTML = '<i class="bi bi-arrow-down-circle-fill downloaded"></i>';
       }
+      exportLibraryDownloadToPhone(status.library_path);
       return status;
     }
     if (jobId) {
@@ -7912,13 +8179,26 @@ function bindNowPlayingSwipe() {
     }, () => !state.detailsExpanded);
   }
 
+  function anOverlayIsOpen() {
+    // #queuePanel and #connectPanel are fixed-position overlays stacked on top
+    // of .details-panel with their own scroller, so .details-panel's own
+    // scrollTop tells you nothing about what is happening inside them — every
+    // touch inside the queue still bubbles up to this listener. Without this
+    // check, any downward drag in the queue list (even one meant to scroll
+    // back toward the top) could close the whole now-playing screen the
+    // moment it passed the swipe threshold.
+    const queue = $("queuePanel");
+    const connect = $("connectPanel");
+    return (queue && !queue.hidden) || (connect && !connect.hidden);
+  }
+
   const panel = document.querySelector(".details-panel");
   if (panel) {
     onVerticalSwipe(panel, (dy) => {
       if (dy > SWIPE_PX) setDetailsExpanded(false);
       // Only from the top of the panel, otherwise a downward swipe meant to
       // scroll the queue back up would dismiss the screen instead.
-    }, () => state.detailsExpanded && panel.scrollTop <= 0);
+    }, () => state.detailsExpanded && panel.scrollTop <= 0 && !anOverlayIsOpen());
   }
 }
 
@@ -8633,6 +8913,7 @@ function releaseDetailsOverlay() {
 async function openConnectPanel() {
   positionDetailsOverlay();
   $("connectPanel").hidden = false;
+  attachPanelSwipeClose($("connectPanel"), () => $("connectDeviceList"), closeConnectPanel);
   $("btnConnectDevice").classList.add("active");
   $("connectPanel").style.zIndex = "1000";
   $("queuePanel").style.zIndex = "900";
@@ -8699,7 +8980,7 @@ function renderQueueTracks(containerId, tracks, isRecent) {
       el.oncontextmenu = (event) => {
         event.preventDefault();
         if (typeof showTrackContextMenu === "function") {
-          const cinfo = el.dataset.qRecent === "true" ? {} : { queueIndex: track._qIdx };
+          const cinfo = el.dataset.qRecent === "true" ? { kind: "recent" } : { queueIndex: track._qIdx };
           showTrackContextMenu(event, track, cinfo);
         }
       };
@@ -8832,6 +9113,11 @@ function refreshQueuePanel() {
 function openQueuePanel() {
   positionDetailsOverlay();
   $("queuePanel").hidden = false;
+  attachPanelSwipeClose($("queuePanel"), () => {
+    const recent = $("queueContentRecent");
+    return recent && !recent.hidden ? recent : $("queueContentQueue");
+  }, closeQueuePanel);
+  attachQueueTabSwipe($("queuePanel"));
   $("btnQueue").classList.add("active");
   $("queuePanel").style.zIndex = "1000";
   $("connectPanel").style.zIndex = "900";
@@ -8906,11 +9192,14 @@ document.querySelectorAll(".queue-tab").forEach(tab => {
 // Context Menu
 // ---------------------------------------------------------------------------
 let contextMenuTargetTrack = null;
+// The row's own library button, so the sheet's Download acts on the real
+// element instead of a detached one whose class changes nobody ever sees.
+let contextMenuTargetLibraryBtn = null;
 let contextMenuLibraryReady = false;
 
 function ensureContextMenuLibrary() {
   if (contextMenuLibraryReady) return;
-  ["trackContextMenu", "albumContextMenu"].forEach((menuId) => {
+  ["trackContextMenu", "albumContextMenu", "artistContextMenu"].forEach((menuId) => {
     if ($(menuId) && !$(`${menuId}ToggleProxy`)) {
       const proxy = document.createElement("button");
       proxy.id = `${menuId}ToggleProxy`;
@@ -8978,6 +9267,101 @@ function openContextSheet(menu) {
 // a real finger. Calling preventDefault() on touchmove claims the gesture, and
 // it is only claimed for downward drags that start at the top of the sheet, so
 // scrolling a long list still works normally.
+// Swipe a full-screen phone panel down to close it: the lyrics panel, the
+// queue, and the connect-to-device panel all use this. Touch events so the
+// gesture can be claimed with preventDefault(), and only claimed when
+// `scroller()` (the panel's own inner scroll region — never the panel
+// element itself, which does not scroll) is already at its top, so a
+// downward swipe mid-scroll keeps scrolling instead of closing the panel.
+function attachPanelSwipeClose(panel, scroller, close) {
+  if (!panel || panel.dataset.swipeClose) return;
+  panel.dataset.swipeClose = "1";
+  const DISMISS_PX = 90;
+  let startY = 0;
+  let offset = 0;
+  let dragging = false;
+
+  panel.addEventListener("touchstart", (event) => {
+    const content = typeof scroller === "function" ? scroller() : scroller;
+    if (event.touches.length !== 1 || (content && content.scrollTop > 0)) {
+      dragging = false;
+      return;
+    }
+    dragging = true;
+    offset = 0;
+    startY = event.touches[0].clientY;
+    panel.style.transition = "none";
+  }, { passive: true });
+
+  panel.addEventListener("touchmove", (event) => {
+    if (!dragging) return;
+    const dy = event.touches[0].clientY - startY;
+    if (dy <= 0) return;
+    offset = dy;
+    event.preventDefault();
+    panel.style.transform = `translateY(${dy}px)`;
+    panel.style.opacity = String(Math.max(0.35, 1 - dy / 600));
+  }, { passive: false });
+
+  const settle = () => {
+    if (!dragging) return;
+    dragging = false;
+    panel.style.transition = "transform 190ms ease, opacity 190ms ease";
+    if (offset > DISMISS_PX) {
+      panel.style.transform = "translateY(100%)";
+      panel.style.opacity = "0";
+      setTimeout(() => {
+        close();
+        panel.style.transform = "";
+        panel.style.opacity = "";
+        panel.style.transition = "";
+      }, 190);
+    } else {
+      panel.style.transform = "";
+      panel.style.opacity = "";
+    }
+  };
+  panel.addEventListener("touchend", settle, { passive: true });
+  panel.addEventListener("touchcancel", settle, { passive: true });
+}
+
+// Swipe left/right on the queue panel to switch between its Queue and
+// Recently played tabs, the way a phone tab strip is expected to behave.
+function attachQueueTabSwipe(panel) {
+  if (!panel || panel.dataset.tabSwipe) return;
+  panel.dataset.tabSwipe = "1";
+  const SWIPE_PX = 48;
+  const SLOP_PX = 40;
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+
+  panel.addEventListener("touchstart", (event) => {
+    tracking = event.touches.length === 1;
+    if (!tracking) return;
+    startX = event.touches[0].clientX;
+    startY = event.touches[0].clientY;
+  }, { passive: true });
+
+  panel.addEventListener("touchend", (event) => {
+    if (!tracking) return;
+    tracking = false;
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+    if (Math.abs(dy) > SLOP_PX || Math.abs(dx) < SWIPE_PX) return;
+    const tabs = [...panel.querySelectorAll(".queue-tab")];
+    const activeIndex = tabs.findIndex(t => t.classList.contains("active"));
+    if (activeIndex === -1) return;
+    // Swipe left moves to the next tab, right moves to the previous — the
+    // content appears to travel with the finger, same as a horizontal pager.
+    const nextIndex = activeIndex + (dx < 0 ? 1 : -1);
+    if (nextIndex < 0 || nextIndex >= tabs.length) return;
+    tabs[nextIndex].click();
+  }, { passive: true });
+}
+
 function attachSheetDrag(menu) {
   if (menu.dataset.sheetDrag) return;
   menu.dataset.sheetDrag = "1";
@@ -9035,6 +9419,32 @@ function attachSheetDrag(menu) {
   }, true);
 }
 
+// Re-read one track's library state and repaint its button. toggleTrackLibrary
+// leaves the button mid-flight when a download finishes, so without this the
+// icon keeps the spinner it had when the job started.
+async function refreshLibraryButtonState(track, button) {
+  if (!button || !button.isConnected || !isTrackItem(track)) return;
+  try {
+    const statuses = await api("/api/library/status/batch", {
+      method: "POST",
+      body: JSON.stringify({ tracks: [serviceDownloadPayload(track, "download")] }),
+    });
+    const status = (statuses || [])[0] || {};
+    const downloaded = !!status.in_library;
+    const busy = !!status.library_requested;
+    button.classList.toggle("downloaded", downloaded);
+    button.classList.toggle("progress", busy);
+    const label = downloaded ? "Remove from library" : (busy ? "Cancel library download" : "Add to library");
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.innerHTML = busy
+      ? progressButtonMarkup(status)
+      : `<i class="bi ${downloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
+  } catch (_) {
+    // Leave the button as-is; a later render will correct it.
+  }
+}
+
 function openContextMenu(event, menu) {
   if (!menu) return;
   event.preventDefault();
@@ -9085,12 +9495,15 @@ function positionContextSubmenus(menu) {
 
 $("ctxDownload")?.addEventListener("click", () => {
   if (contextMenuTargetTrack) {
-    // Simulate a click on a library button if we can find one, or just trigger toggleTrackLibrary
-    // We create a dummy button for the toggle function
-    const dummyBtn = document.createElement("button");
-    toggleTrackLibrary(contextMenuTargetTrack, dummyBtn, () => {
-        // Refresh views if needed
-        syncActiveTrackRows();
+    // Drive the row's real button when there is one. The previous version made
+    // a detached dummy, so every progress and "downloaded" class landed on an
+    // orphan element and the row's icon never changed after the download.
+    const button = contextMenuTargetLibraryBtn && contextMenuTargetLibraryBtn.isConnected
+      ? contextMenuTargetLibraryBtn
+      : document.createElement("button");
+    toggleTrackLibrary(contextMenuTargetTrack, button, () => {
+      syncActiveTrackRows();
+      refreshLibraryButtonState(contextMenuTargetTrack, button);
     });
   }
   $("trackContextMenu").hidden = true;
@@ -9098,6 +9511,8 @@ $("ctxDownload")?.addEventListener("click", () => {
 
 function showTrackContextMenu(event, track, contextInfo = {}) {
   contextMenuTargetTrack = track;
+  contextMenuTargetLibraryBtn =
+    event?.target?.closest?.(".track-row, .track")?.querySelector?.("[data-library-action]") || null;
   const menu = $("trackContextMenu");
   if (!menu) return;
 
@@ -9238,6 +9653,40 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
     applyTasteState(status === "liked", status === "hard_blacklisted");
   }).catch(() => {});
 
+  // Remove from statistics (stats page only — contextInfo.kind === "stats")
+  const btnRemoveFromStats = $("ctxRemoveFromStats");
+  if (btnRemoveFromStats) {
+    const statsCtx = contextInfo && contextInfo.kind === "stats" ? contextInfo : null;
+    btnRemoveFromStats.style.display = statsCtx ? "flex" : "none";
+    if (statsCtx) {
+      btnRemoveFromStats.onclick = async () => {
+        menu.hidden = true;
+        // track.track_key (the backend's raw stats identity) — NOT trackKey(track),
+        // which prefixes identifiers (e.g. "spotify_id:...") for client-side queue/
+        // playlist matching and won't match the track_key column in the DB.
+        await api("/api/stats/remove", {
+          method: "DELETE",
+          body: JSON.stringify({ kind: "track", key: track.track_key || "" }),
+        }).catch(() => {});
+        state.statsCache = {};
+        if (statsCtx.onRemoved) statsCtx.onRemoved();
+      };
+    }
+  }
+
+  // Remove from recently played (contextInfo.kind === "recent")
+  const btnRemoveFromRecent = $("ctxRemoveFromRecent");
+  if (btnRemoveFromRecent) {
+    const isRecent = contextInfo && contextInfo.kind === "recent";
+    btnRemoveFromRecent.style.display = isRecent ? "flex" : "none";
+    if (isRecent) {
+      btnRemoveFromRecent.onclick = async () => {
+        menu.hidden = true;
+        await removeFromRecentlyPlayed(track);
+      };
+    }
+  }
+
   // Remove from playlist
   const btnRemoveFromPlaylist = $("ctxRemoveFromPlaylist");
   if (btnRemoveFromPlaylist) {
@@ -9343,7 +9792,7 @@ $("ctxGoAlbum")?.addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 let contextMenuTargetAlbum = null;
 
-function showAlbumContextMenu(event, album) {
+function showAlbumContextMenu(event, album, contextInfo = {}) {
   contextMenuTargetAlbum = album;
   const menu = $("albumContextMenu");
   if (!menu) return;
@@ -9357,14 +9806,171 @@ function showAlbumContextMenu(event, album) {
   }
   const headerTitle = $("ctxAlbumHeaderTitle");
   if (headerTitle) headerTitle.textContent = target.title || album.name || "Unknown Album";
-  
+
   const headerArtist = $("ctxAlbumHeaderArtist");
   if (headerArtist) headerArtist.textContent = target.artist || "";
 
   $("ctxAlbumCopySpotify")?.classList.toggle("hidden", !spotifyAlbumUrl(target));
   $("ctxAlbumCopyMusicBrainz")?.classList.toggle("hidden", !musicBrainzReleaseUrl(target));
 
+  // Remove from statistics (stats page only — contextInfo.kind === "stats")
+  const btnRemoveFromStats = $("ctxAlbumRemoveFromStats");
+  if (btnRemoveFromStats) {
+    const statsCtx = contextInfo && contextInfo.kind === "stats" ? contextInfo : null;
+    btnRemoveFromStats.style.display = statsCtx ? "flex" : "none";
+    if (statsCtx) {
+      btnRemoveFromStats.onclick = async () => {
+        menu.hidden = true;
+        await api("/api/stats/remove", {
+          method: "DELETE",
+          body: JSON.stringify({ kind: "album", key: album.album_key || "" }),
+        }).catch(() => {});
+        state.statsCache = {};
+        if (statsCtx.onRemoved) statsCtx.onRemoved();
+      };
+    }
+  }
+
   openContextMenu(event, menu);
+}
+
+// ---------------------------------------------------------------------------
+// Artist Context Menu (statistics page only)
+// ---------------------------------------------------------------------------
+let contextMenuTargetArtist = null;
+
+function showArtistContextMenu(event, artist, contextInfo = {}) {
+  contextMenuTargetArtist = artist;
+  const menu = $("artistContextMenu");
+  if (!menu) return;
+  const target = artistTarget(artist);
+
+  const headerArt = $("ctxArtistHeaderArt");
+  if (headerArt) {
+    headerArt.style.backgroundImage = target.artwork_url ? `url('${target.artwork_url}')` : "";
+    headerArt.style.display = target.artwork_url ? "block" : "none";
+  }
+  const headerTitle = $("ctxArtistHeaderTitle");
+  if (headerTitle) headerTitle.textContent = target.name || target.artist || artist.name || artist.artist || "Unknown Artist";
+
+  const btnGoArtist = $("ctxArtistGoArtist");
+  if (btnGoArtist) {
+    btnGoArtist.onclick = () => {
+      menu.hidden = true;
+      pushPage(() => renderArtistPage(target));
+    };
+  }
+
+  $("ctxArtistCopySpotify")?.classList.toggle("hidden", !spotifyArtistUrl(target));
+
+  const btnRemoveFromStats = $("ctxArtistRemoveFromStats");
+  if (btnRemoveFromStats) {
+    const statsCtx = contextInfo && contextInfo.kind === "stats" ? contextInfo : null;
+    btnRemoveFromStats.style.display = statsCtx ? "flex" : "none";
+    if (statsCtx) {
+      btnRemoveFromStats.onclick = async () => {
+        menu.hidden = true;
+        await api("/api/stats/remove", {
+          method: "DELETE",
+          body: JSON.stringify({ kind: "artist", key: artist.artist_key || "" }),
+        }).catch(() => {});
+        state.statsCache = {};
+        if (statsCtx.onRemoved) statsCtx.onRemoved();
+      };
+    }
+  }
+
+  openContextMenu(event, menu);
+}
+
+document.addEventListener("click", (e) => {
+  const menu = $("artistContextMenu");
+  if (menu && !menu.hidden && !menu.contains(e.target)) {
+    menu.hidden = true;
+  }
+});
+
+// A bare artist row has no track list of its own, so "Add to queue"/
+// "Add to playlist" fetch the artist's top tracks first — same lightweight
+// endpoint the sidebar "Related music" card already uses.
+async function fetchArtistTopTracks(artist = {}) {
+  const target = artistTarget(artist);
+  try {
+    const data = await api("/api/artist/top_tracks", {
+      method: "POST",
+      timeout: 20000,
+      body: JSON.stringify({ artist_id: target.artist_id, name: target.name }),
+    });
+    return data.tracks || [];
+  } catch (e) {
+    console.error("Failed to fetch artist top tracks:", e);
+    return [];
+  }
+}
+
+$("ctxArtistAddQueue")?.addEventListener("click", async () => {
+  const artist = contextMenuTargetArtist;
+  $("artistContextMenu").hidden = true;
+  if (!artist) return;
+  const tracks = await fetchArtistTopTracks(artist);
+  if (!tracks.length) return;
+  tracks.forEach(t => {
+    const trackItem = { ...t, kind: "track" };
+    state.queue.push(trackItem);
+    if (state.originalQueue) state.originalQueue.push(trackItem);
+  });
+  if (!$("queuePanel").hidden) refreshQueuePanel();
+  updateSidebarNextQueue();
+});
+
+$("ctxArtistAddPlaylist")?.addEventListener("click", async () => {
+  const artist = contextMenuTargetArtist;
+  $("artistContextMenu").hidden = true;
+  if (!artist) return;
+  const tracks = await fetchArtistTopTracks(artist);
+  if (!tracks.length) return;
+  try {
+    const target = artistTarget(artist);
+    const pl = await api("/api/playlists", {
+      method: "POST",
+      body: JSON.stringify({
+        name: target.name || "New Playlist",
+        spotify_url: spotifyArtistUrl(target),
+        origin: "artist",
+      }),
+    });
+    await api("/api/playlists/tracks/add", { method: "POST", body: JSON.stringify({ id: pl.id, tracks: tracks.map(t => ({ ...t, kind: "track" })) }) });
+    await loadPlaylists();
+  } catch (e) {
+    alert("Failed to add artist's top tracks to playlist: " + e.message);
+  }
+});
+
+$("ctxArtistCopySpotify")?.addEventListener("click", () => {
+  if (contextMenuTargetArtist) {
+    const url = spotifyArtistUrl(contextMenuTargetArtist);
+    if (url) navigator.clipboard.writeText(url);
+  }
+  $("artistContextMenu").hidden = true;
+});
+
+// Binds right-click/long-press on stats artist/album cards to show the
+// stats-only context menu (with "Remove from statistics"), without touching
+// the generic bindCardClicks used by the Home page's own Top Artists/Albums
+// grids, which must never show that action.
+function bindStatsEntityContextMenus(containerId, items, kind, onRemoved) {
+  const container = $(containerId);
+  if (!container) return;
+  container.querySelectorAll("[data-card]").forEach((button) => {
+    const item = items[Number(button.dataset.card)];
+    if (!item) return;
+    button.oncontextmenu = (event) => {
+      event.preventDefault();
+      const contextInfo = { kind: "stats", onRemoved };
+      if (kind === "artist") showArtistContextMenu(event, item, contextInfo);
+      else if (kind === "album") showAlbumContextMenu(event, item, contextInfo);
+    };
+  });
 }
 $("ctxAlbumAddQueue")?.addEventListener("click", async () => {
   if (contextMenuTargetAlbum) {
