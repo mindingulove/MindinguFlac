@@ -11,6 +11,6 @@ packaging==26.2
 python-dotenv==1.2.4
 typing-extensions==4.16.0
 cffi==2.0.0
-cryptography==49.0.0
+cryptography==50.0.2
 Pillow==12.3.0
 pycryptodome==3.21.0

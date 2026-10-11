@@ -5,7 +5,7 @@ fd1f4eeb3217fe2aea9b8f027122d7e4baf11d227d9438f2a41828136a125f0a  android-app/ap
 7a8262dc69d1bbf7209b3b7576744743670bd5a8cba48c7d8f08c151943ccbc7  android-app/app/python-wheels/chaquopy_freetype-2.9.1-2-py3-none-android_21_arm64_v8a.whl
 5555be57a2633fb5a3c0c810e89c8b705c471e3dabd95aa596fc7fdd48322728  android-app/app/python-wheels/chaquopy_libjpeg-1.5.3-1-py3-none-android_21_arm64_v8a.whl
 b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685  android-app/app/python-wheels/charset_normalizer-3.5.2-py3-none-any.whl
-a10534d3b4811c015ddc5b7cac369de59da5fc18888897547f6da136ea7a2a34  android-app/app/python-wheels/cryptography-49.0.0-1-cp312-cp312-android_24_arm64_v8a.whl
+7540968f2de99a54a50e5d39637270c344c4d96592dfad38abb4178c94618d3b  android-app/app/python-wheels/cryptography-50.0.2-1-cp312-cp312-android_24_arm64_v8a.whl
 a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598  android-app/app/python-wheels/exceptiongroup-1.3.1-py3-none-any.whl
 63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86  android-app/app/python-wheels/h11-0.16.0-py3-none-any.whl
 0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6  android-app/app/python-wheels/h2-4.4.1-py3-none-any.whl

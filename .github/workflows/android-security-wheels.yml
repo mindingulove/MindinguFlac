@@ -71,12 +71,12 @@ jobs:
           --- src-original/Cargo.toml
           +++ src/Cargo.toml
           @@ -33,1 +33,1 @@
-          -pyo3 = { version = "0.29", features = ["abi3"] }
-          +pyo3 = { version = "0.29", features = ["abi3", "abi3-py312"] }
+          -pyo3 = { version = "0.29", features = ["abi3", "abi3t"] }
+          +pyo3 = { version = "0.29", features = ["abi3", "abi3t", "abi3-py312"] }
           PATCH
           sed -i 's/version: "1.17.1"/version: "2.0.0"/' custom-recipes/cffi/meta.yaml
           sed -i 's/version: "11.0.0"/version: "12.3.0"/' custom-recipes/pillow/meta.yaml
-          sed -i 's/version: "42.0.8"/version: "49.0.0"/' custom-recipes/cryptography/meta.yaml
+          sed -i 's/version: "42.0.8"/version: "50.0.2"/' custom-recipes/cryptography/meta.yaml
           sed -i 's/- openssl/- cffi 2.0.0/' custom-recipes/cryptography/meta.yaml
           python "$GITHUB_WORKSPACE/scripts/prepare_android_crypto_builder.py" .
 
@@ -103,12 +103,12 @@ jobs:
       - name: Build patched OpenSSL 3.5 LTS for Android
         run: bash scripts/build_android_openssl.sh "$GITHUB_WORKSPACE/.work/chaquopy/server/pypi/openssl-static"
 
-      - name: Build cryptography 49.0.0 for Android
+      - name: Build cryptography 50.0.2 for Android
         working-directory: .work/chaquopy/server/pypi
         run: |
           export MINDINGUFLAC_OPENSSL_DIR="$PWD/openssl-static/prefix"
           python build-wheel.py --python 3.12 --abi arm64-v8a "custom-recipes/cryptography"
-          cp dist/cryptography/cryptography-49.0.0-*-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+          cp dist/cryptography/cryptography-50.0.2-*-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
 
       - uses: actions/upload-artifact@v4
         with:

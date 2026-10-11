@@ -215,7 +215,7 @@ recorded versions and artifact hashes.
   through ADB on Nothing A065: the WebView loaded, `/api/runtime` reported no
   missing dependencies, CFFI and cryptography native libraries loaded, and
   the jlibtorrent native probe passed.
-  Cryptography 49.0.0 and Pillow 12.3.0 have since built locally; cryptography
+  Cryptography 50.0.2 and Pillow 12.3.0 have since built locally; cryptography
   statically links OpenSSL 3.5.9 LTS. Both APKs pass packaging checks; installing
   and checking the patched build on the phone is pending USB reconnection.
 

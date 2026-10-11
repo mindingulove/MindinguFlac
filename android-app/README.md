@@ -208,7 +208,7 @@ pinned set is: `yt-dlp 2026.8.19`, `requests 2.34.2`, `mutagen 1.48.1`,
 `hyperframe 6.1.0`, `httpcore 1.0.9`, `h11 0.16.0`, `socksio 1.0.0`,
 `anyio 4.15.1`, `sniffio 1.3.1`, `exceptiongroup 1.3.1`), `aiofiles 25.1.0`,
 `tenacity 9.2.1`, `tqdm 4.70.1`, `packaging 26.2`, `python-dotenv 1.2.4`,
-`typing-extensions 4.16.0`, `cryptography 49.0.0` (with `cffi 2.0.0`,
+`typing-extensions 4.16.0`, `cryptography 50.0.2` (with `cffi 2.0.0`,
 `pycparser 3.1`, statically linked OpenSSL 3.5.9), `Pillow 12.3.0` (with
 `chaquopy-libjpeg 1.5.3`, `chaquopy-freetype 2.9.1`),
 `pycryptodome 3.21.0`, `urllib3 2.8.0`, `charset-normalizer 3.5.2`,
@@ -217,7 +217,7 @@ pinned set is: `yt-dlp 2026.8.19`, `requests 2.34.2`, `mutagen 1.48.1`,
 The Python 3.12 CFFI 2.0.0 wheel comes from
 https://pypi.flet.dev/cffi/; its published SHA-256 was checked on download.
 The Python 3.12 pycryptodome wheel comes from https://chaquo.com/pypi-13.1/.
-Cryptography 49.0.0 and Pillow 12.3.0 are built locally using Chaquopy commit
+Cryptography 50.0.2 and Pillow 12.3.0 are built locally using Chaquopy commit
 `75197ed5c8280c38881af0e03fede591f1abc11e`, Android NDK 27.3.13750724 and
 API 24. Cryptography uses static OpenSSL 3.5.9 LTS built with
 `scripts/build_android_openssl.sh`; its source checksum is pinned in that
@@ -234,8 +234,8 @@ Produced by a clean `./gradlew :app:assembleDebug :app:assembleRelease`.
 
 | APK | Size | SHA-256 |
 | --- | --- | --- |
-| `app/build/outputs/apk/debug/app-debug.apk` | 86,562,966 bytes | `372f5834cc36b20a3dc0311a53f26b8ea8cb87cf3029b96fc2326487b96e88f6` |
-| `app/build/outputs/apk/release/app-release-unsigned.apk` | 66,064,561 bytes | `8a36915eb190c056e6fcab52b67793b9bf0d9df3b5e34ecbefe61e41632a2075` |
+| `app/build/outputs/apk/debug/app-debug.apk` | 86,591,856 bytes | `6c3ac4f287eb6aff8b6274b011e209b363539db7eba91bdbfde0ae53f65c681a` |
+| `app/build/outputs/apk/release/app-release-unsigned.apk` | 66,093,477 bytes | `0f4f85955d525bfac168ec2b06c74513238536ff30ad310d4b85de595d259b6e` |
 
 The release APK is unsigned: there is no signing config in this repository, so
 sign it before distributing.
