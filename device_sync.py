@@ -23,9 +23,12 @@ SHARED_SETTINGS = (
     "volume", "track_max_retries", "cache_cleanup_frequency",
     "strict_title_match", "demo_music_indexer", "tour_source",
     "tour_city", "tour_lat", "tour_lon", "tour_state", "tour_country",
+    "discogs_token",
 )
 _desktop: "DesktopPairingService | None" = None
 _android: "AndroidPairingClient | None" = None
+_settings_revision_lock = threading.RLock()
+_settings_revision_value: float | None = None
 
 
 def _state_dir() -> Path:
@@ -52,6 +55,45 @@ def _write_json(path: Path, value: dict) -> None:
     temp.replace(path)
 
 
+def _settings_revision_path() -> Path:
+    return _state_dir() / "settings_revision.json"
+
+
+def _settings_revision() -> float:
+    """Return the persisted cross-device settings revision, with a legacy fallback."""
+    global _settings_revision_value
+    with _settings_revision_lock:
+        if _settings_revision_value is None:
+            saved = _load_json(_settings_revision_path(), {})
+            try:
+                revision = float(saved.get("revision") or 0)
+            except (TypeError, ValueError):
+                revision = 0
+            if revision <= 0:
+                try:
+                    import app
+                    revision = app.CONFIG_PATH.stat().st_mtime
+                except (OSError, AttributeError):
+                    revision = 0
+            _settings_revision_value = revision
+        return _settings_revision_value
+
+
+def _save_settings_revision(revision: float) -> None:
+    global _settings_revision_value
+    revision = max(0.0, float(revision))
+    with _settings_revision_lock:
+        _settings_revision_value = revision
+        _write_json(_settings_revision_path(), {"revision": revision})
+
+
+def mark_settings_changed() -> float:
+    """Record an explicit local Settings save for reliable LAN conflict ordering."""
+    revision = max(time.time(), _settings_revision() + 0.000001)
+    _save_settings_revision(revision)
+    return revision
+
+
 def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: float = 0) -> dict:
     """Export only portable preferences and user listening history."""
     import app
@@ -59,10 +101,7 @@ def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: 
     import service_downloader
 
     settings = {key: getattr(app.app_config, key) for key in SHARED_SETTINGS}
-    try:
-        settings_revision = app.CONFIG_PATH.stat().st_mtime
-    except OSError:
-        settings_revision = 0
+    settings_revision = _settings_revision()
     manager = app.service_downloader
     jobs = []
     with manager._lock:
@@ -144,7 +183,7 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
 
     incoming = snapshot.get("settings")
     if isinstance(incoming, dict):
-        current_revision = app.CONFIG_PATH.stat().st_mtime if app.CONFIG_PATH.exists() else 0
+        current_revision = _settings_revision()
         incoming_revision = float(snapshot.get("settings_revision") or 0)
         current = {key: getattr(app.app_config, key) for key in SHARED_SETTINGS}
         values = {key: incoming[key] for key in SHARED_SETTINGS if key in incoming}
@@ -156,6 +195,7 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
                 app.app_config = updated
                 app.save_config(app.CONFIG_PATH, updated)
                 app.service_downloader.update_config(updated)
+            _save_settings_revision(incoming_revision)
     return {"events": imported_events, "recent": imported_recent}
 
 

@@ -2806,6 +2806,11 @@ class Handler(BaseHTTPRequestHandler):
                     app_config = updated
                     save_config(CONFIG_PATH, app_config)
                     service_downloader.update_config(app_config)
+                try:
+                    import device_sync
+                    device_sync.mark_settings_changed()
+                except Exception as exc:
+                    print(f"[Device sync] Could not update shared-settings revision: {exc}")
                 self.send_json({"ok": True})
                 return
             if path == "/api/pairing/invitation":
