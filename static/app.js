@@ -3461,7 +3461,7 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
     method: "POST",
     body: JSON.stringify({
       title: "YouTube login required",
-      message: "Click to sign in with your default browser, then return to retry the track.",
+      message: "Use Log in in Mindinguflac to sign in, then retry the track.",
       url: job.youtube_login_url || "https://www.youtube.com/",
     }),
   }).catch(() => {});
@@ -3474,10 +3474,12 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
     document.removeEventListener("visibilitychange", onVisibilityChange);
   };
   const onAway = () => { leftApp = true; };
-  const onReturn = () => {
+  const onReturn = async () => {
     if (retryArmed && leftApp && document.visibilityState !== "hidden") {
-      cleanupReturnWatcher();
-      retryOnce();
+      try {
+        const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
+        if (status.signed_in) await retryOnce();
+      } catch (_) {}
     }
   };
   const onVisibilityChange = () => {
@@ -3509,10 +3511,11 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
 
   showActionToast("YouTube login required to download this track.", "Log in", async () => {
     try {
-      await api("/api/system/open-url", {
+      const opened = await api("/api/system/open-url", {
         method: "POST",
         body: JSON.stringify({ url: job.youtube_login_url || "https://www.youtube.com/" }),
       });
+      flow.embedded = !!opened.embedded;
     } catch (error) {
       cleanupReturnWatcher();
       showToast(error.message || "Could not open the browser", 5000);
@@ -3531,7 +3534,7 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
         if (status && status.signed_in) await retryOnce();
       } catch (_) {}
     }, 2000);
-    showActionToast("Sign in to YouTube, then return to Mindinguflac.", "Retry now", retryOnce);
+    showActionToast(flow.embedded ? "Sign in in the YouTube window. The download will retry automatically." : "Sign in to YouTube, then return to Mindinguflac.", "Retry now", retryOnce);
   });
 }
 
@@ -6237,6 +6240,7 @@ async function renderSettings() {
   startCacheLogPolling();
   state.settings = await api("/api/settings");
   if (IS_ANDROID) await loadRuntimeCapabilities();
+  setupYoutubeSignInSettings();
 
   $("cacheDir").value = state.settings.cache_dir || "";
   $("cacheDir").title = state.settings.cache_dir || "";
@@ -6324,6 +6328,52 @@ async function renderSettings() {
     $("cacheUsage").textContent = `${sizeText} used by ${stats.files} files`;
   } catch (e) {}
   setupPairingSettings();
+}
+
+let youtubeSettingsLoginPoll = null;
+
+async function setupYoutubeSignInSettings() {
+  if (youtubeSettingsLoginPoll) clearInterval(youtubeSettingsLoginPoll);
+  youtubeSettingsLoginPoll = null;
+  const row = $("youtubeSignInRow");
+  const button = $("youtubeSignInButton");
+  const label = $("youtubeSignInStatus");
+  if (!row || !button || IS_ANDROID) return;
+  try {
+    const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
+    row.classList.toggle("hidden", !status.embedded_available);
+    if (!status.embedded_available) return;
+    label.textContent = status.signed_in ? "YouTube session saved on this device." : "Sign in in the app. Your session stays on this device.";
+  } catch (_) { return; }
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const opened = await api("/api/system/open-url", { method: "POST", body: JSON.stringify({ url: "https://www.youtube.com/" }) });
+      if (!opened.ok) throw new Error("Could not open YouTube sign-in");
+      label.textContent = "Complete sign-in in the YouTube window.";
+      if (youtubeSettingsLoginPoll) clearInterval(youtubeSettingsLoginPoll);
+      let checking = false;
+      youtubeSettingsLoginPoll = setInterval(async () => {
+        if (checking) return;
+        checking = true;
+        try {
+          const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
+          if (status.signed_in) {
+            clearInterval(youtubeSettingsLoginPoll);
+            youtubeSettingsLoginPoll = null;
+            label.textContent = "YouTube session saved on this device.";
+            showToast("Signed in to YouTube");
+          } else if (!status.login_open) {
+            clearInterval(youtubeSettingsLoginPoll);
+            youtubeSettingsLoginPoll = null;
+            label.textContent = "Sign-in closed. You can try again.";
+          }
+        } catch (_) {} finally { checking = false; }
+      }, 2000);
+    } catch (error) {
+      showToast(error.message || "Could not open YouTube sign-in", 5000);
+    } finally { button.disabled = false; }
+  };
 }
 
 function setupPairingSettings() {

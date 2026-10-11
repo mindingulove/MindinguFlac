@@ -13,6 +13,7 @@ import time
 import webbrowser
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 APP_NAME = "Mindinguflac"
@@ -594,6 +595,62 @@ def install_system_notifications(window: webview.Window) -> None:
 import multiprocessing
 import ctypes
 
+def install_youtube_login(main_window) -> None:
+    """Use our WebView2 profile, not another browser's locked cookie database."""
+    if sys.platform != "win32":
+        return
+    import app
+    import backend_ytpdl
+
+    state = {"window": None}
+    lock = threading.Lock()
+
+    def open_login():
+        with lock:
+            if state["window"] is not None:
+                state["window"].show()
+                return True
+            login = webview.create_window(
+                "Sign in to YouTube — Mindinguflac",
+                "https://www.youtube.com/", width=1000, height=760,
+                min_size=(640, 480), background_color=DARK_BACKGROUND,
+                js_api=None,
+            )
+            state["window"] = login
+        stopped = threading.Event()
+
+        def on_closed():
+            stopped.set()
+            with lock:
+                if state["window"] is login:
+                    state["window"] = None
+
+        login.events.closed += on_closed
+
+        def capture_session():
+            # Native get_cookies includes HttpOnly cookies. Passwords and cookie
+            # values are never evaluated in JS, logged, or sent to the frontend.
+            while not stopped.wait(2):
+                try:
+                    url = urlparse(login.get_current_url() or "")
+                    host = (url.hostname or "").lower()
+                    if url.scheme != "https" or not (host == "youtube.com" or host.endswith(".youtube.com")):
+                        continue
+                    if backend_ytpdl.import_youtube_webview_cookies(login.get_cookies()):
+                        log_step("YouTube session saved from the app sign-in window")
+                        login.destroy()
+                        main_window.show()
+                        return
+                except Exception as exc:
+                    log_step(f"YouTube sign-in capture unavailable ({type(exc).__name__})")
+
+        threading.Thread(target=capture_session, name="youtube-sign-in", daemon=True).start()
+        return True
+
+    app._youtube_login_fn = open_login
+    app._youtube_login_active_fn = lambda: state["window"] is not None
+
+
 def main() -> None:
     global webview
     # Set desktop mode immediately before any other imports
@@ -670,6 +727,7 @@ def main() -> None:
             background_color=DARK_BACKGROUND,
         )
         log_step("pywebview window object created")
+        install_youtube_login(window)
         install_system_notifications(window)
         install_macos_dock_menu(window, app.get_dock_recent_items)
 

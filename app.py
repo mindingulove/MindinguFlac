@@ -326,6 +326,8 @@ _np_state_fn = None    # (state: int) -> None
 _np_clear_fn = None    # () -> None
 _macos_media_command_fn = None   # (action: str) -> None
 _system_notification_fn = None   # (title: str, body: str, url: str) -> bool
+_youtube_login_fn = None  # Opens the app-owned native YouTube sign-in window.
+_youtube_login_active_fn = None
 _dock_playing_state_fn = None   # (playing: bool) -> None
 
 
@@ -2513,15 +2515,19 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed_target.scheme != "https" or host not in {"youtube.com", "www.youtube.com", "music.youtube.com"}:
                     self.send_error_json("Only secure YouTube login URLs may be opened", HTTPStatus.BAD_REQUEST)
                     return
-                opened = bool(webbrowser.open(target, new=2))
-                self.send_json({"ok": opened})
+                embedded = _youtube_login_fn is not None
+                opened = bool(_youtube_login_fn() if embedded else webbrowser.open(target, new=2))
+                self.send_json({"ok": opened, "embedded": embedded})
                 return
             if path == "/api/system/youtube-login-status":
                 if not self.trusted_local_origin():
                     self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
                     return
                 import backend_ytpdl
-                self.send_json({"ok": True, "signed_in": backend_ytpdl.youtube_login_available()})
+                embedded = _youtube_login_fn is not None
+                login_open = bool(_youtube_login_active_fn and _youtube_login_active_fn())
+                signed_in = not login_open and backend_ytpdl.youtube_login_available(browser_discovery=not embedded)
+                self.send_json({"ok": True, "signed_in": signed_in, "embedded_available": embedded, "login_open": login_open})
                 return
             if path == "/api/system/notify":
                 if not self.trusted_local_origin():

@@ -48,6 +48,7 @@ def _youtube_cookie_file() -> str:
     try:
         from config import app_data_dir
 
+        paths.append(app_data_dir() / "youtube-webview-cookies.txt")
         paths.append(app_data_dir() / "cookies.txt")
     except Exception:
         pass
@@ -147,30 +148,76 @@ def _discover_youtube_browser_session():
     return None
 
 
-def youtube_login_available() -> bool:
+def youtube_login_available(browser_discovery: bool = True) -> bool:
     """Return whether a local, signed-in YouTube session can be used safely.
 
     The desktop UI uses this after it sends the user to the browser.  Checking
     the cookie store rather than assuming that a window-focus event happened
     makes the login hand-off work when macOS keeps the webview focused.
     """
-    try:
-        if _discover_youtube_browser_session() is not None:
-            return True
-    except Exception as exc:
-        logger.info("Browser cookie discovery unavailable while checking YouTube login: %s", exc)
-
     cookie_file = _youtube_cookie_file()
-    if not cookie_file:
+    if cookie_file:
+        try:
+            from http.cookiejar import MozillaCookieJar
+            cookies = MozillaCookieJar(cookie_file)
+            cookies.load(ignore_discard=True, ignore_expires=True)
+            if _has_youtube_auth_cookie(cookies):
+                return True
+        except Exception:
+            pass
+    if not browser_discovery:
         return False
     try:
-        from http.cookiejar import MozillaCookieJar
-
-        cookies = MozillaCookieJar(cookie_file)
-        cookies.load(ignore_discard=True, ignore_expires=True)
-        return _has_youtube_auth_cookie(cookies)
-    except Exception:
+        return _discover_youtube_browser_session() is not None
+    except Exception as exc:
+        logger.info("Browser cookie discovery unavailable while checking YouTube login: %s", type(exc).__name__)
         return False
+
+
+def import_youtube_webview_cookies(cookies) -> bool:
+    """Save the app-owned native cookie API result; credentials never enter JS."""
+    from email.utils import parsedate_to_datetime
+    from http.cookiejar import Cookie, MozillaCookieJar
+    from config import app_data_dir
+    import tempfile
+
+    jar = MozillaCookieJar()
+    for record in cookies:
+        for morsel in record.values():
+            domain = str(morsel["domain"] or "www.youtube.com").lower()
+            host = domain.lstrip(".")
+            if not any(host == allowed or host.endswith("." + allowed) for allowed in ("youtube.com", "google.com")):
+                continue
+            expires = None
+            if morsel["expires"]:
+                try:
+                    expires = int(parsedate_to_datetime(morsel["expires"]).timestamp())
+                    if expires <= 0:
+                        expires = None  # Native session cookies have no expiry.
+                except (ValueError, TypeError, OverflowError):
+                    pass
+            jar.set_cookie(Cookie(
+                version=0, name=morsel.key, value=morsel.value,
+                port=None, port_specified=False, domain=domain,
+                domain_specified=domain.startswith("."), domain_initial_dot=domain.startswith("."),
+                path=morsel["path"] or "/", path_specified=True,
+                secure=bool(morsel["secure"]), expires=expires, discard=expires is None,
+                comment=None, comment_url=None,
+                rest={"HttpOnly": ""} if morsel["httponly"] else {},
+            ))
+    if not _has_youtube_auth_cookie(jar):
+        return False
+    target = app_data_dir() / "youtube-webview-cookies.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _BROWSER_COOKIE_EXPORTS_LOCK:
+        fd, temporary = tempfile.mkstemp(prefix=".youtube-session-", dir=target.parent)
+        os.close(fd)
+        try:
+            jar.save(temporary, ignore_discard=True, ignore_expires=True)
+            os.replace(temporary, target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    return True
 
 
 def _youtube_imported_cookie_file() -> Path:
@@ -1736,9 +1783,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
     # browser_cookie3 discovers supported local cookie stores itself. Export
     # only YouTube cookies into this job's private cache directory for yt-dlp,
     # then service_downloader removes the temporary export when the job ends.
-    browser_cookie_source = _add_browser_youtube_cookies(ydl_opts, output_dir, str(job.get("id") or ""))
+    _add_youtube_cookie_file(ydl_opts)
+    browser_cookie_source = False
     if not _has_youtube_auth_opts(ydl_opts):
-        _add_youtube_cookie_file(ydl_opts)
+        browser_cookie_source = _add_browser_youtube_cookies(ydl_opts, output_dir, str(job.get("id") or ""))
 
     if not _has_youtube_auth_opts(ydl_opts) and not is_android and sys.platform != "win32":
         _mark_youtube_login_required(job, manager)
@@ -1755,6 +1803,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
     label = "video" if video_mode else (codec.upper() if codec else "best native audio")
     if browser_cookie_source:
         manager._append_cache_event(job, "trying", "Using signed-in YouTube cookies discovered from the system browsers")
+    elif _has_youtube_auth_opts(ydl_opts):
+        manager._append_cache_event(job, "trying", "Using the saved YouTube session")
     elif is_android:
         manager._append_cache_event(job, "trying", "Using Android guest YouTube access")
     elif not _has_youtube_auth_opts(ydl_opts):
