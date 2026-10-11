@@ -13,6 +13,7 @@ import android.provider.MediaStore;
 import android.media.AudioManager;
 import android.graphics.Color;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.window.OnBackInvokedDispatcher;
@@ -50,6 +51,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     private View loadingView;
     private String apiToken;
     private String pendingPairingUrl;
+    private WifiManager.MulticastLock pairingMulticastLock;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -61,6 +63,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         getWindow().setStatusBarColor(Color.rgb(9, 10, 13));
         getWindow().setNavigationBarColor(Color.rgb(5, 6, 8));
         setContentView(createContentView());
+        acquirePairingMulticastLock();
         configureWebView();
         if (getIntent() != null && getIntent().getData() != null) pendingPairingUrl = getIntent().getData().toString();
         LocalModelAdvisor.initialize(getApplicationContext());
@@ -75,6 +78,18 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         registerBackHandler();
         requestNotificationPermission();
         startPythonBackend();
+    }
+
+    private void acquirePairingMulticastLock() {
+        try {
+            WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wifi == null) return;
+            pairingMulticastLock = wifi.createMulticastLock("mindinguflac-lan-discovery");
+            pairingMulticastLock.setReferenceCounted(false);
+            pairingMulticastLock.acquire();
+        } catch (SecurityException ignored) {
+            pairingMulticastLock = null;
+        }
     }
 
     private View createContentView() {
@@ -360,6 +375,10 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     @Override
     protected void onDestroy() {
         MediaCommandRelay.clearListener(this);
+        if (pairingMulticastLock != null && pairingMulticastLock.isHeld()) {
+            pairingMulticastLock.release();
+            pairingMulticastLock = null;
+        }
         if (isFinishing()) {
             MediaPlaybackService.clear(getApplicationContext());
         }

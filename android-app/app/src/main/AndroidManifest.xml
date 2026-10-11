@@ -12,6 +12,9 @@
     <!-- Lets the local-model downloader check whether the active connection is
          Wi-Fi before auto-starting a ~1.5 GB download. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Android filters Wi-Fi broadcasts unless the app holds a multicast lock. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
         android:name="com.chaquo.python.android.PyApplication"

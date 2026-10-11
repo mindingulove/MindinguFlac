@@ -243,6 +243,10 @@ class DesktopPairingService:
             def do_POST(self):
                 try:
                     body = self.read_body()
+                    if self.path == "/pair/preview":
+                        result = service.preview_pairing(body)
+                        self.respond(result, 200)
+                        return
                     if self.path == "/pair/complete":
                         result = service.complete_pairing(body)
                         self.respond(result, 200)
@@ -358,6 +362,27 @@ class DesktopPairingService:
             self.invitation = None
             self._save()
         return {"ok": True, "device_id": device_id, "phone_id": phone_id, "secret": shared, "fingerprint": self.fingerprint, "name": socket.gethostname()}
+
+    def preview_pairing(self, body: dict) -> dict:
+        """Validate a QR without consuming it or creating a paired device."""
+        device_id = str(body.get("device_id") or "")
+        token = str(body.get("token") or "")
+        fingerprint = str(body.get("fingerprint") or "")
+        with self.lock:
+            invitation = dict(self.invitation or {})
+            devices = dict(self.state.get("devices") or {})
+        if not invitation or float(invitation.get("expires_at") or 0) < time.time():
+            raise ValueError("The pairing QR code expired. Ask the desktop to show a new one.")
+        if (device_id != invitation.get("device_id")
+                or not secrets.compare_digest(token, str(invitation.get("token") or ""))):
+            raise ValueError("Pairing invitation does not match the active QR code")
+        if (not secrets.compare_digest(fingerprint, self.fingerprint)
+                or not secrets.compare_digest(fingerprint, str(invitation.get("fingerprint") or ""))):
+            raise ValueError("Desktop fingerprint changed. Scan the new QR code.")
+        phone_id = str(body.get("phone_id") or "")
+        return {"ok": True, "device_id": device_id, "name": socket.gethostname() or "Mindinguflac desktop",
+                "fingerprint": self.fingerprint, "expires_at": invitation["expires_at"],
+                "already_paired": bool(phone_id and phone_id in devices)}
 
     def remove_device(self, device_id: str) -> bool:
         with self.lock:
@@ -483,7 +508,8 @@ class AndroidPairingClient:
         result["_status"] = status
         return result
 
-    def pair(self, invitation: str) -> dict:
+    @staticmethod
+    def _parse_invitation(invitation: str) -> tuple[str, str, str]:
         parsed = urllib.parse.urlparse(invitation)
         if parsed.scheme == "mindinguflac":
             data = dict(urllib.parse.parse_qsl(parsed.query))
@@ -497,6 +523,9 @@ class AndroidPairingClient:
         fingerprint = str(data.get("fingerprint") or "")
         if not target_id or not token or len(fingerprint) != 64:
             raise ValueError("Pairing QR code is incomplete")
+        return target_id, token, fingerprint
+
+    def _find_invited_desktop(self, target_id: str, fingerprint: str) -> dict:
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             with self.lock:
@@ -507,7 +536,36 @@ class AndroidPairingClient:
         else:
             raise TimeoutError("Could not find that desktop on this Wi-Fi network")
         if not secrets.compare_digest(fingerprint, str(device.get("fingerprint") or "")):
-            raise ValueError("The desktop fingerprint advertised on Wi-Fi does not match the QR code")
+            raise ValueError("The desktop fingerprint advertised on Wi-Fi does not match the scanned QR")
+        return device
+
+    def preview(self, invitation: str) -> dict:
+        """Identify the QR's desktop and show pairing availability without pairing."""
+        target_id, token, fingerprint = self._parse_invitation(invitation)
+        device = self._find_invited_desktop(target_id, fingerprint)
+        checked = self._connect(device, "/pair/preview", {
+            "device_id": target_id, "token": token, "fingerprint": fingerprint,
+            "phone_id": self.state["phone_id"],
+        })
+        with self.lock:
+            pair = dict(self.state.get("pair") or {})
+        paired = bool(pair)
+        return {
+            "device_id": target_id,
+            "name": str(device.get("name") or "Mindinguflac desktop"),
+            "fingerprint": fingerprint,
+            "can_pair": not paired,
+            "already_paired": bool(paired and pair.get("device_id") == target_id) or bool(checked.get("already_paired")),
+            "paired_with": str(pair.get("name") or "") if paired else "",
+        }
+
+    def pair(self, invitation: str) -> dict:
+        target_id, token, fingerprint = self._parse_invitation(invitation)
+        with self.lock:
+            current_pair = dict(self.state.get("pair") or {})
+        if current_pair:
+            raise ValueError("This phone is already paired. Remove that pairing before scanning another QR code")
+        device = self._find_invited_desktop(target_id, fingerprint)
         response = self._connect(device, "/pair/complete", {
             "device_id": target_id,
             "phone_id": self.state["phone_id"],
@@ -571,7 +629,10 @@ class AndroidPairingClient:
             return {"ok": True, "paired": False}
         if not device:
             raise TimeoutError("Connect to the paired desktop's Wi-Fi to send the removal message")
-        result = self._connect(device, "/pair/remove", {"device_id": pair["device_id"]}, pair["secret"])
+        # The server authenticates the request header against its paired phone
+        # ID. Sending the desktop's ID here made Android appear unpaired while
+        # leaving the desktop record intact.
+        result = self._connect(device, "/pair/remove", {"device_id": pair["phone_id"]}, pair["secret"])
         if result.get("desauth"):
             with self.lock:
                 self.state["pair"] = None

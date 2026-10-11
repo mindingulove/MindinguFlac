@@ -243,7 +243,7 @@
                 <span>Scan this one-time QR code while both devices are on the same Wi-Fi network.</span>
               </div>
               <div class="settings-control">
-                <button id="createPairingQr" class="primary" type="button">Show pairing QR code</button>
+                <button id="createPairingQr" class="primary" type="button" aria-expanded="false">Show pairing QR code</button>
               </div>
             </div>
             <div id="pairingInvitation" class="pairing-invitation hidden">
@@ -251,7 +251,6 @@
               <div>
                 <strong>Scan with Mindinguflac on Android</strong>
                 <p id="pairingQrExpiry">This code expires in three minutes.</p>
-                <button id="cancelPairingQr" type="button">Dismiss QR code</button>
               </div>
             </div>
             <div class="settings-row" id="pairingAndroidActions">
@@ -261,6 +260,18 @@
               </div>
               <div class="settings-control">
                 <button id="scanPairingQr" class="primary" type="button">Pair device</button>
+              </div>
+            </div>
+            <div id="pairingConfirmation" class="pairing-confirmation hidden" role="alertdialog" aria-labelledby="pairingConfirmTitle" aria-describedby="pairingConfirmMessage">
+              <div>
+                <strong id="pairingConfirmTitle">Confirm device pairing</strong>
+                <p id="pairingConfirmMessage">Review the desktop identity before pairing.</p>
+                <div class="pairing-confirm-identity"><span>Device</span><strong id="pairingConfirmName"></strong></div>
+                <div class="pairing-confirm-identity"><span>SHA-256 fingerprint</span><code id="pairingConfirmFingerprint"></code></div>
+              </div>
+              <div class="pairing-confirm-actions">
+                <button id="cancelPairingConfirm" type="button">Cancel</button>
+                <button id="confirmPairing" class="primary" type="button" disabled>Confirm and pair</button>
               </div>
             </div>
             <div id="pairingStatus" class="pairing-status" aria-live="polite"></div>

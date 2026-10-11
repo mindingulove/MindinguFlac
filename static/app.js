@@ -11,6 +11,7 @@ const state = {
   viewStack: [],
   runtime: null,
   catalog: { artists: [], albums: [], top_tracks: [], personal_tracks: [], recent_tracks: [] },
+  mobileLibraryFilter: "playlists",
   settings: {},
   playlists: [],
   currentTrack: null,
@@ -54,7 +55,12 @@ const state = {
   catalogRefreshTimer: null,
   cacheLogTimer: null,
   pairingPollTimer: null,
+  pairingQrTimer: null,
+  pairingInvite: null,
+  pairingQrVisible: false,
   pairingBeforeInvite: [],
+  pendingPairingInvitation: "",
+  pairingPreview: null,
   progressLogOpen: false,
   progressLogTimer: null,
   progressLogTippy: null,
@@ -759,12 +765,64 @@ function setMobileNavActive(name) {
 }
 
 function mobileLibraryItemsHtml(playlists) {
-  if (!playlists.length) return '<div class="mobile-empty-state">Your playlists will appear here.</div>';
-  return playlists.map(pl => {
-    const art = pl.artwork_url || (pl.tracks?.[0] || {}).artwork_url || "";
-    return `<button class="mobile-library-item" type="button" data-mobile-playlist-id="${esc(pl.id)}">
-      <span class="mobile-library-art" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : '<i class="bi bi-music-note-list"></i>'}</span>
-      <span><strong>${esc(pl.name)}</strong><small>Playlist · ${pl.tracks?.length || 0} songs</small></span>
+  const filter = state.mobileLibraryFilter || "playlists";
+  if (filter === "playlists") {
+    if (!playlists.length) return '<div class="mobile-empty-state">Your playlists will appear here.</div>';
+    return playlists.map(pl => {
+      const art = pl.artwork_url || (pl.tracks?.[0] || {}).artwork_url || "";
+      return `<button class="mobile-library-item" type="button" data-mobile-playlist-id="${esc(pl.id)}">
+        <span class="mobile-library-art" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : '<i class="bi bi-music-note-list"></i>'}</span>
+        <span><strong>${esc(pl.name)}</strong><small>Playlist · ${pl.tracks?.length || 0} songs</small></span>
+      </button>`;
+    }).join("");
+  }
+
+  const trackKey = track => String(track.spotify_id || track.id || `${track.title || track.name || ""}\u0000${track.artist || ""}`).trim().toLocaleLowerCase();
+  const items = new Map();
+  for (const playlist of playlists) {
+    for (const track of (playlist.tracks || [])) {
+      if (!track || typeof track !== "object") continue;
+      const primary = primaryArtistName(track);
+      if (filter === "artists") {
+        const credits = track.artists || track.metadata?.artists || track.artist_names;
+        const entries = Array.isArray(credits)
+          ? credits.map(value => typeof value === "string" ? { name: value } : (value || {}))
+          : String(track.artist || "").split(/,\s+|\s+&\s+|\s+feat(?:uring)?\.?\s+|\s+ft\.?\s+|\s+x\s+/i).map(name => ({ name }));
+        for (const credit of entries) {
+          const name = String(credit.name || credit.artist || "").trim();
+          if (!name) continue;
+          const key = name.normalize("NFKC").toLocaleLowerCase();
+          const creditId = credit.artist_id || credit.spotify_artist_id || credit.spotify_id || credit.id || (key === primary.normalize("NFKC").toLocaleLowerCase() ? (track.spotify_artist_id || track.artist_id || "") : "");
+          if (!items.has(key)) items.set(key, { name, artist: name, type: "artist", artwork_url: credit.artwork_url || credit.image_url || track.artist_artwork_url || "", artist_id: creditId, trackKeys: new Set() });
+          const entry = items.get(key);
+          entry.trackKeys.add(trackKey(track));
+          if (!entry.artwork_url && (credit.artwork_url || credit.image_url || track.artist_artwork_url)) entry.artwork_url = credit.artwork_url || credit.image_url || track.artist_artwork_url;
+          if (!entry.artist_id && creditId) entry.artist_id = creditId;
+        }
+      } else {
+        const title = String(track.album || track.album_title || "").trim();
+        if (!title) continue;
+        const albumArtist = String(track.album_artist || track.metadata?.album_artist || primary).trim();
+        const key = `${title}\u0000${albumArtist}`.normalize("NFKC").toLocaleLowerCase();
+        if (!items.has(key)) items.set(key, { title, album: title, artist: albumArtist, type: "album", artwork_url: track.album_artwork_url || track.artwork_url || "", artist_artwork_url: track.artist_artwork_url || "", spotify_id: track.album_spotify_id || track.spotify_album_id || track.metadata?.album_spotify_id || track.metadata?.spotify_album_id || "", musicbrainz_release_id: track.musicbrainz_release_id || track.release_id || track.metadata?.musicbrainz_release_id || "", year: track.year || "", trackKeys: new Set() });
+        const entry = items.get(key);
+        entry.trackKeys.add(trackKey(track));
+        if (!entry.artwork_url && (track.album_artwork_url || track.artwork_url)) entry.artwork_url = track.album_artwork_url || track.artwork_url;
+        if (!entry.year && track.year) entry.year = track.year;
+      }
+    }
+  }
+  const libraryItems = [...items.values()].sort((a, b) => (a.name || a.title).localeCompare(b.name || b.title));
+  if (!libraryItems.length) return `<div class="mobile-empty-state">${filter === "artists" ? "Artists" : "Albums"} from your playlists will appear here.</div>`;
+  return libraryItems.map(item => {
+    const art = item.artwork_url || "";
+    const count = item.trackKeys.size;
+    const isArtist = filter === "artists";
+    const label = isArtist ? item.name : item.title;
+    const detail = isArtist ? `Artist · ${count} song${count === 1 ? "" : "s"}` : `${item.artist || "Album"} · ${count} song${count === 1 ? "" : "s"}`;
+    return `<button class="mobile-library-item" type="button" ${isArtist ? `data-mobile-artist='${attrJson(item)}'` : `data-mobile-album='${attrJson(item)}'`}>
+      <span class="mobile-library-art ${isArtist ? "mobile-library-art-round" : ""}" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : `<i class="bi ${isArtist ? "bi-person-fill" : "bi-disc"}"></i>`}</span>
+      <span><strong>${esc(label)}</strong><small>${esc(detail)}</small></span>
     </button>`;
   }).join("");
 }
@@ -775,6 +833,12 @@ function bindMobileLibraryItems() {
       const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
       if (playlist) pushPage(() => renderPlaylistPage(playlist));
     };
+  });
+  document.querySelectorAll("[data-mobile-artist]").forEach(button => {
+    button.onclick = () => pushPage(() => renderArtistPage(JSON.parse(button.dataset.mobileArtist || "{}")));
+  });
+  document.querySelectorAll("[data-mobile-album]").forEach(button => {
+    button.onclick = () => pushPage(() => renderAlbumPage(JSON.parse(button.dataset.mobileAlbum || "{}")));
   });
 }
 
@@ -800,13 +864,28 @@ function renderMobileLibraryPage() {
         <button class="mobile-title-action" type="button" data-mobile-search aria-label="Search library"><i class="bi bi-search"></i></button>
         <button class="mobile-title-action" type="button" id="mobileCreatePlaylist" aria-label="Create playlist"><i class="bi bi-plus-lg"></i></button>
       </div>
-      <div class="mobile-filter-pills"><span>Playlists</span><span>Albums</span><span>Artists</span></div>
+      <div class="mobile-filter-pills" role="tablist" aria-label="Library type">
+        ${[["playlists", "Playlists"], ["albums", "Albums"], ["artists", "Artists"]].map(([key, label]) => `<button class="${(state.mobileLibraryFilter || "playlists") === key ? "active" : ""}" type="button" role="tab" aria-selected="${(state.mobileLibraryFilter || "playlists") === key}" data-mobile-library-filter="${key}">${label}</button>`).join("")}
+      </div>
       <div class="mobile-library-sort"><strong><i class="bi bi-arrow-down-up"></i> Recents</strong><i class="bi bi-grid"></i></div>
       <div id="mobileLibraryItems" class="mobile-library-items">
         ${mobileLibraryItemsHtml(playlists)}
       </div>
     </div>`;
   bindMobileLibraryItems();
+  document.querySelectorAll("[data-mobile-library-filter]").forEach(button => {
+    button.onclick = () => {
+      state.mobileLibraryFilter = button.dataset.mobileLibraryFilter;
+      document.querySelectorAll("[data-mobile-library-filter]").forEach(tab => {
+        const active = tab === button;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", String(active));
+      });
+      const list = $("mobileLibraryItems");
+      if (list) list.innerHTML = mobileLibraryItemsHtml(state.playlists || []);
+      bindMobileLibraryItems();
+    };
+  });
   document.querySelector("[data-mobile-search]")?.addEventListener("click", focusMobileSearch);
   const create = $("mobileCreatePlaylist");
   if (create && $("createPlaylistBtn")) create.onclick = () => $("createPlaylistBtn").click();
@@ -6241,28 +6320,83 @@ function setupPairingSettings() {
   $("pairingDesktopActions")?.classList.toggle("hidden", IS_ANDROID);
   $("pairingAndroidActions")?.classList.toggle("hidden", !IS_ANDROID);
   const makeQr = $("createPairingQr");
-  if (makeQr) makeQr.onclick = async () => {
+  const invitationPanel = $("pairingInvitation");
+  const setQrVisible = visible => {
+    state.pairingQrVisible = visible;
+    invitationPanel?.classList.toggle("hidden", !visible);
+    if (makeQr) {
+      makeQr.textContent = visible ? "Hide pairing QR code" : "Show pairing QR code";
+      makeQr.setAttribute("aria-expanded", String(visible));
+    }
+  };
+  const createQr = async () => {
     makeQr.disabled = true;
     try {
       const before = await api("/api/pairing/status");
       state.pairingBeforeInvite = (before.devices || []).map(device => device.device_id);
       const invite = await api("/api/pairing/invitation", { method: "POST", body: "{}" });
+      state.pairingInvite = invite;
       $("pairingQrImage").src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(invite.qr_svg)}`;
-      $("pairingInvitation").classList.remove("hidden");
-      $("pairingQrExpiry").textContent = `This one-time code expires at ${new Date(invite.expires_at * 1000).toLocaleTimeString()}.`;
+      $("pairingQrExpiry").textContent = `This one-time code expires at ${new Date(invite.expires_at * 1000).toLocaleTimeString()}. It will refresh automatically while shown.`;
+      setQrVisible(true);
+      clearTimeout(state.pairingQrTimer);
+      state.pairingQrTimer = setTimeout(async () => {
+        if (!state.pairingQrVisible) return;
+        try { await createQr(); }
+        catch (error) { showToast(error.message || "Could not refresh the pairing code", 5000); }
+      }, Math.max(1000, invite.expires_at * 1000 - Date.now() + 250));
       refreshPairingSettings();
     } catch (error) {
       showToast(error.message || "Could not create a pairing code", 5000);
+      if (!state.pairingQrVisible) setQrVisible(false);
     } finally {
       makeQr.disabled = false;
     }
   };
-  const dismiss = $("cancelPairingQr");
-  if (dismiss) dismiss.onclick = () => $("pairingInvitation").classList.add("hidden");
+  if (makeQr) makeQr.onclick = async () => {
+    if (state.pairingQrVisible) {
+      setQrVisible(false);
+      clearTimeout(state.pairingQrTimer);
+      return;
+    }
+    if (state.pairingInvite && state.pairingInvite.expires_at * 1000 > Date.now()) {
+      setQrVisible(true);
+      state.pairingQrTimer = setTimeout(createQr, Math.max(1000, state.pairingInvite.expires_at * 1000 - Date.now() + 250));
+      return;
+    }
+    await createQr();
+  };
   const scan = $("scanPairingQr");
   if (scan) scan.onclick = () => {
     if (window.MindinguflacAndroid?.scanDevicePairingQr) window.MindinguflacAndroid.scanDevicePairingQr();
     else showToast("The QR scanner is only available in the Android app", 4000);
+  };
+  const cancelConfirmation = $("cancelPairingConfirm");
+  if (cancelConfirmation) cancelConfirmation.onclick = () => {
+    state.pendingPairingInvitation = "";
+    state.pairingPreview = null;
+    $("pairingConfirmation")?.classList.add("hidden");
+  };
+  const confirm = $("confirmPairing");
+  if (confirm) confirm.onclick = async () => {
+    const invitation = state.pendingPairingInvitation;
+    if (!invitation || !state.pairingPreview?.can_pair || confirm.disabled) return;
+    confirm.disabled = true;
+    cancelConfirmation && (cancelConfirmation.disabled = true);
+    $("pairingConfirmMessage").textContent = "Pairing and starting Wi-Fi sync…";
+    try {
+      await api("/api/pairing/connect", { method: "POST", body: JSON.stringify({ invitation }), timeout: 30000 });
+      state.pendingPairingInvitation = "";
+      state.pairingPreview = null;
+      $("pairingConfirmation")?.classList.add("hidden");
+      await refreshPairingSettings();
+      showToast("Device paired. Syncing over Wi-Fi.");
+    } catch (error) {
+      $("pairingConfirmMessage").textContent = error.message || "Pairing failed. Scan the QR code again.";
+      confirm.disabled = false;
+    } finally {
+      if (cancelConfirmation) cancelConfirmation.disabled = false;
+    }
   };
   if (state.pairingPollTimer) clearInterval(state.pairingPollTimer);
   refreshPairingSettings();
@@ -6280,7 +6414,12 @@ async function refreshPairingSettings() {
       const devices = data.devices || [];
       statusEl.textContent = devices.length ? `${devices.length} paired device${devices.length === 1 ? "" : "s"} · syncing over Wi-Fi` : "No devices paired";
       if (devices.some(device => !state.pairingBeforeInvite.includes(device.device_id))) {
+        clearTimeout(state.pairingQrTimer);
+        state.pairingInvite = null;
+        state.pairingQrVisible = false;
         $("pairingInvitation")?.classList.add("hidden");
+        const toggle = $("createPairingQr");
+        if (toggle) { toggle.textContent = "Show pairing QR code"; toggle.setAttribute("aria-expanded", "false"); }
       }
       for (const device of devices) {
         const row = document.createElement("div");
@@ -6307,6 +6446,8 @@ async function refreshPairingSettings() {
       }
     } else {
       const pair = data.pair || {};
+      const scanButton = $("scanPairingQr");
+      if (scanButton) scanButton.classList.toggle("hidden", !!data.paired);
       if (data.paired) {
         statusEl.textContent = `Paired with ${pair.name || "desktop"}${data.last_sync ? ` · synced ${new Date(data.last_sync * 1000).toLocaleTimeString()}` : " · syncing…"}`;
         const row = document.createElement("div");
@@ -6334,12 +6475,55 @@ async function refreshPairingSettings() {
 
 window.handleDevicePairingUrl = async function (value) {
   if (!IS_ANDROID) return;
+  const invitation = String(value || "").trim();
+  if (!invitation) return;
+  state.pendingPairingInvitation = invitation;
+  state.pairingPreview = null;
+  if (!( $("settings")?.classList.contains("active"))) pushPage(renderSettings);
+  const confirmation = $("pairingConfirmation");
+  const confirm = $("confirmPairing");
+  const cancel = $("cancelPairingConfirm");
+  if (!confirmation || !confirm) {
+    showToast("Could not open the pairing confirmation in Settings.", 5000);
+    return;
+  }
+  confirmation.classList.remove("hidden");
+  $("pairingConfirmTitle").textContent = "Confirm device pairing";
+  $("pairingConfirmMessage").textContent = "Checking the desktop identity on your Wi-Fi network…";
+  $("pairingConfirmName").textContent = "Finding desktop…";
+  $("pairingConfirmFingerprint").textContent = "Verifying fingerprint…";
+  confirm.disabled = true;
+  if (cancel) cancel.disabled = false;
+  confirmation.scrollIntoView({ behavior: "smooth", block: "center" });
   try {
-    await api("/api/pairing/connect", { method: "POST", body: JSON.stringify({ invitation: String(value || "") }), timeout: 30000 });
-    await renderSettings();
-    showToast("Device paired. Syncing over Wi-Fi.");
+    const preview = await api("/api/pairing/preview", {
+      method: "POST",
+      body: JSON.stringify({ invitation }),
+      timeout: 30000,
+    });
+    if (state.pendingPairingInvitation !== invitation) return;
+    state.pairingPreview = preview;
+    $("pairingConfirmName").textContent = preview.name || "Mindinguflac desktop";
+    $("pairingConfirmFingerprint").textContent = String(preview.fingerprint || "").match(/.{1,4}/g)?.join(" ") || "Unavailable";
+    if (preview.already_paired) {
+      $("pairingConfirmTitle").textContent = "Already paired";
+      $("pairingConfirmMessage").textContent = `This phone is already paired with ${preview.name || "this desktop"}. Remove the existing pairing before scanning again.`;
+    } else if (!preview.can_pair) {
+      $("pairingConfirmTitle").textContent = "Another desktop is paired";
+      $("pairingConfirmMessage").textContent = `This phone is already paired with ${preview.paired_with || "another desktop"}. Remove that pairing before continuing.`;
+    } else {
+      $("pairingConfirmMessage").textContent = "Pair this phone with the desktop shown above? Confirm to begin syncing, or cancel to leave the devices unpaired.";
+      confirm.disabled = false;
+    }
+    confirmation.scrollIntoView({ behavior: "smooth", block: "center" });
   } catch (error) {
-    showToast(error.message || "Pairing failed", 6000);
+    if (state.pendingPairingInvitation !== invitation) return;
+    $("pairingConfirmTitle").textContent = "Could not verify desktop";
+    $("pairingConfirmName").textContent = "Unverified device";
+    $("pairingConfirmFingerprint").textContent = "";
+    $("pairingConfirmMessage").textContent = error.message || "Could not verify this pairing request.";
+    confirm.disabled = true;
+    confirmation.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 };
 
@@ -9075,6 +9259,7 @@ function renderQueueTracks(containerId, tracks, isRecent) {
     const idx = parseInt(el.dataset.qIndex, 10);
     const track = tracks[idx];
     el.onclick = () => {
+      if (Date.now() < (Number(container.dataset.suppressQueueClickUntil) || 0)) return;
       if (el.dataset.qRecent === "true") {
         selectMusicItem(track, "stream", tracks, { title: "Recently Played" });
       } else {
@@ -9100,7 +9285,7 @@ function renderQueueTracks(containerId, tracks, isRecent) {
 
 function reorderQueueTrack(fromIndex, toIndex) {
   if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return false;
-  if (fromIndex < 0 || toIndex < 0 || fromIndex >= state.queue.length || toIndex >= state.queue.length) return false;
+  if (fromIndex < 0 || toIndex < 0 || fromIndex >= state.queue.length || toIndex > state.queue.length) return false;
   const currentKey = state.currentTrack ? trackKey(state.currentTrack) : "";
   const moving = state.queue[fromIndex];
   if (currentKey && trackKey(moving) === currentKey) return false;
@@ -9121,12 +9306,64 @@ function reorderQueueTrack(fromIndex, toIndex) {
 
 function bindQueueReorder(container) {
   let draggedIndex = -1;
+  let touchDrag = null;
   const clearDropTargets = () => {
     container.querySelectorAll(".queue-drop-before, .queue-drop-after").forEach(el => {
       el.classList.remove("queue-drop-before", "queue-drop-after");
     });
   };
   container.querySelectorAll(".queue-track-reorderable").forEach(row => {
+    const handle = row.querySelector(".queue-drag-handle");
+    if (handle) {
+      handle.addEventListener("pointerdown", event => {
+        if (event.pointerType === "mouse" || !event.isPrimary || event.button > 0) return;
+        const fromIndex = parseInt(row.dataset.qAbsIndex || "-1", 10);
+        if (fromIndex < 0) return;
+        touchDrag = { pointerId: event.pointerId, fromIndex, startX: event.clientX, startY: event.clientY, moved: false, handle };
+        try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+        event.preventDefault();
+      });
+      handle.addEventListener("pointermove", event => {
+        if (!touchDrag || touchDrag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - touchDrag.startX;
+        const dy = event.clientY - touchDrag.startY;
+        if (!touchDrag.moved && Math.hypot(dx, dy) < 8) return;
+        touchDrag.moved = true;
+        row.classList.add("queue-dragging");
+        const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".queue-track-reorderable");
+        clearDropTargets();
+        if (target && target !== row) {
+          const rect = target.getBoundingClientRect();
+          target.classList.add(event.clientY > rect.top + rect.height / 2 ? "queue-drop-after" : "queue-drop-before");
+        }
+        event.preventDefault();
+      });
+      const finishPointerDrag = event => {
+        if (!touchDrag || touchDrag.pointerId !== event.pointerId) return;
+        const drag = touchDrag;
+        touchDrag = null;
+        row.classList.remove("queue-dragging");
+        clearDropTargets();
+        try { handle.releasePointerCapture(event.pointerId); } catch (_) {}
+        if (!drag.moved) return;
+        container.dataset.suppressQueueClickUntil = String(Date.now() + 400);
+        const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".queue-track-reorderable");
+        if (target) {
+          const targetIndex = parseInt(target.dataset.qAbsIndex || "-1", 10);
+          if (targetIndex >= 0 && targetIndex !== drag.fromIndex) {
+            const rect = target.getBoundingClientRect();
+            reorderQueueTrack(drag.fromIndex, event.clientY > rect.top + rect.height / 2 ? targetIndex + 1 : targetIndex);
+          }
+        } else {
+          const last = container.querySelector(".queue-track-reorderable:last-child");
+          if (last && event.clientY > last.getBoundingClientRect().bottom) {
+            reorderQueueTrack(drag.fromIndex, state.queue.length);
+          }
+        }
+      };
+      handle.addEventListener("pointerup", finishPointerDrag);
+      handle.addEventListener("pointercancel", finishPointerDrag);
+    }
     row.addEventListener("dragstart", (event) => {
       draggedIndex = parseInt(row.dataset.qAbsIndex || "-1", 10);
       row.classList.add("queue-dragging");
@@ -9391,6 +9628,12 @@ function attachPanelSwipeClose(panel, scroller, close) {
   let dragging = false;
 
   panel.addEventListener("touchstart", (event) => {
+    // Queue reordering owns gestures that start on a drag handle; treating a
+    // downward reorder as a panel-dismiss swipe would move the whole overlay.
+    if (event.target.closest?.(".queue-drag-handle")) {
+      dragging = false;
+      return;
+    }
     const content = typeof scroller === "function" ? scroller() : scroller;
     if (event.touches.length !== 1 || (content && content.scrollTop > 0)) {
       dragging = false;

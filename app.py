@@ -2816,6 +2816,10 @@ class Handler(BaseHTTPRequestHandler):
                 import device_sync
                 self.send_json(device_sync.pair(str(body.get("invitation") or "")))
                 return
+            if path == "/api/pairing/preview":
+                import device_sync
+                self.send_json(device_sync.preview(str(body.get("invitation") or "")))
+                return
             if path == "/api/pairing/remove":
                 import device_sync
                 self.send_json(device_sync.remove(str(body.get("device_id") or "")))
