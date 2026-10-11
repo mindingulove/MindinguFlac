@@ -210,7 +210,16 @@ recorded versions and artifact hashes.
 
 ## Outstanding
 
-Two items remain, both blocked on input rather than on work.
+- Python 3.12 migration trial (2026-10-11): the debug APK builds locally with
+  prebuilt Flet CFFI 2.0.0 and Python 3.12 Chaquopy native wheels. Installed
+  through ADB on Nothing A065: the WebView loaded, `/api/runtime` reported no
+  missing dependencies, CFFI and cryptography native libraries loaded, and
+  the jlibtorrent native probe passed.
+  Cryptography 49.0.0 and Pillow 12.3.0 have since built locally; cryptography
+  statically links OpenSSL 3.5.9 LTS. Both APKs pass packaging checks; installing
+  and checking the patched build on the phone is pending USB reconnection.
+
+The UI/device coverage items below also remain pending.
 
 **The supplied phone reference screenshots**, which are not in the repository:
 

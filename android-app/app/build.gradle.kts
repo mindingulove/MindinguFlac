@@ -89,8 +89,8 @@ android {
 
 chaquopy {
     defaultConfig {
-        version = "3.10"
-        buildPython("/opt/homebrew/bin/python3.10")
+        version = "3.12"
+        buildPython(providers.environmentVariable("MINDINGUFLAC_BUILD_PYTHON").orElse("python3.12").get())
         pip {
             options("--no-index", "--find-links", bundledWheelDir.absolutePath)
             if (!localWheelDir.isNullOrBlank()) options("--find-links", localWheelDir)

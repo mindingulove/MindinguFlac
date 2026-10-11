@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
       - uses: actions/setup-java@v4
         with:
@@ -44,7 +44,7 @@ jobs:
         working-directory: .work/chaquopy/server/pypi
         run: |
           python -m pip install build==1.5.0 jinja2==3.1.6 jsonschema==2.6.0 pyelftools==0.29 pypi-simple==1.1.0 pyyaml==6.0.3 setuptools==69.1.1 tqdm==4.66.1 wheel==0.33.6
-          ../..//target/download-target.sh "$GITHUB_WORKSPACE/.work/chaquopy/maven/com/chaquo/python/target/3.10.19-0"
+          ../..//target/download-target.sh "$GITHUB_WORKSPACE/.work/chaquopy/maven/com/chaquo/python/target/3.12.12-0"
           mkdir -p dist/chaquopy-libffi dist/chaquopy-libjpeg dist/chaquopy-freetype
           curl --fail --location --silent --show-error \
             https://chaquo.com/pypi-13.1/chaquopy-libffi/chaquopy_libffi-3.3-3-py3-none-android_24_arm64_v8a.whl \
@@ -72,30 +72,43 @@ jobs:
           +++ src/Cargo.toml
           @@ -33,1 +33,1 @@
           -pyo3 = { version = "0.29", features = ["abi3"] }
-          +pyo3 = { version = "0.29", features = ["abi3", "abi3-py310"] }
+          +pyo3 = { version = "0.29", features = ["abi3", "abi3-py312"] }
           PATCH
           sed -i 's/version: "1.17.1"/version: "2.0.0"/' custom-recipes/cffi/meta.yaml
           sed -i 's/version: "11.0.0"/version: "12.3.0"/' custom-recipes/pillow/meta.yaml
           sed -i 's/version: "42.0.8"/version: "49.0.0"/' custom-recipes/cryptography/meta.yaml
-          sed -i '/- openssl/a\    - cffi 2.0.0' custom-recipes/cryptography/meta.yaml
+          sed -i 's/- openssl/- cffi 2.0.0/' custom-recipes/cryptography/meta.yaml
+          python "$GITHUB_WORKSPACE/scripts/prepare_android_crypto_builder.py" .
 
-      - name: Build cffi 2.0.0 for Android
+      - name: Download verified prebuilt cffi 2.0.0 for Android
         working-directory: .work/chaquopy/server/pypi
         run: |
-          python build-wheel.py --python 3.10 --abi arm64-v8a "custom-recipes/cffi"
-          cp dist/cffi/cffi-2.0.0-*-cp310-cp310-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+          mkdir -p dist/cffi
+          curl --fail --location --silent --show-error \
+            https://pypi.flet.dev/-/ver_19qZEZ/cffi-2.0.0-1-cp312-cp312-android_24_arm64_v8a.whl \
+            --output dist/cffi/cffi-2.0.0-1-cp312-cp312-android_24_arm64_v8a.whl
+          echo 'fd1f4eeb3217fe2aea9b8f027122d7e4baf11d227d9438f2a41828136a125f0a  dist/cffi/cffi-2.0.0-1-cp312-cp312-android_24_arm64_v8a.whl' | sha256sum --check
+          cp dist/cffi/cffi-2.0.0-1-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
 
       - name: Build Pillow 12.3.0 for Android
         working-directory: .work/chaquopy/server/pypi
         run: |
-          python build-wheel.py --python 3.10 --abi arm64-v8a "custom-recipes/pillow"
-          cp dist/pillow/pillow-12.3.0-*-cp310-cp310-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+          python build-wheel.py --python 3.12 --abi arm64-v8a "custom-recipes/pillow"
+          cp dist/pillow/pillow-12.3.0-*-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+
+      - name: Install native CFFI for cryptography build helpers
+        working-directory: .work/chaquopy/server/pypi
+        run: python -m pip install --target env/lib/python cffi==2.0.0
+
+      - name: Build patched OpenSSL 3.5 LTS for Android
+        run: bash scripts/build_android_openssl.sh "$GITHUB_WORKSPACE/.work/chaquopy/server/pypi/openssl-static"
 
       - name: Build cryptography 49.0.0 for Android
         working-directory: .work/chaquopy/server/pypi
         run: |
-          python build-wheel.py --python 3.10 --abi arm64-v8a "custom-recipes/cryptography"
-          cp dist/cryptography/cryptography-49.0.0-*-cp310-cp310-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+          export MINDINGUFLAC_OPENSSL_DIR="$PWD/openssl-static/prefix"
+          python build-wheel.py --python 3.12 --abi arm64-v8a "custom-recipes/cryptography"
+          cp dist/cryptography/cryptography-49.0.0-*-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
 
       - uses: actions/upload-artifact@v4
         with:

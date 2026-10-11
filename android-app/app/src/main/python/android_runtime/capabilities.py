@@ -49,8 +49,10 @@ PACKAGED_RUNTIMES: dict[str, tuple[str | None, str]] = {
     "dotenv": ("python-dotenv", "SpotiFLAC configuration loading"),
     "typing_extensions": ("typing-extensions", "SpotiFLAC typing backports"),
     "cryptography": ("cryptography", "SpotiFLAC signed-session provider calls"),
+    "_cffi_backend": ("cffi", "native cryptography bindings"),
     "Crypto": ("pycryptodome", "SpotiFLAC provider payload decryption"),
     "PIL": ("Pillow", "artwork decoding and embedded cover art"),
+    "PIL._imaging": ("Pillow", "native artwork decoder"),
 }
 
 #: Engines the desktop app offers that the phone deliberately does not ship.
@@ -101,6 +103,14 @@ def dependency_manifest() -> dict:
         }
         if imported:
             entry["version"] = _module_version(distribution or import_name)
+            if import_name == "cryptography":
+                try:
+                    from cryptography.hazmat.backends.openssl.backend import backend
+
+                    entry["openssl_version"] = backend.openssl_version_text()
+                except Exception as exc:
+                    entry["imported"] = False
+                    entry["detail"] = f"OpenSSL backend failed: {type(exc).__name__}: {exc}"
         entries[import_name] = entry
     missing = sorted(name for name, entry in entries.items() if not entry["imported"])
     return {"runtimes": entries, "missing": missing, "ok": not missing}

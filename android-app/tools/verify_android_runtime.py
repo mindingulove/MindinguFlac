@@ -1,6 +1,6 @@
 """Live verification of the Android backend in the Android configuration.
 
-Runs the real ``android_runtime.bootstrap.start()`` on a python3.10
+Runs the real ``android_runtime.bootstrap.start()`` on a python3.12
 interpreter whose installed packages are exactly the APK's bundled wheel set,
 with the APK's vendored source tree on sys.path, then exercises the embedded
 HTTP API the way the WebView does: capability report, settings persistence,

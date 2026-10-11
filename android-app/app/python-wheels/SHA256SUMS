@@ -1,12 +1,11 @@
 abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695  android-app/app/python-wheels/aiofiles-25.1.0-py3-none-any.whl
 6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101  android-app/app/python-wheels/anyio-4.15.1-py3-none-any.whl
 62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775  android-app/app/python-wheels/certifi-2026.7.22-py3-none-any.whl
-eda060fcaf2d3785cb1ad9b272f5710fcecc11a5858df8d02e2a41421b4fc058  android-app/app/python-wheels/cffi-1.17.1-1-cp310-cp310-android_24_arm64_v8a.whl
+fd1f4eeb3217fe2aea9b8f027122d7e4baf11d227d9438f2a41828136a125f0a  android-app/app/python-wheels/cffi-2.0.0-1-cp312-cp312-android_24_arm64_v8a.whl
 7a8262dc69d1bbf7209b3b7576744743670bd5a8cba48c7d8f08c151943ccbc7  android-app/app/python-wheels/chaquopy_freetype-2.9.1-2-py3-none-android_21_arm64_v8a.whl
-86873c2f8e5e43b07b72233bf35e06ad8dae41ba98e0556202d61d00d7ad952f  android-app/app/python-wheels/chaquopy_libffi-3.3-3-py3-none-android_24_arm64_v8a.whl
 5555be57a2633fb5a3c0c810e89c8b705c471e3dabd95aa596fc7fdd48322728  android-app/app/python-wheels/chaquopy_libjpeg-1.5.3-1-py3-none-android_21_arm64_v8a.whl
 b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685  android-app/app/python-wheels/charset_normalizer-3.5.2-py3-none-any.whl
-8c11f71686f7f4b03bb0daf37930e3ff4832952bafcda937622083ad1b7f363a  android-app/app/python-wheels/cryptography-42.0.8-0-cp310-cp310-android_24_arm64_v8a.whl
+a10534d3b4811c015ddc5b7cac369de59da5fc18888897547f6da136ea7a2a34  android-app/app/python-wheels/cryptography-49.0.0-1-cp312-cp312-android_24_arm64_v8a.whl
 a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598  android-app/app/python-wheels/exceptiongroup-1.3.1-py3-none-any.whl
 63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86  android-app/app/python-wheels/h11-0.16.0-py3-none-any.whl
 0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6  android-app/app/python-wheels/h2-4.4.1-py3-none-any.whl
@@ -17,9 +16,9 @@ b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5  android-app/ap
 ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c  android-app/app/python-wheels/idna-3.20-py3-none-any.whl
 4f077fe87d3fc7fba259aa63d8c026b18382ca6a42ef37c61e16f1b1b5b82fe7  android-app/app/python-wheels/mutagen-1.48.1-py3-none-any.whl
 40dbb2ada16cb327933e5993df5d9039c0f80f26c5c729200d854075cc1d80bf  android-app/app/python-wheels/packaging-26.2-py3-none-any.whl
-1947b66baf075d9deda03394c232a07fc9af201fd8b8f22de59bcaf6e559697d  android-app/app/python-wheels/pillow-11.0.0-0-cp310-cp310-android_24_arm64_v8a.whl
+28fbfd4c40d8eaef962ef14b3f684b1f4e44b075068fb0f539d5f99839700322  android-app/app/python-wheels/pillow-12.3.0-0-cp312-cp312-android_24_arm64_v8a.whl
 f09d358c840bd147b79e55f2bc494f18ea869dc897f5852a8f5766b74f787882  android-app/app/python-wheels/pycparser-3.1-py3-none-any.whl
-8c9a9e983fee98565c305ac3f6a6d6e2ca90ccbc302eabd1ec5c521c047e5274  android-app/app/python-wheels/pycryptodome-3.21.0-0-cp310-cp310-android_24_arm64_v8a.whl
+97041f1ca848125720d2a65be4fc2229e4bdeacf841db69f0852f86e682ecc8e  android-app/app/python-wheels/pycryptodome-3.21.0-0-cp312-cp312-android_24_arm64_v8a.whl
 2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5  android-app/app/python-wheels/PySocks-1.7.1-py3-none-any.whl
 42269a8a5b3fd54ffa6f3d84b18abed50064717576b4ecf03dc4a55d8aa04fdc  android-app/app/python-wheels/python_dotenv-1.2.4-py3-none-any.whl
 2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0  android-app/app/python-wheels/requests-2.34.2-py3-none-any.whl

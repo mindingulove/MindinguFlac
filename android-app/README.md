@@ -11,7 +11,8 @@ companion service, Playwright, or an AI API token.
 - 64-bit ARM device (`arm64-v8a`)
 - JDK 17
 - Android SDK platform 35
-- Python 3.10 available at `/opt/homebrew/bin/python3.10`
+- Python 3.12 available as `python3.12` on PATH. Set `MINDINGUFLAC_BUILD_PYTHON`
+  to use another Python 3.12 executable.
 
 ## Build and install
 
@@ -120,18 +121,18 @@ tools/stage_android_sources.sh /tmp/mf-stage
 
 # 2. Import every backend module under the Android env + sys.path layout and
 #    print a packaged/imported dependency manifest.
-python3.10 tools/audit_android_imports.py /tmp/mf-stage app/python-wheels /tmp/manifest.json
+python3.12 tools/audit_android_imports.py /tmp/mf-stage app/python-wheels /tmp/manifest.json
 
 # 3. Start the real embedded backend and exercise the HTTP API end to end
 #    (capability report, settings persistence, search/artist/album/lyrics/
 #    artwork, download jobs, cancellation, prefetch, range streaming).
-python3.10 tools/verify_android_runtime.py /tmp/mf-stage /tmp/mf-device /tmp/verify.json
+python3.12 tools/verify_android_runtime.py /tmp/mf-stage /tmp/mf-device /tmp/verify.json
 
 # 4. Prove the required runtime is inside a built APK.
 python3 tools/inspect_apk.py app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Step 2 and 3 need a Python 3.10 interpreter with
+Step 2 and 3 need a Python 3.12 interpreter with
 `app/src/main/python/android-requirements.txt` installed, so the host package
 set matches the APK's. The focused unit tests are
 `../test/test_android_runtime.py` (run from the repository root with
@@ -181,7 +182,7 @@ and dark-mode matrix — everything above is one phone in portrait.
 
 Build toolchain: Gradle 8.7, Android Gradle Plugin 8.5.2, Chaquopy 17.0.0,
 `compileSdk`/`targetSdk` 35, `minSdk` 26, ABI `arm64-v8a` only, embedded
-CPython 3.10, JDK 17.
+CPython 3.12, JDK 17.
 
 | Component | Version | SHA-256 |
 | --- | --- | --- |
@@ -207,20 +208,34 @@ pinned set is: `yt-dlp 2026.8.19`, `requests 2.34.2`, `mutagen 1.48.1`,
 `hyperframe 6.1.0`, `httpcore 1.0.9`, `h11 0.16.0`, `socksio 1.0.0`,
 `anyio 4.15.1`, `sniffio 1.3.1`, `exceptiongroup 1.3.1`), `aiofiles 25.1.0`,
 `tenacity 9.2.1`, `tqdm 4.70.1`, `packaging 26.2`, `python-dotenv 1.2.4`,
-`typing-extensions 4.16.0`, `cryptography 42.0.8` (with `cffi 1.17.1`,
-`pycparser 3.1`, `chaquopy-libffi 3.3`), `Pillow 11.0.0` (with
+`typing-extensions 4.16.0`, `cryptography 49.0.0` (with `cffi 2.0.0`,
+`pycparser 3.1`, statically linked OpenSSL 3.5.9), `Pillow 12.3.0` (with
 `chaquopy-libjpeg 1.5.3`, `chaquopy-freetype 2.9.1`),
 `pycryptodome 3.21.0`, `urllib3 2.8.0`, `charset-normalizer 3.5.2`,
 `idna 3.20`, `certifi 2026.7.22`.
 
-### Built artifacts, 2026-10-10
+The Python 3.12 CFFI 2.0.0 wheel comes from
+https://pypi.flet.dev/cffi/; its published SHA-256 was checked on download.
+The Python 3.12 pycryptodome wheel comes from https://chaquo.com/pypi-13.1/.
+Cryptography 49.0.0 and Pillow 12.3.0 are built locally using Chaquopy commit
+`75197ed5c8280c38881af0e03fede591f1abc11e`, Android NDK 27.3.13750724 and
+API 24. Cryptography uses static OpenSSL 3.5.9 LTS built with
+`scripts/build_android_openssl.sh`; its source checksum is pinned in that
+script. The reproducible build steps are in
+`.github/workflows/android-security-wheels.yml`. Runtime verification uses
+`/api/runtime`, including native CFFI/Pillow imports and the loaded OpenSSL
+version. The Python 3.12 runtime trial was tested on the physical phone through ADB.
+The patched dependency build passed APK packaging checks; its device runtime
+check is pending because the phone disconnected before installation.
+
+### Built artifacts, 2026-10-11
 
 Produced by a clean `./gradlew :app:assembleDebug :app:assembleRelease`.
 
 | APK | Size | SHA-256 |
 | --- | --- | --- |
-| `app/build/outputs/apk/debug/app-debug.apk` | 61,322,863 bytes | `b6dcbbd45bf7ef40d72a75af98805c15f3c53af7a564bf60b23027cf8f59a761` |
-| `app/build/outputs/apk/release/app-release-unsigned.apk` | 55,527,803 bytes | `ddbb57a2cd2e662c060597d10787fc1abfd4bce094133ed9e4e2e71656473575` |
+| `app/build/outputs/apk/debug/app-debug.apk` | 86,562,966 bytes | `372f5834cc36b20a3dc0311a53f26b8ea8cb87cf3029b96fc2326487b96e88f6` |
+| `app/build/outputs/apk/release/app-release-unsigned.apk` | 66,064,561 bytes | `8a36915eb190c056e6fcab52b67793b9bf0d9df3b5e34ecbefe61e41632a2075` |
 
 The release APK is unsigned: there is no signing config in this repository, so
 sign it before distributing.

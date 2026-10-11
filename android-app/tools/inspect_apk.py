@@ -18,8 +18,8 @@ so = sorted(n for n in names if n.startswith("lib/") and n.endswith(".so"))
 check("ARM64 libjlibtorrent native binary present",
       any("libjlibtorrent" in n for n in so),
       next((f"{n} ({sizes[n]:,} bytes)" for n in so if "libjlibtorrent" in n), ""))
-check("embedded CPython 3.10 native runtime present",
-      any("libpython3.10.so" in n for n in so))
+check("embedded CPython 3.12 native runtime present",
+      any("libpython3.12.so" in n for n in so))
 check("only the arm64-v8a ABI is packaged",
       all(n.startswith("lib/arm64-v8a/") for n in so),
       ", ".join(sorted({n.split("/")[1] for n in so})))
@@ -37,7 +37,7 @@ check("jlibtorrent Java/SWIG bindings in dex",
       and in_dex("com/frostwire/jlibtorrent/swig/libtorrent_jni"))
 check("Android torrent bridge in dex", in_dex("AndroidTorrentEngine"))
 check("Gemini Nano + local Gemma advisors in dex",
-      in_dex("NanoAdvisor") and in_dex("LocalGemmaAdvisor"))
+      in_dex("NanoAdvisor") and in_dex("LocalModelAdvisor"))
 check("ML Kit GenAI prompt API in dex", in_dex("com/google/mlkit/genai"))
 # R8 shortens MediaPipe's non-JNI packages in a release build, so check the
 # classes the native llm_inference engine actually binds to by name instead of
