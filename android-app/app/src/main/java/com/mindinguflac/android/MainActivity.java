@@ -9,6 +9,8 @@ import android.content.ContentValues;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.media.AudioManager;
 import android.graphics.Color;
@@ -176,10 +178,16 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     private void dispatchPendingPairingUrl() {
         if (pendingPairingUrl == null || webView == null) return;
         String value = pendingPairingUrl;
-        pendingPairingUrl = null;
         webView.evaluateJavascript(
-                "window.handleDevicePairingUrl && window.handleDevicePairingUrl(" +
-                        org.json.JSONObject.quote(value) + ")", null);
+                "(function(){if(typeof window.handleDevicePairingUrl!=='function')return false;" +
+                        "window.handleDevicePairingUrl(" + org.json.JSONObject.quote(value) + ");return true;})()",
+                result -> {
+                    if ("true".equals(result) && value.equals(pendingPairingUrl)) {
+                        pendingPairingUrl = null;
+                    } else if (value.equals(pendingPairingUrl) && webView != null) {
+                        new Handler(Looper.getMainLooper()).postDelayed(this::dispatchPendingPairingUrl, 250);
+                    }
+                });
     }
 
     @Override
@@ -341,10 +349,9 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_PAIRING_QR) {
             ScanIntentResult result = ScanIntentResult.parseActivityResult(resultCode, data);
-            if (result.getContents() != null && webView != null) {
-                webView.evaluateJavascript(
-                        "window.handleDevicePairingUrl && window.handleDevicePairingUrl(" +
-                                org.json.JSONObject.quote(result.getContents()) + ")", null);
+            if (result.getContents() != null) {
+                pendingPairingUrl = result.getContents();
+                dispatchPendingPairingUrl();
             }
             return;
         }

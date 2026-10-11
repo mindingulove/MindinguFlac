@@ -995,6 +995,8 @@ function setActiveView(id) {
 // exit once there is genuinely nothing left to go back to.
 window.__androidBack = function () {
   try {
+    const pairingDialog = $("pairingConfirmation");
+    if (pairingDialog?.open) { pairingDialog.close(); return; }
     if (state.lyrics?.open) { closeLyricsPanel(); return; }
     const queue = $("queuePanel");
     if (queue && !queue.hidden) { closeQueuePanel(); return; }
@@ -1025,8 +1027,9 @@ function pushPage(renderFn) {
   }
   state.viewStack.push({ render: renderFn, scroll: 0 });
   state.forwardHistory = [];
-  renderFn();
+  const rendered = renderFn();
   updateHistoryButtons();
+  return rendered;
 }
 
 function popPage() {
@@ -6372,10 +6375,16 @@ function setupPairingSettings() {
     else showToast("The QR scanner is only available in the Android app", 4000);
   };
   const cancelConfirmation = $("cancelPairingConfirm");
+  const pairingDialog = $("pairingConfirmation");
+  if (pairingDialog) pairingDialog.onclose = () => {
+    state.pendingPairingInvitation = "";
+    state.pairingPreview = null;
+  };
   if (cancelConfirmation) cancelConfirmation.onclick = () => {
     state.pendingPairingInvitation = "";
     state.pairingPreview = null;
-    $("pairingConfirmation")?.classList.add("hidden");
+    const dialog = $("pairingConfirmation");
+    if (dialog?.open) dialog.close();
   };
   const confirm = $("confirmPairing");
   if (confirm) confirm.onclick = async () => {
@@ -6388,7 +6397,8 @@ function setupPairingSettings() {
       await api("/api/pairing/connect", { method: "POST", body: JSON.stringify({ invitation }), timeout: 30000 });
       state.pendingPairingInvitation = "";
       state.pairingPreview = null;
-      $("pairingConfirmation")?.classList.add("hidden");
+      const dialog = $("pairingConfirmation");
+      if (dialog?.open) dialog.close();
       await refreshPairingSettings();
       showToast("Device paired. Syncing over Wi-Fi.");
     } catch (error) {
@@ -6473,13 +6483,18 @@ async function refreshPairingSettings() {
   }
 }
 
-window.handleDevicePairingUrl = async function (value) {
-  if (!IS_ANDROID) return;
+window.handleDevicePairingUrl = function (value) {
+  if (!IS_ANDROID) return false;
   const invitation = String(value || "").trim();
-  if (!invitation) return;
+  if (!invitation) return false;
+  void presentDevicePairingConfirmation(invitation);
+  return true;
+};
+
+async function presentDevicePairingConfirmation(invitation) {
   state.pendingPairingInvitation = invitation;
   state.pairingPreview = null;
-  if (!( $("settings")?.classList.contains("active"))) pushPage(renderSettings);
+  if (!$("settings")?.classList.contains("active")) await pushPage(renderSettings);
   const confirmation = $("pairingConfirmation");
   const confirm = $("confirmPairing");
   const cancel = $("cancelPairingConfirm");
@@ -6487,14 +6502,26 @@ window.handleDevicePairingUrl = async function (value) {
     showToast("Could not open the pairing confirmation in Settings.", 5000);
     return;
   }
-  confirmation.classList.remove("hidden");
+  if (!confirmation.open) confirmation.showModal();
   $("pairingConfirmTitle").textContent = "Confirm device pairing";
   $("pairingConfirmMessage").textContent = "Checking the desktop identity on your Wi-Fi network…";
-  $("pairingConfirmName").textContent = "Finding desktop…";
-  $("pairingConfirmFingerprint").textContent = "Verifying fingerprint…";
+  let qrName = "Mindinguflac desktop";
+  let qrFingerprint = "";
+  try {
+    const parsed = new URL(invitation);
+    qrName = parsed.searchParams.get("name") || qrName;
+    qrFingerprint = parsed.searchParams.get("fingerprint") || "";
+  } catch (_) {
+    try {
+      const parsed = JSON.parse(invitation);
+      qrName = parsed.name || qrName;
+      qrFingerprint = parsed.fingerprint || "";
+    } catch (_) {}
+  }
+  $("pairingConfirmName").textContent = qrName;
+  $("pairingConfirmFingerprint").textContent = qrFingerprint.match(/.{1,4}/g)?.join(" ") || "Checking fingerprint…";
   confirm.disabled = true;
   if (cancel) cancel.disabled = false;
-  confirmation.scrollIntoView({ behavior: "smooth", block: "center" });
   try {
     const preview = await api("/api/pairing/preview", {
       method: "POST",
@@ -6505,7 +6532,11 @@ window.handleDevicePairingUrl = async function (value) {
     state.pairingPreview = preview;
     $("pairingConfirmName").textContent = preview.name || "Mindinguflac desktop";
     $("pairingConfirmFingerprint").textContent = String(preview.fingerprint || "").match(/.{1,4}/g)?.join(" ") || "Unavailable";
-    if (preview.already_paired) {
+    if (!preview.verified) {
+      $("pairingConfirmTitle").textContent = "Could not verify desktop";
+      $("pairingConfirmMessage").textContent = preview.error || "The scanned device could not be verified on this Wi-Fi network.";
+      confirm.disabled = true;
+    } else if (preview.already_paired) {
       $("pairingConfirmTitle").textContent = "Already paired";
       $("pairingConfirmMessage").textContent = `This phone is already paired with ${preview.name || "this desktop"}. Remove the existing pairing before scanning again.`;
     } else if (!preview.can_pair) {
@@ -6515,17 +6546,15 @@ window.handleDevicePairingUrl = async function (value) {
       $("pairingConfirmMessage").textContent = "Pair this phone with the desktop shown above? Confirm to begin syncing, or cancel to leave the devices unpaired.";
       confirm.disabled = false;
     }
-    confirmation.scrollIntoView({ behavior: "smooth", block: "center" });
   } catch (error) {
     if (state.pendingPairingInvitation !== invitation) return;
     $("pairingConfirmTitle").textContent = "Could not verify desktop";
-    $("pairingConfirmName").textContent = "Unverified device";
-    $("pairingConfirmFingerprint").textContent = "";
+    $("pairingConfirmName").textContent = qrName;
+    $("pairingConfirmFingerprint").textContent = qrFingerprint.match(/.{1,4}/g)?.join(" ") || "Unavailable";
     $("pairingConfirmMessage").textContent = error.message || "Could not verify this pairing request.";
     confirm.disabled = true;
-    confirmation.scrollIntoView({ behavior: "smooth", block: "center" });
   }
-};
+}
 
 async function saveSettings(e) {
   e.preventDefault();

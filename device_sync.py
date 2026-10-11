@@ -316,15 +316,17 @@ class DesktopPairingService:
     def make_invitation(self) -> dict:
         self.start()
         token = secrets.token_urlsafe(24)
+        desktop_name = socket.gethostname() or "Mindinguflac desktop"
         invitation = {
             "device_id": self.state["device_id"],
             "token": token,
             "fingerprint": self.fingerprint,
+            "name": desktop_name,
             "expires_at": time.time() + 180,
         }
         with self.lock:
             self.invitation = invitation
-        query = urllib.parse.urlencode({key: invitation[key] for key in ("device_id", "token", "fingerprint")})
+        query = urllib.parse.urlencode({key: invitation[key] for key in ("device_id", "token", "fingerprint", "name")})
         uri = "mindinguflac://pair?" + query
         import qrcode
         import qrcode.image.svg
@@ -509,7 +511,7 @@ class AndroidPairingClient:
         return result
 
     @staticmethod
-    def _parse_invitation(invitation: str) -> tuple[str, str, str]:
+    def _parse_invitation(invitation: str) -> tuple[str, str, str, str]:
         parsed = urllib.parse.urlparse(invitation)
         if parsed.scheme == "mindinguflac":
             data = dict(urllib.parse.parse_qsl(parsed.query))
@@ -521,9 +523,10 @@ class AndroidPairingClient:
         target_id = str(data.get("device_id") or "")
         token = str(data.get("token") or "")
         fingerprint = str(data.get("fingerprint") or "")
+        name = str(data.get("name") or "").strip()
         if not target_id or not token or len(fingerprint) != 64:
             raise ValueError("Pairing QR code is incomplete")
-        return target_id, token, fingerprint
+        return target_id, token, fingerprint, name
 
     def _find_invited_desktop(self, target_id: str, fingerprint: str) -> dict:
         deadline = time.monotonic() + 20
@@ -541,26 +544,38 @@ class AndroidPairingClient:
 
     def preview(self, invitation: str) -> dict:
         """Identify the QR's desktop and show pairing availability without pairing."""
-        target_id, token, fingerprint = self._parse_invitation(invitation)
-        device = self._find_invited_desktop(target_id, fingerprint)
-        checked = self._connect(device, "/pair/preview", {
-            "device_id": target_id, "token": token, "fingerprint": fingerprint,
-            "phone_id": self.state["phone_id"],
-        })
+        target_id, token, fingerprint, qr_name = self._parse_invitation(invitation)
         with self.lock:
             pair = dict(self.state.get("pair") or {})
         paired = bool(pair)
+        already_paired = bool(paired and pair.get("device_id") == target_id)
+        name = qr_name or "Mindinguflac desktop"
+        try:
+            device = self._find_invited_desktop(target_id, fingerprint)
+            name = str(device.get("name") or name)
+            checked = self._connect(device, "/pair/preview", {
+                "device_id": target_id, "token": token, "fingerprint": fingerprint,
+                "phone_id": self.state["phone_id"],
+            })
+        except Exception as exc:
+            return {
+                "device_id": target_id, "name": name, "fingerprint": fingerprint,
+                "verified": False, "can_pair": False, "already_paired": already_paired,
+                "paired_with": str(pair.get("name") or "") if paired else "",
+                "error": str(exc)[:300],
+            }
         return {
             "device_id": target_id,
-            "name": str(device.get("name") or "Mindinguflac desktop"),
+            "name": name,
             "fingerprint": fingerprint,
-            "can_pair": not paired,
-            "already_paired": bool(paired and pair.get("device_id") == target_id) or bool(checked.get("already_paired")),
+            "verified": True,
+            "can_pair": not paired and not checked.get("already_paired"),
+            "already_paired": already_paired or bool(checked.get("already_paired")),
             "paired_with": str(pair.get("name") or "") if paired else "",
         }
 
     def pair(self, invitation: str) -> dict:
-        target_id, token, fingerprint = self._parse_invitation(invitation)
+        target_id, token, fingerprint, _name = self._parse_invitation(invitation)
         with self.lock:
             current_pair = dict(self.state.get("pair") or {})
         if current_pair:
@@ -685,6 +700,12 @@ def pair(invitation_value: str) -> dict:
     if _android is None:
         raise RuntimeError("Android pairing service is not running")
     return _android.pair(invitation_value)
+
+
+def preview(invitation_value: str) -> dict:
+    if _android is None:
+        raise RuntimeError("Android pairing service is not running")
+    return _android.preview(invitation_value)
 
 
 def stop_android_pairing() -> None:
