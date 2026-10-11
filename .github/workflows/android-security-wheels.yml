@@ -35,7 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Keep Chaquopy build paths inside compiler wrapper allowlist
-        run: sed -i 's|dirname(sys.argv\[0\])/../..|dirname(sys.argv[0])/..|' .work/chaquopy/server/pypi/compiler-wrapper.py
+        run: python -c 'from pathlib import Path; p=Path(".work/chaquopy/server/pypi/compiler-wrapper.py"); p.write_text(p.read_text().replace("dirname(sys.argv[0])/../..", "dirname(sys.argv[0])/.."))'
 
       - name: Install Android NDK and build tools
         run: |
