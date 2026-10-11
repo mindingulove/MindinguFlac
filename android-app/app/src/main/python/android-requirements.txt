@@ -1,3 +1,4 @@
+# Native dependencies match the bundled CPython 3.12 Android arm64 wheels.
 mutagen
 requests
 PySocks
