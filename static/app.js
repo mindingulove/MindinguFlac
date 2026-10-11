@@ -6556,6 +6556,15 @@ async function presentDevicePairingConfirmation(invitation) {
   }
 }
 
+function showSettingsNotice(title, message) {
+  const dialog = $("settingsNoticeDialog");
+  if (!dialog) return;
+  $("settingsNoticeTitle").textContent = title;
+  $("settingsNoticeMessage").textContent = message;
+  $("settingsNoticeClose").onclick = () => dialog.close();
+  if (!dialog.open) dialog.showModal();
+}
+
 async function saveSettings(e) {
   e.preventDefault();
   const body = {
@@ -6585,8 +6594,8 @@ async function saveSettings(e) {
     await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
     state.settings = body;
     state.tourLocation = null;
-    alert("Settings saved");
-  } catch (e) { alert("Save failed: " + e.message); }
+    showSettingsNotice("Settings saved", "Your preferences have been saved.");
+  } catch (e) { showSettingsNotice("Could not save settings", e.message || "Please try again."); }
 }
 
 // ---------------------------------------------------------------------------

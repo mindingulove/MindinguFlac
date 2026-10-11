@@ -66,15 +66,9 @@ def _settings_revision() -> float:
         if _settings_revision_value is None:
             saved = _load_json(_settings_revision_path(), {})
             try:
-                revision = float(saved.get("revision") or 0)
+                revision = float(saved["revision"]) if "revision" in saved else 0.0
             except (TypeError, ValueError):
                 revision = 0
-            if revision <= 0:
-                try:
-                    import app
-                    revision = app.CONFIG_PATH.stat().st_mtime
-                except (OSError, AttributeError):
-                    revision = 0
             _settings_revision_value = revision
         return _settings_revision_value
 
@@ -127,6 +121,7 @@ def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: 
         "device_id": local_id,
         "settings": settings,
         "settings_revision": settings_revision,
+        "settings_revision_mode": 1,
         "recent": jobs[:1000],
         "statistics": db.sync_export(statistics_since),
         "desktop_cursor": float(desktop_cursor or 0),
@@ -184,10 +179,15 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
     incoming = snapshot.get("settings")
     if isinstance(incoming, dict):
         current_revision = _settings_revision()
-        incoming_revision = float(snapshot.get("settings_revision") or 0)
+        incoming_revision = float(snapshot.get("settings_revision") or 0) if snapshot.get("settings_revision_mode") == 1 else 0.0
         current = {key: getattr(app.app_config, key) for key in SHARED_SETTINGS}
         values = {key: incoming[key] for key in SHARED_SETTINGS if key in incoming}
-        if incoming_revision > current_revision and values != current:
+        initial_desktop_snapshot = (
+            os.environ.get("MINDINGUFLAC_ANDROID") == "1"
+            and incoming_revision == current_revision
+            and not any(value for value in (current_revision, incoming_revision))
+        )
+        if (incoming_revision > current_revision or initial_desktop_snapshot) and values != current:
             config_values = app.app_config.public_dict()
             config_values.update(values)
             updated = app._sanitize_runtime_config(app.AppConfig.from_public_dict(config_values))

@@ -3454,6 +3454,13 @@ button.primary, button.use-torrent { background: var(--accent); color: #000; bor
 dialog { background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 16px; padding: 0; width: 90%; max-width: 520px; box-shadow: 0 24px 64px rgba(0,0,0,0.8); }
 dialog::backdrop { background: rgba(0,0,0,0.74); }
 
+.settings-notice-dialog { max-width: 440px; }
+.settings-notice-content { padding: 26px; }
+.settings-notice-content h2 { margin: 0 0 10px; font-size: 20px; }
+.settings-notice-content p { margin: 0 0 24px; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.settings-notice-content button { min-width: 96px; min-height: 42px; border-radius: 999px; padding: 0 20px; }
+.settings-notice-content button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
 .playlist-picker {
   display: flex;
   flex-direction: column;
