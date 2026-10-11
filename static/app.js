@@ -3340,6 +3340,7 @@ function canSwitchToVideo(track = state.currentTrack) {
   return canSwitchToLocalVideo(track) ||
     state.videoFetch.status === "ready" ||
     state.videoFetch.status === "downloading" ||
+    state.videoFetch.status === "error" ||
     state.videoFetch.status === "not_found";
 }
 
@@ -3353,7 +3354,7 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
   if (!track) return state.videoFetch;
   if (!force && state.videoFetch.trackKey === key) {
     const s = state.videoFetch.status;
-    if (s === "ready" || s === "not_found" || s === "downloading") return state.videoFetch;
+      if (s === "ready" || s === "not_found" || s === "downloading") return state.videoFetch;
   }
   state.videoFetch = { trackKey: key, status: "downloading", path: "" };
   renderSideVideoButton();
@@ -3379,7 +3380,13 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
         renderSideCover(track);
       }
       renderSideVideoButton();
-      if (data.status === "ready" || data.status === "not_found") {
+      if (data.status === "ready" || data.status === "not_found" || data.status === "error") {
+        if (data.status === "error") {
+          state.videoMode = false;
+          state.sideVideoTrackKey = "";
+          renderSideCover(track);
+          showToast(data.error || "Video download failed. Try again.", 6000);
+        }
         if (data.status === "not_found") showToast("No video found for this track");
         if (state.videoMode && state.sideVideoTrackKey === key && data.status === "ready") {
           renderSideCover(track);

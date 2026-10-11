@@ -216,8 +216,12 @@ recorded versions and artifact hashes.
   missing dependencies, CFFI and cryptography native libraries loaded, and
   the jlibtorrent native probe passed.
   Cryptography 50.0.2 and Pillow 12.3.0 have since built locally; cryptography
-  statically links OpenSSL 3.5.9 LTS. Both APKs pass packaging checks; installing
-  and checking the patched build on the phone is pending USB reconnection.
+  statically links OpenSSL 3.5.9 LTS. Both APKs pass packaging checks. The patched
+  debug build is installed on Nothing A065; the runtime confirms all four native
+  dependency versions, no missing dependencies, and a working jlibtorrent probe.
+  Android music video fetch now uses progressive MP4 with embedded audio instead
+  of FFmpeg-dependent adaptive streams. Billie Jean downloaded successfully and
+  loaded in the phone WebView at 480×360 (295.845 seconds).
 
 The UI/device coverage items below also remain pending.
 

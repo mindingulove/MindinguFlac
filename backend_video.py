@@ -13,6 +13,7 @@ Entry point used by app.py:
 from __future__ import annotations
 
 import shutil
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -491,15 +492,16 @@ def _download_torrent_clip(magnet: str, output_path: Path, expected_s: float = 0
 
 # ── YouTube fallback download ────────────────────────────────────────────────
 
-def _download_youtube_clip(url: str, start_offset: int, output_path: Path) -> bool:
+def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_cb=None) -> bool:
     """Download a YouTube music video at 480p H.264/AAC into output_path."""
     try:
         import yt_dlp
-        from backend_ytpdl import _ffmpeg_location
+        from backend_ytpdl import _ffmpeg_location, _youtube_metadata_opts, _add_youtube_cookie_file
     except Exception:
         return False
 
     tmp = output_path.with_suffix(".ytmp.mp4")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp.unlink(missing_ok=True)
     opts: dict = {
         "format": (
@@ -524,7 +526,14 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path) -> bo
         "fragment_retries": 3,
         "http_chunk_size": 10 * 1024 * 1024,
     }
-    if start_offset > 0:
+    is_android = os.environ.get("MINDINGUFLAC_ANDROID") == "1"
+    if is_android:
+        # Progressive MP4 already contains sound; adaptive formats need FFmpeg,
+        # which isn't shipped in the Android APK.
+        opts.update(_youtube_metadata_opts(skip_download=False))
+        opts["format"] = "best[ext=mp4][vcodec!=none][acodec!=none][height<=720]/best[ext=mp4][vcodec!=none][acodec!=none]"
+        opts.pop("merge_output_format", None)
+    if start_offset > 0 and not is_android:
         from yt_dlp.utils import download_range_func
         opts["download_ranges"] = download_range_func(None, [(start_offset, None)])
         opts["force_keyframes_at_cuts"] = True
@@ -532,18 +541,25 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path) -> bo
     if ffmpeg:
         opts["ffmpeg_location"] = ffmpeg
 
-    for browser in ("safari", "chrome", "firefox", None):
+    attempts = []
+    cookie_opts = dict(opts)
+    if _add_youtube_cookie_file(cookie_opts):
+        attempts.append(cookie_opts)
+    if not is_android:
+        for browser in ("safari", "chrome", "firefox"):
+            attempts.append({**opts, "cookiesfrombrowser": (browser,)})
+    attempts.append(dict(opts))
+    for attempt in attempts:
         try:
-            attempt = dict(opts)
-            if browser:
-                attempt["cookiesfrombrowser"] = (browser,)
             tmp.unlink(missing_ok=True)
             with yt_dlp.YoutubeDL(attempt) as ydl:
                 ydl.download([url])
             if tmp.exists() and tmp.stat().st_size > 65536:
                 tmp.replace(output_path)
                 return True
-        except Exception:
+        except Exception as exc:
+            if log_cb:
+                log_cb(f"Video download failed: {exc}")
             tmp.unlink(missing_ok=True)
     return False
 

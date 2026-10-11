@@ -263,6 +263,8 @@ def _quality_to_codec(quality: str) -> str:
 def _format_selector(quality: str) -> str:
     mode = _quality_mode(quality)
     if mode == "video":
+        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+            return "best[ext=mp4][vcodec!=none][acodec!=none][has_drm!=true]"
         # H.264 required — Safari <audio> cannot play AV1-in-mp4 containers
         return (
             "bestvideo[vcodec^=avc][height<=480][has_drm!=true]+bestaudio[ext=m4a][has_drm!=true]/"

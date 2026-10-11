@@ -218,6 +218,7 @@ lyrics_prefetch_lock = threading.Lock()
 lyrics_prefetch_inflight: set[str] = set()
 video_cache_lock = threading.Lock()
 _video_fetch_jobs: dict[str, str] = {}   # cache_key -> "downloading"|"ready"|"failed"
+_video_fetch_errors: dict[str, str] = {}
 _video_fetch_lock = threading.Lock()
 
 
@@ -1459,7 +1460,7 @@ def _lookup_youtube_video(identity: dict) -> dict:
     key = _video_cache_key(identity)
     with video_cache_lock:
         cached = _load_video_cache().get(key)
-    if cached:
+    if cached and (cached.get("found") or os.environ.get("MINDINGUFLAC_ANDROID") != "1"):
         return {**cached, "source": "cache", "identity": identity}
 
     try:
@@ -1500,6 +1501,9 @@ def _lookup_youtube_video(identity: dict) -> dict:
             "socket_timeout": 8,
             "noplaylist": True,
         }
+        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+            from backend_ytpdl import _youtube_metadata_opts
+            opts.update(_youtube_metadata_opts(extract_flat="in_playlist"))
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(f"ytsearch12:{query}", download=False)
         entries = [entry for entry in (info or {}).get("entries") or [] if isinstance(entry, dict)]
@@ -1695,7 +1699,7 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             override = None
 
         # Try backend_video torrent clip search first (own session, parallel with music downloads)
-        if not override:
+        if not override and os.environ.get("MINDINGUFLAC_ANDROID") != "1":
             try:
                 import backend_video
                 _vid_title = f"{identity.get('artist', '')} – {identity.get('title', '')}".strip(" –")
@@ -1713,11 +1717,23 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
         lookup = _lookup_youtube_video(identity)
         if not lookup.get("found") or not lookup.get("webpage_url"):
             with _video_fetch_lock:
-                _video_fetch_jobs[key] = "failed"
+                _video_fetch_jobs[key] = "not_found" if lookup.get("ok") else "failed"
+                if not lookup.get("ok"):
+                    _video_fetch_errors[key] = "Video search failed. Check your connection and try again."
             return
         url = lookup["webpage_url"]
         start_offset = int(lookup.get("video_start_offset") or 0)
         VIDEO_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+            from backend_video import _download_youtube_clip
+            def _android_video_log(message):
+                print(f"[VideoFetch] {message}")
+            downloaded = _download_youtube_clip(url, start_offset, mp4_path, log_cb=_android_video_log)
+            with _video_fetch_lock:
+                _video_fetch_jobs[key] = "ready" if downloaded else "failed"
+                if not downloaded:
+                    _video_fetch_errors[key] = "Video download failed. YouTube may require sign-in or this video may not offer a compatible stream."
+            return
         import yt_dlp
         # H.264 + AAC mp4 for Safari/WKWebView compatibility.
         # Fallback chain: prefer avc≤480p, then any avc, then any mp4, then best.
@@ -1807,6 +1823,7 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
             _save_video_cache(cache)
         with _video_fetch_lock:
             _video_fetch_jobs.pop(key, None)
+            _video_fetch_errors.pop(key, None)
     if mp4_path.exists() and mp4_path.stat().st_size > 65536:
         return {"status": "ready", "path": str(mp4_path)}
     with _video_fetch_lock:
@@ -1816,6 +1833,8 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
     if job_status == "downloading":
         return {"status": "downloading"}
     if job_status == "failed":
+        return {"status": "error", "error": _video_fetch_errors.get(key, "Video download failed. Try again.")}
+    if job_status == "not_found":
         return {"status": "not_found"}
     with _video_fetch_lock:
         _video_fetch_jobs[key] = "downloading"

@@ -7,6 +7,8 @@
 - Browse playlists, albums, and deduplicated artists in the Android library, and reorder the Android queue with touch gestures.
 
 ## Fixed
+- Use combined video/audio MP4 streams on Android without requiring FFmpeg; report download failures separately from missing videos.
+- Update Android to Python 3.12, CFFI 2.0.0, cryptography 50.0.2 with OpenSSL 3.5.9 LTS, and Pillow 12.3.0 to address reported dependency vulnerabilities.
 - Keep AI advisor provider and model choices device-specific while syncing shared settings.
 - Apply the first desktop settings snapshot on Android and use saved logical revisions for later preference changes.
 - Show settings save results in a themed in-app dialog on Android.
