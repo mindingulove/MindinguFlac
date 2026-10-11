@@ -1,0 +1,82 @@
+name: Build Android security wheels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64-wheels:
+    name: Build patched Android arm64 wheels
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chaquo/chaquopy
+          ref: 75197ed5c8280c38881af0e03fede591f1abc11e
+          path: .work/chaquopy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Android NDK and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes patchelf patch
+          sdkmanager "ndk;27.3.13750724"
+
+      - name: Prepare Chaquopy wheel builder
+        working-directory: .work/chaquopy/server/pypi
+        run: |
+          python -m pip install -r requirements.txt
+          ../..//target/download-target.sh "$GITHUB_WORKSPACE/.work/chaquopy/maven/com/chaquo/python/target/3.10.19-0"
+          mkdir -p dist/chaquopy-libffi dist/chaquopy-libjpeg dist/chaquopy-freetype
+          curl --fail --location --silent --show-error \
+            https://chaquo.com/pypi-13.1/chaquopy-libffi/chaquopy_libffi-3.3-3-py3-none-android_24_arm64_v8a.whl \
+            --output dist/chaquopy-libffi/chaquopy_libffi-3.3-3-py3-none-android_24_arm64_v8a.whl
+          curl --fail --location --silent --show-error \
+            https://chaquo.com/pypi-13.1/chaquopy-libjpeg/chaquopy_libjpeg-1.5.3-1-py3-none-android_21_arm64_v8a.whl \
+            --output dist/chaquopy-libjpeg/chaquopy_libjpeg-1.5.3-1-py3-none-android_21_arm64_v8a.whl
+          curl --fail --location --silent --show-error \
+            https://chaquo.com/pypi-13.1/chaquopy-freetype/chaquopy_freetype-2.9.1-2-py3-none-android_21_arm64_v8a.whl \
+            --output dist/chaquopy-freetype/chaquopy_freetype-2.9.1-2-py3-none-android_21_arm64_v8a.whl
+          mkdir -p "$RUNNER_TEMP/android-recipes" "$RUNNER_TEMP/android-wheels"
+          cp -R packages/cffi "$RUNNER_TEMP/android-recipes/cffi"
+          cp -R packages/pillow "$RUNNER_TEMP/android-recipes/pillow"
+          cp -R packages/cryptography "$RUNNER_TEMP/android-recipes/cryptography"
+          sed -i 's/version: "1.17.1"/version: "2.0.0"/' "$RUNNER_TEMP/android-recipes/cffi/meta.yaml"
+          sed -i 's/version: "11.0.0"/version: "12.3.0"/' "$RUNNER_TEMP/android-recipes/pillow/meta.yaml"
+          sed -i 's/version: "42.0.8"/version: "49.0.0"/' "$RUNNER_TEMP/android-recipes/cryptography/meta.yaml"
+          sed -i '/- openssl/a\    - cffi 2.0.0' "$RUNNER_TEMP/android-recipes/cryptography/meta.yaml"
+
+      - name: Build cffi 2.0.0 for Android
+        working-directory: .work/chaquopy/server/pypi
+        run: |
+          python build-wheel.py --python 3.10 --abi arm64-v8a "$RUNNER_TEMP/android-recipes/cffi"
+          cp dist/cffi/cffi-2.0.0-*-cp310-cp310-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+
+      - name: Build Pillow 12.3.0 for Android
+        working-directory: .work/chaquopy/server/pypi
+        run: |
+          python build-wheel.py --python 3.10 --abi arm64-v8a "$RUNNER_TEMP/android-recipes/pillow"
+          cp dist/pillow/pillow-12.3.0-*-cp310-cp310-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+
+      - name: Build cryptography 49.0.0 for Android
+        working-directory: .work/chaquopy/server/pypi
+        run: |
+          python build-wheel.py --python 3.10 --abi arm64-v8a "$RUNNER_TEMP/android-recipes/cryptography"
+          cp dist/cryptography/cryptography-49.0.0-*-cp310-cp310-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64-security-wheels
+          path: ${{ runner.temp }}/android-wheels/*.whl
+          if-no-files-found: error
