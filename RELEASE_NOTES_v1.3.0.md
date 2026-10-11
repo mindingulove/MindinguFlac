@@ -1,6 +1,7 @@
 # Mindinguflac v1.3.0
 
 ## Added
+- Introduce Mindinguflac for Android as a new standalone app for Android 8+ 64-bit ARM devices.
 - Pair Android and desktop over the local Wi-Fi network with a fingerprint-checked, expiring QR invitation and an explicit confirmation dialog.
 - Sync recently played tracks, listening statistics, and shared preferences, including tour source, tour location, and the Discogs token.
 - Browse playlists, albums, and deduplicated artists in the Android library, and reorder the Android queue with touch gestures.
