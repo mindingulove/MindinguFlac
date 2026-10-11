@@ -380,10 +380,8 @@ if (-not (Test-Path $appExe)) {
     throw "Build failed: main app exe not found at $appExe"
 }
 
-# Extract build ID from app.py and write _build_id.txt (read by launcher at runtime)
-$buildId = (& $python -c "import re; m = re.search(r'SpotiFLACStreamer/([^\x22]+)', open('app.py').read()); print(m.group(1) if m else 'unknown')")
-Write-Host "Build ID: $buildId"
-[System.IO.File]::WriteAllText((Join-Path $root "_build_id.txt"), $buildId)
+# Keep the release version while assigning each replacement bundle its own cache.
+$buildVersion = (& $python -c "import re; m = re.search(r'SpotiFLACStreamer/([^\x22]+)', open('app.py').read()); print(m.group(1) if m else 'unknown')")
 
 # Zip the onedir app with portable separators and Windows-reserved path names
 # sanitized. The launcher repeats this validation defensively at extraction.
@@ -392,6 +390,10 @@ if (Test-Path $bundleZip) { Remove-Item $bundleZip -Force }
 Write-Host "Creating bundle.zip from $appDir ..."
 Invoke-Checked { & $python -m scripts.create_windows_bundle $appDir $bundleZip }
 Write-Host "bundle.zip created: $([math]::Round((Get-Item $bundleZip).Length / 1MB, 1)) MB"
+$bundleHash = (Get-FileHash -Path $bundleZip -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()
+$buildId = "$buildVersion-$bundleHash"
+Write-Host "Build ID: $buildId"
+[System.IO.File]::WriteAllText((Join-Path $root "_build_id.txt"), $buildId)
 
 # Build the tiny launcher (onefile) that wraps bundle.zip + shows progress bar
 Write-Host "Building launcher..."

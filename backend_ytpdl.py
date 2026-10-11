@@ -105,6 +105,48 @@ def _has_youtube_auth_cookie(cookiejar) -> bool:
         return False
 
 
+def _discover_youtube_browser_session():
+    """Select one signed-in profile, never merge separate browser sessions."""
+    import browser_cookie3
+
+    if sys.platform == "win32":
+        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        browser_roots = [
+            ("edge", local / "Microsoft" / channel / "User Data")
+            for channel in ("Edge", "Edge Beta", "Edge Dev", "Edge SxS")
+        ] + [
+            ("chrome", local / "Google" / "Chrome" / "User Data"),
+            ("brave", local / "BraveSoftware" / "Brave-Browser" / "User Data"),
+        ]
+        for browser, root in browser_roots:
+            reader = getattr(browser_cookie3, browser, None)
+            if not reader or not root.is_dir():
+                continue
+            profiles = [root / "Default", *sorted(root.glob("Profile *"))]
+            for profile in profiles:
+                for relative in ("Network/Cookies", "Cookies"):
+                    cookie_file = profile / relative
+                    if not cookie_file.is_file():
+                        continue
+                    try:
+                        jar = reader(cookie_file=str(cookie_file), key_file=str(root / "Local State"), domain_name="youtube.com")
+                        if _has_youtube_auth_cookie(jar):
+                            logger.info("YouTube session found in %s %s", browser, profile.name)
+                            return jar
+                    except Exception as exc:
+                        # Log the failure type, never cookie values or keys.
+                        logger.info("YouTube cookie reader failed for %s %s (%s); profile lock or encryption may prevent import", browser, profile.name, type(exc).__name__)
+
+    for reader in getattr(browser_cookie3, "all_browsers", []):
+        try:
+            jar = reader(domain_name="youtube.com")
+            if _has_youtube_auth_cookie(jar):
+                return jar
+        except Exception as exc:
+            logger.debug("YouTube cookie reader %s unavailable (%s)", reader.__name__, type(exc).__name__)
+    return None
+
+
 def youtube_login_available() -> bool:
     """Return whether a local, signed-in YouTube session can be used safely.
 
@@ -113,9 +155,7 @@ def youtube_login_available() -> bool:
     makes the login hand-off work when macOS keeps the webview focused.
     """
     try:
-        import browser_cookie3
-
-        if _has_youtube_auth_cookie(browser_cookie3.load(domain_name="youtube.com")):
+        if _discover_youtube_browser_session() is not None:
             return True
     except Exception as exc:
         logger.info("Browser cookie discovery unavailable while checking YouTube login: %s", exc)
@@ -149,11 +189,10 @@ def import_youtube_browser_cookies(target_file: Path | None = None) -> Path | No
     focus/return event from the system browser.
     """
     try:
-        import browser_cookie3
         from http.cookiejar import MozillaCookieJar
 
-        discovered = browser_cookie3.load(domain_name="youtube.com")
-        if not _has_youtube_auth_cookie(discovered):
+        discovered = _discover_youtube_browser_session()
+        if discovered is None:
             return None
         cookie_path = target_file or _youtube_imported_cookie_file()
         cookie_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1701,7 +1740,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     if not _has_youtube_auth_opts(ydl_opts):
         _add_youtube_cookie_file(ydl_opts)
 
-    if not _has_youtube_auth_opts(ydl_opts) and not is_android:
+    if not _has_youtube_auth_opts(ydl_opts) and not is_android and sys.platform != "win32":
         _mark_youtube_login_required(job, manager)
         raise RuntimeError(
             "YouTube login required. Click the Mindinguflac notification, sign in in your browser, then return to retry."
@@ -1718,7 +1757,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
         manager._append_cache_event(job, "trying", "Using signed-in YouTube cookies discovered from the system browsers")
     elif is_android:
         manager._append_cache_event(job, "trying", "Using Android guest YouTube access")
+    elif not _has_youtube_auth_opts(ydl_opts):
+        manager._append_cache_event(job, "trying", "Browser cookies could not be imported; trying public YouTube access without requiring another login")
     manager._append_cache_event(job, "trying", f"Downloading via ytp-dl ({label})...")
+
+    auth_failures = []
+    def _remember_auth_failure(exc):
+        message = str(exc).lower()
+        if any(marker in message for marker in ("sign in", "login required", "authentication required", "log in")):
+            auth_failures.append(True)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1736,12 +1783,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         candidates = _prepend_current_youtube_candidate(candidates, job)
                         candidates = _ranked_youtube_matches_with_ai(candidates, job, manager)
                     except Exception as exc:
+                        _remember_auth_failure(exc)
                         manager._append_cache_event(job, "trying", f"YouTube search failed: {exc}")
                         return None
                 else:
                     try:
                         direct_info = ydl.extract_info(target_url, download=False)
                     except Exception as exc:
+                        _remember_auth_failure(exc)
                         manager._append_cache_event(job, "trying", f"Could not verify direct YouTube URL before download ({exc}); trying it anyway")
                         candidates = [(target_url, None)]
                     else:
@@ -1833,6 +1882,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             )
                         continue
                     except Exception as exc:
+                        _remember_auth_failure(exc)
                         exc_str = str(exc)
                         # 403/429 = bot detection / rate limit — transient, don't blacklist
                         # "Requested format is not available" is cookie-induced: a signed-in
@@ -1850,6 +1900,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                                 if result_code == 0 or has_file:
                                     return download_url
                             except Exception as retry_exc:
+                                _remember_auth_failure(retry_exc)
                                 exc_str = f"{exc_str}; no-cookie retry: {retry_exc}"
                         if not transient:
                             db.add_to_blacklist(download_url, f"ytp-dl error: {exc_str[:120]}")
@@ -1898,6 +1949,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     worked_url = _try_download(broad_query)
 
             if not worked_url:
+                if auth_failures and sys.platform == "win32":
+                    _mark_youtube_login_required(job, manager)
+                    raise RuntimeError("YouTube requires a readable signed-in session. Edge cookies may be protected or locked; another login in the same profile may not resolve cookie import.")
                 raise RuntimeError("All YouTube download attempts failed")
 
     except Exception as exc:
