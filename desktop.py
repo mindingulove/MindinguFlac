@@ -519,7 +519,10 @@ def install_system_notifications(window: webview.Window) -> None:
                         info = response.notification().request().content().userInfo() or {}
                         target = str(info.get("url") or "")
                         if target:
-                            webbrowser.open(target, new=2)
+                            if _app._youtube_login_fn:
+                                threading.Thread(target=_app._youtube_login_fn, name="youtube-notification-login", daemon=True).start()
+                            else:
+                                webbrowser.open(target, new=2)
                     finally:
                         completion_handler()
 
@@ -596,8 +599,8 @@ import multiprocessing
 import ctypes
 
 def install_youtube_login(main_window) -> None:
-    """Use our WebView2 profile, not another browser's locked cookie database."""
-    if sys.platform != "win32":
+    """Read the app-owned WebView2/WKWebView session through its native API."""
+    if sys.platform not in {"win32", "darwin"}:
         return
     import app
     import backend_ytpdl

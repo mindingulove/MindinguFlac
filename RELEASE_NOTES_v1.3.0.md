@@ -7,7 +7,7 @@
 - Browse playlists, albums, and deduplicated artists in the Android library, and reorder the Android queue with touch gestures.
 
 ## Fixed
-- Sign in to YouTube inside a dedicated Windows pywebview window and save the app-owned session through the native WebView2 cookie API, without reading Edge's protected profile database.
+- Sign in to YouTube inside a dedicated desktop pywebview window on Windows and macOS, saving the app-owned session through the native WebView2/WKWebView cookie API.
 - Set the Windows unpacker window, taskbar and shortcut icons, and refresh extracted files when replacing a build of the same version.
 - Check Windows browser profiles separately and try public YouTube access when browser cookies cannot be imported, instead of reporting a login requirement before contacting YouTube.
 - Use combined video/audio MP4 streams on Android without requiring FFmpeg; report download failures separately from missing videos.

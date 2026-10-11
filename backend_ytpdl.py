@@ -191,7 +191,11 @@ def import_youtube_webview_cookies(cookies) -> bool:
             expires = None
             if morsel["expires"]:
                 try:
-                    expires = int(parsedate_to_datetime(morsel["expires"]).timestamp())
+                    expiry = morsel["expires"]
+                    if hasattr(expiry, "timeIntervalSince1970"):
+                        expires = int(expiry.timeIntervalSince1970())  # WKWebView NSDate
+                    else:
+                        expires = int(parsedate_to_datetime(expiry).timestamp())
                     if expires <= 0:
                         expires = None  # Native session cookies have no expiry.
                 except (ValueError, TypeError, OverflowError):
@@ -2001,7 +2005,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
             if not worked_url:
                 if auth_failures and sys.platform == "win32":
                     _mark_youtube_login_required(job, manager)
-                    raise RuntimeError("YouTube requires a readable signed-in session. Edge cookies may be protected or locked; another login in the same profile may not resolve cookie import.")
+                    raise RuntimeError("YouTube requires sign-in. Use Mindinguflac's Log in button or Settings → YouTube account to save an app-owned session.")
                 raise RuntimeError("All YouTube download attempts failed")
 
     except Exception as exc:
