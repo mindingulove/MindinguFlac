@@ -69,6 +69,7 @@ def _create_shortcut(special_folder: str, name: str, target: pathlib.Path) -> No
             f'$s = $ws.CreateShortcut("$folder\\{name}"); '
             f'$s.TargetPath = "{target_str}"; '
             f'$s.WorkingDirectory = "{workdir}"; '
+            f'$s.IconLocation = "{target_str},0"; '
             f'$s.Save()'
         )
         subprocess.run(
@@ -129,6 +130,13 @@ def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
         _extract_silent(bundle, target)
         return {"desktop": False, "startmenu": False}
 
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mindinguflac.desktop")
+        except Exception:
+            pass
+
     dark = _is_dark_mode()
 
     bg     = "#1c1c1c" if dark else "#ffffff"
@@ -143,6 +151,9 @@ def _run_extraction_ui(bundle: pathlib.Path, target: pathlib.Path) -> dict:
 
     root = tk.Tk()
     root.title("Mindinguflac Setup")
+    icon = pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(__file__).parent / "build" / "icons")) / "mindinguflac.ico"
+    if icon.is_file():
+        root.iconbitmap(default=str(icon))
     root.resizable(False, False)
     root.configure(bg=bg)
     root.geometry("460x240")

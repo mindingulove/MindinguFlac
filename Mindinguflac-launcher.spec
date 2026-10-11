@@ -9,6 +9,7 @@ a = Analysis(
     datas=[
         ('dist/bundle.zip', '.'),
         ('_build_id.txt', '.'),
+        ('build/icons/mindinguflac.ico', '.'),
     ],
     hiddenimports=['tkinter', 'tkinter.ttk'],
     hookspath=[],
