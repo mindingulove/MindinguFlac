@@ -7,6 +7,7 @@
 - Browse playlists, albums, and deduplicated artists in the Android library, and reorder the Android queue with touch gestures.
 
 ## Fixed
+- Correct the Windows WebView2 cookie deletion API so YouTube Sign out can clear the app-owned session.
 - Keep macOS YouTube sign-in redirects inside Mindinguflac instead of handing them to a separately installed YouTube web app; distinguish completed and cancelled sign-in attempts.
 - Wait for YouTube to confirm sign-in before saving a session; provide Sign out that clears only the app-owned YouTube/Google cookies and saved session.
 - Use yt-dlp's supported authenticated desktop clients instead of forcing mobile clients that discard cookies.

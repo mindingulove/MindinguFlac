@@ -652,7 +652,7 @@ def clear_youtube_native_cookies(main_window) -> None:
                     try:
                         for cookie in task.Result:
                             if allowed(cookie.Domain):
-                                manager.DeleteCookies(cookie.Name, cookie.Domain, cookie.Path)
+                                manager.DeleteCookiesWithDomainAndPath(cookie.Name, cookie.Domain, cookie.Path)
                     except Exception as exc:
                         errors.append(exc)
                     finally:
