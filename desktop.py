@@ -746,7 +746,7 @@ def install_youtube_login(main_window) -> None:
                 return True
             login = webview.create_window(
                 "Sign in to YouTube — Mindinguflac",
-                "https://www.youtube.com/", width=1000, height=760,
+                "https://www.youtube.com/signin?app=desktop&next=https%3A%2F%2Fwww.youtube.com%2F", width=1000, height=760,
                 min_size=(640, 480), background_color=DARK_BACKGROUND,
                 js_api=None,
             )
