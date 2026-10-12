@@ -692,6 +692,25 @@ def install_youtube_login(main_window) -> None:
         # NSURLRequest (including a form's POST body).
         if not hasattr(install_login_navigation, "delegate_class"):
             class MindinguflacYoutubeLoginDelegate(cocoa.BrowserView.BrowserDelegate):
+                def webView_decidePolicyForNavigationAction_decisionHandler_(
+                    self, native_view, action, handler
+                ):
+                    target = urlparse(str(action.request().URL().absoluteString()))
+                    host = (target.hostname or "").lower()
+                    trusted = any(host == domain or host.endswith("." + domain)
+                                  for domain in ("google.com", "youtube.com"))
+                    if target.scheme == "https" and trusted:
+                        # WebKit's AllowWithoutTryingAppLink policy prevents a
+                        # Safari-installed YouTube web app from taking over the
+                        # redirect. It preserves normal HTTPS/cookie handling.
+                        # Defined in WKNavigationDelegatePrivate.h as Allow + 2
+                        # since macOS 10.11; scoped to this login view only.
+                        handler(cocoa.WebKit.WKNavigationActionPolicyAllow + 2)
+                        return
+                    return super().webView_decidePolicyForNavigationAction_decisionHandler_(
+                        native_view, action, handler
+                    )
+
                 def webView_createWebViewWithConfiguration_forNavigationAction_windowFeatures_(
                     self, native_view, configuration, action, features
                 ):
@@ -713,6 +732,7 @@ def install_youtube_login(main_window) -> None:
             if instance:
                 instance._youtube_login_delegate = install_login_navigation.delegate_class.alloc().init()
                 instance.webview.setUIDelegate_(instance._youtube_login_delegate)
+                instance.webview.setNavigationDelegate_(instance._youtube_login_delegate)
 
         AppHelper.callAfter(install)
 

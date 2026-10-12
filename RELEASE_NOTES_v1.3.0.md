@@ -7,6 +7,7 @@
 - Browse playlists, albums, and deduplicated artists in the Android library, and reorder the Android queue with touch gestures.
 
 ## Fixed
+- Keep macOS YouTube sign-in redirects inside Mindinguflac instead of handing them to a separately installed YouTube web app; distinguish completed and cancelled sign-in attempts.
 - Wait for YouTube to confirm sign-in before saving a session; provide Sign out that clears only the app-owned YouTube/Google cookies and saved session.
 - Use yt-dlp's supported authenticated desktop clients instead of forcing mobile clients that discard cookies.
 - Bundle yt-dlp's JavaScript challenge solver and enable the packaged Node runtime for desktop YouTube requests.
