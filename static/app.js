@@ -3478,7 +3478,7 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
     if (retryArmed && leftApp && document.visibilityState !== "hidden") {
       try {
         const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
-        if (status.signed_in) await retryOnce();
+        if (status.signed_in && (!status.embedded_available || status.login_outcome === "completed")) await retryOnce();
       } catch (_) {}
     }
   };
@@ -3531,7 +3531,7 @@ function requestYoutubeLoginAndRetry(job, retryDownload) {
       if (flow.retrying || !flow.loginOpened) return;
       try {
         const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
-        if (status && status.signed_in) await retryOnce();
+        if (status && status.signed_in && (!flow.embedded || status.login_outcome === "completed")) await retryOnce();
       } catch (_) {}
     }, 2000);
     showActionToast(flow.embedded ? "Sign in in the YouTube window. The download will retry automatically." : "Sign in to YouTube, then return to Mindinguflac.", "Retry now", retryOnce);
@@ -6373,7 +6373,7 @@ async function setupYoutubeSignInSettings() {
         checking = true;
         try {
           const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
-          if (status.signed_in) {
+          if (status.signed_in && status.login_outcome === "completed") {
             clearInterval(youtubeSettingsLoginPoll);
             youtubeSettingsLoginPoll = null;
             showStatus(status);
@@ -6381,7 +6381,10 @@ async function setupYoutubeSignInSettings() {
           } else if (!status.login_open) {
             clearInterval(youtubeSettingsLoginPoll);
             youtubeSettingsLoginPoll = null;
-            label.textContent = "Sign-in closed. You can try again.";
+            showStatus(status);
+            label.textContent = status.signed_in
+              ? "Sign-in cancelled. The previously saved YouTube session is still available."
+              : "Sign-in closed before completion. You can try again.";
           }
         } catch (_) {} finally { checking = false; }
       }, 2000);

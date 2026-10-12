@@ -1863,12 +1863,6 @@ def run(output_dir: Path, job: dict, manager) -> None:
         browser_cookie_source = _add_browser_youtube_cookies(ydl_opts, output_dir, str(job.get("id") or ""))
     _use_job_youtube_cookie_copy(ydl_opts, str(job.get("id") or ""))
 
-    if not _has_youtube_auth_opts(ydl_opts) and not is_android and sys.platform != "win32":
-        _mark_youtube_login_required(job, manager)
-        raise RuntimeError(
-            "YouTube login required. Click the Mindinguflac notification, sign in in your browser, then return to retry."
-        )
-
     with manager._lock:
         job["status"] = "running"
         job["output_dir"] = str(output_dir)
@@ -2074,7 +2068,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     worked_url = _try_download(broad_query)
 
             if not worked_url:
-                if auth_failures and sys.platform == "win32":
+                if auth_failures and not is_android:
                     _mark_youtube_login_required(job, manager)
                     raise RuntimeError("YouTube requires sign-in. Use Mindinguflac's Log in button or Settings → YouTube account to save an app-owned session.")
                 raise RuntimeError("All YouTube download attempts failed")

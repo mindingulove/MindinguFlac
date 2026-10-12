@@ -328,6 +328,7 @@ _macos_media_command_fn = None   # (action: str) -> None
 _system_notification_fn = None   # (title: str, body: str, url: str) -> bool
 _youtube_login_fn = None  # Opens the app-owned native YouTube sign-in window.
 _youtube_login_active_fn = None
+_youtube_login_outcome_fn = None
 _youtube_logout_fn = None
 _dock_playing_state_fn = None   # (playing: bool) -> None
 
@@ -2529,7 +2530,8 @@ class Handler(BaseHTTPRequestHandler):
                 embedded = _youtube_login_fn is not None
                 login_open = bool(_youtube_login_active_fn and _youtube_login_active_fn())
                 signed_in = not login_open and backend_ytpdl.youtube_login_available(browser_discovery=not embedded)
-                self.send_json({"ok": True, "signed_in": signed_in, "embedded_available": embedded, "login_open": login_open})
+                outcome = _youtube_login_outcome_fn() if _youtube_login_outcome_fn else "idle"
+                self.send_json({"ok": True, "signed_in": signed_in, "embedded_available": embedded, "login_open": login_open, "login_outcome": outcome})
                 return
             if path == "/api/system/youtube-logout":
                 if not self.trusted_local_origin():

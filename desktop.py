@@ -677,8 +677,44 @@ def install_youtube_login(main_window) -> None:
     import app
     import backend_ytpdl
 
-    state = {"window": None, "stopped": None, "signing_out": False}
+    state = {"window": None, "stopped": None, "signing_out": False, "outcome": "idle"}
     lock = threading.Lock()
+
+    def install_login_navigation(login):
+        if sys.platform != "darwin":
+            return
+        from PyObjCTools import AppHelper
+        from webview.platforms import cocoa
+
+        # The default WKWebView UI delegate handles only link-click popups;
+        # form submissions and script-created authentication windows are lost.
+        # Keep trusted authentication popups in this window, with their original
+        # NSURLRequest (including a form's POST body).
+        if not hasattr(install_login_navigation, "delegate_class"):
+            class MindinguflacYoutubeLoginDelegate(cocoa.BrowserView.BrowserDelegate):
+                def webView_createWebViewWithConfiguration_forNavigationAction_windowFeatures_(
+                    self, native_view, configuration, action, features
+                ):
+                    target = urlparse(str(action.request().URL().absoluteString()))
+                    host = (target.hostname or "").lower()
+                    trusted = any(host == domain or host.endswith("." + domain)
+                                  for domain in ("google.com", "youtube.com"))
+                    if target.scheme == "https" and trusted:
+                        log_step("YouTube sign-in continued an authentication request in the same window")
+                        native_view.loadRequest_(action.request())
+                        return None
+                    return super().webView_createWebViewWithConfiguration_forNavigationAction_windowFeatures_(
+                        native_view, configuration, action, features
+                    )
+            install_login_navigation.delegate_class = MindinguflacYoutubeLoginDelegate
+
+        def install():
+            instance = cocoa.BrowserView.instances.get(login.uid)
+            if instance:
+                instance._youtube_login_delegate = install_login_navigation.delegate_class.alloc().init()
+                instance.webview.setUIDelegate_(instance._youtube_login_delegate)
+
+        AppHelper.callAfter(install)
 
     def open_login():
         stopped = threading.Event()
@@ -696,14 +732,26 @@ def install_youtube_login(main_window) -> None:
             )
             state["window"] = login
             state["stopped"] = stopped
+            state["outcome"] = "pending"
 
         def on_closed():
             stopped.set()
             with lock:
                 if state["window"] is login:
                     state["window"] = None
+                    if state["outcome"] == "pending":
+                        state["outcome"] = "cancelled"
 
         login.events.closed += on_closed
+        login.events.shown += lambda: install_login_navigation(login)
+
+        def on_loaded():
+            # Keep authentication codes, query strings and account details out
+            # of logs while recording which stage actually finished loading.
+            current = urlparse(login.get_current_url() or "")
+            log_step(f"YouTube sign-in page loaded: {current.hostname or 'unknown'}{current.path}")
+
+        login.events.loaded += on_loaded
 
         def capture_session():
             # Native get_cookies includes HttpOnly cookies. Passwords and cookie
@@ -715,6 +763,9 @@ def install_youtube_login(main_window) -> None:
                     if url.scheme != "https" or not (host == "youtube.com" or host.endswith(".youtube.com")):
                         continue
                     confirmed = login.evaluate_js("""(() => {
+                        if (location.protocol !== 'https:' ||
+                            !(location.hostname === 'youtube.com' || location.hostname.endsWith('.youtube.com')) ||
+                            location.pathname.startsWith('/signin')) return false;
                         const cfg = window.ytcfg;
                         if (cfg && typeof cfg.get === 'function' && cfg.get('LOGGED_IN') === true) return true;
                         return window.ytInitialData?.responseContext?.mainAppWebResponseContext?.loggedOut === false;
@@ -722,10 +773,15 @@ def install_youtube_login(main_window) -> None:
                     if confirmed is not True:
                         continue
                     cookies = login.get_cookies()
+                    # Navigation can change while the native cookie API runs.
+                    if login.get_current_url() != url.geturl():
+                        continue
                     with lock:
                         if stopped.is_set():
                             return
                         saved = backend_ytpdl.import_youtube_webview_cookies(cookies)
+                        if saved:
+                            state["outcome"] = "completed"
                     if saved:
                         log_step("YouTube session saved from the app sign-in window")
                         login.destroy()
@@ -751,6 +807,8 @@ def install_youtube_login(main_window) -> None:
                 login.destroy()
             clear_youtube_native_cookies(main_window)
             backend_ytpdl.clear_saved_youtube_session()
+            with lock:
+                state["outcome"] = "idle"
             log_step("Cleared the app-owned YouTube session")
             return True
         finally:
@@ -759,6 +817,7 @@ def install_youtube_login(main_window) -> None:
 
     app._youtube_login_fn = open_login
     app._youtube_login_active_fn = lambda: state["window"] is not None
+    app._youtube_login_outcome_fn = lambda: state["outcome"]
     app._youtube_logout_fn = sign_out
 
 
