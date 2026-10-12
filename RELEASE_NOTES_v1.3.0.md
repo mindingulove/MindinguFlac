@@ -7,6 +7,9 @@
 - Browse playlists, albums, and deduplicated artists in the Android library, and reorder the Android queue with touch gestures.
 
 ## Fixed
+- Wait for YouTube to confirm sign-in before saving a session; provide Sign out that clears only the app-owned YouTube/Google cookies and saved session.
+- Use yt-dlp's supported authenticated desktop clients instead of forcing mobile clients that discard cookies.
+- Bundle yt-dlp's JavaScript challenge solver and enable the packaged Node runtime for desktop YouTube requests.
 - Sign in to YouTube inside a dedicated desktop pywebview window on Windows and macOS, saving the app-owned session through the native WebView2/WKWebView cookie API.
 - Set the Windows unpacker window, taskbar and shortcut icons, and refresh extracted files when replacing a build of the same version.
 - Check Windows browser profiles separately and try public YouTube access when browser cookies cannot be imported, instead of reporting a login requirement before contacting YouTube.

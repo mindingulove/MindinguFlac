@@ -24,7 +24,44 @@ _BROWSER_COOKIE_EXPORTS_LOCK = threading.Lock()
 
 
 def _youtube_extractor_args() -> dict:
-    return {"youtube": {"player_client": ["android", "ios", "web"]}}
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        return {"youtube": {"player_client": ["android", "ios", "web"]}}
+    # yt-dlp selects different clients for authenticated sessions. Forcing
+    # mobile clients on desktop discards cookies and can hide playable formats.
+    return {}
+
+
+def _youtube_js_runtime_opts() -> dict:
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        return {}
+    name = "node.exe" if sys.platform == "win32" else "node"
+    roots = [Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "playwright"]
+    try:
+        import playwright
+        roots.append(Path(playwright.__file__).resolve().parent)
+    except ImportError:
+        pass
+    for root in roots:
+        node = root / "driver" / name
+        if node.is_file():
+            return {"js_runtimes": {"node": {"path": str(node)}}}
+    node = shutil.which(name)
+    return {"js_runtimes": {"node": {"path": node}}} if node else {}
+
+
+def _youtube_session_signed_out() -> bool:
+    from config import app_data_dir
+    return (app_data_dir() / "youtube-signed-out").exists()
+
+
+def clear_saved_youtube_session() -> None:
+    from config import app_data_dir
+    root = app_data_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    with _BROWSER_COOKIE_EXPORTS_LOCK:
+        (root / "youtube-signed-out").touch()
+        for name in ("youtube-webview-cookies.txt", "youtube-webview-session.json", "cookies.txt"):
+            (root / name).unlink(missing_ok=True)
 
 
 def _youtube_metadata_opts(**overrides) -> dict:
@@ -36,11 +73,14 @@ def _youtube_metadata_opts(**overrides) -> dict:
         "extractor_args": _youtube_extractor_args(),
         "http_headers": {"Accept-Encoding": "identity"},
     }
+    opts.update(_youtube_js_runtime_opts())
     opts.update(overrides)
     return opts
 
 
 def _youtube_cookie_file() -> str:
+    if _youtube_session_signed_out():
+        return ""
     paths: list[Path] = []
     env_path = os.environ.get("MINDINGUFLAC_YOUTUBE_COOKIES") or os.environ.get("YTDLP_COOKIES")
     if env_path:
@@ -48,7 +88,8 @@ def _youtube_cookie_file() -> str:
     try:
         from config import app_data_dir
 
-        paths.append(app_data_dir() / "youtube-webview-cookies.txt")
+        if (app_data_dir() / "youtube-webview-session.json").is_file():
+            paths.append(app_data_dir() / "youtube-webview-cookies.txt")
         paths.append(app_data_dir() / "cookies.txt")
     except Exception:
         pass
@@ -108,6 +149,8 @@ def _has_youtube_auth_cookie(cookiejar) -> bool:
 
 def _discover_youtube_browser_session():
     """Select one signed-in profile, never merge separate browser sessions."""
+    if _youtube_session_signed_out():
+        return None
     import browser_cookie3
 
     if sys.platform == "win32":
@@ -207,7 +250,7 @@ def import_youtube_webview_cookies(cookies) -> bool:
                 path=morsel["path"] or "/", path_specified=True,
                 secure=bool(morsel["secure"]), expires=expires, discard=expires is None,
                 comment=None, comment_url=None,
-                rest={"HttpOnly": ""} if morsel["httponly"] else {},
+                rest={"HTTPOnly": ""} if morsel["httponly"] else {},
             ))
     if not _has_youtube_auth_cookie(jar):
         return False
@@ -219,6 +262,10 @@ def import_youtube_webview_cookies(cookies) -> bool:
         try:
             jar.save(temporary, ignore_discard=True, ignore_expires=True)
             os.replace(temporary, target)
+            import json
+            import time
+            (target.parent / "youtube-webview-session.json").write_text(json.dumps({"verified_at": time.time(), "source": "native_youtube_login"}), encoding="utf-8")
+            (target.parent / "youtube-signed-out").unlink(missing_ok=True)
         finally:
             Path(temporary).unlink(missing_ok=True)
     return True
@@ -283,6 +330,28 @@ def cleanup_browser_cookie_export(job_id: str) -> None:
             cookie_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _use_job_youtube_cookie_copy(opts: dict, job_id: str) -> None:
+    """Keep yt-dlp's cookie writes out of the saved session and source files."""
+    source = opts.get("cookiefile")
+    if not source:
+        return
+    from config import app_data_dir
+    import tempfile
+    directory = app_data_dir() / "youtube-session-jobs"
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="session-", suffix=".txt", dir=directory)
+    os.close(fd)
+    path = Path(name)
+    try:
+        shutil.copyfile(source, path)
+        with _BROWSER_COOKIE_EXPORTS_LOCK:
+            _BROWSER_COOKIE_EXPORTS[str(job_id)] = path
+        opts["cookiefile"] = str(path)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _mark_youtube_login_required(job: dict, manager) -> None:
@@ -1779,6 +1848,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     }
     if video_mode:
         ydl_opts["merge_output_format"] = "mp4"
+    ydl_opts.update(_youtube_js_runtime_opts())
 
     if ffmpeg_path:
         ydl_opts["ffmpeg_location"] = ffmpeg_path
@@ -1791,6 +1861,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
     browser_cookie_source = False
     if not _has_youtube_auth_opts(ydl_opts):
         browser_cookie_source = _add_browser_youtube_cookies(ydl_opts, output_dir, str(job.get("id") or ""))
+    _use_job_youtube_cookie_copy(ydl_opts, str(job.get("id") or ""))
 
     if not _has_youtube_auth_opts(ydl_opts) and not is_android and sys.platform != "win32":
         _mark_youtube_login_required(job, manager)

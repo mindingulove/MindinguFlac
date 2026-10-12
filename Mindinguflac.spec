@@ -133,6 +133,10 @@ try:
 except Exception:
     pass
 
+# YouTube's challenge solver scripts are distributed as a companion package.
+tmp_ret = collect_all('yt_dlp_ejs')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
 # Playwright (Duck.ai AI-reranker browser worker). collect_all bundles the node
 # driver + package data; playwright_stealth bundles its JS evasion files. NOTE:
 # the actual Chromium browser is NOT bundled — it lives in the per-user

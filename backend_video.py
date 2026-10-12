@@ -496,7 +496,7 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
     """Download a YouTube music video at 480p H.264/AAC into output_path."""
     try:
         import yt_dlp
-        from backend_ytpdl import _ffmpeg_location, _youtube_metadata_opts, _add_youtube_cookie_file
+        from backend_ytpdl import _ffmpeg_location, _youtube_metadata_opts, _add_youtube_cookie_file, _youtube_session_signed_out, _youtube_js_runtime_opts
     except Exception:
         return False
 
@@ -526,6 +526,7 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
         "fragment_retries": 3,
         "http_chunk_size": 10 * 1024 * 1024,
     }
+    opts.update(_youtube_js_runtime_opts())
     is_android = os.environ.get("MINDINGUFLAC_ANDROID") == "1"
     if is_android:
         # Progressive MP4 already contains sound; adaptive formats need FFmpeg,
@@ -545,7 +546,7 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
     cookie_opts = dict(opts)
     if _add_youtube_cookie_file(cookie_opts):
         attempts.append(cookie_opts)
-    if not is_android:
+    if not is_android and not _youtube_session_signed_out():
         for browser in ("safari", "chrome", "firefox"):
             attempts.append({**opts, "cookiesfrombrowser": (browser,)})
     attempts.append(dict(opts))

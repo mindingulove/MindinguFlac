@@ -56,6 +56,7 @@ for _pkg in (
     'pydoll',
     'torrfetch',
     'yt_dlp',
+    'yt_dlp_ejs',
     'rapidfuzz',
     'pydantic', 'pydantic_core',
     'httpx', 'httpcore', 'h2', 'hpack', 'hyperframe',

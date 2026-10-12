@@ -598,6 +598,78 @@ def install_system_notifications(window: webview.Window) -> None:
 import multiprocessing
 import ctypes
 
+def clear_youtube_native_cookies(main_window) -> None:
+    """Delete only YouTube/Google cookies in this app's native browser store."""
+    finished = threading.Event()
+    errors = []
+
+    def allowed(domain):
+        domain = str(domain).lstrip(".").lower()
+        return any(domain == host or domain.endswith("." + host) for host in ("youtube.com", "google.com"))
+
+    if sys.platform == "darwin":
+        from PyObjCTools import AppHelper
+        from webview.platforms.cocoa import BrowserView
+
+        def begin():
+            try:
+                store = BrowserView.instances[main_window.uid].datastore.httpCookieStore()
+
+                def received(cookies):
+                    pending = [cookie for cookie in cookies if allowed(cookie.domain())]
+                    if not pending:
+                        finished.set()
+                        return
+                    remaining = [len(pending)]
+
+                    def deleted():
+                        remaining[0] -= 1
+                        if remaining[0] == 0:
+                            finished.set()
+
+                    for cookie in pending:
+                        store.deleteCookie_completionHandler_(cookie, deleted)
+
+                store.getAllCookies_(received)
+            except Exception as exc:
+                errors.append(exc)
+                finished.set()
+
+        AppHelper.callAfter(begin)
+    else:
+        from webview.platforms.winforms import BrowserView
+        from System import Action
+        from System.Collections.Generic import List
+        from System.Threading.Tasks import Task
+        from Microsoft.Web.WebView2.Core import CoreWebView2Cookie
+        browser = BrowserView.instances[main_window.uid].browser
+
+        def begin():
+            try:
+                manager = browser.webview.CoreWebView2.CookieManager
+
+                def received(task):
+                    try:
+                        for cookie in task.Result:
+                            if allowed(cookie.Domain):
+                                manager.DeleteCookies(cookie.Name, cookie.Domain, cookie.Path)
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        finished.set()
+
+                manager.GetCookiesAsync("").ContinueWith(
+                    Action[Task[List[CoreWebView2Cookie]]](received), browser.syncContextTaskScheduler,
+                )
+            except Exception as exc:
+                errors.append(exc)
+                finished.set()
+
+        browser.webview.BeginInvoke(Action(begin))
+    if not finished.wait(15) or errors:
+        raise RuntimeError("Could not clear the app's YouTube session. Please try again.")
+
+
 def install_youtube_login(main_window) -> None:
     """Read the app-owned WebView2/WKWebView session through its native API."""
     if sys.platform not in {"win32", "darwin"}:
@@ -605,11 +677,14 @@ def install_youtube_login(main_window) -> None:
     import app
     import backend_ytpdl
 
-    state = {"window": None}
+    state = {"window": None, "stopped": None, "signing_out": False}
     lock = threading.Lock()
 
     def open_login():
+        stopped = threading.Event()
         with lock:
+            if state["signing_out"]:
+                return False
             if state["window"] is not None:
                 state["window"].show()
                 return True
@@ -620,7 +695,7 @@ def install_youtube_login(main_window) -> None:
                 js_api=None,
             )
             state["window"] = login
-        stopped = threading.Event()
+            state["stopped"] = stopped
 
         def on_closed():
             stopped.set()
@@ -639,7 +714,19 @@ def install_youtube_login(main_window) -> None:
                     host = (url.hostname or "").lower()
                     if url.scheme != "https" or not (host == "youtube.com" or host.endswith(".youtube.com")):
                         continue
-                    if backend_ytpdl.import_youtube_webview_cookies(login.get_cookies()):
+                    confirmed = login.evaluate_js("""(() => {
+                        const cfg = window.ytcfg;
+                        if (cfg && typeof cfg.get === 'function' && cfg.get('LOGGED_IN') === true) return true;
+                        return window.ytInitialData?.responseContext?.mainAppWebResponseContext?.loggedOut === false;
+                    })()""")
+                    if confirmed is not True:
+                        continue
+                    cookies = login.get_cookies()
+                    with lock:
+                        if stopped.is_set():
+                            return
+                        saved = backend_ytpdl.import_youtube_webview_cookies(cookies)
+                    if saved:
                         log_step("YouTube session saved from the app sign-in window")
                         login.destroy()
                         main_window.show()
@@ -650,8 +737,29 @@ def install_youtube_login(main_window) -> None:
         threading.Thread(target=capture_session, name="youtube-sign-in", daemon=True).start()
         return True
 
+    def sign_out():
+        with lock:
+            if state["signing_out"]:
+                raise RuntimeError("YouTube sign-out is already in progress")
+            state["signing_out"] = True
+            login = state["window"]
+            stopped = state["stopped"]
+            if stopped:
+                stopped.set()
+        try:
+            if login:
+                login.destroy()
+            clear_youtube_native_cookies(main_window)
+            backend_ytpdl.clear_saved_youtube_session()
+            log_step("Cleared the app-owned YouTube session")
+            return True
+        finally:
+            with lock:
+                state["signing_out"] = False
+
     app._youtube_login_fn = open_login
     app._youtube_login_active_fn = lambda: state["window"] is not None
+    app._youtube_logout_fn = sign_out
 
 
 def main() -> None:

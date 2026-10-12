@@ -328,6 +328,7 @@ _macos_media_command_fn = None   # (action: str) -> None
 _system_notification_fn = None   # (title: str, body: str, url: str) -> bool
 _youtube_login_fn = None  # Opens the app-owned native YouTube sign-in window.
 _youtube_login_active_fn = None
+_youtube_logout_fn = None
 _dock_playing_state_fn = None   # (playing: bool) -> None
 
 
@@ -1765,7 +1766,8 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             from yt_dlp.utils import download_range_func
             opts["download_ranges"] = download_range_func(None, [(start_offset, None)])
             opts["force_keyframes_at_cuts"] = True
-        from backend_ytpdl import _add_youtube_cookie_file, _ffmpeg_location
+        from backend_ytpdl import _add_youtube_cookie_file, _ffmpeg_location, _youtube_session_signed_out, _youtube_js_runtime_opts
+        opts.update(_youtube_js_runtime_opts())
         ffmpeg = _ffmpeg_location()
         if ffmpeg:
             opts["ffmpeg_location"] = ffmpeg
@@ -1782,7 +1784,7 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
         cookie_opts = dict(opts)
         if _add_youtube_cookie_file(cookie_opts):
             attempts.append(cookie_opts)
-        for _browser in ("safari", "chrome", "firefox"):
+        for _browser in (() if _youtube_session_signed_out() else ("safari", "chrome", "firefox")):
             attempt_opts = dict(opts)
             attempt_opts["cookiesfrombrowser"] = (_browser,)
             attempts.append(attempt_opts)
@@ -2528,6 +2530,20 @@ class Handler(BaseHTTPRequestHandler):
                 login_open = bool(_youtube_login_active_fn and _youtube_login_active_fn())
                 signed_in = not login_open and backend_ytpdl.youtube_login_available(browser_discovery=not embedded)
                 self.send_json({"ok": True, "signed_in": signed_in, "embedded_available": embedded, "login_open": login_open})
+                return
+            if path == "/api/system/youtube-logout":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                if _youtube_logout_fn is None:
+                    self.send_error_json("YouTube sign-out is available in the desktop app", HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    signed_out = bool(_youtube_logout_fn())
+                except Exception:
+                    self.send_error_json("Could not clear the app's YouTube session. Please try again.")
+                    return
+                self.send_json({"ok": signed_out, "signed_in": False})
                 return
             if path == "/api/system/notify":
                 if not self.trusted_local_origin():

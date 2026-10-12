@@ -6339,15 +6339,30 @@ async function setupYoutubeSignInSettings() {
   const button = $("youtubeSignInButton");
   const label = $("youtubeSignInStatus");
   if (!row || !button || IS_ANDROID) return;
+  let signedIn = false;
+  const showStatus = status => {
+    signedIn = !!status.signed_in;
+    label.textContent = signedIn ? "YouTube session saved on this device." : "Sign in in the app. Your session stays on this device.";
+    button.textContent = signedIn ? "Sign out" : "Sign in to YouTube";
+    button.disabled = false;
+  };
   try {
     const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
     row.classList.toggle("hidden", !status.embedded_available);
     if (!status.embedded_available) return;
-    label.textContent = status.signed_in ? "YouTube session saved on this device." : "Sign in in the app. Your session stays on this device.";
+    showStatus(status);
   } catch (_) { return; }
   button.onclick = async () => {
     button.disabled = true;
     try {
+      if (signedIn) {
+        await api("/api/system/youtube-logout", { method: "POST", body: JSON.stringify({}) });
+        if (youtubeSettingsLoginPoll) clearInterval(youtubeSettingsLoginPoll);
+        youtubeSettingsLoginPoll = null;
+        showStatus({ signed_in: false });
+        showToast("Signed out of YouTube");
+        return;
+      }
       const opened = await api("/api/system/open-url", { method: "POST", body: JSON.stringify({ url: "https://www.youtube.com/" }) });
       if (!opened.ok) throw new Error("Could not open YouTube sign-in");
       label.textContent = "Complete sign-in in the YouTube window.";
@@ -6361,7 +6376,7 @@ async function setupYoutubeSignInSettings() {
           if (status.signed_in) {
             clearInterval(youtubeSettingsLoginPoll);
             youtubeSettingsLoginPoll = null;
-            label.textContent = "YouTube session saved on this device.";
+            showStatus(status);
             showToast("Signed in to YouTube");
           } else if (!status.login_open) {
             clearInterval(youtubeSettingsLoginPoll);
