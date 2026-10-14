@@ -568,6 +568,31 @@
     </div>
   </dialog>
 
+  <div id="playlistContextMenu" class="context-menu" hidden>
+    <div class="context-menu-header">
+      <div id="ctxPlaylistArt" class="context-menu-header-art"></div>
+      <div class="context-menu-header-info">
+        <strong id="ctxPlaylistTitle"></strong>
+        <span id="ctxPlaylistSubtitle"></span>
+      </div>
+    </div>
+    <div class="context-menu-separator"></div>
+    <button id="ctxPlaylistShare" class="context-menu-item" type="button"><i class="bi bi-share"></i> Share playlist link</button>
+    <p id="ctxPlaylistShareHint" class="playlist-share-hint" hidden>This local playlist has no public link.</p>
+    <button id="ctxPlaylistDelete" class="context-menu-item" type="button"><i class="bi bi-trash3"></i> Delete playlist</button>
+  </div>
+
+  <dialog id="deletePlaylistDialog" class="settings-notice-dialog" aria-labelledby="deletePlaylistTitle" aria-describedby="deletePlaylistMessage">
+    <form method="dialog" class="settings-notice-content">
+      <h2 id="deletePlaylistTitle">Delete playlist?</h2>
+      <p id="deletePlaylistMessage"></p>
+      <div class="playlist-delete-actions">
+        <button type="submit" value="cancel" autofocus>Cancel</button>
+        <button class="primary" type="submit" value="delete">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="settingsNoticeDialog" class="settings-notice-dialog" aria-labelledby="settingsNoticeTitle" aria-describedby="settingsNoticeMessage">
     <div class="settings-notice-content">
       <h2 id="settingsNoticeTitle">Settings saved</h2>

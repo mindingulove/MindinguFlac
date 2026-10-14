@@ -827,18 +827,97 @@ function mobileLibraryItemsHtml(playlists) {
   }).join("");
 }
 
+function bindLibraryHold(button, openMenu) {
+  let timer = null;
+  let start = null;
+  let held = false;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  button.addEventListener("pointerdown", event => {
+    cancel();
+    held = false;
+    if (event.pointerType === "mouse" || !event.isPrimary) return;
+    start = { x: event.clientX, y: event.clientY };
+    timer = setTimeout(() => {
+      if (!button.isConnected) return;
+      held = true;
+      openMenu({ preventDefault() {}, target: button, clientX: start.x, clientY: start.y });
+    }, 550);
+  });
+  button.addEventListener("pointermove", event => {
+    if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) cancel();
+  });
+  ["pointerup", "pointercancel", "pointerleave"].forEach(name => button.addEventListener(name, cancel));
+  button.addEventListener("click", event => {
+    if (!held) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  button.oncontextmenu = event => {
+    event.preventDefault();
+    cancel();
+    if (!held) openMenu(event);
+    held = true;
+  };
+}
+
+function playlistShareUrl(playlist) {
+  const source = String(playlist.spotify_url || "").trim();
+  const uri = source.match(/^spotify:playlist:([A-Za-z0-9]+)$/);
+  if (uri) return `https://open.spotify.com/playlist/${uri[1]}`;
+  try {
+    const url = new URL(source);
+    return url.protocol === "https:" && url.hostname === "open.spotify.com" && /^\/playlist\/[A-Za-z0-9]+\/?$/.test(url.pathname) ? url.href : "";
+  } catch (_) { return ""; }
+}
+
+function showPlaylistContextMenu(event, playlist) {
+  const menu = $("playlistContextMenu");
+  $("ctxPlaylistTitle").textContent = playlist.name || "Playlist";
+  $("ctxPlaylistSubtitle").textContent = `Playlist · ${playlist.tracks?.length || 0} songs`;
+  const art = playlist.artwork_url || playlist.tracks?.[0]?.artwork_url || "";
+  $("ctxPlaylistArt").style.backgroundImage = art ? `url('${art}')` : "";
+  const url = playlistShareUrl(playlist);
+  const share = $("ctxPlaylistShare");
+  share.disabled = !url;
+  share.title = url ? "Share playlist link" : "This local playlist has no public link.";
+  $("ctxPlaylistShareHint").hidden = !!url;
+  share.onclick = async () => {
+    menu.hidden = true;
+    try {
+      if (window.MindinguflacAndroid?.sharePlaylistLink) {
+        window.MindinguflacAndroid.sharePlaylistLink(playlist.name || "Playlist", url);
+      } else if (navigator.share) {
+        await navigator.share({ title: playlist.name || "Playlist", url });
+      } else {
+        await navigator.clipboard.writeText(url);
+        showToast("Playlist link copied");
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") showToast("Could not share the playlist link.");
+    }
+  };
+  $("ctxPlaylistDelete").onclick = () => { menu.hidden = true; deletePlaylist(playlist.id); };
+  openContextMenu(event, menu);
+}
+
 function bindMobileLibraryItems() {
   document.querySelectorAll("[data-mobile-playlist-id]").forEach(button => {
     button.onclick = () => {
       const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
       if (playlist) pushPage(() => renderPlaylistPage(playlist));
     };
+    bindLibraryHold(button, event => {
+      const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
+      if (playlist) showPlaylistContextMenu(event, playlist);
+    });
   });
   document.querySelectorAll("[data-mobile-artist]").forEach(button => {
     button.onclick = () => pushPage(() => renderArtistPage(JSON.parse(button.dataset.mobileArtist || "{}")));
+    bindLibraryHold(button, event => showArtistContextMenu(event, JSON.parse(button.dataset.mobileArtist || "{}")));
   });
   document.querySelectorAll("[data-mobile-album]").forEach(button => {
     button.onclick = () => pushPage(() => renderAlbumPage(JSON.parse(button.dataset.mobileAlbum || "{}")));
+    bindLibraryHold(button, event => showAlbumContextMenu(event, JSON.parse(button.dataset.mobileAlbum || "{}")));
   });
 }
 
@@ -7601,15 +7680,27 @@ function renderSidebarPlaylists() {
 }
 
 async function deletePlaylist(id) {
-  if (!confirm("Delete this playlist?")) return;
+  const playlist = state.playlists.find(item => item.id === id);
+  if (!playlist) return;
+  const dialog = $("deletePlaylistDialog");
+  if (dialog.open) return;
+  $("deletePlaylistMessage").textContent = `Delete “${playlist.name || "this playlist"}” from your library? Your music files will be kept.`;
+  const confirmed = await new Promise(resolve => {
+    dialog.returnValue = "cancel";
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "delete"), { once: true });
+    dialog.showModal();
+  });
+  if (!confirmed) return;
+  const viewingDeletedPlaylist = state.activePlaylistId === id && !!$("pageContent")?.querySelector(".playlist-hero");
   try {
     await api("/api/playlists", { method: "DELETE", body: JSON.stringify({ id }) });
     state.playlists = state.playlists.filter(p => p.id !== id);
     renderSidebarPlaylists();
     // If we're viewing this playlist, go back
-    if (state.viewStack.length > 1) popPage();
+    if (viewingDeletedPlaylist && state.viewStack.length > 1) popPage();
+    showToast("Playlist deleted");
   } catch (e) {
-    alert("Failed to delete playlist: " + e.message);
+    showSettingsNotice("Could not delete playlist", e.message || "Please try again.");
   }
 }
 
@@ -9658,7 +9749,7 @@ let contextMenuLibraryReady = false;
 
 function ensureContextMenuLibrary() {
   if (contextMenuLibraryReady) return;
-  ["trackContextMenu", "albumContextMenu", "artistContextMenu"].forEach((menuId) => {
+  ["trackContextMenu", "albumContextMenu", "artistContextMenu", "playlistContextMenu"].forEach((menuId) => {
     if ($(menuId) && !$(`${menuId}ToggleProxy`)) {
       const proxy = document.createElement("button");
       proxy.id = `${menuId}ToggleProxy`;

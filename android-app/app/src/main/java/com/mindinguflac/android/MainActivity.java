@@ -495,6 +495,20 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
 
     public final class AndroidBridge {
         @JavascriptInterface
+        public void sharePlaylistLink(String title, String link) {
+            Uri uri = Uri.parse(link == null ? "" : link);
+            if (!"https".equals(uri.getScheme()) || !"open.spotify.com".equals(uri.getHost())
+                    || uri.getPath() == null || !uri.getPath().matches("/playlist/[A-Za-z0-9]+/?")) return;
+            runOnUiThread(() -> {
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("text/plain");
+                send.putExtra(Intent.EXTRA_SUBJECT, title);
+                send.putExtra(Intent.EXTRA_TEXT, link);
+                startActivity(Intent.createChooser(send, "Share playlist link"));
+            });
+        }
+
+        @JavascriptInterface
         public void scanDevicePairingQr() {
             runOnUiThread(() -> {
                 ScanOptions options = new ScanOptions();

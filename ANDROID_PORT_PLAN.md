@@ -237,3 +237,11 @@ The UI/device coverage items below also remain pending.
 - The screen-size, orientation, dark-mode, system-bar, keyboard and
   external-link matrix. Everything so far is one phone in portrait, so small
   and large screens and landscape are untested.
+
+## Android playlist actions — 2026-10-13
+
+- Implemented Library playlist long-press action sheet with Delete playlist and Share playlist link.
+- Deletion uses a themed confirmation and keeps downloaded music files.
+- Spotify playlist links open Android’s native share chooser; local playlists without a public URL explain why link sharing is unavailable.
+- Library artist and album rows use the same hold gesture, with movement cancellation and tap suppression.
+- APK build succeeds; physical interaction verification is pending because no phone is connected over ADB.
