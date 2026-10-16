@@ -370,7 +370,7 @@ function persistPlaybackSnapshot(force = false) {
 }
 
 async function api(path, options = {}) {
-  const { timeout = 15000, ...fetchOptions } = options;
+  const { timeout = path.startsWith("/api/music/album_tracks?") ? 45000 : 15000, ...fetchOptions } = options;
   const controller = timeout > 0 ? new AbortController() : null;
   const id = controller ? setTimeout(() => controller.abort(), timeout) : null;
   try {
@@ -379,15 +379,18 @@ async function api(path, options = {}) {
       ...fetchOptions,
       signal: controller ? controller.signal : undefined,
     });
-    if (id) clearTimeout(id);
     if (!resp.ok) {
       const error = await resp.json().catch(() => ({ error: resp.statusText }));
       throw new Error(error.error || "API call failed");
     }
-    return resp.json();
+    return await resp.json();
   } catch (err) {
-    if (id) clearTimeout(id);
+    if (controller?.signal.aborted) {
+      throw new Error("The request took too long. Please try again.");
+    }
     throw err;
+  } finally {
+    if (id) clearTimeout(id);
   }
 }
 
@@ -568,7 +571,7 @@ async function fetchAlbumTracks(album = {}) {
     release_id: musicBrainzReleaseId(target),
     spotify_id: spotifyAlbumId(target),
   });
-  const full = await api(`/api/music/album_tracks?${params.toString()}`);
+  const full = await api(`/api/music/album_tracks?${params.toString()}&details=0`);
   return full.tracks || [];
 }
 
@@ -2671,13 +2674,16 @@ async function renderAlbumPage(album) {
   const content = $("pageContent");
   content.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading ${esc(album.title || album.album)}…</span></div>`;
 
+  const loadingState = content.firstElementChild;
   try {
     const artistName = album.artist || "";
     const albumTitle = album.title || album.album || "";
     const releaseId = album.musicbrainz_release_id || "";
     const spotifyId = album.spotify_id || "";
-    
-    const data = await api(`/api/music/album_tracks?artist=${encodeURIComponent(artistName)}&album=${encodeURIComponent(albumTitle)}&release_id=${releaseId}&spotify_id=${spotifyId}`);
+
+    const params = new URLSearchParams({ artist: artistName, album: albumTitle, release_id: releaseId, spotify_id: spotifyId });
+    const data = await api(`/api/music/album_tracks?${params}&details=0`);
+    if (content.firstElementChild !== loadingState) return;
     const artistArtwork = data.artist_artwork_url || album.artist_artwork_url || "";
     const year = data.year || album.year || "";
     const albumMeta = [
@@ -2692,7 +2698,7 @@ async function renderAlbumPage(album) {
       : (spotifyArtwork ? [{ url: spotifyArtwork, source: "Spotify", label: "Cover" }] : []);
     const hasMultipleImages = galleryImages.length > 1;
     const firstImage = galleryImages[0] || { url: "", source: "Spotify", label: "Cover" };
-    
+
     content.innerHTML = `
       <div class="scroll-area">
         <div class="entity-hero">
@@ -2701,23 +2707,23 @@ async function renderAlbumPage(album) {
               <button class="gallery-enlarge" id="albumGalleryEnlarge" type="button" aria-label="View ${esc(data.album)} artwork larger">
                 <img id="albumGalleryImage" src="${esc(firstImage.url)}" alt="${esc(data.album)} artwork">
               </button>
-              ${hasMultipleImages ? `
-                <button class="gallery-arrow previous" id="albumGalleryPrevious" type="button" aria-label="Previous album image"><i class="bi bi-chevron-left"></i></button>
-                <button class="gallery-arrow next" id="albumGalleryNext" type="button" aria-label="Next album image"><i class="bi bi-chevron-right"></i></button>
-                <span class="gallery-position" id="albumGalleryPosition">1 / ${galleryImages.length}</span>
-              ` : ""}
+
+                <button class="gallery-arrow previous${hasMultipleImages ? "" : " hidden"}" id="albumGalleryPrevious" type="button" aria-label="Previous album image"><i class="bi bi-chevron-left"></i></button>
+                <button class="gallery-arrow next${hasMultipleImages ? "" : " hidden"}" id="albumGalleryNext" type="button" aria-label="Next album image"><i class="bi bi-chevron-right"></i></button>
+                <span class="gallery-position${hasMultipleImages ? "" : " hidden"}" id="albumGalleryPosition">1 / ${galleryImages.length}</span>
+
             </div>
-            ${data.discogs_release_url ? `
+
               <div class="discogs-attribution ${firstImage.source === "Discogs" ? "" : "hidden"}" id="discogsAttribution">
                 <a href="${esc(data.discogs_release_url)}" target="_blank" rel="noopener">Data provided by Discogs</a>
                 <span>This application uses Discogs' API but is not affiliated with, sponsored or endorsed by Discogs.</span>
               </div>
-            ` : ""}
+
           </div>
           <div>
             <span class="eyebrow">Album</span>
             <h1>${esc(data.album)}</h1>
-            <div class="hero-meta-row">
+            <div class="hero-meta-row" id="albumHeroMeta">
               <button class="hero-artist-link" id="heroArtistLink" title="${esc(data.artist)}">
                 ${artistArtwork ? `<div class="mini-art" style="background-image: url('${artistArtwork}')"></div>` : ""}
                 ${esc(data.artist)}
@@ -2740,15 +2746,15 @@ async function renderAlbumPage(album) {
         <dialog class="album-image-modal" id="albumImageModal" aria-label="${esc(data.album)} artwork preview">
           <button class="album-image-modal-close" id="albumImageModalClose" type="button" aria-label="Close enlarged artwork"><i class="bi bi-x-lg"></i></button>
           <button class="album-image-modal-zoom" id="albumImageModalZoom" type="button" aria-label="Toggle zoom view"><i class="bi bi-zoom-in"></i></button>
-          ${hasMultipleImages ? `
-            <button class="album-image-modal-arrow previous" id="albumImageModalPrevious" type="button" aria-label="Previous enlarged album image"><i class="bi bi-chevron-left"></i></button>
-            <button class="album-image-modal-arrow next" id="albumImageModalNext" type="button" aria-label="Next enlarged album image"><i class="bi bi-chevron-right"></i></button>
-          ` : ""}
+
+            <button class="album-image-modal-arrow previous${hasMultipleImages ? "" : " hidden"}" id="albumImageModalPrevious" type="button" aria-label="Previous enlarged album image"><i class="bi bi-chevron-left"></i></button>
+            <button class="album-image-modal-arrow next${hasMultipleImages ? "" : " hidden"}" id="albumImageModalNext" type="button" aria-label="Next enlarged album image"><i class="bi bi-chevron-right"></i></button>
+
           <img id="albumImageModalImage" src="${esc(firstImage.url)}" alt="${esc(data.album)} artwork enlarged">
         </dialog>
       </div>
     `;
-    
+
     $("heroArtistLink").onclick = () => openArtistLink({
       name: data.artist,
       artwork_url: artistArtwork,
@@ -2761,7 +2767,7 @@ async function renderAlbumPage(album) {
     const discogsAttribution = $("discogsAttribution");
     let galleryIndex = 0;
     let modalZoom = { scale: 1, x: 0, y: 0, isPanning: false, startX: 0, startY: 0 };
-    
+
     const updateModalTransform = () => {
       albumImageModalImage.style.transform = `translate(${modalZoom.x}px, ${modalZoom.y}px) scale(${modalZoom.scale})`;
       const zoomBtn = $("albumImageModalZoom");
@@ -2779,6 +2785,7 @@ async function renderAlbumPage(album) {
     };
 
     const showGalleryImage = (nextIndex) => {
+      if (!galleryImages.length) return;
       galleryIndex = (nextIndex + galleryImages.length) % galleryImages.length;
       const image = galleryImages[galleryIndex];
       galleryImage.src = image.url;
@@ -2799,13 +2806,13 @@ async function renderAlbumPage(album) {
       const delta = -event.deltaY;
       const factor = delta > 0 ? 1.1 : 0.9;
       const nextScale = Math.min(Math.max(modalZoom.scale * factor, 1), 10);
-      
+
       // If we are at scale 1, reset position
       if (nextScale === 1) {
         modalZoom.x = 0;
         modalZoom.y = 0;
       }
-      
+
       modalZoom.scale = nextScale;
       updateModalTransform();
     };
@@ -2855,21 +2862,57 @@ async function renderAlbumPage(album) {
       if (event.key === "ArrowLeft") { event.stopPropagation(); event.preventDefault(); showGalleryImage(galleryIndex - 1); }
       else if (event.key === "ArrowRight") { event.stopPropagation(); event.preventDefault(); showGalleryImage(galleryIndex + 1); }
     });
-    if (hasMultipleImages) {
-      $("albumGalleryPrevious").onclick = (event) => {
-        event.stopPropagation();
-        showGalleryImage(galleryIndex - 1);
-      };
-      $("albumGalleryNext").onclick = (event) => {
-        event.stopPropagation();
-        showGalleryImage(galleryIndex + 1);
-      };
-      $("albumImageModalPrevious").onclick = () => showGalleryImage(galleryIndex - 1);
-      $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
-    }
+    $("albumGalleryPrevious").onclick = (event) => {
+      event.stopPropagation();
+      showGalleryImage(galleryIndex - 1);
+    };
+    $("albumGalleryNext").onclick = (event) => {
+      event.stopPropagation();
+      showGalleryImage(galleryIndex + 1);
+    };
+    $("albumImageModalPrevious").onclick = () => showGalleryImage(galleryIndex - 1);
+    $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
     renderTrackList("albumTrackList", data.tracks || [], "album");
+    const trackList = $("albumTrackList");
+    if (data._extras_complete === false) {
+      // Artwork scans and secondary metadata must never delay playable tracks.
+      api(`/api/music/album_tracks?${params}`, { timeout: 90000 }).then(details => {
+        if ($("albumTrackList") !== trackList) return;
+        const displayedTracks = data.tracks || [];
+        Object.assign(data, details, { tracks: displayedTracks });
+        const enrichedImages = details.gallery_images || [];
+        if (enrichedImages.length) {
+          galleryImages.splice(0, galleryImages.length, ...enrichedImages);
+          const multiple = galleryImages.length > 1;
+          $("albumGallery").classList.toggle("has-slides", multiple);
+          for (const id of ["albumGalleryPrevious", "albumGalleryNext", "albumGalleryPosition", "albumImageModalPrevious", "albumImageModalNext"]) {
+            $(id)?.classList.toggle("hidden", !multiple);
+          }
+          if (discogsAttribution) {
+            discogsAttribution.querySelector("a").href = details.discogs_release_url || "#";
+          }
+          if (!albumImageModal.open) showGalleryImage(galleryIndex);
+        }
+        const heroArtist = $("heroArtistLink");
+        const image = details.artist_artwork_url || artistArtwork;
+        heroArtist.innerHTML = `${image ? `<div class="mini-art" style="background-image: url('${esc(image)}')"></div>` : ""}${esc(data.artist)}`;
+        const meta = [details.year || year, `${data.track_count} tracks`, data.total_duration].filter(Boolean);
+        $("albumHeroMeta").querySelectorAll(":scope > span").forEach(el => el.remove());
+        $("albumHeroMeta").insertAdjacentHTML("beforeend", meta.map(value => `<span class="dot">•</span><span>${esc(value)}</span>`).join(""));
+        trackList.querySelectorAll(".track-row").forEach((row, index) => {
+          const enriched = details.tracks?.[index];
+          if (!enriched) return;
+          Object.assign(data.tracks[index], enriched);
+          row.dataset.itemData = JSON.stringify(data.tracks[index]);
+          const count = row.querySelector(".views-count");
+          if (count) count.textContent = trackPlaysValue(enriched) ? trackPlaysValue(enriched).toLocaleString() : "-";
+        });
+      }).catch(() => {});
+    }
   } catch (e) {
-    content.innerHTML = `<div class="error-state">Failed to load album: ${e.message}</div>`;
+    if (content.firstElementChild === loadingState) {
+      content.innerHTML = `<div class="error-state">Failed to load album: ${esc(e.message)}</div>`;
+    }
   }
 }
 
@@ -7916,7 +7959,7 @@ async function hydrateAlbumPlaylistTracks(playlist, playbackContext = null) {
       release_id: releaseId,
       spotify_id: spotifyId,
     });
-    const data = await api(`/api/music/album_tracks?${params.toString()}`);
+    const data = await api(`/api/music/album_tracks?${params.toString()}&details=0`);
     const hydratedTracks = Array.isArray(data.tracks) ? data.tracks : [];
     if (!hydratedTracks.length) return playlist;
 

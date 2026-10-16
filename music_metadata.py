@@ -273,6 +273,7 @@ def _legacy_track_item(item: object) -> dict:
         "external_urls": {"spotify": _metadata_text(getattr(item, "external_url", ""))},
         "external_ids": {"isrc": _metadata_text(getattr(item, "isrc", ""))},
         "popularity": _numeric_plays(getattr(item, "plays", 0)) // 10000,
+        "plays": _numeric_plays(getattr(item, "plays", 0)),
     }
 
 
@@ -783,6 +784,8 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
         return {
             "id": album_match.group(1),
             "name": info.get("name", ""),
+            "release_date": info.get("release_date", ""),
+            "artists": [{"name": name} for name in _track_artist_names(tracks[0])] if tracks else [],
             "images": [{"url": cover_url}] if cover_url else [],
             "tracks": {"items": [_legacy_track_item(item) for item in tracks]},
         }
@@ -2147,50 +2150,33 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
                 yield {"type": "related_artists", "artists": payload}
 
 
-def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "", spotify_id: str = "") -> dict:
+def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "", spotify_id: str = "", *, include_extras: bool = True) -> dict:
     import db
     album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
     cached = db.get_album_metadata(album_key)
     if cached:
-        cached_year = release_year(str(cached.get("year") or ""))
-        if not cached_year:
-            cached_year = next(
-                (
-                    release_year(str(track.get("year") or track.get("release_date") or ""))
-                    for track in (cached.get("tracks") or [])
-                    if release_year(str(track.get("year") or track.get("release_date") or ""))
-                ),
-                "",
-            )
-        if cached_year:
-            if cached.get("year") != cached_year:
-                cached = {**cached, "year": cached_year}
-                db.save_album_metadata(album_key, cached)
-            print(f"[Metadata] Using cached album metadata for: {artist} - {album}")
-            return cached
-        recovered_year = musicbrainz_album_year(artist, album)
-        if recovered_year:
-            cached = {**cached, "year": recovered_year}
-            cached["tracks"] = [
-                {**track, "year": track.get("year") or recovered_year}
-                for track in (cached.get("tracks") or [])
-            ]
+        cached_year = release_year(str(cached.get("year") or "")) or next(
+            (release_year(str(track.get("year") or track.get("release_date") or ""))
+             for track in cached.get("tracks", [])
+             if release_year(str(track.get("year") or track.get("release_date") or ""))), "",
+        )
+        if cached_year and cached.get("year") != cached_year:
+            cached = {**cached, "year": cached_year}
             db.save_album_metadata(album_key, cached)
-            print(f"[Metadata] Repaired cached album release year for: {artist} - {album}")
+        cached = {**cached, "_extras_complete": cached.get("_extras_complete", bool(cached_year))}
+        if not include_extras or cached["_extras_complete"]:
             return cached
-        if not spotify_id and not release_id:
-            print(f"[Metadata] Using cached album metadata without release year for: {artist} - {album}")
-            return cached
-        print(f"[Metadata] Refreshing album metadata with missing release year: {artist} - {album}")
+        cached = {**cached, "spotify_id": cached.get("spotify_id") or spotify_id,
+                  "release_id": cached.get("release_id") or release_id}
+        return _enrich_album_metadata(config, cached, album_key)
 
     tracks, art, yr, total_ms = [], "", "", 0
-    release_genres = musicbrainz_genres_for_release(release_id) if release_id else []
+    release_genres = []
     if spotify_id:
         try:
             sp_album = _sp(f"albums/{spotify_id}", market="US")
             if sp_album:
-                playcounts = spotify_album_playcounts(spotify_id)
-                art = proxy_artwork_url(sp_album.get("images", [{}])[0].get("url", ""))
+                art = proxy_artwork_url((sp_album.get("images") or [{}])[0].get("url", ""))
                 yr = release_year(sp_album.get("release_date", ""))
                 album_name = sp_album["name"]
                 albumartist = (sp_album.get("artists") or [{}])[0].get("name") or artist
@@ -2201,7 +2187,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                         "album": album_name, "year": yr, "track_number": t.get("track_number"),
                         "duration": format_duration_ms(t.get("duration_ms", 0)),
                         "artwork_url": art, "spotify_id": t["id"], "source": "Spotify",
-                        "length": t.get("duration_ms", 0), "plays": playcounts.get(t["id"], 0),
+                        "length": t.get("duration_ms", 0), "plays": _numeric_plays(t.get("plays", 0)),
                         "genres": release_genres,
                         "genre": release_genres[0] if release_genres else "",
                     })
@@ -2222,11 +2208,11 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                         "type": "track", "title": rec.get("title", it.get("title")),
                         "artist": albumartist, "album": album_name, "year": yr,
                         "track_number": it.get("number", ""), "duration": format_duration_ms(ln),
-                        "artwork_url": art or spotify_album_artwork(artist, album_name),
+                        "artwork_url": art,
                         "musicbrainz_recording_id": rec.get("id", ""), "musicbrainz_release_id": release_id,
                         "source": "MusicBrainz", "length": ln,
-                        "genres": release_genres or musicbrainz_genres_for_recording(rec.get("id", "")),
-                        "genre": (release_genres or musicbrainz_genres_for_recording(rec.get("id", "")) or [""])[0],
+                        "genres": release_genres,
+                        "genre": (release_genres or [""])[0],
                     })
         except Exception: pass
 
@@ -2237,17 +2223,45 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
             data = _sp("search", q=search_q, type="album", limit=1)
             items = (data.get("albums") or {}).get("items") or []
             if items and items[0].get("id") and items[0]["id"] != spotify_id:
-                return album_tracks(config, artist, album, "", items[0]["id"])
+                return album_tracks(config, artist, album, "", items[0]["id"], include_extras=include_extras)
         except Exception: pass
 
-    if not yr:
-        yr = musicbrainz_album_year(artist, album)
-        if yr:
-            for track in tracks:
-                if not track.get("year"):
-                    track["year"] = yr
+    result = {
+        "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
+        "total_duration": format_duration_ms(total_ms), "artwork_url": art,
+        "artist_artwork_url": "", "tracks": tracks,
+        "gallery_images": ([{"url": art, "full_url": art, "source": "Spotify",
+                            "label": "Spotify Cover", "is_spotify": True}] if art else []),
+        "release_id": release_id, "spotify_id": spotify_id,
+        "genres": release_genres, "genre": "", "_extras_complete": False,
+    }
+    # Save playable tracks before optional third-party lookups. The details
+    # request reuses this payload instead of repeating the Spotify lookup.
+    if tracks:
+        db.save_album_metadata(album_key, result)
+    return _enrich_album_metadata(config, result, album_key) if include_extras else result
 
-    if not art: art = spotify_album_artwork(artist, album)
+
+def _enrich_album_metadata(config: AppConfig, base: dict, album_key: str) -> dict:
+    result = {**base, "tracks": [dict(track) for track in base.get("tracks", [])]}
+    artist, album = result["artist"], result["album"]
+    release_id, spotify_id = result.get("release_id", ""), result.get("spotify_id", "")
+    yr = result.get("year", "") or musicbrainz_album_year(artist, album)
+    art = result.get("artwork_url", "") or spotify_album_artwork(artist, album)
+    tracks = result["tracks"]
+    playcounts = spotify_album_playcounts(spotify_id) if spotify_id else {}
+    release_genres = musicbrainz_genres_for_release(release_id) if release_id else []
+    for track in tracks:
+        track["year"] = track.get("year") or yr
+        track["plays"] = playcounts.get(track.get("spotify_id"), track.get("plays", 0))
+        genres = release_genres or track.get("genres") or (
+            musicbrainz_genres_for_recording(track["musicbrainz_recording_id"])
+            if track.get("musicbrainz_recording_id") else []
+        )
+        if genres:
+            track.update(genres=genres, genre=genres[0])
+        if not track.get("artwork_url"):
+            track["artwork_url"] = art
     gallery_images = []
     
     # 1. Add Spotify (Primary Base)
@@ -2293,23 +2307,15 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
     # Use the best quality image as the main artwork_url if available
     top_art = gallery_images[0]["url"] if gallery_images else art
 
-    result = {
-        "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
-        "total_duration": format_duration_ms(total_ms), "artwork_url": top_art,
-        "artist_artwork_url": spotify_artist_artwork(artist), "tracks": tracks,
-        "gallery_images": gallery_images,
-        "release_id": release_id,
-        "spotify_id": spotify_id,
-        "genres": release_genres,
-        "genre": release_genres[0] if release_genres else "",
-    }
-    
-    # Cache it!
+    result.update(
+        year=yr, artwork_url=top_art, gallery_images=gallery_images,
+        artist_artwork_url=spotify_artist_artwork(artist),
+        discogs_release_url=discogs_release.get("release_url", ""),
+        genres=release_genres, genre=release_genres[0] if release_genres else "",
+        _extras_complete=True,
+    )
     if tracks:
-        import db
-        album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
         db.save_album_metadata(album_key, result)
-
     return result
 
 

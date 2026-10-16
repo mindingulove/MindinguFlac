@@ -2117,7 +2117,8 @@ class Handler(BaseHTTPRequestHandler):
                 album = query.get("album", [""])[0].strip()
                 release_id = query.get("release_id", [""])[0].strip()
                 spotify_id = query.get("spotify_id", [""])[0].strip()
-                self.send_json(album_tracks(app_config, artist, album, release_id, spotify_id))
+                include_extras = query.get("details", ["1"])[0] != "0"
+                self.send_json(album_tracks(app_config, artist, album, release_id, spotify_id, include_extras=include_extras))
                 return
             if path == "/api/test/hypebot/concerts":
                 import hypebot_tour
