@@ -172,11 +172,15 @@ class TestBackendYtpDl(unittest.TestCase):
             path="/", path_specified=True, secure=True, expires=None, discard=False,
             comment=None, comment_url=None, rest={}, rfc2109=False,
         ))
-        with tempfile.TemporaryDirectory() as tmp, patch("browser_cookie3.load", return_value=cookies) as load:
+        reader = MagicMock(return_value=cookies)
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("backend_ytpdl._youtube_session_signed_out", return_value=False), \
+                patch("backend_ytpdl.sys.platform", "darwin"), \
+                patch("browser_cookie3.all_browsers", [reader]):
             cookie_path = backend_ytpdl.import_youtube_browser_cookies(Path(tmp) / "cookies.txt")
             self.assertIsNotNone(cookie_path)
             self.assertTrue(cookie_path.is_file())
-            load.assert_called_once_with(domain_name="youtube.com")
+            reader.assert_called_once_with(domain_name="youtube.com")
             self.assertEqual(cookie_path.stat().st_mode & 0o777, 0o600)
 
     def test_youtube_login_available_detects_signed_in_browser_cookies(self):
@@ -189,9 +193,13 @@ class TestBackendYtpDl(unittest.TestCase):
             path="/", path_specified=True, secure=True, expires=None, discard=False,
             comment=None, comment_url=None, rest={}, rfc2109=False,
         ))
-        with patch("browser_cookie3.load", return_value=cookies) as load:
+        reader = MagicMock(return_value=cookies)
+        with patch("backend_ytpdl._youtube_cookie_file", return_value=""), \
+                patch("backend_ytpdl._youtube_session_signed_out", return_value=False), \
+                patch("backend_ytpdl.sys.platform", "darwin"), \
+                patch("browser_cookie3.all_browsers", [reader]):
             self.assertTrue(backend_ytpdl.youtube_login_available())
-            load.assert_called_once_with(domain_name="youtube.com")
+            reader.assert_called_once_with(domain_name="youtube.com")
 
     def test_youtube_search_retries_without_cookie_file_after_empty_results(self):
         calls = []
@@ -941,7 +949,7 @@ class TestBackendYtpDl(unittest.TestCase):
         search_opts = yt_dlp_module.YoutubeDL.call_args_list[-1].args[0]
         self.assertEqual(search_opts["extract_flat"], "in_playlist")
         ydl_opts = yt_dlp_module.YoutubeDL.call_args_list[-2].args[0]
-        self.assertEqual(ydl_opts["extractor_args"]["youtube"]["player_client"], ["android", "ios", "web"])
+        self.assertNotIn("player_client", ydl_opts["extractor_args"].get("youtube", {}))
         yt_dlp_instance.download.assert_called_once_with(["https://www.youtube.com/watch?v=official"])
         self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=official")
 

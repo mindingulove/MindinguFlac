@@ -3,7 +3,14 @@
 All notable changes to Mindinguflac are documented here.
 
 ---
-## [1.3.0] — Unreleased
+## [1.3.1] — 2026-10-16
+
+### Fixed
+- Publish a signed Android APK so Android accepts installation.
+- Include the desktop YouTube sign-in and Windows sign-out fixes.
+- Update Settings, backend, macOS bundle, and Android versions to 1.3.1; increment Android versionCode to 3.
+
+## [1.3.0]
 
 ### Added
 - Pair Android and desktop over the local Wi-Fi network with a fingerprint-checked, expiring QR invitation and an explicit confirmation dialog.

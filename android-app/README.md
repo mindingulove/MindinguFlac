@@ -27,7 +27,22 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 Python packages declared in `app/src/main/python/android-requirements.txt` are
 installed from `app/python-wheels/` during the build. `./gradlew
 :app:assembleRelease` produces a minified, **unsigned** release APK; there is
-no signing config in this repository, so sign it yourself before distributing.
+no signing config in this repository. Prepare the installable distribution with
+the packaging tool, which aligns the APK, signs it, checks its signature and ZIP
+integrity, and writes a SHA-256 sidecar. Keep using the same private keystore
+for updates; do not commit the keystore or its passwords.
+
+```sh
+# Set APK_STORE_PASSWORD and APK_KEY_PASSWORD securely in the environment.
+python3 tools/package_release.py \
+  app/build/outputs/apk/release/app-release-unsigned.apk \
+  ../dist/android/Mindinguflac-android-arm64-v1.3.1.apk \
+  --build-tools "$ANDROID_HOME/build-tools/36.1.0" \
+  --keystore /private/path/to/existing.keystore --alias existing-key
+```
+
+Publish only the verified signed APK and its `.apk.sha256` sidecar. An unsigned
+APK is a build intermediate and Android will reject it during installation.
 
 ## Download engines are offered only when their runtime is present
 
