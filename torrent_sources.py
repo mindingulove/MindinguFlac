@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import html
+import logging
 import re
 import urllib.parse
 import urllib.request
+import ssl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _TRACKERS = [
@@ -81,7 +83,12 @@ def _http(url: str, data: bytes | None = None, headers: dict | None = None, time
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, data=data, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    try:
+        import certifi
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        context = None
+    with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
         return resp.read().decode("utf-8", "replace")
 
 
@@ -529,11 +536,133 @@ def search_solid(query: str, timeout: int = 12) -> list[dict]:
     return out
 
 
-def search_1337x(query: str, timeout: int = 12) -> list[dict]:
-    """1337x search via SolidTorrents and extra query flags."""
-    # Since direct 1337x is Cloudflare-protected, we use an aggregator
-    # but append the site name to favor those results if the aggregator supports it.
-    return search_solid(query + " 1337x", timeout)
+def _1337x_parse_listing(page: str, base: str, limit: int = 100) -> list[dict]:
+    results = []
+    for row in re.findall(r"<tr\b[^>]*>.*?</tr>", page, flags=re.I | re.S):
+        match = re.search(
+            r"<a[^>]+href=[\"'](?P<href>/torrent/\d+/[^\"']+)[\"'][^>]*>(?P<title>.*?)</a>",
+            row, flags=re.I | re.S,
+        )
+        if not match:
+            continue
+        title = html.unescape(re.sub(r"<[^>]+>", "", match.group("title"))).strip()
+        if not title:
+            continue
+        cells = {}
+        for cls, content in re.findall(
+            r"<td[^>]+class=[\"'](?P<class>[^\"']+)[\"'][^>]*>(?P<content>.*?)</td>",
+            row, flags=re.I | re.S,
+        ):
+            cells[cls] = html.unescape(re.sub(r"<[^>]+>", "", content)).strip()
+        try:
+            seeders = int(re.sub(r"[^\d]", "", cells.get("coll-2 seeds", "")) or 0)
+        except Exception:
+            seeders = 0
+        try:
+            leechers = int(re.sub(r"[^\d]", "", cells.get("coll-3 leeches", "")) or 0)
+        except Exception:
+            leechers = 0
+        results.append({
+            "title": title,
+            "detail_url": urllib.parse.urljoin(base, match.group("href")),
+            "size": cells.get("coll-4 size", ""),
+            "seeders": seeders,
+            "leechers": leechers,
+            "source": "1337x",
+            "category": "audio",
+        })
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _1337x_detail_magnet(detail_url: str, title: str, timeout: int) -> str:
+    try:
+        page = _http(detail_url, timeout=timeout)
+    except Exception:
+        return ""
+    match = re.search(r"href=[\"'](magnet:\?xt=urn:btih:[^\"']+)[\"']", page, flags=re.I)
+    if match:
+        return html.unescape(match.group(1))
+    # Some mirrors expose the info hash separately from the magnet action.
+    match = re.search(r"magnet:\?xt=urn:btih:([a-f0-9]{40})", page, flags=re.I)
+    return _magnet(match.group(1), title) if match else ""
+
+
+def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "") -> list[dict]:
+    """Search 1337x with its primary host, accessible mirrors, and artist fallback.
+
+    1337x.st currently answers non-browser clients with a Cloudflare challenge.
+    The .la mirror serves the same search/detail format without requiring a
+    browser, so keep .st first and use .la before older .to fallback. Searching
+    the artist alone also prevents broad multiword queries from hiding a good
+    album past the first few rows; the unified fuzzy/swarm ranker decides which
+    of those rows belong in the candidate list.
+    """
+    # App searches often prepend artist/title/format terms. Search the album
+    # name by itself as well: 1337x's result ordering can bury the strong album
+    # pack when those extra terms are included.
+    queries = list(dict.fromkeys(
+        value.strip() for value in (album, query, artist) if value and value.strip()
+    ))
+    cloudflare_challenge = False
+    collected: list[dict] = []
+    seen_details: set[str] = set()
+    for search_query in queries:
+        slug = urllib.parse.quote(search_query, safe="")
+        # .st is currently challenged for direct clients, while .la serves the
+        # same index. Try the working mirror first to avoid spending the short
+        # Android request timeout on a Cloudflare response.
+        for base in ("https://1337x.la", "https://1337x.st", "https://1337x.to"):
+            try:
+                page = _http(f"{base}/search/{slug}/1/", timeout=timeout)
+                candidates = _1337x_parse_listing(page, base, limit=100)
+            except Exception as exc:
+                if "403" in str(exc) or "cloudflare" in str(exc).lower() or "challenge" in str(exc).lower():
+                    cloudflare_challenge = True
+                candidates = []
+            candidates = [row for row in candidates if row["detail_url"] not in seen_details]
+            # Avoid firing hundreds of detail requests across parallel Android
+            # first-pass queries. Keep the most seeded rows from the listing;
+            # the shared fuzzy ranker makes the final choice.
+            candidates.sort(key=lambda row: int(row.get("seeders") or 0), reverse=True)
+            candidates = candidates[:50]
+            if not candidates:
+                continue
+            seen_details.update(row["detail_url"] for row in candidates)
+            out = []
+            with ThreadPoolExecutor(max_workers=min(12, len(candidates))) as executor:
+                futures = [executor.submit(_1337x_detail_magnet, item["detail_url"], item["title"], timeout) for item in candidates]
+                for item, future in zip(candidates, futures):
+                    try:
+                        magnet = future.result() or ""
+                    except Exception:
+                        magnet = ""
+                    if magnet:
+                        result = dict(item)
+                        result["magnet"] = magnet
+                        result.pop("detail_url", None)
+                        out.append(result)
+            collected.extend(out)
+            # The first reachable mirror provides the same index. Avoid
+            # repeating each query against mirrors after it returned rows.
+            if out:
+                break
+    if collected:
+        return collected
+    fallback = search_solid(query + " 1337x", timeout)
+    if cloudflare_challenge:
+        if fallback:
+            logging.getLogger(__name__).warning(
+                "1337x blocked this automated request with a Cloudflare challenge; "
+                "using %d SolidTorrents fallback candidate(s)", len(fallback),
+            )
+        else:
+            logging.getLogger(__name__).warning(
+                "1337x blocked this automated request with a Cloudflare challenge, "
+                "and the SolidTorrents fallback returned no candidates",
+            )
+    return fallback
 
 
 def search_kickass(query: str, timeout: int = 12) -> list[dict]:

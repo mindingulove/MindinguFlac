@@ -115,6 +115,9 @@ class AppConfig:
     volume: float = 1.0
     track_max_retries: int = 1
     download_engine: str = "ytp-dl"
+    torrent_playback_candidates: int = 3
+    torrent_prefetch_candidates: int = 2
+    torrent_metadata_timeout_seconds: int = 60
     duck_model: str = "1"
     ai_provider: str = "duckai"
     gemini_model: str = "flash"
@@ -144,6 +147,9 @@ class AppConfig:
             "default_quality": self.default_quality,
             "download_service": self.download_service,
             "download_engine": self.download_engine,
+            "torrent_playback_candidates": self.torrent_playback_candidates,
+            "torrent_prefetch_candidates": self.torrent_prefetch_candidates,
+            "torrent_metadata_timeout_seconds": self.torrent_metadata_timeout_seconds,
             "duck_model": self.duck_model,
             "ai_provider": self.ai_provider,
             "gemini_model": self.gemini_model,
@@ -193,6 +199,17 @@ class AppConfig:
         if tour_source not in {"ai", "hypebot"}:
             tour_source = "ai"
 
+        def candidate_count(name: str, default: int) -> int:
+            try:
+                return max(1, min(8, int(value.get(name, default))))
+            except (ValueError, TypeError, OverflowError):
+                return default
+
+        try:
+            metadata_timeout = max(10, min(180, int(value.get("torrent_metadata_timeout_seconds", 60))))
+        except (ValueError, TypeError, OverflowError):
+            metadata_timeout = 60
+
         return cls(
             cache_dir=_to_path(cache_dir_str, default_cache_dir),
             music_dir=_to_path(music_dir_str, default_music_dir),
@@ -206,6 +223,9 @@ class AppConfig:
             volume=float(value.get("volume", 1.0)),
             track_max_retries=rt,
             download_engine=value.get("download_engine", cls.download_engine),
+            torrent_playback_candidates=candidate_count("torrent_playback_candidates", 3),
+            torrent_prefetch_candidates=candidate_count("torrent_prefetch_candidates", 2),
+            torrent_metadata_timeout_seconds=metadata_timeout,
             duck_model=str(value.get("duck_model", "1") or "1"),
             ai_provider=str(value.get("ai_provider", "duckai") or "duckai"),
             gemini_model=str(value.get("gemini_model", "gemini-1.5-flash") or "gemini-1.5-flash"),

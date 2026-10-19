@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 import torrent_sources
 
@@ -61,6 +63,42 @@ class LimeTorrentsTests(unittest.TestCase):
         self.assertEqual(rows[0]["category"], "audio")
         self.assertIn("8CE081FF6E4719A68D0376A8EE3AA7C4F4BB00AF", rows[0]["magnet"])
         self.assertIn("itorrents.net/torrent/8CE081FF6E4719A68D0376A8EE3AA7C4F4BB00AF.torrent", rows[0]["torrent_url"])
+
+
+class X1337Tests(unittest.TestCase):
+    def test_cloudflare_primary_falls_back_to_mirror_and_keeps_result_after_row_12(self):
+        wanted = "The Jimi Hendrix Experience - Electric Ladyland (50th Anniversary Deluxe Edition) (2018) [3CD] FLAC"
+        rows = []
+        for index in range(1, 16):
+            title = wanted if index == 14 else f"Jimi Hendrix unrelated release {index} FLAC"
+            rows.append(
+                f'<tr><td><a href="/torrent/{index}/release-{index}/">{title}</a></td>'
+                f'<td class="coll-2 seeds">{114 if index == 14 else 2}</td>'
+                f'<td class="coll-3 leeches">{20 if index == 14 else 1}</td>'
+                '<td class="coll-4 size">1.2 GB</td></tr>'
+            )
+        listing = "<table>" + "".join(rows) + "</table>"
+
+        requested = []
+        def fake_http(url, **_kwargs):
+            requested.append(url)
+            if "1337x.st" in url:
+                raise HTTPError(url, 403, "Cloudflare challenge", {}, None)
+            if "/search/" in url:
+                return listing
+            return 'href="magnet:?xt=urn:btih:' + f"{int(url.split('/torrent/')[1].split('/')[0]):040X}" + '"'
+
+        with patch.object(torrent_sources, "_http", side_effect=fake_http):
+            results = torrent_sources.search_1337x(
+                "Jimi Hendrix Electric Ladyland FLAC", timeout=1,
+                artist="Jimi Hendrix", album="Electric Ladyland",
+            )
+
+        match = next(row for row in results if row["title"] == wanted)
+        self.assertEqual((match["seeders"], match["leechers"]), (114, 20))
+        self.assertTrue(match["magnet"].startswith("magnet:?xt=urn:btih:"))
+        self.assertEqual(match["source"], "1337x")
+        self.assertIn("/search/Electric%20Ladyland/1/", requested[0])
 
 
 class TorLockTests(unittest.TestCase):

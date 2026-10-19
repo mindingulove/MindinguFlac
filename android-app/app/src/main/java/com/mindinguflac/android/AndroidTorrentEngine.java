@@ -9,6 +9,8 @@ import com.frostwire.jlibtorrent.SettingsPack;
 import com.frostwire.jlibtorrent.TorrentHandle;
 import com.frostwire.jlibtorrent.TorrentInfo;
 import com.frostwire.jlibtorrent.TorrentStatus;
+import com.frostwire.jlibtorrent.TorrentFlags;
+import com.frostwire.jlibtorrent.swig.torrent_flags_t;
 
 import org.json.JSONObject;
 
@@ -20,10 +22,22 @@ import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /** Android-native libtorrent bridge used by the embedded Python backend. */
 public final class AndroidTorrentEngine {
     private static final ConcurrentHashMap<String, TorrentJob> JOBS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, AtomicBoolean> STARTS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, byte[]> METADATA = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Long> WARM_EXPIRIES = new ConcurrentHashMap<>();
+    private static final ScheduledExecutorService WARM_SWARMS = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread thread = new Thread(task, "torrent-warm-expiry");
+        thread.setDaemon(true);
+        return thread;
+    });
     private static final Set<String> LOSSLESS_EXTENSIONS = immutableSet(
             ".flac", ".alac", ".wav", ".wave", ".aiff", ".aif", ".ape", ".wv");
     private static final Set<String> AUDIO_EXTENSIONS = immutableSet(
@@ -62,13 +76,18 @@ public final class AndroidTorrentEngine {
         final File selectedFile;
         final long selectedSize;
         final int selectedIndex;
+        final long fileOffset;
+        final int pieceLength;
+        boolean prefetch = false;
 
         TorrentJob(TorrentHandle handle, File selectedFile,
-                   long selectedSize, int selectedIndex) {
+                   long selectedSize, int selectedIndex, long fileOffset, int pieceLength) {
             this.handle = handle;
             this.selectedFile = selectedFile;
             this.selectedSize = selectedSize;
             this.selectedIndex = selectedIndex;
+            this.fileOffset = fileOffset;
+            this.pieceLength = pieceLength;
         }
     }
 
@@ -89,9 +108,9 @@ public final class AndroidTorrentEngine {
             settings.setEnableDht(true);
             settings.setEnableLsd(true);
             settings.setDhtBootstrapNodes(DHT_BOOTSTRAP_NODES);
-            settings.activeDownloads(4);
+            settings.activeDownloads(30);
             settings.activeSeeds(0);
-            settings.activeLimit(12);
+            settings.activeLimit(40);
             settings.connectionsLimit(200);
             settings.maxPeerlistSize(1000);
             settings.inactivityTimeout(120);
@@ -99,17 +118,7 @@ public final class AndroidTorrentEngine {
             session.start(new SessionParams(settings));
             sharedSession = session;
         }
-        waitForDht(sharedSession, 25000);
         return sharedSession;
-    }
-
-    /** Magnet metadata comes from the DHT, so there is no point asking before it has nodes. */
-    private static void waitForDht(SessionManager session, long timeoutMs) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
-            if (session.dhtNodes() > 8) return;
-            Thread.sleep(250);
-        }
     }
 
     /**
@@ -134,8 +143,11 @@ public final class AndroidTorrentEngine {
      */
     public static String startDownload(String jobId, String magnet, String outputPath,
                                        String artist, String title, String album,
-                                       String trackNumber, boolean requireLossless) {
+                                       String trackNumber, boolean requireLossless,
+                                       int metadataTimeoutSeconds) {
         cancel(jobId);
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        STARTS.put(jobId, cancelled);
         try {
             File outputDir = new File(outputPath);
             File metadataDir = new File(outputDir, ".metadata");
@@ -146,7 +158,13 @@ public final class AndroidTorrentEngine {
 
             SessionManager session = sharedSession();
             String resolvable = withTrackers(magnet);
-            byte[] metadata = session.fetchMagnet(resolvable, 90, metadataDir);
+            if (cancelled.get()) throw new InterruptedException("Cancelled");
+            String metadataKey = java.net.URLDecoder.decode(magnet, java.nio.charset.StandardCharsets.UTF_8)
+                    .replaceAll("(?i)^.*[?&]xt=urn:btih:([^&]+).*$", "$1").toLowerCase(Locale.ROOT);
+            byte[] metadata = METADATA.get(metadataKey);
+            int metadataTimeout = Math.max(10, Math.min(180, metadataTimeoutSeconds));
+            if (metadata == null) metadata = session.fetchMagnet(resolvable, metadataTimeout, metadataDir);
+            if (cancelled.get()) throw new InterruptedException("Cancelled");
             if (metadata == null || metadata.length == 0) {
                 throw new IllegalStateException("Torrent metadata timed out");
             }
@@ -154,6 +172,8 @@ public final class AndroidTorrentEngine {
             if (!info.isValid()) {
                 throw new IllegalStateException("Torrent metadata is invalid");
             }
+            if (METADATA.size() >= 32) METADATA.remove(METADATA.keys().nextElement());
+            METADATA.put(metadataKey, metadata);
 
             int selected = selectFile(info.files(), artist, title, album, trackNumber, requireLossless);
             if (selected < 0) {
@@ -162,7 +182,14 @@ public final class AndroidTorrentEngine {
                         : "No matching audio file in torrent");
             }
 
-            session.download(info, outputDir);
+            // Keep adding/registering a shared handle atomic with release.
+            synchronized (SESSION_LOCK) {
+            if (cancelled.get()) throw new InterruptedException("Cancelled");
+            Priority[] requestedFiles = Priority.array(Priority.IGNORE, info.numFiles());
+            requestedFiles[selected] = Priority.SEVEN;
+            // jlibtorrent 2.0.12 dereferences the flags wrapper in download();
+            // passing null here crashes native code after metadata is resolved.
+            session.download(info, outputDir, null, requestedFiles, null, new torrent_flags_t());
             TorrentHandle handle = null;
             for (int attempt = 0; attempt < 100; attempt++) {
                 handle = session.find(info);
@@ -173,24 +200,25 @@ public final class AndroidTorrentEngine {
                 throw new IllegalStateException("libtorrent did not add the selected source");
             }
 
-            Priority[] priorities = Priority.array(Priority.IGNORE, info.numFiles());
-            priorities[selected] = Priority.SEVEN;
-            handle.prioritizeFiles(priorities);
+            FileStorage files = info.files();
+            File selectedFile = new File(handle.savePath(), files.filePath(selected));
+            TorrentJob state = new TorrentJob(
+                    handle, selectedFile, files.fileSize(selected), selected, files.fileOffset(selected), info.pieceLength());
+            JOBS.put(jobId, state);
+            handle.setFlags(TorrentFlags.SEQUENTIAL_DOWNLOAD);
+            updatePriorities(handle);
             handle.resume();
 
-            FileStorage files = info.files();
-            File selectedFile = new File(outputDir, files.filePath(selected));
-            TorrentJob state = new TorrentJob(
-                    handle, selectedFile, files.fileSize(selected), selected);
-            JOBS.put(jobId, state);
-
             return json(true, "", selectedFile.getAbsolutePath(), files.fileSize(selected),
-                    0L, 0, 0, false, info.name()).toString();
+                    0L, 0, 0, false, info.name()).put("save_path", handle.savePath()).toString();
+            }
         } catch (Throwable error) {
             // Never tear the shared session down here: the caller simply moves
             // on to the next candidate, and killing the session would make it
             // start from a cold DHT all over again.
             return json(false, message(error), "", 0L, 0L, 0, 0, false, "").toString();
+        } finally {
+            STARTS.remove(jobId, cancelled);
         }
     }
 
@@ -209,9 +237,15 @@ public final class AndroidTorrentEngine {
             if (torrent.errorCode() != null && torrent.errorCode().value() != 0) {
                 error = torrent.errorCode().message();
             }
+            long contiguous = -(state.fileOffset % state.pieceLength);
+            int piece = (int) (state.fileOffset / state.pieceLength);
+            while (contiguous < state.selectedSize && state.handle.havePiece(piece)) {
+                contiguous += state.pieceLength;
+                piece++;
+            }
             return json(error.isEmpty(), error, state.selectedFile.getAbsolutePath(),
                     state.selectedSize, ready, torrent.numPeers(), torrent.numSeeds(),
-                    finished, torrent.name()).toString();
+                    finished, torrent.name()).put("contiguous", Math.max(0L, Math.min(contiguous, state.selectedSize))).toString();
         } catch (Throwable error) {
             return json(false, message(error), state.selectedFile.getAbsolutePath(),
                     state.selectedSize, 0L, 0, 0, false, "").toString();
@@ -219,6 +253,11 @@ public final class AndroidTorrentEngine {
     }
 
     public static void release(String jobId) {
+        release(jobId, true);
+    }
+
+    private static void release(String jobId, boolean keepWarm) {
+        synchronized (SESSION_LOCK) {
         TorrentJob state = JOBS.remove(jobId);
         if (state == null) return;
         // Drop this job's torrent but keep the session: other jobs share it, and
@@ -228,11 +267,69 @@ public final class AndroidTorrentEngine {
             session = sharedSession;
         }
         if (session == null) return;
-        try { session.remove(state.handle); } catch (Throwable ignored) {}
+        for (TorrentJob other : JOBS.values()) {
+            if (other.handle.infoHash().equals(state.handle.infoHash())) {
+                updatePriorities(other.handle);
+                return;
+            }
+        }
+        String hash = state.handle.infoHash().toString();
+        if (!keepWarm) {
+            WARM_EXPIRIES.remove(hash);
+            try { session.remove(state.handle); } catch (Throwable ignored) {}
+            return;
+        }
+        // Keep a healthy album's peer connections briefly for the next track.
+        long expiry = System.nanoTime();
+        WARM_EXPIRIES.put(hash, expiry);
+        WARM_SWARMS.schedule(() -> {
+            synchronized (SESSION_LOCK) {
+                if (!WARM_EXPIRIES.remove(hash, expiry)) return;
+                for (TorrentJob other : JOBS.values()) {
+                    if (other.handle.infoHash().equals(state.handle.infoHash())) return;
+                }
+                try { session.remove(state.handle); } catch (Throwable ignored) {}
+            }
+        }, 180, TimeUnit.SECONDS);
+        }
     }
 
     public static void cancel(String jobId) {
-        release(jobId);
+        AtomicBoolean pending = STARTS.get(jobId);
+        if (pending != null) pending.set(true);
+        release(jobId, false);
+    }
+
+    public static void cancelGroup(String jobId) {
+        String prefix = jobId + "::torrent::";
+        for (String id : STARTS.keySet()) {
+            if (id.equals(jobId) || id.startsWith(prefix)) cancel(id);
+        }
+        for (String id : JOBS.keySet()) {
+            if (id.equals(jobId) || id.startsWith(prefix)) cancel(id);
+        }
+    }
+
+    private static void updatePriorities(TorrentHandle handle) {
+        Priority[] priorities = Priority.array(Priority.IGNORE, handle.filePriorities().length);
+        for (TorrentJob other : JOBS.values()) {
+            if (other.handle.infoHash().equals(handle.infoHash()) && other.selectedIndex < priorities.length) {
+                if (!other.prefetch || priorities[other.selectedIndex] != Priority.SEVEN) {
+                    priorities[other.selectedIndex] = other.prefetch ? Priority.TWO : Priority.SEVEN;
+                }
+            }
+        }
+        handle.prioritizeFiles(priorities);
+    }
+
+    public static void setPrefetch(String jobId, boolean prefetch) {
+        synchronized (SESSION_LOCK) {
+            TorrentJob state = JOBS.get(jobId);
+            if (state != null && state.prefetch != prefetch) {
+                state.prefetch = prefetch;
+                updatePriorities(state.handle);
+            }
+        }
     }
 
     /**

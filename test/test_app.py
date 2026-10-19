@@ -373,3 +373,59 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GrowingTorrentStreamTests(unittest.TestCase):
+    def test_stream_waits_for_verified_bytes_instead_of_sending_sparse_holes(self):
+        self._check_stream(True)
+
+    def test_growing_file_advertises_final_length_before_all_bytes_exist(self):
+        self._check_stream(False)
+
+    def _check_stream(self, preallocated):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'growing.flac'
+            prefix = b'fLaC' + b'A' * (600 * 1024 + 119)
+            tail = b'B' * (128 * 1024)
+            path.write_bytes(prefix + bytes(len(tail)) if preallocated else prefix)
+            job = {'status': 'running', 'active_audio_path': str(path), 'active_audio_ready_bytes': len(prefix), 'active_audio_size': len(prefix) + len(tail)}
+            class Handler(app.Handler):
+                def do_GET(self):
+                    self.stream_local_path(path, is_active_job=True, active_job_id='test')
+                def log_message(self, *args):
+                    pass
+            server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app.service_downloader, 'get_job', side_effect=lambda _: dict(job)):
+                thread.start()
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    connection.request('GET', '/')
+                    response = connection.getresponse()
+                    self.assertEqual(int(response.getheader('Content-Length')), len(prefix) + len(tail))
+                    self.assertEqual(response.read(len(prefix)), prefix)
+                    result = []
+                    finished = threading.Event()
+                    def read_tail():
+                        try:
+                            result.append(response.read())
+                        finally:
+                            finished.set()
+                    reader = threading.Thread(target=read_tail, daemon=True)
+                    reader.start()
+                    sent_before_verified = finished.wait(.3)
+                    with path.open('r+b', buffering=0) as f:
+                        f.seek(len(prefix))
+                        f.write(tail)
+                    job['active_audio_ready_bytes'] = len(prefix) + len(tail)
+                    job['status'] = 'finished'
+                    self.assertTrue(finished.wait(3))
+                    self.assertFalse(sent_before_verified, 'preallocated holes must not be streamed')
+                    self.assertEqual(result, [tail])
+                finally:
+                    connection.close()
+                    server.shutdown()
+                    server.server_close()

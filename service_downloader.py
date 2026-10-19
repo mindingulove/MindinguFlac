@@ -315,6 +315,8 @@ def _find_audio_files(root: Path, delete_invalid: bool = False) -> list[Path]:
         return files
     for path in root.rglob("*"):
         if path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES:
+            if "_race" in path.relative_to(root).parts:
+                continue
             path = _repair_audio_extension(path)
             if is_valid_audio_file(path):
                 files.append(path)
@@ -1251,12 +1253,17 @@ class ServiceDownloadManager:
         resolved = []
         unresolved: list[Path] = []
         known_paths = set()
+        unfinished_roots = []
         with self._lock:
             for job in self.jobs.values():
                 if job.get("library_path"):
                     known_paths.add(str(job["library_path"]))
+                if job.get("status") != "finished" and job.get("mode", "stream") == "stream" and job.get("output_dir"):
+                    unfinished_roots.append(Path(job["output_dir"]).resolve())
 
         for path in _find_audio_files(cache_dir):
+            if any(path.resolve().is_relative_to(root) for root in unfinished_roots):
+                continue
             if str(path) in known_paths:
                 continue
             # Sidecar-backed files resolve to one concrete track regardless of
@@ -1659,6 +1666,25 @@ class ServiceDownloadManager:
                     if active_rank >= requested_rank:
                         return active
 
+                # A transient media error or app restart must not discard a
+                # torrent that has already produced audio. Reuse its UUID and
+                # data directory when the same track is requested again.
+                if self._requested_engine(payload)[0] == "torrent":
+                    with self._lock:
+                        resumable = next((job for job in sorted(self.jobs.values(), key=lambda j: j.get("created_at", 0), reverse=True)
+                            if job.get("engine") == "torrent" and job.get("status") == "error"
+                            and job.get("mode", "stream") == "stream"
+                            and job.get("error") != "Cancelled by user"
+                            and _job_matches_identity(job, identity)
+                            and str(job.get("resolved_url") or "").startswith("magnet:")
+                            and job.get("active_audio_path") and Path(job["active_audio_path"]).is_file()), None)
+                        if resumable:
+                            resumable.update(status="starting", error="", last_status="Resuming retained torrent data", prefetch=bool(payload.get("prefetch")))
+                            self._cancel_flags.discard(resumable["id"])
+                    if resumable:
+                        threading.Thread(target=self._worker, args=(resumable["id"], {**payload, "_resume_torrent": True}), daemon=True).start()
+                        return self._public_job(resumable)
+
             return self._create_job(payload)
 
     def _create_job(self, payload: dict) -> dict:
@@ -1767,7 +1793,7 @@ class ServiceDownloadManager:
             # Stream cache dirs are per-job UUIDs and safe to wipe. Download
             # dirs are the shared album folder (music_dir/artist/album), so
             # wiping them would delete sibling tracks already in the library.
-            if job.get("mode", "stream") == "stream" and output_dir.exists():
+            if job.get("mode", "stream") == "stream" and output_dir.exists() and not payload.get("_resume_torrent"):
                 try:
                     shutil.rmtree(output_dir, ignore_errors=True)
                 except Exception:

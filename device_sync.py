@@ -93,6 +93,10 @@ def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: 
     import app
     import db
     import service_downloader
+    import playlist_sync
+
+    with app.playlists_lock:
+        playlists = playlist_sync.export(app.PLAYLISTS_PATH)
 
     settings = {key: getattr(app.app_config, key) for key in SHARED_SETTINGS}
     settings_revision = _settings_revision()
@@ -123,6 +127,7 @@ def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: 
         "settings_revision": settings_revision,
         "settings_revision_mode": 1,
         "recent": jobs[:1000],
+        "playlists": playlists,
         "statistics": db.sync_export(statistics_since),
         "desktop_cursor": float(desktop_cursor or 0),
         "sent_at": time.time(),
@@ -134,6 +139,7 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
     import app
     import db
     import service_downloader
+    import playlist_sync
 
     if int(snapshot.get("schema") or 0) != PROTOCOL:
         raise ValueError("Unsupported sync protocol")
@@ -196,7 +202,11 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
                 app.save_config(app.CONFIG_PATH, updated)
                 app.service_downloader.update_config(updated)
             _save_settings_revision(incoming_revision)
-    return {"events": imported_events, "recent": imported_recent}
+    imported_playlists = 0
+    if "playlists" in snapshot:
+        with app.playlists_lock:
+            imported_playlists = playlist_sync.merge(app.PLAYLISTS_PATH, snapshot["playlists"])
+    return {"events": imported_events, "recent": imported_recent, "playlists": imported_playlists}
 
 
 def _ensure_certificate(state_dir: Path) -> tuple[Path, Path, str]:

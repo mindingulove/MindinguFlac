@@ -455,7 +455,11 @@ def load_playlists() -> list[dict]:
 
 
 def save_playlists(data: list[dict]) -> None:
-    PLAYLISTS_PATH.write_text(json.dumps(data, indent=2), "utf-8")
+    import playlist_sync
+    playlist_sync.record_changes(PLAYLISTS_PATH, load_playlists(), data)
+    temp = PLAYLISTS_PATH.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(data, indent=2), "utf-8")
+    temp.replace(PLAYLISTS_PATH)
 
 
 def valid_playback_session(value: object) -> dict:
@@ -1929,7 +1933,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.3.1"
+    server_version = "SpotiFLACStreamer/1.3.2"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -2450,7 +2454,10 @@ class Handler(BaseHTTPRequestHandler):
                     file_complete = active_audio_size > 0 and active_audio_ready >= active_audio_size
                 except (OSError, TypeError, ValueError):
                     file_complete = False
-                self.stream_local_path(candidate, is_active_job=not is_finished and not file_complete, audio_hint=True)
+                self.stream_local_path(
+                    candidate, is_active_job=not is_finished and not file_complete,
+                    audio_hint=True, active_job_id=job_id if job.get("engine") == "torrent" else "",
+                )
                 return
 
             if path == "/api/tidal_proxy":
@@ -3116,9 +3123,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def stream_local_path(self, path: Path, is_active_job: bool = False, audio_hint: bool = False) -> None:
+    def stream_local_path(self, path: Path, is_active_job: bool = False, audio_hint: bool = False, active_job_id: str = "") -> None:
         try:
             size = path.stat().st_size
+            if is_active_job and active_job_id:
+                stream_job = service_downloader.get_job(active_job_id) or {}
+                size = int(stream_job.get("active_audio_size") or size)
             if is_active_job:
                 mime = _sniff_audio_mime(path)
             else:
@@ -3127,7 +3137,7 @@ class Handler(BaseHTTPRequestHandler):
             if audio_hint and mime == "video/mp4":
                 mime = "audio/mp4"
 
-            if is_active_job and _candidate_is_streamable(path):
+            if is_active_job and not active_job_id and _candidate_is_streamable(path):
                 self.send_response(200)
                 self.send_cors_headers()
                 self.send_header("Content-Type", mime)
@@ -3203,13 +3213,31 @@ class Handler(BaseHTTPRequestHandler):
             if status == 206:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
-            with path.open("rb") as f:
+            with path.open("rb", buffering=0 if is_active_job and active_job_id else -1) as f:
                 f.seek(start)
                 remaining = content_length
+                idle_since = time.monotonic()
                 while remaining > 0:
-                    chunk = f.read(min(256 * 1024, remaining))
+                    readable = remaining
+                    if is_active_job and active_job_id:
+                        current_job = service_downloader.get_job(active_job_id)
+                        if not current_job or current_job.get("status") == "error":
+                            return
+                        if current_job.get("status") != "finished":
+                            if str(current_job.get("active_audio_path") or "") != str(path):
+                                return
+                            # A torrent file may be preallocated to its final
+                            # size. Never send sparse holes as decoded audio.
+                            readable = min(remaining, max(0, int(current_job.get("active_audio_ready_bytes") or 0) - f.tell()))
+                            if readable <= 0:
+                                if time.monotonic() - idle_since > 120:
+                                    return
+                                time.sleep(0.25)
+                                continue
+                    chunk = f.read(min(256 * 1024, readable))
                     if not chunk:
                         break
+                    idle_since = time.monotonic()
                     remaining -= len(chunk)
                     try:
                         self.wfile.write(chunk)

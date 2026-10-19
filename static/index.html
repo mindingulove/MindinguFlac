@@ -99,6 +99,15 @@
 
           <div class="settings-section">
             <h2 class="settings-section-title">Playback</h2>
+            <div class="settings-row hidden" id="youtubeSignInRow">
+              <div class="settings-info">
+                <strong>YouTube account</strong>
+                <span id="youtubeSignInStatus">Sign in in the app. Your session stays on this device.</span>
+              </div>
+              <div class="settings-control">
+                <button type="button" id="youtubeSignInButton" class="primary">Sign in to YouTube</button>
+              </div>
+            </div>
             <div class="settings-row" id="downloadEngineRow">
               <div class="settings-info">
                 <strong>Download engine</strong>
@@ -110,6 +119,33 @@
                   <option value="torrent">Looseless - Torrent</option>
                   <option value="spotiflac">Experimental - Spotiflac</option>
                 </select>
+              </div>
+            </div>
+            <div class="settings-row hidden" id="torrentPlaybackCandidatesRow">
+              <div class="settings-info">
+                <strong>Torrent candidates for current playback</strong>
+                <span>Sources tested at once for the playing track. Stalled sources are replaced independently.</span>
+              </div>
+              <div class="settings-control">
+                <input id="torrentPlaybackCandidates" type="number" min="1" max="8" step="1" value="3" required style="width: 60px; text-align: center;">
+              </div>
+            </div>
+            <div class="settings-row hidden" id="torrentPrefetchCandidatesRow">
+              <div class="settings-info">
+                <strong>Torrent candidates per background track</strong>
+                <span>Sources tested at once for each prefetched track. Lower values leave more capacity for playback.</span>
+              </div>
+              <div class="settings-control">
+                <input id="torrentPrefetchCandidates" type="number" min="1" max="8" step="1" value="2" required style="width: 60px; text-align: center;">
+              </div>
+            </div>
+            <div class="settings-row hidden" id="torrentMetadataTimeoutRow">
+              <div class="settings-info">
+                <strong>Torrent metadata timeout</strong>
+                <span>Seconds each torrent candidate gets to provide its file list before that slot moves on.</span>
+              </div>
+              <div class="settings-control">
+                <input id="torrentMetadataTimeout" type="number" min="10" max="180" step="5" value="60" required style="width: 76px; text-align: center;">
               </div>
             </div>
             <div class="settings-row hidden" id="androidEngineNotesRow">
@@ -128,15 +164,6 @@
               </div>
               <div class="settings-control">
                 <select id="downloadService"></select>
-              </div>
-            </div>
-            <div class="settings-row hidden" id="youtubeSignInRow">
-              <div class="settings-info">
-                <strong>YouTube account</strong>
-                <span id="youtubeSignInStatus">Sign in in the app. Your session stays on this device.</span>
-              </div>
-              <div class="settings-control">
-                <button type="button" id="youtubeSignInButton" class="primary">Sign in to YouTube</button>
               </div>
             </div>
             <div class="settings-row" id="defaultQualityRow">
@@ -324,7 +351,7 @@
 
           <div class="settings-footer" style="display: flex; justify-content: space-between; align-items: center;">
             <div style="font-size: 12px; color: var(--muted);">
-              Mindingulove © 2026 | Version 1.3.1
+              Mindingulove © 2026 | Version 1.3.2
             </div>
             <button class="primary" type="submit">Save settings</button>
           </div>

@@ -3,6 +3,16 @@
 All notable changes to Mindinguflac are documented here.
 
 ---
+## [1.3.2] — 2026-10-18
+
+### Fixed
+- Reduce duplicate torrent-provider work in the desktop first pass while keeping every selected tracker in the parallel search; use the focused album, track, and lossless queries shared with Android.
+- Keep high-seed album matches from being lost to overloaded provider/detail lookups, and reuse a verified album magnet for the next queued track.
+- Improve Android torrent candidate discovery and preserve the winning album source for subsequent tracks.
+- Start next-track prefetch while the current track plays and expose separate playback/prefetch concurrency plus metadata-timeout settings.
+- Keep YouTube audio fallback available while FLAC torrent candidates continue in parallel.
+- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 10.
+
 ## [1.3.1] — 2026-10-16
 
 ### Fixed

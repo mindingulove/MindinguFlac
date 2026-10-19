@@ -30,6 +30,7 @@ hiddenimports = [
     'catalog',
     'service_downloader',
     'device_sync',
+    'playlist_sync',
     'ai_reranker',
     'duck_proxy',
     'codex_proxy',
@@ -223,8 +224,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.3.1',
-        'CFBundleVersion': '1.3.1',
+        'CFBundleShortVersionString': '1.3.2',
+        'CFBundleVersion': '1.3.2',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

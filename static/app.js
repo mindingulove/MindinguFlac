@@ -237,6 +237,9 @@ function renderAndroidEngineNotes() {
 }
 
 function updateEngineControls(engine, currentService, currentQuality) {
+  $("torrentPlaybackCandidatesRow")?.classList.toggle("hidden", engine !== "torrent");
+  $("torrentPrefetchCandidatesRow")?.classList.toggle("hidden", engine !== "torrent");
+  $("torrentMetadataTimeoutRow")?.classList.toggle("hidden", engine !== "torrent");
   const serviceRow = $("serviceRow");
   const retriesRow = $("retriesRow");
   const serviceSel = $("downloadService");
@@ -2943,6 +2946,10 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
 
   
   const requestId = ++state.playbackRequestId;
+  state.rebuffering = false;
+  state.rebufferPosition = 0;
+  state.rebufferAfterBytes = 0;
+  state.lastActiveReadyBytes = 0;
   state.manualPauseRequested = false;
   state.activeJobId = null;
   state.currentTrack = item;
@@ -3093,6 +3100,9 @@ function seekAfterMetadata(audio, position) {
 
 async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library", startAt = 0) {
   if (requestId !== state.playbackRequestId) return;
+  state.rebuffering = false;
+  state.rebufferAfterBytes = 0;
+  state.rebufferPosition = 0;
   const pendingResume = Number(state.pendingResumePosition || 0);
   if ((!Number.isFinite(startAt) || startAt <= 0) && pendingResume > 0) {
     startAt = pendingResume;
@@ -3151,6 +3161,10 @@ async function resumeBrowserAudioFromStableSource(audio) {
   if (!audio) return;
   console.log("[Player] resumeBrowserAudioFromStableSource, current src:", audio.src);
   state.manualPauseRequested = false;
+  if (state.rebuffering && isActiveJobStreamUrl(state.currentStreamUrl)) {
+    state.autoplayWanted = true;
+    return;
+  }
   const hasMissingSource = !audio.src || audio.src === window.location.href;
   const shouldUseFinishedFile = state.currentLibraryPath && (
     hasMissingSource ||
@@ -3174,6 +3188,10 @@ async function resumeBrowserAudioFromStableSource(audio) {
   state.autoplayWanted = true;
   audio.play().catch((error) => {
     console.error("[Player] Play failed:", error);
+    if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
+      waitForActiveJobBuffer(audio);
+      return;
+    }
     const key = trackKey(state.currentTrack);
     if (state.currentTrack && error.name !== "NotAllowedError" && error.name !== "AbortError") {
       if (state.lastAutoRetryKey === key) {
@@ -3440,7 +3458,23 @@ function playerStatusForJob(job, fallback = "Loading...") {
 }
 
 function activeJobHasPlayableAudio(job) {
-  return Number(job?.active_audio_ready_bytes || 0) > 512 * 1024;
+  const ready = Number(job?.active_audio_ready_bytes || 0);
+  const total = Number(job?.active_audio_size || 0);
+  const duration = Number(state.currentTrack?.duration_ms || state.currentTrack?.length || 0) / 1000;
+  const position = Math.max(0, Number(state.rebufferPosition || 0));
+  const target = Math.max(2 * 1024 * 1024, duration > 0 && total > 0 ? total * (position + 20) / duration : 0);
+  const required = total > 0 ? Math.min(total, target) : target;
+  return ready >= required && ready >= Math.min(total || Infinity, Number(state.rebufferAfterBytes || 0));
+}
+
+function waitForActiveJobBuffer(audio) {
+  state.rebufferPosition = Number.isFinite(audio?.currentTime) ? audio.currentTime : 0;
+  state.rebufferAfterBytes = Number(state.lastActiveReadyBytes || 0) + 1024 * 1024;
+  state.rebuffering = true;
+  state.currentPlayableReady = false;
+  state.autoplayWanted = !state.manualPauseRequested;
+  audio?.pause();
+  if (state.currentTrack) setPlayerStatus("Buffering more audio...", state.currentTrack);
 }
 
 function isVideoLibraryPath(path) {
@@ -5716,6 +5750,13 @@ async function prefetchOneTrack(next, orderKey) {
   }
 }
 
+function maybePrefetchUpcomingTracks(position) {
+  if (position < 2 || state.manualPauseRequested || state.prefetchedForRequestId === state.playbackRequestId) return;
+  state.prefetchedForRequestId = state.playbackRequestId;
+  prefetchNextTracks().catch(() => { state.prefetchedForRequestId = -1; });
+  prefetchNextVideos();
+}
+
 async function prefetchNextTracks() {
   if (state.isRepeat) { console.log("[Prefetch] skipped: repeat on"); return; }
   restoreLinearOriginalQueue();
@@ -6003,6 +6044,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       const data = await api("/api/service/downloads");
       const job = (data.jobs || []).find((item) => item.id === jobId);
       if (!job) return;
+      state.lastActiveReadyBytes = Number(job.active_audio_ready_bytes || 0);
       if (job.status === "error") {
         if (job.youtube_login_required) {
           state.activeJobId = null;
@@ -6035,7 +6077,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
           }
         }
         setPlayerStatusIcon("ready");
-        setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track, job);
+        setPlayerStatus(mode === "stream" ? (state.manualPauseRequested ? "Ready — paused" : "Playing from cache") : "Saved to library", track, job);
         if (!switchedToFinal && mode === "stream" && job.library_path) {
           switchedToFinal = true;
           const audio = $("audioPlayer");
@@ -6060,6 +6102,9 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       }
       if (mode === "stream" && !state.currentPlayableReady && activeJobHasPlayableAudio(job) && !isNativeAudioSelected()) {
         const audio = $("audioPlayer");
+        const resumeAt = Number(state.rebufferPosition || 0);
+        state.rebuffering = false;
+        state.rebufferAfterBytes = 0;
         const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
         state.currentStreamUrl = streamUrl;
         audio.src = streamUrl;
@@ -6067,6 +6112,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         if (!state.manualPauseRequested) {
           state.autoplayWanted = true;
           audio.load();
+          seekAfterMetadata(audio, resumeAt);
           tryStartAudio(audio, track, requestId, job.id);
         }
       }
@@ -6387,6 +6433,9 @@ async function renderSettings() {
     renderAndroidEngineNotes();
   }
   $("downloadEngine").value = engine;
+  $("torrentPlaybackCandidates").value = state.settings.torrent_playback_candidates ?? 3;
+  $("torrentPrefetchCandidates").value = state.settings.torrent_prefetch_candidates ?? 2;
+  $("torrentMetadataTimeout").value = state.settings.torrent_metadata_timeout_seconds ?? 60;
   updateEngineControls(
     engine,
     state.settings.download_service || (IS_ANDROID && engine === "torrent" ? "all" : "youtube"),
@@ -6769,6 +6818,9 @@ async function saveSettings(e) {
     cache_dir: $("cacheDir").value,
     music_dir: $("musicDir").value,
     download_engine: $("downloadEngine").value,
+    torrent_playback_candidates: Number($("torrentPlaybackCandidates").value),
+    torrent_prefetch_candidates: Number($("torrentPrefetchCandidates").value),
+    torrent_metadata_timeout_seconds: Number($("torrentMetadataTimeout").value),
     ai_provider: IS_ANDROID ? "android" : ($("aiProvider") ? $("aiProvider").value : "duckai"),
     duck_model: $("duckModel") ? $("duckModel").value : "1",
     gemini_model: $("geminiModel") ? $("geminiModel").value : "gemini-1.5-flash",
@@ -6919,10 +6971,7 @@ function startNativeAudioPolling(requestId) {
     updateLyricsPosition(state.nativeAudio.position || 0);
     // Prefetch the next track once playback is underway. The <audio> element's
     // ontimeupdate never fires on the native path, so trigger it here too.
-    if (state.nativeAudio.position >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
-      state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTracks().catch(() => {}); prefetchNextVideos();
-    }
+    maybePrefetchUpcomingTracks(state.nativeAudio.position);
     if (status.ended && !state.manualPauseRequested) {
       await finalizeListeningSession("complete", "native_audio_ended").catch(() => {});
       await stopNativeAudio();
@@ -7399,10 +7448,8 @@ function bindPlayer() {
     const endedRequestId = state.playbackRequestId;
     const endedJobId = state.activeJobId;
     if (isActiveJobStreamUrl(state.currentStreamUrl) && endedJobId) {
-      const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
       if (await activeJobStillRunning(endedJobId)) {
-        setPlayerStatus("Buffering...", state.currentTrack);
-        await reconnectActiveJobStream(audio, endedRequestId, endedJobId, resumeAt);
+        waitForActiveJobBuffer(audio);
         return;
       }
       if (endedRequestId !== state.playbackRequestId || state.activeJobId !== endedJobId) return;
@@ -7421,6 +7468,7 @@ function bindPlayer() {
     playQueueOffset(1);
   };
   audio.ontimeupdate = () => {
+    maybePrefetchUpcomingTracks(audio.currentTime || 0);
     if (!audio.duration) return;
     updateListeningSessionPosition(audio.currentTime, audio.duration);
     if (state.streamRetryCount) state.streamRetryCount = 0; // playback recovered
@@ -7432,13 +7480,6 @@ function bindPlayer() {
     syncLocalVideoOverlay(audio.currentTime);
     updateLyricsPosition(audio.currentTime);
     persistPlaybackSnapshot();
-    // Only prefetch from a stable browser source. Live active-job streams can
-    // still be growing, and starting background downloads against them can
-    // race the stream handoff and trigger an early advance.
-    if (audio.currentTime >= 2 && state.prefetchedForRequestId !== state.playbackRequestId && !isActiveJobStreamUrl(state.currentStreamUrl)) {
-      state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTracks().catch(() => {}); prefetchNextVideos();
-    }
   };
   audio.onseeked = () => {
     syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
@@ -7454,12 +7495,15 @@ function bindPlayer() {
     }
   };
   audio.oncanplay = () => {
-    if (state.autoplayWanted && !state.manualPauseRequested && audio.paused) {
+    if (state.autoplayWanted && !state.manualPauseRequested && !state.rebuffering && audio.paused) {
       audio.play().catch(() => {});
     }
     syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
   };
   audio.onwaiting = () => {
+    if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl) && !state.manualPauseRequested) {
+      waitForActiveJobBuffer(audio);
+    }
     if (state.currentTrack) {
       setPlayerStatus(state.activeJobPhase === "Searching..." ? "Searching..." : "Buffering...", state.currentTrack);
     }
@@ -7489,6 +7533,12 @@ function bindPlayer() {
     const erroredSrc = audio.currentSrc || audio.src || "";
     // Ignore errors if we don't have a source (common when using native output)
     if (!audio.src || audio.src === window.location.href) return;
+    if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
+      // A growing stream may temporarily run out of data. Keep the download
+      // and its already-tested torrents; reselecting cancels and deletes them.
+      waitForActiveJobBuffer(audio);
+      return;
+    }
     if (state.manualPauseRequested) return;
     // WebKit can still dispatch an error for a previous active-job URL after
     // the player has already switched to the finalized cache file. Do not let
@@ -7658,8 +7708,16 @@ function formatTime(s) { const m = Math.floor(s / 60); return `${m}:${Math.floor
 
 async function loadPlaylists() {
   try {
-    state.playlists = await api("/api/playlists");
-    renderSidebarPlaylists();
+    const playlists = await api("/api/playlists");
+    if (JSON.stringify(state.playlists) !== JSON.stringify(playlists)) {
+      state.playlists = playlists;
+      renderSidebarPlaylists();
+    }
+    if (!state.playlistSyncRefreshTimer) {
+      state.playlistSyncRefreshTimer = setInterval(() => {
+        if (!document.hidden) loadPlaylists();
+      }, 5000);
+    }
   } catch (e) {
     console.error("loadPlaylists failed", e);
   }

@@ -557,6 +557,13 @@ class AndroidTorrentCandidateRankingTest(unittest.TestCase):
         self.assertGreater(lossless, lossy)
         self.assertGreater(lossy, 0)
 
+    def test_feature_credit_in_title_or_album_does_not_block_candidate(self):
+        score = torrent_backend._score(
+            {"title": "Artist feat Guest Artist - Album feat Guest Artist FLAC",
+             "category": "Audio", "seeders": 4},
+            "Artist", "Track feat Guest Artist", "Album feat Guest Artist")
+        self.assertGreater(score, 0)
+
     def test_the_magnet_hash_is_what_deduplicates_candidates(self):
         first = "magnet:?xt=urn:btih:ABCDEF0123456789&dn=one"
         second = "magnet:?xt=urn:btih:abcdef0123456789&dn=two&tr=udp%3A%2F%2Ftracker"
@@ -588,9 +595,60 @@ class AndroidTorrentCandidateRankingTest(unittest.TestCase):
 
         self.assertEqual(len(ordered), 2)
         self.assertTrue(all(entry.get("magnet") for entry in seen["candidates"]))
-        # The advisor's order is honoured once every candidate already passed
-        # the deterministic filter above.
-        self.assertEqual(ordered[0]["magnet"], "magnet:?xt=urn:btih:bbbb&dn=Discovery+24bit")
+        # The pooled source list launches by swarm health; AI may only break
+        # ties, so the healthier TorLock result stays first.
+        self.assertEqual(ordered[0]["magnet"], "magnet:?xt=urn:btih:aaaa&dn=Discovery+FLAC")
+
+    def test_merged_candidate_list_prioritizes_seed_to_leecher_ratio(self):
+        job = {"id": "j", "artist": "Jimi Hendrix", "title": "Voodoo Chile",
+               "album": "Electric Ladyland", "service": "all", "metadata": {}}
+        manager = SimpleNamespace(_append_cache_event=lambda *a: None, config=None)
+        candidates = [
+            {"title": "The Jimi Hendrix Experience - Electric Ladyland 3CD FLAC",
+             "category": "Audio", "seeders": 6, "leechers": 2,
+             "magnet": "magnet:?xt=urn:btih:lowratio", "source": "torlock"},
+            {"title": "The Jimi Hendrix Experience - Electric Ladyland 50th Anniversary FLAC",
+             "category": "Audio", "seeders": 114, "leechers": 20,
+             "magnet": "magnet:?xt=urn:btih:highratio", "source": "1337x"},
+        ]
+        with patch.object(torrent_backend, "_search", return_value=candidates):
+            ordered = torrent_backend._ordered_candidates(job, manager)
+
+        self.assertEqual(ordered[0]["magnet"], "magnet:?xt=urn:btih:highratio")
+
+    def test_large_seed_count_beats_tiny_swarm_with_a_better_ratio(self):
+        job = {"id": "j", "artist": "Jimi Hendrix", "title": "Voodoo Chile",
+               "album": "Electric Ladyland", "service": "all", "metadata": {}}
+        manager = SimpleNamespace(_append_cache_event=lambda *a: None, config=None)
+        candidates = [
+            {"title": "The Jimi Hendrix Experience - Electric Ladyland FLAC",
+             "category": "Audio", "seeders": 3, "leechers": 0,
+             "magnet": "magnet:?xt=urn:btih:tiny", "source": "torlock"},
+            {"title": "The Jimi Hendrix Experience - Electric Ladyland 50th Anniversary FLAC",
+             "category": "Audio", "seeders": 193, "leechers": 101,
+             "magnet": "magnet:?xt=urn:btih:large", "source": "1337x"},
+        ]
+        with patch.object(torrent_backend, "_search", return_value=candidates):
+            ordered = torrent_backend._ordered_candidates(job, manager)
+
+        self.assertEqual(ordered[0]["magnet"], "magnet:?xt=urn:btih:large")
+
+    def test_unseeded_candidates_never_enter_the_android_race(self):
+        job = {"id": "j", "artist": "Jimi Hendrix", "title": "Voodoo Chile",
+               "album": "Electric Ladyland", "service": "all", "metadata": {}}
+        manager = SimpleNamespace(_append_cache_event=lambda *a: None, config=None)
+        candidates = [
+            {"title": "Jimi Hendrix - Electric Ladyland FLAC", "category": "Audio",
+             "seeders": 0, "leechers": 40,
+             "magnet": "magnet:?xt=urn:btih:unseeded", "source": "1337x"},
+            {"title": "Jimi Hendrix - Electric Ladyland 50th Anniversary FLAC", "category": "Audio",
+             "seeders": 193, "leechers": 101,
+             "magnet": "magnet:?xt=urn:btih:healthy", "source": "1337x"},
+        ]
+        with patch.object(torrent_backend, "_search", return_value=candidates):
+            ordered = torrent_backend._ordered_candidates(job, manager)
+
+        self.assertEqual([row["magnet"] for row in ordered], ["magnet:?xt=urn:btih:healthy"])
 
     def test_a_failing_advisor_leaves_the_deterministic_order_intact(self):
         import ai_reranker
@@ -703,13 +761,15 @@ class FakeNativeTorrentEngine:
         self.started = []
         self.released = []
         self._status_calls = 0
-        self._current = None
+        self._jobs = {}
+        self._counts = {}
 
-    def startDownload(self, job_id, magnet, output, artist, title, album, track, lossless):
+    def startDownload(self, job_id, magnet, output, artist, title, album, track, lossless,
+                      metadata_timeout=None):
         self.started.append({"magnet": magnet, "lossless": lossless, "output": output})
-        self._current = self.scripts[magnet]
-        self._status_calls = 0
-        start = self._current["start"]
+        self._jobs[job_id] = self.scripts[magnet]
+        self._counts[job_id] = 0
+        start = self._jobs[job_id]["start"]
         if start.get("ok") and start.get("create"):
             path = Path(start["path"])
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -717,9 +777,9 @@ class FakeNativeTorrentEngine:
         return json.dumps(start)
 
     def status(self, job_id):
-        frames = self._current["frames"]
-        frame = frames[min(self._status_calls, len(frames) - 1)]
-        self._status_calls += 1
+        frames = self._jobs[job_id]["frames"]
+        frame = frames[min(self._counts[job_id], len(frames) - 1)]
+        self._counts[job_id] += 1
         return json.dumps(frame)
 
     def release(self, job_id):
@@ -759,6 +819,140 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
                  "seeders": 10, "_score": 100 - index}
                 for index, magnet in enumerate(magnets)]
 
+    def test_known_album_starts_before_slow_search_returns(self):
+        import threading
+        release_search = threading.Event()
+        path = self.out / "known.flac"
+        engine = FakeNativeTorrentEngine({"magnet:?xt=urn:btih:known": {
+            "start": {"ok": True, "path": str(path), "size": 1000, "create": True},
+            "frames": [{"ok": True, "ready": 1000, "size": 1000, "finished": True}],
+        }})
+        self.job["resolved_url"] = "magnet:?xt=urn:btih:stale-track-source"
+        self.manager.config = object()
+        import db
+        def slow_search(*_args):
+            release_search.wait(3)
+            return []
+        try:
+            with patch.object(torrent_backend, '_engine', return_value=engine), \
+                    patch.object(torrent_backend, '_ordered_candidates', side_effect=slow_search), \
+                    patch.object(db, 'get_album_source', return_value={
+                        'engine': 'torrent', 'resolved_url': 'magnet:?xt=urn:btih:known'
+                    }):
+                torrent_backend.run(self.out, self.job, self.manager)
+            self.assertFalse(release_search.is_set())
+            self.assertEqual(self.job['resolved_url'], 'magnet:?xt=urn:btih:known')
+        finally:
+            release_search.set()
+
+    def test_failed_saved_album_magnet_is_deleted_before_parallel_replacements(self):
+        import db
+        path = self.out / "replacement.flac"
+        bad = "magnet:?xt=urn:btih:bad"
+        good = "magnet:?xt=urn:btih:good"
+        engine = FakeNativeTorrentEngine({
+            bad: {"start": {"ok": False, "error": "metadata timed out"}, "frames": []},
+            good: {"start": {"ok": True, "path": str(path), "size": 1000, "create": True},
+                   "frames": [{"ok": True, "ready": 1000, "size": 1000, "finished": True}]},
+        })
+        self.manager.config = object()
+        cached = {"engine": "torrent", "resolved_url": bad}
+        with patch.object(torrent_backend, "_engine", return_value=engine), \
+                patch.object(torrent_backend, "_ordered_candidates", return_value=self._candidates(good)), \
+                patch.object(db, "get_album_source", return_value=cached), \
+                patch.object(db, "delete_album_source") as delete_source:
+            torrent_backend.run(self.out, self.job, self.manager)
+        self.assertEqual([row["magnet"] for row in engine.started], [bad, good])
+        delete_source.assert_called_once_with("daft punk||discovery")
+        self.assertEqual(self.job["resolved_url"], good)
+
+    def test_stalled_winner_uses_previously_started_alternative_and_keeps_partial(self):
+        import itertools
+        partial = self.out / 'partial.flac'
+        good = self.out / 'alternative.flac'
+        engine = FakeNativeTorrentEngine({
+            'first': {'start': {'ok': True, 'path': str(partial), 'size': 1000000, 'create': True},
+                      'frames': [{'ok': True, 'ready': 100000, 'size': 1000000, 'finished': False}]},
+            'other': {'start': {'ok': True, 'path': str(good), 'size': 1000, 'create': True},
+                      'frames': [{'ok': True, 'ready': 1000, 'size': 1000, 'finished': True}]},
+        })
+        clock = itertools.count(0, 30)
+        with patch.object(torrent_backend, '_engine', return_value=engine), \
+                patch.object(torrent_backend, '_ordered_candidates', return_value=self._candidates('first', 'other')), \
+                patch.object(torrent_backend.time, 'monotonic', lambda: next(clock)), \
+                patch.object(torrent_backend.time, 'sleep', lambda _: None):
+            torrent_backend.run(self.out, self.job, self.manager)
+        self.assertTrue(partial.is_file())
+        self.assertEqual(self.job['resolved_url'], 'other')
+        self.assertEqual([row['magnet'] for row in engine.started], ['first', 'other'])
+
+    def test_slots_refill_while_selected_source_is_still_downloading(self):
+        import time
+        real_sleep = time.sleep
+        clock = [0.0]
+        good = self.out / "healthy.flac"
+        partial = self.out / "trickle.flac"
+        class Engine(FakeNativeTorrentEngine):
+            def status(inner, native_id):
+                if native_id.endswith("::1"):
+                    # Progress keeps this source alive while other slots expire.
+                    return json.dumps({"ok": True, "ready": 20000 + int(clock[0]) * 10,
+                                       "size": 27000000, "finished": False})
+                return super().status(native_id)
+        engine = Engine({
+            "trickle": {"start": {"ok": True, "path": str(partial), "size": 27000000, "create": True}, "frames": []},
+            **{key: {"start": {"ok": True, "path": str(self.out / (key + ".flac")), "size": 27000000},
+                     "frames": [{"ok": True, "ready": 0, "size": 27000000, "finished": False}]} for key in ("dead1", "dead2")},
+            "healthy": {"start": {"ok": True, "path": str(good), "size": 1000, "create": True},
+                        "frames": [{"ok": True, "ready": 1000, "size": 1000, "finished": True}]},
+        })
+        def tick(_seconds):
+            clock[0] += 1
+            self.assertLess(clock[0], 100, str((engine.started, self.manager.events)))
+            real_sleep(.001)
+        with patch.object(torrent_backend, "_engine", return_value=engine), \
+                patch.object(torrent_backend, "_ordered_candidates", return_value=self._candidates("trickle", "dead1", "dead2", "healthy")), \
+                patch.object(torrent_backend.time, "monotonic", lambda: clock[0]), \
+                patch.object(torrent_backend.time, "sleep", side_effect=tick):
+            torrent_backend.run(self.out, self.job, self.manager)
+        self.assertEqual(self.job["resolved_url"], "healthy")
+        self.assertEqual(len(engine.started), 4)
+        self.assertTrue(partial.is_file())
+        self.assertTrue(any("trickle.flac" in message for _, message in self.manager.events))
+
+    def test_three_native_candidates_start_while_first_metadata_is_blocked(self):
+        barrier = threading.Barrier(3)
+        unblock = threading.Event()
+        good = self.out / "winner.flac"
+        good.write_bytes(b"fLaC" + bytes(996))
+        class Engine:
+            def __init__(self):
+                self.started = []
+                self.cancelled = []
+            def startDownload(inner, native_id, magnet, *args):
+                inner.started.append(magnet)
+                barrier.wait(timeout=3)
+                if magnet == "first":
+                    if not unblock.wait(timeout=3):
+                        raise AssertionError("slow metadata blocked the healthy candidate")
+                    return json.dumps({"ok": False, "error": "Cancelled"})
+                return json.dumps({"ok": True, "path": str(good), "size": 1000})
+            def status(inner, native_id):
+                ready = 1000 if native_id.endswith("::2") else 0
+                return json.dumps({"ok": True, "ready": ready, "size": 1000, "finished": ready == 1000})
+            def cancel(inner, native_id):
+                inner.cancelled.append(native_id)
+                unblock.set()
+            def release(inner, native_id):
+                pass
+        engine = Engine()
+        with patch.object(torrent_backend, "_engine", return_value=engine), \
+                patch.object(torrent_backend, "_ordered_candidates", return_value=self._candidates("first", "second", "third", "fourth")):
+            torrent_backend.run(self.out, self.job, self.manager)
+        self.assertCountEqual(engine.started, ["first", "second", "third"])
+        self.assertEqual(self.job["resolved_url"], "second")
+        self.assertTrue(any(item.endswith("::1") for item in engine.cancelled))
+
     def test_a_finished_download_reports_the_selected_file_and_full_progress(self):
         path = self.out / "07 Veridis Quo.flac"
         engine = FakeNativeTorrentEngine({
@@ -781,7 +975,8 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
         self.assertEqual(self.job["active_audio_path"], str(path))
         self.assertEqual(self.job["downloaded_bytes"], 1000)
         self.assertEqual(self.job["resolved_url"], "magnet:?xt=urn:btih:aaaa")
-        self.assertEqual(engine.released, ["job-1"])
+        self.assertTrue(engine.released)
+        self.assertTrue(all(item.startswith("job-1::torrent::") for item in engine.released))
 
     def test_a_stalled_source_is_abandoned_for_the_next_candidate(self):
         good = self.out / "07 Veridis Quo.flac"
@@ -802,7 +997,7 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
                              return_value=self._candidates(
                                  "magnet:?xt=urn:btih:dead", "magnet:?xt=urn:btih:live")), \
                 patch.object(torrent_backend.time, "sleep", lambda _s: None), \
-                patch.object(torrent_backend.time, "time", lambda: next(clock)):
+                patch.object(torrent_backend.time, "monotonic", lambda: next(clock)):
             torrent_backend.run(self.out, self.job, self.manager)
 
         self.assertEqual([entry["magnet"] for entry in engine.started],
@@ -847,7 +1042,8 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
                 torrent_backend.run(self.out, self.job, self.manager)
 
         self.assertIn("No matching lossless audio file", str(caught.exception))
-        self.assertEqual(engine.released, ["job-1"])
+        self.assertTrue(engine.released)
+        self.assertTrue(all(item.startswith("job-1::torrent::") for item in engine.released))
 
     def test_no_candidates_is_an_actionable_error_not_a_silent_finish(self):
         with patch.object(torrent_backend, "_engine", return_value=FakeNativeTorrentEngine({})), \
@@ -857,7 +1053,7 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
 
         self.assertIn("No matching FLAC torrent sources", str(caught.exception))
 
-    def test_cancelling_mid_download_stops_and_releases_the_handle(self):
+    def test_cancelling_before_start_does_not_launch_native_downloads(self):
         path = self.out / "07 Veridis Quo.flac"
         engine = FakeNativeTorrentEngine({
             "magnet:?xt=urn:btih:aaaa": {
@@ -875,7 +1071,8 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
                 torrent_backend.run(self.out, self.job, self.manager)
 
         self.assertIn("Cancelled", str(caught.exception))
-        self.assertEqual(engine.released, ["job-1"])
+        self.assertEqual(engine.started, [])
+        self.assertEqual(engine.released, [])
 
     def test_a_finished_torrent_with_a_missing_file_is_an_error(self):
         engine = FakeNativeTorrentEngine({
