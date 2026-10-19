@@ -36,7 +36,7 @@ for updates; do not commit the keystore or its passwords.
 # Set APK_STORE_PASSWORD and APK_KEY_PASSWORD securely in the environment.
 python3 tools/package_release.py \
   app/build/outputs/apk/release/app-release-unsigned.apk \
-  ../dist/android/Mindinguflac-android-arm64-v1.3.2-build10.apk \
+  ../dist/android/Mindinguflac-android-arm64-v1.3.2-build11.apk \
   --build-tools "$ANDROID_HOME/build-tools/36.1.0" \
   --keystore /private/path/to/existing.keystore --alias existing-key
 ```

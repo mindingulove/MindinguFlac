@@ -161,7 +161,14 @@ def _normalize_service(value: str) -> str:
     return _SERVICE_ALIASES.get(service, service)
 
 
-def _search_all_tracker_providers(query: str, metadata: dict, timeout: int = 6, artist: str = "", album: str = "") -> dict[str, list[dict]]:
+def _search_all_tracker_providers(
+    query: str,
+    metadata: dict,
+    timeout: int = 6,
+    artist: str = "",
+    album: str = "",
+    include_1337x: bool = True,
+) -> dict[str, list[dict]]:
     """Fetch every configured torrent provider concurrently for one query."""
     import torrent_sources
 
@@ -170,7 +177,6 @@ def _search_all_tracker_providers(query: str, metadata: dict, timeout: int = 6, 
         "torlock": lambda: torrent_sources.search_torlock(query, timeout=timeout),
         "torrentdownloads": lambda: torrent_sources.search_torrentdownloads(query, category, timeout=timeout),
         "limetorrents": lambda: torrent_sources.search_limetorrents(query, timeout=timeout),
-        "1337x": lambda: torrent_sources.search_1337x(query, timeout=timeout, artist=artist, album=album),
         "kickass": lambda: torrent_sources.search_kickass(query, timeout=timeout),
         "solidtorrents": lambda: torrent_sources.search_solid(query, timeout=timeout),
         "knaben": lambda: torrent_sources.search_knaben(query, timeout=timeout),
@@ -178,6 +184,10 @@ def _search_all_tracker_providers(query: str, metadata: dict, timeout: int = 6, 
         "piratebay": lambda: torrfetch.search_torrents(query, only=["piratebay"]) or [],
         "yts": lambda: torrfetch.search_torrents(query, only=["yts"]) or [],
     }
+    if include_1337x:
+        calls["1337x"] = lambda: torrent_sources.search_1337x(
+            query, timeout=timeout, artist=artist, album=album
+        )
     found = {name: [] for name in calls}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(calls)) as pool:
         futures = {pool.submit(call): name for name, call in calls.items()}
@@ -1056,13 +1066,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
             # phases, so it is a local in this enclosing function and cannot
             # be referenced here before that loop runs. Use the track's
             # resolved album as the default for the initial discovery queries.
-            def do_search_safe(q, svc, search_album=album_clean):
+            def do_search_safe(q, svc, search_album=album_clean, include_1337x=True):
                 results = []
                 import torrent_sources
                 try:
                     torrentdownloads_category = torrent_sources.torrentdownloads_category_from_metadata(metadata)
                     if svc == "all":
-                        provider_results = _search_all_tracker_providers(q, metadata, artist=primary_artist, album=search_album)
+                        provider_results = _search_all_tracker_providers(
+                            q, metadata, artist=primary_artist, album=search_album,
+                            include_1337x=include_1337x,
+                        )
                         results = _filter_and_rank_provider_results(
                             provider_results,
                             lambda row: score_torrent_result(
@@ -1689,8 +1702,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             )
                         search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(query_specs)))
                         pending_search_futures = {
-                            search_executor.submit(do_search_safe, q, service, query_album): (q, query_album)
-                            for q, query_album in query_specs
+                            search_executor.submit(
+                                do_search_safe, q, service, query_album,
+                                query_index == 0,
+                            ): (q, query_album)
+                            for query_index, (q, query_album) in enumerate(query_specs)
                         }
 
                     search_deadline = time.time() + (55 if phase_label in {"First pass", "Track fallback"} else 40)

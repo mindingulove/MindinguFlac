@@ -599,11 +599,13 @@ def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "
     album past the first few rows; the unified fuzzy/swarm ranker decides which
     of those rows belong in the candidate list.
     """
-    # App searches often prepend artist/title/format terms. Search the album
-    # name by itself as well: 1337x's result ordering can bury the strong album
-    # pack when those extra terms are included.
+    # The caller already fans track, album, and lossless queries across the
+    # trackers. Search 1337x by artist first: its album-only index can bury the
+    # matching record under unrelated high-seed "Electric" results. Keep the
+    # supplied query as one fallback, without multiplying every call into
+    # album + query + artist searches.
     queries = list(dict.fromkeys(
-        value.strip() for value in (album, query, artist) if value and value.strip()
+        value.strip() for value in (artist, query) if value and value.strip()
     ))
     cloudflare_challenge = False
     collected: list[dict] = []
@@ -622,11 +624,39 @@ def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "
                     cloudflare_challenge = True
                 candidates = []
             candidates = [row for row in candidates if row["detail_url"] not in seen_details]
-            # Avoid firing hundreds of detail requests across parallel Android
-            # first-pass queries. Keep the most seeded rows from the listing;
-            # the shared fuzzy ranker makes the final choice.
+            # Apply cheap artist/content relevance before fetching magnet detail
+            # pages. Seed-only truncation used to spend the detail-request
+            # budget on unrelated high-seed results (for example, other
+            # "Electric" releases) and could omit the matching album entirely.
+            artist_tokens = {
+                token for token in re.findall(r"[a-z0-9]+", artist.lower())
+                if len(token) >= 2 and token not in {"the", "and", "feat", "with"}
+            }
+            album_tokens = {
+                token for token in re.findall(r"[a-z0-9]+", album.lower())
+                if len(token) >= 3 and token not in {"the", "and", "feat", "with", "edition", "deluxe", "flac", "lossless"}
+            }
+            query_tokens = {
+                token for token in re.findall(r"[a-z0-9]+", query.lower())
+                if len(token) >= 3 and token not in {
+                    "the", "and", "feat", "with", "flac", "lossless", "audio",
+                    "music", "mp3", "320", "320kbps", "24bit", "16bit",
+                }
+            }
+            content_tokens = query_tokens - artist_tokens
+
+            def is_relevant_listing_row(row: dict) -> bool:
+                title_tokens = set(re.findall(r"[a-z0-9]+", row["title"].lower()))
+                if artist_tokens and len(artist_tokens & title_tokens) < min(2, len(artist_tokens)):
+                    return False
+                expected = album_tokens or content_tokens
+                return not expected or bool(expected & title_tokens)
+
+            candidates = [row for row in candidates if is_relevant_listing_row(row)]
+            # Resolve only relevant rows, then let the common fuzzy ranker
+            # compare their seed and peer counts with every other tracker.
             candidates.sort(key=lambda row: int(row.get("seeders") or 0), reverse=True)
-            candidates = candidates[:50]
+            candidates = candidates[:30]
             if not candidates:
                 continue
             seen_details.update(row["detail_url"] for row in candidates)
@@ -648,6 +678,8 @@ def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "
             # repeating each query against mirrors after it returned rows.
             if out:
                 break
+        if collected:
+            break
     if collected:
         return collected
     fallback = search_solid(query + " 1337x", timeout)

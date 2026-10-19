@@ -69,12 +69,16 @@ class X1337Tests(unittest.TestCase):
     def test_cloudflare_primary_falls_back_to_mirror_and_keeps_result_after_row_12(self):
         wanted = "The Jimi Hendrix Experience - Electric Ladyland (50th Anniversary Deluxe Edition) (2018) [3CD] FLAC"
         rows = []
-        for index in range(1, 16):
-            title = wanted if index == 14 else f"Jimi Hendrix unrelated release {index} FLAC"
+        titles = [
+            "The Electric State 2025 1080p WEB-DL FLAC",
+            "Jimi Hendrix - Are You Experienced FLAC",
+        ] + [f"Jimi Hendrix unrelated release {index} FLAC" for index in range(3, 15)]
+        titles.append(wanted)
+        for index, title in enumerate(titles, start=1):
             rows.append(
                 f'<tr><td><a href="/torrent/{index}/release-{index}/">{title}</a></td>'
-                f'<td class="coll-2 seeds">{114 if index == 14 else 2}</td>'
-                f'<td class="coll-3 leeches">{20 if index == 14 else 1}</td>'
+                f'<td class="coll-2 seeds">{1200 if index == 1 else 800 if index == 2 else 114 if title == wanted else 2}</td>'
+                f'<td class="coll-3 leeches">{20 if title == wanted else 1}</td>'
                 '<td class="coll-4 size">1.2 GB</td></tr>'
             )
         listing = "<table>" + "".join(rows) + "</table>"
@@ -98,7 +102,12 @@ class X1337Tests(unittest.TestCase):
         self.assertEqual((match["seeders"], match["leechers"]), (114, 20))
         self.assertTrue(match["magnet"].startswith("magnet:?xt=urn:btih:"))
         self.assertEqual(match["source"], "1337x")
-        self.assertIn("/search/Electric%20Ladyland/1/", requested[0])
+        detail_requests = [url for url in requested if "/torrent/" in url]
+        self.assertEqual(len(detail_requests), 1)
+        self.assertIn("/torrent/15/", detail_requests[0])
+        search_requests = [url for url in requested if "/search/" in url]
+        self.assertEqual(len(search_requests), 1)  # one query on the accessible .la mirror
+        self.assertIn("/search/Jimi%20Hendrix/1/", search_requests[0])
 
 
 class TorLockTests(unittest.TestCase):
