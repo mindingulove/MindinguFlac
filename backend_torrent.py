@@ -186,7 +186,8 @@ def _search_all_tracker_providers(
     }
     if include_1337x:
         calls["1337x"] = lambda: torrent_sources.search_1337x(
-            query, timeout=timeout, artist=artist, album=album
+            query, timeout=timeout, artist=artist, album=album,
+            desktop_compact=True,
         )
     found = {name: [] for name in calls}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(calls)) as pool:

@@ -589,7 +589,13 @@ def _1337x_detail_magnet(detail_url: str, title: str, timeout: int) -> str:
     return _magnet(match.group(1), title) if match else ""
 
 
-def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "") -> list[dict]:
+def search_1337x(
+    query: str,
+    timeout: int = 12,
+    artist: str = "",
+    album: str = "",
+    desktop_compact: bool = False,
+) -> list[dict]:
     """Search 1337x with its primary host, accessible mirrors, and artist fallback.
 
     1337x.st currently answers non-browser clients with a Cloudflare challenge.
@@ -599,14 +605,19 @@ def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "
     album past the first few rows; the unified fuzzy/swarm ranker decides which
     of those rows belong in the candidate list.
     """
-    # The caller already fans track, album, and lossless queries across the
-    # trackers. Search 1337x by artist first: its album-only index can bury the
-    # matching record under unrelated high-seed "Electric" results. Keep the
-    # supplied query as one fallback, without multiplying every call into
-    # album + query + artist searches.
-    queries = list(dict.fromkeys(
-        value.strip() for value in (artist, query) if value and value.strip()
-    ))
+    if desktop_compact:
+        # Desktop already fans track, album, and lossless queries across the
+        # trackers. Search 1337x by artist first: its album-only index can bury
+        # the matching record under unrelated high-seed "Electric" results.
+        # Keep the supplied query as one fallback without tripling each call.
+        queries = list(dict.fromkeys(
+            value.strip() for value in (artist, query) if value and value.strip()
+        ))
+    else:
+        # Keep Android and other callers on their existing provider query path.
+        queries = list(dict.fromkeys(
+            value.strip() for value in (album, query, artist) if value and value.strip()
+        ))
     cloudflare_challenge = False
     collected: list[dict] = []
     seen_details: set[str] = set()
@@ -624,39 +635,39 @@ def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "
                     cloudflare_challenge = True
                 candidates = []
             candidates = [row for row in candidates if row["detail_url"] not in seen_details]
-            # Apply cheap artist/content relevance before fetching magnet detail
-            # pages. Seed-only truncation used to spend the detail-request
-            # budget on unrelated high-seed results (for example, other
-            # "Electric" releases) and could omit the matching album entirely.
-            artist_tokens = {
-                token for token in re.findall(r"[a-z0-9]+", artist.lower())
-                if len(token) >= 2 and token not in {"the", "and", "feat", "with"}
-            }
-            album_tokens = {
-                token for token in re.findall(r"[a-z0-9]+", album.lower())
-                if len(token) >= 3 and token not in {"the", "and", "feat", "with", "edition", "deluxe", "flac", "lossless"}
-            }
-            query_tokens = {
-                token for token in re.findall(r"[a-z0-9]+", query.lower())
-                if len(token) >= 3 and token not in {
-                    "the", "and", "feat", "with", "flac", "lossless", "audio",
-                    "music", "mp3", "320", "320kbps", "24bit", "16bit",
+            if desktop_compact:
+                # Resolve relevant rows before applying the detail-request cap;
+                # this prevents unrelated high-seed matches from using up the
+                # desktop request budget.
+                artist_tokens = {
+                    token for token in re.findall(r"[a-z0-9]+", artist.lower())
+                    if len(token) >= 2 and token not in {"the", "and", "feat", "with"}
                 }
-            }
-            content_tokens = query_tokens - artist_tokens
+                album_tokens = {
+                    token for token in re.findall(r"[a-z0-9]+", album.lower())
+                    if len(token) >= 3 and token not in {"the", "and", "feat", "with", "edition", "deluxe", "flac", "lossless"}
+                }
+                query_tokens = {
+                    token for token in re.findall(r"[a-z0-9]+", query.lower())
+                    if len(token) >= 3 and token not in {
+                        "the", "and", "feat", "with", "flac", "lossless", "audio",
+                        "music", "mp3", "320", "320kbps", "24bit", "16bit",
+                    }
+                }
+                content_tokens = query_tokens - artist_tokens
 
-            def is_relevant_listing_row(row: dict) -> bool:
-                title_tokens = set(re.findall(r"[a-z0-9]+", row["title"].lower()))
-                if artist_tokens and len(artist_tokens & title_tokens) < min(2, len(artist_tokens)):
-                    return False
-                expected = album_tokens or content_tokens
-                return not expected or bool(expected & title_tokens)
+                def is_relevant_listing_row(row: dict) -> bool:
+                    title_tokens = set(re.findall(r"[a-z0-9]+", row["title"].lower()))
+                    if artist_tokens and len(artist_tokens & title_tokens) < min(2, len(artist_tokens)):
+                        return False
+                    expected = album_tokens or content_tokens
+                    return not expected or bool(expected & title_tokens)
 
-            candidates = [row for row in candidates if is_relevant_listing_row(row)]
-            # Resolve only relevant rows, then let the common fuzzy ranker
-            # compare their seed and peer counts with every other tracker.
+                candidates = [row for row in candidates if is_relevant_listing_row(row)]
+            # Keep the existing seed-based detail cap for Android; desktop
+            # filters relevance first, then ranks the merged magnet candidates.
             candidates.sort(key=lambda row: int(row.get("seeders") or 0), reverse=True)
-            candidates = candidates[:30]
+            candidates = candidates[:30 if desktop_compact else 50]
             if not candidates:
                 continue
             seen_details.update(row["detail_url"] for row in candidates)
@@ -678,7 +689,7 @@ def search_1337x(query: str, timeout: int = 12, artist: str = "", album: str = "
             # repeating each query against mirrors after it returned rows.
             if out:
                 break
-        if collected:
+        if desktop_compact and collected:
             break
     if collected:
         return collected

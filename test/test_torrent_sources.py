@@ -96,6 +96,7 @@ class X1337Tests(unittest.TestCase):
             results = torrent_sources.search_1337x(
                 "Jimi Hendrix Electric Ladyland FLAC", timeout=1,
                 artist="Jimi Hendrix", album="Electric Ladyland",
+                desktop_compact=True,
             )
 
         match = next(row for row in results if row["title"] == wanted)
@@ -108,6 +109,29 @@ class X1337Tests(unittest.TestCase):
         search_requests = [url for url in requested if "/search/" in url]
         self.assertEqual(len(search_requests), 1)  # one query on the accessible .la mirror
         self.assertIn("/search/Jimi%20Hendrix/1/", search_requests[0])
+
+    def test_android_default_keeps_album_first_search_sequence(self):
+        listing = (
+            '<tr><td><a href="/torrent/1/release/">Jimi Hendrix - Electric Ladyland FLAC</a></td>'
+            '<td class="coll-2 seeds">10</td><td class="coll-3 leeches">2</td>'
+            '<td class="coll-4 size">1 GB</td></tr>'
+        )
+        requested = []
+
+        def fake_http(url, **_kwargs):
+            requested.append(url)
+            if "/search/" in url:
+                return listing
+            return 'href="magnet:?xt=urn:btih:' + "1" * 40 + '"'
+
+        with patch.object(torrent_sources, "_http", side_effect=fake_http):
+            torrent_sources.search_1337x(
+                "Jimi Hendrix Electric Ladyland FLAC", timeout=1,
+                artist="Jimi Hendrix", album="Electric Ladyland",
+            )
+
+        first_search = next(url for url in requested if "/search/" in url)
+        self.assertIn("/search/Electric%20Ladyland/1/", first_search)
 
 
 class TorLockTests(unittest.TestCase):
