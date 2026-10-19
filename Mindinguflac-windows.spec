@@ -12,7 +12,7 @@ hiddenimports = [
     'webview.platforms.mshtml',
     'clr',
     'torrfetch',
-    'libtorrent',
+    'torrent_race', 'desktop_jlibtorrent',
     'torrent_sources',
     'music_metadata',
     'isrc_resolver',
@@ -70,13 +70,18 @@ hiddenimports += collect_submodules('webview')
 
 _collect_package('bleak')
 
-# libtorrent must be collected, not just hidden-imported: its win_amd64 wheel
-# ships dependent native DLLs (OpenSSL etc.) next to libtorrent.pyd. Without
-# collect_all those DLLs are missing from the bundle and the packaged app fails
-# with "DLL load failed while importing libtorrent: The specified module could
-# not be found."
-for package_name in ('libtorrent', 'PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy', 'imageio_ffmpeg', 'playwright', 'playwright_stealth'):
+for package_name in ('PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy', 'imageio_ffmpeg', 'playwright', 'playwright_stealth', 'jpype'):
     _collect_package(package_name)
+
+from desktop_torrent.build_bridge import build_bridge
+from desktop_torrent.build_runtime import build_runtime_archive
+build_bridge()
+_jre = build_runtime_archive()
+datas.extend([
+    (str(Path('desktop_torrent/classes')), 'desktop_torrent/classes'),
+    (str(Path('desktop_torrent/jars')), 'desktop_torrent/jars'),
+    (str(_jre), '.'),
+])
 
 try:
     from playwright.sync_api import sync_playwright

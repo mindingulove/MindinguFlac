@@ -17,7 +17,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'AppKit', 'Foundation', 'IOBluetooth', 'objc',
-        'numpy', 'PIL', 'libtorrent', 'playwright',
+        'numpy', 'PIL', 'playwright',
     ],
     noarchive=False,
     optimize=0,

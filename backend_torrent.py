@@ -19,25 +19,10 @@ except ImportError:
     torrfetch = None
 
 _IS_ANDROID = os.environ.get("MINDINGUFLAC_ANDROID") == "1"
-try:
-    if _IS_ANDROID:
-        lt = None
-    else:
-        import libtorrent as lt
-except (ImportError, OSError) as _lt_exc:
-    # On Windows the win_amd64 libtorrent wheel needs the x64 VC++ runtime,
-    # which is absent on a fresh Windows-on-ARM box. Try to install it, then
-    # retry the import; if that's not possible this raises an actionable,
-    # link-bearing error that the cache-job UI surfaces to the user.
-    if _IS_ANDROID:
-        lt = None
-    else:
-        from vcredist import ensure_vc_redist_for_libtorrent
-        ensure_vc_redist_for_libtorrent(_lt_exc)
-        import libtorrent as lt
-# RapidFuzz's pure-Python source distribution is bundled in the APK, so the
-# deterministic fuzzy matching below runs on Android too; only the native
-# libtorrent wheel is desktop-only.
+_USE_JLIBTORRENT_DESKTOP = not _IS_ANDROID
+# All clients now use FrostWire jlibtorrent 2 through their platform JNI bridge.
+lt = None
+# RapidFuzz's pure-Python distribution is bundled in the APK and desktop app.
 import rapidfuzz
 
 logger = logging.getLogger(__name__)
@@ -207,6 +192,7 @@ def _search_all_tracker_providers(
 def _filter_and_rank_provider_results(
     provider_results: dict[str, list[dict]],
     relevance: Callable[[dict], float],
+    on_error: Callable[[dict, Exception], None] | None = None,
 ) -> list[dict]:
     """Fuzzy-filter and swarm-rank each provider before merging its results."""
     merged = []
@@ -220,7 +206,12 @@ def _filter_and_rank_provider_results(
                 continue
             try:
                 score = relevance(row)
-            except Exception:
+            except Exception as exc:
+                if on_error:
+                    try:
+                        on_error(row, exc)
+                    except Exception:
+                        pass
                 continue
             if score <= 50:
                 continue
@@ -299,7 +290,7 @@ _ACTIVE_SESSIONS: dict[str, dict] = {}
 _SESSIONS_LOCK = threading.Lock()
 _WARM_ALBUM_LEASES = {}
 
-# All torrent jobs share one libtorrent session. Keep prefetch bounded to the
+# All torrent jobs share one jlibtorrent session. Keep prefetch bounded to the
 # five-track window the player requests, while leaving active playback ungated so
 # it can always cut ahead of queued prefetch work.
 try:
@@ -387,7 +378,7 @@ def _create_optimized_session():
         s.add_dht_router(r_host, r_port)
     return s
 
-_GLOBAL_SES = None if _IS_ANDROID else _create_optimized_session()
+_GLOBAL_SES = None if (_IS_ANDROID or _USE_JLIBTORRENT_DESKTOP) else _create_optimized_session()
 
 def _torrent_key(magnet: str) -> str:
     try:
@@ -426,6 +417,36 @@ def _torrent_metadata_timeout_seconds(config=None) -> int:
         return 60
 
 
+def _album_source_keys(artist: str, album: str) -> tuple[str, str]:
+    """Return a stable cache key and the legacy exact-text key.
+
+    Album/artist metadata can vary by punctuation, leading "The", or edition
+    suffixes between tracks on the same release. Preserve the old key as a
+    read fallback so previously saved magnets remain usable.
+    """
+    import unicodedata
+
+    artist_text = str(artist or "").strip().lower()
+    album_text = str(album or "").strip().lower()
+    legacy = f"{artist_text}||{album_text}"
+
+    def normalize(value: str, is_album: bool) -> str:
+        value = unicodedata.normalize("NFKD", value)
+        value = "".join(ch for ch in value if not unicodedata.combining(ch))
+        if is_album:
+            value = re.sub(r"\b\d{1,3}(?:st|nd|rd|th)\b", " ", value)
+            value = re.sub(
+                r"\b(?:deluxe|anniversary|remaster(?:ed)?|expanded|edition|special|version)\b",
+                " ", value,
+            )
+        else:
+            value = re.sub(r"^the\s+", "", value)
+        return " ".join(re.findall(r"[a-z0-9]+", value))
+
+    stable = f"{normalize(artist_text, False)}||{normalize(album_text, True)}"
+    return stable, legacy
+
+
 def _album_similarity_without_track_words(album: str, candidate_title: str, track_title: str) -> int:
     """Compare an album to a release title after removing the requested track words.
 
@@ -441,6 +462,41 @@ def _album_similarity_without_track_words(album: str, candidate_title: str, trac
     candidate_tokens = [token for token in tokens(candidate_title) if token not in track_tokens]
     candidate_without_track = " ".join(candidate_tokens)
     return rapidfuzz.fuzz.token_set_ratio(" ".join(tokens(album)), candidate_without_track)
+
+
+def _android_parity_torrent_score(item: dict, artist: str, title: str, album: str) -> float:
+    """Keep desktop release-title qualification identical to Android's working scorer."""
+    candidate_title = str(item.get("title") or "")
+    lowered = candidate_title.casefold()
+    if _has_video_torrent_marker(lowered):
+        return -1.0
+    category = str(item.get("category") or "").casefold()
+    if category and category != "unknown" and not any(word in category for word in ("audio", "music")):
+        return -1.0
+
+    def tokens(value: str) -> set[str]:
+        return {
+            token for token in re.findall(r"[a-z0-9]+", str(value or "").casefold())
+            if len(token) > 1 and token not in {"the", "and", "feat", "with"}
+        }
+
+    actual = tokens(candidate_title)
+
+    def coverage(wanted: set[str]) -> float:
+        return len(wanted & actual) / len(wanted) if wanted else 0.0
+
+    artist_coverage = coverage(tokens(artist))
+    title_coverage = coverage(tokens(title))
+    album_coverage = coverage(tokens(album))
+    if artist_coverage < 0.45 or max(title_coverage, album_coverage) < 0.35:
+        return -1.0
+    fuzzy = rapidfuzz.fuzz.token_set_ratio(f"{artist} {album}", candidate_title) / 100.0
+    lossless = 90 if any(word in lowered for word in ("flac", "lossless", "24bit", "24-bit")) else 0
+    try:
+        seeders = min(80, max(0, int(item.get("seeders") or 0)))
+    except (TypeError, ValueError):
+        seeders = 0
+    return (artist_coverage * 110) + (title_coverage * 80) + (album_coverage * 90) + (fuzzy * 50) + lossless + seeders
 
 
 def _rolling_torrent_race(next_candidate, start, poll, cleanup, cancelled,
@@ -540,7 +596,8 @@ def _remember_torrent_source(job, magnet, manager):
     artist = str(job.get("artist") or "").lower()
     album = str(job.get("album") or "").lower()
     if album and album != "unknown":
-        db.save_album_source(album_key=f"{artist}||{album}", engine="torrent", resolved_url=magnet)
+        stable_key, _legacy_key = _album_source_keys(artist, album)
+        db.save_album_source(album_key=stable_key, engine="torrent", resolved_url=magnet)
 
 
 def _keep_torrent_warm(magnet):
@@ -629,9 +686,9 @@ def _unregister_job_from_torrent(magnet: str, job_id: str) -> bool:
 def _unregister_all_for_job(job_id: str, delete_files: bool = True) -> None:
     """Drop all references this job holds to any active torrent sessions,
     and optionally delete their files if this was the last job referencing them."""
-    if _IS_ANDROID:
+    if _IS_ANDROID or _USE_JLIBTORRENT_DESKTOP:
         try:
-            from android_runtime.torrent_backend import cancel
+            from torrent_race import cancel
             cancel(job_id)
         except Exception:
             pass
@@ -698,9 +755,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
         manager._append_cache_event(job, "provider", "Video request routed to YouTube; torrent engine is reserved for music")
         backend_ytpdl.run(output_dir, job, manager)
         return
-    if _IS_ANDROID:
-        from android_runtime.torrent_backend import run as run_android_torrent
-        run_android_torrent(output_dir, job, manager)
+    if _IS_ANDROID or _USE_JLIBTORRENT_DESKTOP:
+        from torrent_race import run as run_shared_torrent_race
+        run_shared_torrent_race(output_dir, job, manager)
         return
 
     # 0. Setup
@@ -915,8 +972,12 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     
                     required_ratio = 0.50 if is_classical_search and len(meaningful_tokens) > 2 else (0.65 if len(meaningful_tokens) > 2 else 0.85)
                     if match_ratio < required_ratio:
-                        # Fallback: if the filename is very short (e.g. "01.flac"), check the immediate parent folder too
+                        # A short filename may inherit track words from its
+                        # parent, but album-folder words cannot satisfy the
+                        # requested track title on their own.
                         parent_tokens = set(re.findall(r'\w+', f_path.parent.name.lower())) if f_path.parent.name else set()
+                        album_folder_tokens = set(re.findall(r'\w+', clean_term(album_clean).lower()))
+                        parent_tokens.difference_update(album_folder_tokens)
                         combined_tokens = filename_tokens.union(parent_tokens)
                         match_count = sum(1 for t in meaningful_tokens if t in combined_tokens)
                         match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
@@ -1044,13 +1105,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
         # 1. INSTANT CACHE
         catalog = _load_catalog(manager)
-        album_key = f"{primary_artist.lower()}||{album.lower()}"
-        # RECOVERY attempt: use the persistent source from DB if available
-        album_key = f"{primary_artist.lower()}||{album.lower()}"
+        album_key, legacy_album_key = _album_source_keys(primary_artist, album)
         cached_magnet = job.get("resolved_url")
         # Prefer the proven album-wide swarm for every track on that album,
         # even if this queued track carries an older track-specific URL.
-        album_source = db.get_album_source(album_key)
+        album_source = db.get_album_source(album_key) or db.get_album_source(legacy_album_key)
         if album_source and album_source.get("engine") == "torrent" and str(album_source.get("resolved_url") or "").startswith("magnet:"):
             cached_magnet = album_source.get("resolved_url")
         elif not cached_magnet or not str(cached_magnet).startswith("magnet:"):
@@ -1067,7 +1126,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
             # phases, so it is a local in this enclosing function and cannot
             # be referenced here before that loop runs. Use the track's
             # resolved album as the default for the initial discovery queries.
-            def do_search_safe(q, svc, search_album=album_clean, include_1337x=True):
+            def do_search_safe(
+                q, svc, search_album=album_clean, include_1337x=True,
+                phase_allow_album_miss=False, diagnostic_phase="", log_provider_summary=False,
+            ):
                 results = []
                 import torrent_sources
                 try:
@@ -1077,13 +1139,39 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             q, metadata, artist=primary_artist, album=search_album,
                             include_1337x=include_1337x,
                         )
+                        raw_counts = {name: len(rows) for name, rows in provider_results.items()}
+                        raw_1337x = provider_results.get("1337x") or []
                         results = _filter_and_rank_provider_results(
                             provider_results,
                             lambda row: score_torrent_result(
                                 row, primary_artist, title_clean, search_album,
-                                allow_album_miss=allow_album_miss,
+                                allow_album_miss=phase_allow_album_miss,
+                            ),
+                            on_error=lambda row, exc: (
+                                manager._append_cache_event(
+                                    job, "trying",
+                                    f"1337x scoring exception ({type(exc).__name__}): {exc}",
+                                )
+                                if str(row.get("source") or "").lower() == "1337x" else None
                             ),
                         )
+                        if log_provider_summary:
+                            top_1337x = max(
+                                raw_1337x,
+                                key=lambda row: int(row.get("seeders") or 0),
+                                default=None,
+                            )
+                            detail = (
+                                f"; 1337x top: {top_1337x.get('seeders', 0)}S/"
+                                f"{top_1337x.get('leechers', 0)}L {top_1337x.get('title', '')}"
+                                if top_1337x else ""
+                            )
+                            counts = ", ".join(f"{name}={count}" for name, count in raw_counts.items())
+                            manager._append_cache_event(
+                                job, "trying",
+                                f"{diagnostic_phase}: provider search '{q}' raw results: {counts}; "
+                                f"fuzzy-ranked={len(results)}{detail}",
+                            )
                     elif svc == "torrentdownloads":
                         results = torrent_sources.search_torrentdownloads(q, torrentdownloads_category, timeout=4)
                     elif svc == "limetorrents":
@@ -1105,118 +1193,50 @@ def run(output_dir: Path, job: dict, manager) -> None:
 
             def score_torrent_result(r, target_artist, target_title, target_album, allow_album_miss=False):
                 torrent_title = r.get("title", "").lower()
-                if _has_video_torrent_marker(torrent_title) or _has_disallowed_adult_content(torrent_title, allowed_adult_terms, adult_filter_terms):
+                def reject(reason):
+                    if str(r.get("source") or "").lower() == "1337x":
+                        manager._append_cache_event(job, "trying", f"1337x fuzzy rejection: {reason}")
                     return -1
+
+                if _has_video_torrent_marker(torrent_title) or _has_disallowed_adult_content(torrent_title, allowed_adult_terms, adult_filter_terms):
+                    return reject("video/adult filter")
                 
                 category = str(r.get("category") or "").lower()
                 if category and category != "unknown" and not any(k in category for k in ["audio", "music"]):
-                    return -1
+                    return reject(f"category={category}")
                 
                 classical_adj, classical_catalog_state = classical_candidate_adjustment(str(r.get("title") or ""))
                 if is_classical_search and classical_catalog_state == "mismatch":
-                    return -1
+                    return reject("classical catalog mismatch")
 
-                artist_tokens = set(re.findall(r'\w+', target_artist.lower()))
-                title_tokens = set(re.findall(r'\w+', torrent_title))
-                meaningful_artist = {t for t in artist_tokens if len(t) >= 2 and t not in {"the","and","feat","with"}}
-                if not meaningful_artist: meaningful_artist = artist_tokens
-                
-                artist_verified = False
-                matches = meaningful_artist.intersection(title_tokens)
-                
-                # Strict verification: multi-word artists need at least 2 matching tokens (or 70% if very long)
-                if len(meaningful_artist) >= 2:
-                    if len(matches) >= 2 and len(matches) >= (len(meaningful_artist) * 0.7):
-                        artist_verified = True
-                elif len(matches) >= len(meaningful_artist):
-                    artist_verified = True
-                    
-                if not artist_verified and target_artist.replace("'", "") in torrent_title: 
-                    artist_verified = True
+                # Keep release qualification identical to Android. Classical
+                # catalog handling remains an additional desktop safeguard.
+                parity_item = dict(r)
+                parity_item["title"] = torrent_title
+                parity_score = _android_parity_torrent_score(
+                    parity_item, target_artist,
+                    classical_query_terms(target_title) if is_classical_search else target_title,
+                    clean_term(target_album),
+                )
+                if parity_score < 0:
+                    return reject("Android parity fuzzy filter")
+                def match_tokens(text):
+                    return {
+                        token for token in re.findall(r"[a-z0-9]+", str(text or "").casefold())
+                        if len(token) > 1 and token not in {"the", "and", "feat", "with"}
+                    }
 
-                album_verified = False
-                target_album = clean_term(target_album).lower()
-                if target_album and target_album != "unknown":
-                    if rapidfuzz.fuzz.token_set_ratio(target_album.lower(), torrent_title) > 85: album_verified = True
-                
-                target_title_for_score = classical_query_terms(target_title) if is_classical_search else target_title
-                title_score = max(
-                    rapidfuzz.fuzz.token_set_ratio(target_title.lower(), torrent_title),
-                    rapidfuzz.fuzz.token_set_ratio(target_title_for_score.lower(), torrent_title) if target_title_for_score else 0,
-                )
-                album_tokens = set(re.findall(r'\w+', target_album.lower()))
-                generic_album_tokens = {
-                    "get", "here", "there", "this", "that", "the", "a", "an", "to", "from",
-                    "in", "on", "of", "for", "me", "you", "now", "out", "up", "down",
-                    "greatest", "hits", "hit", "best", "collection", "collections", "complete",
-                    "ultimate", "essential", "singles", "anthology", "platinum", "gold",
-                    "beginning", "part", "ost", "soundtrack",
-                    "original", "motion", "picture", "limited", "edition",
-                }
-                album_has_distinctive_token = any(
-                    len(token) >= 4 and token not in generic_album_tokens
-                    for token in album_tokens
-                )
+                artist_tokens = match_tokens(target_artist)
+                album_tokens = match_tokens(clean_term(target_album))
+                actual_tokens = match_tokens(torrent_title)
+                artist_coverage = len(artist_tokens & actual_tokens) / len(artist_tokens) if artist_tokens else 0.0
+                album_coverage = len(album_tokens & actual_tokens) / len(album_tokens) if album_tokens else 0.0
                 if is_classical_search and classical_catalog_state == "matched":
-                    artist_verified = True
-                    allow_album_miss = True
-
-                if target_album:
-                    # Generic album names (like 'Trilogy') are accepted IF the artist is confirmed.
-                    if not artist_verified and not album_verified:
-                        return -1
-                    # If artist is verified, we can be much more relaxed about generic album names
-                    if not artist_verified and not album_has_distinctive_token and rapidfuzz.fuzz.ratio(target_album.lower(), torrent_title) < 95:
-                        return -1
-                    if allow_album_miss and not album_verified and not artist_verified:
-                        return -1
-                    if not allow_album_miss and not album_verified:
-                        return -1
-                    if album_verified and not artist_verified and title_score < 45 and not album_has_distinctive_token:
-                        return -1
-                elif not artist_verified or title_score < 55:
-                    return -1
-                
-                score = title_score
+                    artist_coverage = max(artist_coverage, 1.0)
+                score = parity_score
                 score += classical_adj
-                score += 40 if artist_verified else 0
-                score += 60 if album_verified else 20
-                collection_result = any(
-                    k in torrent_title
-                    for k in ["discography", "complete", "collection", "albums", "greatest hits", "best of"]
-                )
-                if collection_result:
-                    score += 30
-                
-                # Massive Audiophile boost
-                if (
-                    any(k in torrent_title for k in ["flac", "lossless", "24-bit", "96khz", "alac", "eac"])
-                    and (title_score >= 60 or album_verified or collection_result)
-                ):
-                    score += 250
-                source_name = str(r.get("source") or "")
-                if source_name.startswith("torlock"):
-                    score += 45
-                elif source_name.startswith("torrentdownloads"):
-                    score += 35
-                elif source_name.startswith("limetorrents"):
-                    score += 20
-                
-                # Penalty for video keywords
-                if any(k in torrent_title for k in ["1080p", "720p", "x264", "h264", "brrip", "dvdrip", "videograffitti"]):
-                    score -= 500
-
-                health = int(r.get("seeders") or 0)
-                if health > 0:
-                    import math
-                    score += math.log10(health) * 20
-                else:
-                    score -= 100
-                
-                # Store verification flags for later file-level selection
-                r["_artist_verified"] = artist_verified
-                r["_album_verified"] = album_verified
-                
+                r["_artist_verified"] = artist_coverage >= 0.45
+                r["_album_verified"] = album_coverage >= 0.35
                 return score
 
             trackers = _get_best_trackers()
@@ -1427,8 +1447,9 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     if album != "Unknown":
                         catalog[f"{primary_artist.lower()}||{album.lower()}"] = magnet
                         _save_catalog(manager, catalog)
+                        stable_album_key, _legacy_album_key = _album_source_keys(primary_artist, album)
                         db.save_album_source(
-                            album_key=f"{primary_artist.lower()}||{album.lower()}",
+                            album_key=stable_album_key,
                             engine="torrent",
                             resolved_url=magnet
                         )
@@ -1557,9 +1578,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         return
                     cached_source_pending = False
                     try:
-                        saved = db.get_album_source(album_key) or {}
+                        saved = db.get_album_source(album_key) or db.get_album_source(legacy_album_key) or {}
                         if _torrent_key(str(saved.get("resolved_url") or "")) == _torrent_key(cached_magnet):
-                            db.delete_album_source(album_key)
+                            failed_key = str(saved.get("album_key") or album_key)
+                            db.delete_album_source(failed_key)
                             phase_status(f"Saved album torrent failed ({reason}); removed it and searching replacements")
                     except Exception:
                         pass
@@ -1705,7 +1727,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         pending_search_futures = {
                             search_executor.submit(
                                 do_search_safe, q, service, query_album,
-                                query_index == 0,
+                                query_index == 0, allow_album_miss,
+                                phase_label, query_index == 0,
                             ): (q, query_album)
                             for query_index, (q, query_album) in enumerate(query_specs)
                         }

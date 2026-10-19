@@ -39,5 +39,7 @@ torrent_catalog.json
 android-app/.gradle/
 android-app/local.properties
 android-app/**/build/
+desktop_torrent/classes/
+desktop_torrent/desktop-torrent-bridge.jar
 # Generated from the root web UI by the Android Gradle sync task.
 android-app/app/src/main/python/android_runtime/static/

@@ -47,6 +47,42 @@ class TestBackendTorrentHelpers(unittest.TestCase):
         self.assertEqual([row["seeders"] for row in rows], [114, 6])
         self.assertTrue(all(row["_score"] == 100 for row in rows))
 
+    def test_desktop_release_fuzzy_score_matches_android_for_1337x_electric_ladyland(self):
+        import sys
+        from pathlib import Path
+        android_python = Path(__file__).resolve().parent.parent / "android-app" / "app" / "src" / "main" / "python"
+        if str(android_python) not in sys.path:
+            sys.path.insert(0, str(android_python))
+        from android_runtime.torrent_backend import _score as android_score
+
+        candidate = {
+            "title": "The Jimi Hendrix Experience - Electric Ladyland (50th Anniversary Deluxe Edition) (2018) [3CD] FLAC",
+            "category": "Audio",
+            "seeders": 193,
+            "leechers": 101,
+        }
+        desktop = backend_torrent._android_parity_torrent_score(
+            candidate, "Jimi Hendrix", "Come On Let the Good Times Roll", "Electric Ladyland"
+        )
+        mobile = android_score(
+            candidate, "Jimi Hendrix", "Come On Let the Good Times Roll", "Electric Ladyland"
+        )
+        self.assertGreater(desktop, 0)
+        self.assertEqual(desktop, mobile)
+
+    def test_desktop_android_parity_rejects_album_hit_without_artist_match(self):
+        candidate = {
+            "title": "Electric Ladyland (50th Anniversary Deluxe Edition) FLAC",
+            "category": "Audio",
+            "seeders": 193,
+        }
+        self.assertEqual(
+            backend_torrent._android_parity_torrent_score(
+                candidate, "Jimi Hendrix", "Come On Let the Good Times Roll", "Electric Ladyland"
+            ),
+            -1.0,
+        )
+
     def test_large_swarm_beats_tiny_zero_leecher_ratio_swarm(self):
         rows = backend_torrent._filter_and_rank_provider_results(
             {"1337x": [
@@ -85,6 +121,8 @@ class TestBackendTorrentHelpers(unittest.TestCase):
         self.assertLess(score, 85)
 
     def test_registration_disables_unrequested_album_files_from_the_start(self):
+        if backend_torrent.lt is None:
+            self.skipTest("desktop torrent registration now uses the shared jlibtorrent JNI engine")
         import tempfile
         from pathlib import Path
         from types import SimpleNamespace
@@ -186,6 +224,8 @@ class TestSharedSessionCleanup(unittest.TestCase):
     ("no byte progress"/"stalled during streaming")."""
 
     def setUp(self):
+        if backend_torrent._GLOBAL_SES is None:
+            self.skipTest("legacy Python-libtorrent session cleanup was replaced by the shared JNI engine")
         self._orig_key = backend_torrent._torrent_key
         self._orig_remove = backend_torrent._GLOBAL_SES.remove_torrent
         backend_torrent._torrent_key = lambda m: "SHAREDKEY"
@@ -260,6 +300,8 @@ class TestPrefetchTorrentGate(unittest.TestCase):
 
 class TestRollingTorrentRace(unittest.TestCase):
     def test_http_metadata_fetches_run_concurrently_outside_session_lock(self):
+        if backend_torrent.lt is None:
+            self.skipTest("legacy Python-libtorrent registration was replaced by the shared JNI engine")
         import concurrent.futures
         import tempfile
         import threading
@@ -370,6 +412,16 @@ class TestRollingTorrentRace(unittest.TestCase):
 
 
 class TestTorrentSettings(unittest.TestCase):
+    def test_album_source_key_ignores_release_edition_noise_and_keeps_legacy_key(self):
+        stable, legacy = backend_torrent._album_source_keys(
+            "The Jimi Hendrix Experience", "Electric Ladyland (50th Anniversary Deluxe Edition)",
+        )
+        same, _ = backend_torrent._album_source_keys(
+            "Jimi Hendrix Experience", "Electric Ladyland",
+        )
+        self.assertEqual(stable, same)
+        self.assertEqual(legacy, "the jimi hendrix experience||electric ladyland (50th anniversary deluxe edition)")
+
     def test_counts_roundtrip_to_disk_and_old_configs_get_defaults(self):
         import tempfile
         from pathlib import Path

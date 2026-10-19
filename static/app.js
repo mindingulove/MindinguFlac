@@ -5633,6 +5633,23 @@ function playableQueueItem(item) {
   return item && item.type !== "artist" && item.type !== "album";
 }
 
+function prefetchAlbumKey(item) {
+  const meta = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const normalize = (value, isAlbum) => {
+    let text = String(value || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    if (isAlbum) {
+      text = text.replace(/\b\d{1,3}(?:st|nd|rd|th)\b/g, " ")
+        .replace(/\b(?:deluxe|anniversary|remaster(?:ed)?|expanded|edition|special|version)\b/g, " ");
+    } else {
+      text = text.replace(/^the\s+/, "");
+    }
+    return text.match(/[a-z0-9]+/g)?.join(" ") || "";
+  };
+  const album = normalize(item?.album || meta.album, true);
+  const artist = normalize(item?.album_artist || meta.album_artist || item?.artist || meta.artist, false);
+  return album ? `${artist}||${album}` : "";
+}
+
 function getQueueIndex() {
   let idx = state.queueIndex;
   if (idx < 0 && state.currentTrack) {
@@ -5667,7 +5684,15 @@ function upcomingPrefetchTracks(limit = PREFETCH_AHEAD_COUNT) {
     seen.add(key);
     tracks.push(item);
   }
-  return tracks;
+  const currentAlbum = prefetchAlbumKey(state.currentTrack);
+  if (!currentAlbum) return tracks;
+  return tracks.map((track, index) => ({ track, index }))
+    .sort((a, b) => {
+      const aSameAlbum = prefetchAlbumKey(a.track) === currentAlbum;
+      const bSameAlbum = prefetchAlbumKey(b.track) === currentAlbum;
+      return Number(bSameAlbum) - Number(aSameAlbum) || a.index - b.index;
+    })
+    .map(({ track }) => track);
 }
 
 function currentPrefetchWindowKeys() {
@@ -5766,7 +5791,11 @@ async function prefetchNextTracks() {
   const orderKey = currentQueueOrderKey();
   cancelPrefetchJobs("outside current queue window", new Set(targets.map(trackKey)), orderKey);
   console.log(`[Prefetch] Starting batch of ${targets.length}:`, targets.map(track => track.title).join(", "));
-  await Promise.all(targets.map(track => prefetchOneTrack(track, orderKey)));
+  const currentAlbum = prefetchAlbumKey(state.currentTrack);
+  const sameAlbum = currentAlbum ? targets.filter(track => prefetchAlbumKey(track) === currentAlbum) : [];
+  const otherAlbums = targets.filter(track => !sameAlbum.includes(track));
+  await Promise.all(sameAlbum.map(track => prefetchOneTrack(track, orderKey)));
+  await Promise.all(otherAlbums.map(track => prefetchOneTrack(track, orderKey)));
 }
 
 const _videoPrefetchInflight = new Set();

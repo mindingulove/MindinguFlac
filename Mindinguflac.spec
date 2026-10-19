@@ -16,8 +16,8 @@ hiddenimports = [
     'CoreAudio', 
     'UserNotifications',
     'torrfetch', 
-    'libtorrent', 
     'torrent_sources',
+    'torrent_race', 'desktop_jlibtorrent',
     'music_metadata',
     'isrc_resolver',
     'discogs_metadata',
@@ -109,11 +109,21 @@ try:
 except Exception:
     pass
 
-# libtorrent ships as a compiled extension — collect_all ensures its .so and
-# any data files are bundled alongside the hiddenimport entry.
+# Desktop and Android use the same jlibtorrent 2.0.12.9 engine and Python race.
+from desktop_torrent.build_bridge import build_bridge
+from desktop_torrent.build_runtime import build_runtime_archive
+
+build_bridge()
+_jre = build_runtime_archive()
+datas.extend([
+    (str(Path('desktop_torrent/classes')), 'desktop_torrent/classes'),
+    (str(Path('desktop_torrent/jars')), 'desktop_torrent/jars'),
+    (str(_jre), '.'),
+])
 try:
-    tmp_ret = collect_all('libtorrent')
+    tmp_ret = collect_all('jpype')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('jpype')
 except Exception:
     pass
 

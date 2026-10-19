@@ -819,9 +819,7 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
                  "seeders": 10, "_score": 100 - index}
                 for index, magnet in enumerate(magnets)]
 
-    def test_known_album_starts_before_slow_search_returns(self):
-        import threading
-        release_search = threading.Event()
+    def test_known_album_download_does_not_start_provider_search(self):
         path = self.out / "known.flac"
         engine = FakeNativeTorrentEngine({"magnet:?xt=urn:btih:known": {
             "start": {"ok": True, "path": str(path), "size": 1000, "create": True},
@@ -830,20 +828,34 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
         self.job["resolved_url"] = "magnet:?xt=urn:btih:stale-track-source"
         self.manager.config = object()
         import db
-        def slow_search(*_args):
-            release_search.wait(3)
-            return []
-        try:
-            with patch.object(torrent_backend, '_engine', return_value=engine), \
-                    patch.object(torrent_backend, '_ordered_candidates', side_effect=slow_search), \
-                    patch.object(db, 'get_album_source', return_value={
-                        'engine': 'torrent', 'resolved_url': 'magnet:?xt=urn:btih:known'
-                    }):
-                torrent_backend.run(self.out, self.job, self.manager)
-            self.assertFalse(release_search.is_set())
-            self.assertEqual(self.job['resolved_url'], 'magnet:?xt=urn:btih:known')
-        finally:
-            release_search.set()
+        with patch.object(torrent_backend, '_engine', return_value=engine), \
+                patch.object(torrent_backend, '_ordered_candidates', return_value=[]) as search, \
+                patch.object(db, 'get_album_source', return_value={
+                    'engine': 'torrent', 'resolved_url': 'magnet:?xt=urn:btih:known'
+                }):
+            torrent_backend.run(self.out, self.job, self.manager)
+        search.assert_not_called()
+        self.assertEqual(self.job['resolved_url'], 'magnet:?xt=urn:btih:known')
+
+    def test_track_specific_failure_replaces_saved_album_magnet(self):
+        import db
+        bad = "magnet:?xt=urn:btih:bad-track-match"
+        good = "magnet:?xt=urn:btih:replacement"
+        path = self.out / "replacement.flac"
+        engine = FakeNativeTorrentEngine({
+            bad: {"start": {"ok": False, "error": "No matching lossless audio file in torrent"}, "frames": []},
+            good: {"start": {"ok": True, "path": str(path), "size": 1000, "create": True},
+                   "frames": [{"ok": True, "ready": 1000, "size": 1000, "finished": True}]},
+        })
+        self.manager.config = object()
+        cached = {"album_key": "daft punk||discovery", "engine": "torrent", "resolved_url": bad}
+        with patch.object(torrent_backend, "_engine", return_value=engine), \
+                patch.object(torrent_backend, "_ordered_candidates", return_value=self._candidates(good)), \
+                patch.object(db, "get_album_source", return_value=cached), \
+                patch.object(db, "delete_album_source") as delete_source:
+            torrent_backend.run(self.out, self.job, self.manager)
+        delete_source.assert_called_once_with("daft punk||discovery")
+        self.assertIn("Removed failed saved album torrent", " ".join(message for _kind, message in self.manager.events))
 
     def test_failed_saved_album_magnet_is_deleted_before_parallel_replacements(self):
         import db
@@ -862,7 +874,7 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
                 patch.object(db, "get_album_source", return_value=cached), \
                 patch.object(db, "delete_album_source") as delete_source:
             torrent_backend.run(self.out, self.job, self.manager)
-        self.assertEqual([row["magnet"] for row in engine.started], [bad, good])
+        self.assertEqual({row["magnet"] for row in engine.started}, {bad, good})
         delete_source.assert_called_once_with("daft punk||discovery")
         self.assertEqual(self.job["resolved_url"], good)
 
@@ -884,7 +896,7 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
             torrent_backend.run(self.out, self.job, self.manager)
         self.assertTrue(partial.is_file())
         self.assertEqual(self.job['resolved_url'], 'other')
-        self.assertEqual([row['magnet'] for row in engine.started], ['first', 'other'])
+        self.assertEqual({row['magnet'] for row in engine.started}, {'first', 'other'})
 
     def test_slots_refill_while_selected_source_is_still_downloading(self):
         import time
@@ -1000,8 +1012,10 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
                 patch.object(torrent_backend.time, "monotonic", lambda: next(clock)):
             torrent_backend.run(self.out, self.job, self.manager)
 
-        self.assertEqual([entry["magnet"] for entry in engine.started],
-                         ["magnet:?xt=urn:btih:dead", "magnet:?xt=urn:btih:live"])
+        # Candidate start calls happen on independent executor threads, so
+        # scheduler order is intentionally nondeterministic.
+        self.assertEqual({entry["magnet"] for entry in engine.started},
+                         {"magnet:?xt=urn:btih:dead", "magnet:?xt=urn:btih:live"})
         self.assertEqual(self.job["active_audio_path"], str(good))
 
     def test_a_source_that_refuses_to_start_is_skipped(self):

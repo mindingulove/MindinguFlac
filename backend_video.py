@@ -1,289 +1,10 @@
-"""backend_video.py — Music video clip downloader with its own libtorrent session.
+"""YouTube-only music video clip downloader, separate from music torrents."""
 
-Completely separate from backend_torrent.py so music downloads are unaffected.
-
-Strategy (in order):
-  1. Torrent clip search (apibay cat 203, knaben video, solid video) — runs in parallel
-     with YouTube lookup; whichever wins is used.
-  2. YouTube music video fallback if no torrent clip found.
-
-Entry point used by app.py:
-  fetch_clip_to_path(identity, output_mp4_path) -> bool
-"""
 from __future__ import annotations
 
 import shutil
 import os
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
-# ── libtorrent (optional) ────────────────────────────────────────────────────
-
-try:
-    import libtorrent as _lt
-except Exception:
-    _lt = None  # type: ignore
-
-_SESSION_LOCK = threading.Lock()
-_VIDEO_SESSION = None  # lazy-init so import is free if lt unavailable
-
-
-def _get_session():
-    global _VIDEO_SESSION
-    if _lt is None:
-        return None
-    with _SESSION_LOCK:
-        if _VIDEO_SESSION is None:
-            s = _lt.session()
-            s.apply_settings({
-                "active_downloads": 4,
-                "active_seeds": 0,
-                "active_limit": 4,
-                "enable_dht": True,
-                "enable_lsd": True,
-                "enable_upnp": True,
-                "enable_natpmp": True,
-                "alert_mask": 0,
-            })
-            _VIDEO_SESSION = s
-        return _VIDEO_SESSION
-
-
-# ── Constants ────────────────────────────────────────────────────────────────
-
-_VIDEO_EXTS = frozenset({".mp4", ".mkv", ".avi", ".webm", ".mov", ".m4v"})
-_CLIP_MAX_BYTES = 700 * 1024 * 1024   # 700 MB — filters out concerts/multi-video dumps at search time
-_META_WAIT_S = 30                      # seconds to wait for torrent metadata
-_DOWNLOAD_TIMEOUT_S = 150              # 2.5 minutes max per clip download
-
-
-# ── Torrent clip search ──────────────────────────────────────────────────────
-
-def _parse_bytes(value) -> int:
-    """Parse a size value to bytes. Handles int, float, raw byte counts, and human strings (MB/GB)."""
-    import re as _re
-    if value is None:
-        return 0
-    if isinstance(value, (int, float)):
-        return int(value)
-    s = str(value).strip()
-    try:
-        return int(float(s))
-    except Exception:
-        pass
-    m = _re.search(r"([\d.]+)\s*(k|kb|m|mb|mib|g|gb|gib|t|tb)", s, _re.I)
-    if m:
-        n = float(m.group(1))
-        u = m.group(2).lower()
-        mult = {"k": 1024, "kb": 1024, "m": 1024**2, "mb": 1024**2, "mib": 1024**2,
-                "g": 1024**3, "gb": 1024**3, "gib": 1024**3, "t": 1024**4, "tb": 1024**4}
-        return int(n * mult.get(u, 1))
-    return 0
-
-
-def _looks_like_clip(title: str) -> bool:
-    """True when the torrent name looks like a music video clip, not junk/TV/software."""
-    import re as _re
-    low = (title or "").lower()
-    # Hard rejects: concerts, full albums, video formats that signal multi-episode packs
-    if any(w in low for w in (
-        "concert", "live at", "full album", "discography",
-        "dvdrip", "blu-ray", "bluray", "bdrip",
-        "season", "episode",
-    )):
-        return False
-    # Audio-only releases (music files, not video clips)
-    if _re.search(r"\b(320[\s_]?kbps|flac|mp3|aac|wav|lossless|24[\s-]?bit)\b", low):
-        return False
-    # Doujinshi / anime CG sets: (同人CG集), (COMIC1☆28), [無修正] etc.
-    if _re.search(r"^\(", title or "") and _re.search(r"[　-鿿＀-￯]", title or ""):
-        return False
-    # Manga/comic digital releases: (Digital), chapter ranges 001-005, volume markers v28
-    if _re.search(r"\(Digital\)", title or "", _re.IGNORECASE):
-        return False
-    if _re.search(r"\b\d{3}-\d{3}\b", title or ""):  # chapter range like 001-005
-        return False
-    # Webcam/adult site date-prefix format: "26 06 30 ModelName" (YY MM DD)
-    if _re.search(r"^\w[\w\s]*\b\d{2} \d{2} \d{2}\b", title or ""):
-        return False
-    # TV episode pattern: S01E01 / S01E01-E03 etc.
-    if _re.search(r"\bS\d{1,3}E\d{1,3}\b", title or "", _re.IGNORECASE):
-        return False
-    # Software/crack torrents: version numbers + crack indicators
-    if _re.search(r"\b(crack(s|ed)?|keygen|serial|portable|repack|nulled|patch)\b", low):
-        return False
-    if _re.search(r"\bv\d+\.\d+[\.\d]*\b", low) and any(w in low for w in ("fix", "pro", "setup", "installer", "activat")):
-        return False
-    if _re.search(r"\{[A-Za-z]+\}", title or ""):  # {CracksHash}, {TeamOS} etc.
-        return False
-    # TV/anime release group prefix: [GroupName] — supports ASCII and non-ASCII group names
-    if _re.search(r"^\[.{2,30}\]", title or ""):
-        return False
-    # Bracketed broadcast network or codec markers
-    if _re.search(r"\b(nhkg?|nhk world|tbs|fuji tv|abc tv|nbc|cbs tv|bbc one|bbc two|hevc|x265)\b", low):
-        return False
-    # Reject titles that start with CJK characters (Japanese/Chinese/Korean anime, manga, etc.)
-    if _re.match(r'^[぀-ヿ㐀-䶿一-鿿가-힯]', title or ""):
-        return False
-    # Reject if CJK characters make up more than 20% of non-space characters
-    cjk = len(_re.findall(r'[぀-ヿ㐀-䶿一-鿿가-힯]', title or ""))
-    if cjk > 0:
-        non_space = max(len((title or "").replace(" ", "")), 1)
-        if cjk / non_space > 0.20:
-            return False
-    return True
-
-
-def _clip_relevance_score(r: dict, artist: str, title: str) -> float:
-    """Score 0–1: how well the torrent title matches the artist+track we want.
-
-    Uses rapidfuzz token_set_ratio so word order, punctuation, and extra tokens
-    (year, [HQ], 'Official') don't penalise a correct match. Seeder log-bonus
-    breaks ties so a 50-seed exact match beats a 2-seed exact match.
-    """
-    import math as _math
-    from rapidfuzz import fuzz as _fuzz
-    t = (r.get("title") or "").lower()
-    a_low = artist.lower()
-    ti_low = title.lower()
-
-    # token_set_ratio: tokenises both strings, takes the set intersection approach.
-    # "Michael Jackson Bad Music Video" vs "Bad [HQ] - Michael Jackson - Music Video" → ~100
-    artist_score  = _fuzz.token_set_ratio(a_low, t) / 100.0   # 0–1
-    title_score   = _fuzz.token_set_ratio(ti_low, t) / 100.0  # 0–1
-    combined_score = _fuzz.token_set_ratio(f"{a_low} {ti_low}", t) / 100.0
-
-    # Weighted: track title match matters most, then combined, then artist alone
-    fuzzy = title_score * 0.45 + combined_score * 0.35 + artist_score * 0.20
-
-    # Small seeder log-bonus (caps at ~0.15 for very high seed counts)
-    seed_bonus = min(0.15, _math.log1p(int(r.get("seeders") or 0)) / 40)
-
-    return min(1.0, fuzzy + seed_bonus)
-
-
-def search_clip_torrents(artist: str, title: str, timeout: int = 15) -> list[dict]:
-    """Search all providers in parallel; return filtered candidates ranked by relevance.
-
-    Uses every provider from torrent_sources: apibay (cat 203/200), knaben (Video),
-    solid (Video), 1337x, kickass, limetorrents, torlock, torrentdownloads — same
-    breadth as the music torrent backend.
-    """
-    import re as _re
-    import torrent_sources as _ts
-
-    query = f"{artist} {title} music video"
-
-    # Standard trackers to add to magnets that have none (e.g. limetorrents)
-    from torrent_sources import _TRACKERS as _STD_TRACKERS
-    import urllib.parse as _up
-    _tracker_suffix = "".join(f"&tr={_up.quote(t)}" for t in _STD_TRACKERS)
-
-    def _ensure_trackers(magnet: str) -> str:
-        if "&tr=" not in magnet:
-            return magnet + _tracker_suffix
-        return magnet
-
-    # Normalise raw provider results to {title, magnet, size_bytes, seeders, leechers, source}
-    def _normalise(raw: list[dict], src: str) -> list[dict]:
-        out = []
-        for r in (raw or []):
-            title_r = r.get("title") or ""
-            magnet = r.get("magnet") or ""
-            if not title_r or not magnet:
-                continue
-            magnet = _ensure_trackers(magnet)
-            # size may be stored as int bytes or human string depending on provider
-            sb = r.get("size_bytes") or r.get("size") or 0
-            if isinstance(sb, str):
-                sb = _parse_bytes(sb)
-            out.append({
-                "title": title_r,
-                "magnet": magnet,
-                "size_bytes": int(sb or 0),
-                "seeders": int(r.get("seeders") or 0),
-                "leechers": int(r.get("leechers") or 0),
-                "source": r.get("source") or src,
-            })
-        return out
-
-    results: list[dict] = []
-    ex = ThreadPoolExecutor(max_workers=8)
-    try:
-        _fast = timeout        # API-backed providers
-        _slow = min(timeout, 6)  # scraper-based; cap so they don't block
-        futures = {
-            ex.submit(_ts._search_apibay_music_video, query, _fast): "apibay",
-            ex.submit(_ts._search_knaben_music_video, query, _fast): "knaben",
-            ex.submit(_ts._search_solid_music_video, query, _fast): "solid",
-            ex.submit(_ts.search_1337x, query, _slow): "1337x",
-            ex.submit(_ts.search_kickass, query, _slow): "kickass",
-            ex.submit(_ts.search_limetorrents, query, _fast): "limetorrents",
-            ex.submit(_ts.search_torlock, query, _slow): "torlock",
-            ex.submit(_ts.search_torrentdownloads, query, _slow): "torrentdownloads",
-        }
-        try:
-            for fut in as_completed(futures, timeout=timeout):
-                src = futures[fut]
-                try:
-                    results += _normalise(fut.result(), src)
-                except Exception:
-                    pass
-        except TimeoutError:
-            pass
-        # Collect any futures that finished during the timeout window
-        for fut, src in futures.items():
-            if fut.done() and fut not in {f for f in futures if not f.done()}:
-                try:
-                    results += _normalise(fut.result(), src)
-                except Exception:
-                    pass
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
-
-    # Deduplicate by info_hash
-    seen_hashes: set[str] = set()
-    unique: list[dict] = []
-    for r in results:
-        m = r.get("magnet") or ""
-        ih_match = _re.search(r"btih:([A-Fa-f0-9]{40})", m, _re.I)
-        ih = ih_match.group(1).upper() if ih_match else ""
-        if ih and ih in seen_hashes:
-            continue
-        if ih:
-            seen_hashes.add(ih)
-        unique.append(r)
-
-    try:
-        import db as _db
-        _adult_terms = _db.get_adult_filter_terms()
-        _vbl = _db.get_video_blacklist()
-    except Exception:
-        _adult_terms = set()
-        _vbl = set()
-
-    def _passes(r: dict) -> bool:
-        t = (r.get("title") or "").lower()
-        if not _looks_like_clip(r.get("title") or ""):
-            return False
-        if _adult_terms and any(term in t for term in _adult_terms):
-            return False
-        if _CLIP_MAX_BYTES > 0 and int(r.get("size_bytes") or 0) > _CLIP_MAX_BYTES:
-            return False
-        if r.get("magnet") in _vbl:
-            return False
-        return True
-
-    filtered = [r for r in unique if _passes(r)]
-    for r in filtered:
-        r["_relevance"] = _clip_relevance_score(r, artist, title)
-    filtered.sort(key=lambda r: r["_relevance"], reverse=True)
-    return filtered
-
-
-# ── Torrent clip download ────────────────────────────────────────────────────
 
 def _ffmpeg_exe() -> str:
     """Return path to bundled ffmpeg (via imageio-ffmpeg) or fall back to PATH."""
@@ -394,102 +115,6 @@ def _clip_duration_ok(path: Path, expected_s: float) -> bool:
     return ok
 
 
-def _download_torrent_clip(magnet: str, output_path: Path, expected_s: float = 0, timeout: int = _DOWNLOAD_TIMEOUT_S) -> bool:
-    """Download the largest video file from `magnet` into `output_path`.
-
-    Uses the module-local libtorrent session — never touches backend_torrent's session.
-    Returns True on success.
-    """
-    ses = _get_session()
-    if ses is None:
-        return False
-
-    save_dir = output_path.parent / f".vtmp_{output_path.stem}"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    handle = None
-    try:
-        params = {
-            "save_path": str(save_dir),
-            "storage_mode": _lt.storage_mode_t(2),
-        }
-        handle = _lt.add_magnet_uri(ses, magnet, params)
-
-        # Wait for torrent metadata
-        deadline = time.monotonic() + _META_WAIT_S
-        while not handle.has_metadata():
-            if time.monotonic() > deadline:
-                return False
-            time.sleep(1)
-
-        ti = handle.get_torrent_info()
-        files = ti.files()
-
-        # Pick the largest video file in the torrent
-        best_idx, best_size = -1, 0
-        for i in range(ti.num_files()):
-            ext = Path(files.file_path(i)).suffix.lower()
-            sz = files.file_size(i)
-            if ext in _VIDEO_EXTS and sz > best_size:
-                best_idx, best_size = i, sz
-
-        if best_idx == -1:
-            return False  # no video file
-
-        # Pre-download size guard: reject files that are clearly too large.
-        # A music video at 480p averages ~1 MB/min. Cap at 2 GB (still generous
-        # for a 13-minute extended MV like Thriller).
-        if best_size > _CLIP_MAX_BYTES:
-            print(f"[VideoBackend] torrent file too large ({best_size // 1024**2} MB), skipping")
-            return False
-
-        # Disable every file except the chosen one
-        priorities = [0] * ti.num_files()
-        priorities[best_idx] = 7
-        handle.prioritize_files(priorities)
-
-        # Wait for download to complete
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            fp = handle.file_progress()
-            if fp and len(fp) > best_idx:
-                if files.file_size(best_idx) > 0 and fp[best_idx] >= files.file_size(best_idx):
-                    break
-            st = handle.status()
-            if st.state in (_lt.torrent_status.seeding, _lt.torrent_status.finished):
-                break
-            time.sleep(2)
-        else:
-            return False
-
-        src = save_dir / files.file_path(best_idx)
-        if not src.exists() or src.stat().st_size < 65536:
-            return False
-
-        if not _clip_duration_ok(src, expected_s):
-            return False
-        if not _ensure_web_safe_audio(src):
-            return False
-
-        tmp = output_path.with_suffix(".vtmp" + output_path.suffix)
-        shutil.copy2(src, tmp)
-        tmp.replace(output_path)
-        return True
-
-    except Exception as exc:
-        print(f"[VideoBackend] torrent download failed: {exc}")
-        return False
-    finally:
-        try:
-            if handle is not None and handle.is_valid():
-                ses.remove_torrent(handle)
-        except Exception:
-            pass
-        try:
-            shutil.rmtree(save_dir, ignore_errors=True)
-        except Exception:
-            pass
-
-
 # ── YouTube fallback download ────────────────────────────────────────────────
 
 def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_cb=None) -> bool:
@@ -568,231 +193,106 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None, advisor_config=None) -> bool:
-    """Find and download the best music video clip for `identity` into `output_path`.
-
-    Races torrent search against YouTube lookup; whichever produces a valid file wins.
-    YouTube is the fallback if torrents come up empty.
-    Returns True when a file is written to output_path, False otherwise.
-
-    log_cb(msg): optional callable for live-cache log output; defaults to print.
-    """
-    _log = log_cb if callable(log_cb) else print
-
+    """Find and download a music video from YouTube into ``output_path``."""
+    log = log_cb if callable(log_cb) else print
     artist = str(identity.get("artist") or "").strip()
     title = str(identity.get("title") or "").strip()
     if not artist or not title:
         return False
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    expected_s = float(identity.get("duration_s") or 0)
-    if not expected_s:
-        try:
+    try:
+        expected_s = float(identity.get("duration_s") or 0)
+        if not expected_s:
             expected_s = float(identity.get("duration_ms") or 0) / 1000
-        except Exception:
-            expected_s = 0.0
+    except (TypeError, ValueError):
+        expected_s = 0.0
+    track_key = str(identity.get("track_key") or "").strip()
+    log(f"Searching YouTube video for: {artist} – {title}")
 
-    # --- Phase 1: race torrent search vs YouTube lookup -------------------
-    torrent_candidates: list[dict] = []
-    youtube_result: dict = {}
-    youtube_start_offset: int = 0
-
-    _log(f"Searching video clip for: {artist} – {title}")
-
-    def _do_torrent_search():
-        nonlocal torrent_candidates
+    saved_url = ""
+    if track_key:
         try:
-            torrent_candidates = search_clip_torrents(artist, title, timeout=15)
+            import db
+            saved = db.get_video_source(track_key) or {}
+            saved_url = str(saved.get("youtube_url") or "")
+            if saved_url and saved_url not in db.get_video_blacklist():
+                log(f"Reusing saved YouTube video — {saved_url[:80]}")
+                if _download_youtube_clip(saved_url, 0, output_path, log):
+                    if _clip_duration_ok(output_path, expected_s):
+                        return True
+                    output_path.unlink(missing_ok=True)
+                db.add_video_blacklist(saved_url, reason="failed on reuse")
+                saved_url = ""
         except Exception:
-            torrent_candidates = []
+            saved_url = ""
 
-    def _do_youtube_lookup():
-        """Fast yt-dlp search for official music video; falls back to AI lookup."""
-        nonlocal youtube_result, youtube_start_offset
-        # First try: check DB override (instant, no network)
-        try:
-            import db as _db
-            override = _db.get_youtube_video_override(identity)
-            if override and override.get("youtube_video_id"):
-                vid = override["youtube_video_id"]
-                youtube_result = {"found": True, "webpage_url": f"https://www.youtube.com/watch?v={vid}"}
-                youtube_start_offset = int(override.get("start_offset_s") or 0)
-                return
-        except Exception:
-            pass
-        # Second try: direct yt-dlp search — fast, no AI, prioritises Vevo/official
+    result: dict = {}
+    start_offset = 0
+    try:
+        import db
+        override = db.get_youtube_video_override(identity)
+        if override and override.get("youtube_video_id"):
+            video_id = str(override["youtube_video_id"])
+            result = {"found": True, "webpage_url": f"https://www.youtube.com/watch?v={video_id}"}
+            start_offset = int(override.get("start_offset_s") or 0)
+    except Exception:
+        pass
+
+    if not result:
         try:
             import yt_dlp
             query = f"ytsearch5:{artist} {title} official music video"
-            opts = {
-                "quiet": True, "no_warnings": True, "noprogress": True,
-                "noplaylist": True, "extract_flat": True, "socket_timeout": 8,
-            }
+            opts = {"quiet": True, "no_warnings": True, "noprogress": True,
+                    "noplaylist": True, "extract_flat": True, "socket_timeout": 8}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(query, download=False) or {}
             entries = info.get("entries") or []
-            # Duration filter: music video should be within 3x the track duration (or < 15min)
-            _dur_max = max(expected_s * 3, 900) if expected_s else 900
-            def _dur_ok(e: dict) -> bool:
-                d = float(e.get("duration") or 0)
-                return d <= 0 or d <= _dur_max  # 0 = unknown duration, allow through
-            def _pick(entries, require_official: bool):
-                for e in entries:
-                    url = e.get("url") or e.get("webpage_url") or ""
-                    if not url or not _dur_ok(e):
-                        continue
-                    ch = (e.get("channel") or e.get("uploader") or "").lower()
-                    t = (e.get("title") or "").lower()
-                    name_match = artist.lower() in t or any(w in t for w in artist.lower().split() if len(w) > 3)
-                    track_match = title.lower() in t or all(w in t for w in title.lower().split() if len(w) > 2)
-                    is_official = "vevo" in ch or "official" in ch or "vevo" in t or "official" in t
-                    if name_match and track_match and (not require_official or is_official):
-                        return url
-                return ""
-            url = _pick(entries, require_official=True) or _pick(entries, require_official=False)
-            if url:
-                youtube_result = {"found": True, "webpage_url": url}
-                return
+            duration_limit = max(expected_s * 3, 900) if expected_s else 900
+            artist_words = [word.casefold() for word in artist.split() if len(word) > 3]
+            title_words = [word.casefold() for word in title.split() if len(word) > 2]
+            for entry in entries:
+                candidate_title = str(entry.get("title") or "").casefold()
+                duration = float(entry.get("duration") or 0)
+                if duration and duration > duration_limit:
+                    continue
+                if not (artist.casefold() in candidate_title or any(w in candidate_title for w in artist_words)):
+                    continue
+                if not (title.casefold() in candidate_title or all(w in candidate_title for w in title_words)):
+                    continue
+                url = str(entry.get("webpage_url") or entry.get("url") or "")
+                video_id = str(entry.get("id") or "")
+                if video_id and not url.startswith("http"):
+                    url = f"https://www.youtube.com/watch?v={video_id}"
+                if url:
+                    result = {"found": True, "webpage_url": url}
+                    break
         except Exception:
             pass
-        # Fallback: AI-powered lookup (slower)
+
+    if not result:
         try:
             from app import _lookup_youtube_video
-            res = _lookup_youtube_video(identity)
-            if res.get("found") and res.get("webpage_url"):
-                youtube_result = res
-                youtube_start_offset = int(res.get("video_start_offset") or 0)
+            result = _lookup_youtube_video(identity) or {}
+            start_offset = int(result.get("video_start_offset") or 0)
         except Exception:
-            pass
+            result = {}
+    url = str(result.get("webpage_url") or "")
+    if not result.get("found") or not url:
+        log("No matching YouTube music video found")
+        return False
 
-    import threading as _threading
-
-    track_key = str(identity.get("track_key") or "").strip()
-
-    # --- Phase 0: try DB-persisted source from a previous successful fetch ---
+    log(f"Downloading YouTube video — {url[:80]}")
+    if not _download_youtube_clip(url, start_offset, output_path, log):
+        return False
+    if not _clip_duration_ok(output_path, expected_s):
+        output_path.unlink(missing_ok=True)
+        log("YouTube video rejected because its duration did not match the track")
+        return False
     if track_key:
         try:
-            import db as _db
-            saved = _db.get_video_source(track_key)
-            if saved:
-                video_bl = _db.get_video_blacklist()
-                if saved.get("magnet") and saved["magnet"] not in video_bl:
-                    _log(f"Video: reusing saved torrent — {saved.get('torrent_title', '')[:60]}")
-                    if _download_torrent_clip(saved["magnet"], output_path, expected_s=expected_s):
-                        _log(f"Video: clip from saved torrent → {output_path.name}")
-                        return True
-                    _db.add_video_blacklist(saved["magnet"], reason="stalled or no peers on reuse")
-                if saved.get("youtube_url") and saved["youtube_url"] not in video_bl:
-                    _log(f"Video: reusing saved YouTube URL — {saved['youtube_url'][:80]}")
-                    if _download_youtube_clip(saved["youtube_url"], 0, output_path):
-                        if _clip_duration_ok(output_path, expected_s):
-                            _log(f"Video: clip from saved YouTube → {output_path.name}")
-                            return True
-                        output_path.unlink(missing_ok=True)
-                    _db.add_video_blacklist(saved["youtube_url"], reason="failed on reuse")
+            import db
+            db.save_video_source(track_key, youtube_url=url)
         except Exception:
             pass
-
-    # --- Phase 1: race torrent search vs YouTube lookup ---
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        ft = ex.submit(_do_torrent_search)
-        fy = ex.submit(_do_youtube_lookup)
-        ft.result()
-        fy.result()
-
-    if torrent_candidates:
-        _log(f"Video: {len(torrent_candidates)} torrent clip(s) found, trying best matches...")
-    else:
-        _log("Video: no torrent clips found, trying YouTube...")
-
-    # --- Phase 1b: AI advisor in parallel (reorders candidates while first download starts) ---
-    ai_ranked_ids: list[int] = []
-    ai_done = _threading.Event()
-
-    def _run_ai_advisor():
-        try:
-            import ai_reranker
-            duck_model, ai_provider, gemini_model = ai_reranker.provider_settings(advisor_config)
-            if not ai_reranker.is_enabled(ai_provider):
-                return
-            ai_candidates = [
-                {"id": i, "title": r.get("title", ""), "seeders": r.get("seeders", 0),
-                 "magnet": r.get("magnet", ""), "score": int(r.get("_relevance", 0) * 100)}
-                for i, r in enumerate(torrent_candidates[:10])
-            ]
-            ranked = ai_reranker.rank_candidates(
-                {"artist": artist, "title": title},
-                ai_candidates, duck_model, ai_provider, gemini_model,
-                video_clip_mode=True,
-            )
-            if isinstance(ranked, list) and ranked:
-                ai_ranked_ids[:] = ranked
-        except Exception:
-            pass
-        finally:
-            ai_done.set()
-
-    if torrent_candidates:
-        _threading.Thread(target=_run_ai_advisor, daemon=True, name="ai-video-rerank").start()
-        _log("Video: AI advisor running in parallel...")
-        ai_done.wait(timeout=6.0)
-        if ai_ranked_ids:
-            id_map = {i: r for i, r in enumerate(torrent_candidates[:10])}
-            ai_ordered = [id_map[i] for i in ai_ranked_ids if i in id_map]
-            remaining = [r for i, r in id_map.items() if i not in set(ai_ranked_ids)]
-            torrent_candidates = ai_ordered + remaining + torrent_candidates[10:]
-            _log(f"Video: AI advisor reordered top {len(ai_ranked_ids)} candidates")
-        else:
-            _log("Video: AI advisor timed out, using local ranking")
-
-    # --- Phase 2: try torrent first (up to 10 ranked candidates), then YouTube ---
-    _MIN_RELEVANCE = 0.45
-    # If we already have a YouTube result and the top candidates all have 0 seeders,
-    # skip torrents — they'll stall for 30s each and YouTube is already waiting.
-    top = [c for c in torrent_candidates[:10] if c.get("_relevance", 0) >= _MIN_RELEVANCE]
-    if youtube_result and top and all(int(c.get("seeders") or 0) == 0 for c in top[:3]):
-        _log("Video: all top torrent candidates have 0 seeders — skipping to YouTube fallback")
-        torrent_candidates = []
-
-    for candidate in torrent_candidates[:10]:
-        magnet = candidate.get("magnet") or ""
-        if not magnet:
-            continue
-        rel = candidate.get("_relevance", 0)
-        if rel < _MIN_RELEVANCE:
-            _log(f"Video: skipping low-relevance ({rel:.2f}) — {candidate.get('title', '')[:50]}")
-            continue
-        _log(f"Video: trying torrent clip (relevance={rel:.2f}) — {candidate.get('title', '')[:60]} "
-             f"({candidate.get('seeders', 0)} seeds)")
-        if _download_torrent_clip(magnet, output_path, expected_s=expected_s):
-            _log(f"Video: clip saved from torrent → {output_path.name}")
-            if track_key:
-                try:
-                    _db.save_video_source(track_key, magnet=magnet,
-                                          torrent_title=candidate.get("title", ""))
-                except Exception:
-                    pass
-            return True
-        # Don't blacklist stalled magnets — seeder shortage is temporary
-
-    if youtube_result:
-        url = youtube_result["webpage_url"]
-        _log(f"Video: downloading YouTube clip — {url[:80]}")
-        if _download_youtube_clip(url, youtube_start_offset, output_path):
-            if _clip_duration_ok(output_path, expected_s):
-                _log(f"Video: clip saved from YouTube → {output_path.name}")
-                if track_key:
-                    try:
-                        _db.save_video_source(track_key, youtube_url=url)
-                    except Exception:
-                        pass
-                return True
-            output_path.unlink(missing_ok=True)
-            _log("Video: YouTube clip rejected (duration out of range)")
-            try:
-                _db.add_video_blacklist(url, reason="duration out of range")
-            except Exception:
-                pass
-
-    _log("Video: no clip found")
-    return False
+    log(f"Video saved from YouTube → {output_path.name}")
+    return True
