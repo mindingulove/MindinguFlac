@@ -660,7 +660,12 @@ function bindEntityLinks(root = document) {
       event.stopPropagation();
       const track = JSON.parse(button.dataset.sourceTrack || "{}");
       const album = JSON.parse(button.dataset.openAlbum || "{}");
-      if (isTrackItem(track)) {
+      // Open the album page at once: it finds the exact album from the
+      // track's Spotify id (track_spotify_id) and shows its header while the
+      // songs load. Waiting for full track enrichment first (Spotify, Deezer,
+      // MusicBrainz) made every title click take ~30 s.
+      if (isTrackItem(track) && !album.spotify_id && !album.track_spotify_id && !album.album) {
+        // Nothing to locate the album by: only then enrich the track first.
         resolveTrackAlbumLink(track, album).catch(error => {
           console.warn("Could not resolve the track album before opening it:", error);
           openAlbumLink(album);
