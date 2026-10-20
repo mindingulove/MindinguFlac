@@ -616,7 +616,7 @@ function artistLinkHtml(item, text = null, className = "") {
 function albumLinkHtml(item, text = null, className = "") {
   const label = text || (item && item.title) || (item && item.name) || "";
   if (!label) return "";
-  return `<button class="inline-entity-link track-title-link ${className}" type="button" title="${esc(label)}" data-open-album='${attrJson(albumTarget(item))}'>${esc(label)}</button>`;
+  return `<button class="inline-entity-link track-title-link ${className}" type="button" title="${esc(label)}" data-open-album='${attrJson(albumTarget(item))}' data-source-track='${attrJson(item)}'>${esc(label)}</button>`;
 }
 
 function openArtistLink(item) {
@@ -643,9 +643,30 @@ function bindEntityLinks(root = document) {
     button.onclick = (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openAlbumLink(JSON.parse(button.dataset.openAlbum || "{}"));
+      const track = JSON.parse(button.dataset.sourceTrack || "{}");
+      const album = JSON.parse(button.dataset.openAlbum || "{}");
+      const trackAlbum = String(track.album || track.album_title || "").trim();
+      if (isTrackItem(track) && (!trackAlbum || /^unknown(?:\s+album)?$/i.test(trackAlbum))) {
+        resolveTrackAlbumLink(track, album).catch(error => {
+          console.warn("Could not resolve the track album before opening it:", error);
+          openAlbumLink(album);
+        });
+      } else {
+        openAlbumLink(album);
+      }
     };
   });
+}
+
+async function resolveTrackAlbumLink(track, fallbackAlbum) {
+  const response = await api("/api/music/track_metadata", {
+    method: "POST",
+    body: JSON.stringify({ track }),
+    timeout: 45000,
+  });
+  const enriched = response?.track || {};
+  const albumName = String(enriched.album || enriched.album_title || "").trim();
+  openAlbumLink(albumName ? albumTarget({ ...track, ...enriched, album: albumName }) : fallbackAlbum);
 }
 
 // The collapsed player draws its progress as a gradient stop on .player::before,

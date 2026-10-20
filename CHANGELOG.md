@@ -21,7 +21,8 @@ All notable changes to Mindinguflac are documented here.
 - Start next-track prefetch while the current track plays and expose separate playback/prefetch concurrency plus metadata-timeout settings.
 - Keep YouTube audio fallback available while FLAC torrent candidates continue in parallel.
 - Remove the ED2K download provider and its bundled runtime while retaining the Torrent engine.
-- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 13.
+- Resolve missing album metadata before opening the current track album from playback controls.
+- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 14.
 
 ## [1.3.1] — 2026-10-16
 

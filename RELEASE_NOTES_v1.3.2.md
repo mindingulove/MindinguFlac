@@ -17,7 +17,8 @@
 - Start prefetching upcoming queue tracks during current playback, with separate concurrency controls for playback and background prefetch plus an adjustable metadata timeout.
 - Fix a cache-job crash caused by an album search variable being read before assignment.
 - Keep playlist synchronization and playback settings aligned across devices.
-- Settings, backend user-agent, macOS bundle, and Android now report version **1.3.2**. Android versionCode is **13**.
+- Resolve missing album metadata before opening the current track album from playback controls.
+- Settings, backend user-agent, macOS bundle, and Android now report version **1.3.2**. Android versionCode is **14**.
 
 ## Android download
-Download **Mindinguflac-android-arm64-v1.3.2-build13.apk** below. Requires Android 8.0 or newer and a 64-bit ARM device (`arm64-v8a`). The `.apk.sha256` file contains its SHA-256 checksum. The APK is signed with the same certificate as previous Android releases so it can update an existing installation in place.
+Download **Mindinguflac-android-arm64-v1.3.2-build14.apk** below. Requires Android 8.0 or newer and a 64-bit ARM device (`arm64-v8a`). The `.apk.sha256` file contains its SHA-256 checksum. The APK is signed with the same certificate as previous Android releases so it can update an existing installation in place.

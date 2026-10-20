@@ -3056,6 +3056,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/track/credits":
                 self.send_json(track_credits(body.get("track") or body))
                 return
+            if path == "/api/music/track_metadata":
+                track = body.get("track") if isinstance(body.get("track"), dict) else body
+                self.send_json({"track": enrich_track_identifiers(dict(track or {}))})
+                return
             if path == "/api/music/enrich":
                 import queue as _queue
                 tracks = body.get("tracks") or []
