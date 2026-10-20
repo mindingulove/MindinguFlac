@@ -743,6 +743,14 @@ def _persist_album_playlist_track_metadata(playlist: dict) -> None:
         "track_count": len(persisted_tracks),
         "tracks": persisted_tracks,
     })
+    for track in persisted_tracks:
+        db.resolve_track_identity(
+            spotify_id=str(track.get("spotify_id") or track.get("id") or ""),
+            isrc=str(track.get("isrc") or ""),
+            title=str(track.get("title") or track.get("name") or ""),
+            artist=str(track.get("artist") or artist),
+            duration_ms=int(track.get("duration_ms") or 0),
+        )
 
 
 def start_album_playlist_backfill(playlist_id: str) -> None:
@@ -781,6 +789,12 @@ def start_album_playlist_backfill(playlist_id: str) -> None:
                     if value not in ("", None):
                         current[key] = value
                 save_playlists(data)
+                persisted_album_playlist = json.loads(json.dumps(current))
+            _persist_album_playlist_track_metadata(persisted_album_playlist)
+            # A saved album's track list is also a source for persistent
+            # recording identifiers. Resolve ISRCs after the lightweight
+            # album refresh, outside the playlist lock.
+            start_playlist_identifier_enrichment(playlist_id)
         finally:
             with album_playlist_backfill_lock:
                 album_playlist_backfill_in_progress.discard(playlist_id)
@@ -792,6 +806,7 @@ def enrich_and_persist_track(track: dict) -> dict:
     enriched = enrich_track_identifiers(track)
     spotify_id = enriched.get("spotify_id", "")
     changed = False
+    album_playlists_to_persist = []
     with playlists_lock:
         data = load_playlists()
         for playlist in data:
@@ -810,6 +825,14 @@ def enrich_and_persist_track(track: dict) -> dict:
                     changed = True
         if changed:
             save_playlists(data)
+            album_playlists_to_persist = [
+                json.loads(json.dumps(playlist))
+                for playlist in data
+                if str(playlist.get("playlist_origin") or "").strip().lower() == "album"
+                and any(_track_match_key(saved) == _track_match_key(enriched) for saved in playlist.get("tracks") or [])
+            ]
+    for playlist in album_playlists_to_persist:
+        _persist_album_playlist_track_metadata(playlist)
     return enriched
 
 
@@ -3163,7 +3186,7 @@ class Handler(BaseHTTPRequestHandler):
                     if origin in {"manual", "album"}:
                         for enriched in added_tracks:
                             _seed_saved_track_taste(enriched, origin)
-                if added_count > 0:
+                if added_count > 0 or str(pl.get("playlist_origin") or "").strip().lower() == "album":
                     start_playlist_identifier_enrichment(playlist_id)
                 
                 self.send_json({"ok": True, "added": added_count})

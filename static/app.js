@@ -228,11 +228,11 @@ function runtimeEngine(engine) {
 // report, so an engine whose runtime is missing from the APK is never offered.
 function androidEngineOptions() {
   const engines = (state.runtime && state.runtime.engines) || {};
-  const order = ["monochrome", "torrent", "ytp-dl", "spotiflac"];
+  const order = ["ytp-dl", "monochrome", "torrent", "spotiflac"];
   const labels = {
     "torrent": "Torrent (Experimental)",
     "monochrome": "Monochrome (FLAC)",
-    "ytp-dl": "YouTube audio",
+    "ytp-dl": "YouTube Music",
   };
   return order
     .filter(name => engines[name] && engines[name].available)
@@ -5376,9 +5376,9 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
     artist: track.artist || "",
     album: track.album || "",
     title: track.title || "",
-    quality: IS_ANDROID ? androidQuality : (state.settings.default_quality || "LOSSLESS"),
-    service: IS_ANDROID ? androidService : (state.settings.download_service || "tidal"),
-    engine: IS_ANDROID ? androidEngine : (state.settings.download_engine || "spotiflac"),
+    quality: IS_ANDROID ? androidQuality : (state.settings.default_quality || "best"),
+    service: IS_ANDROID ? androidService : (state.settings.download_service || "youtube"),
+    engine: IS_ANDROID ? androidEngine : (state.settings.download_engine || "ytp-dl"),
     // A bare identity snapshot, not the raw `track` object. The backend only
     // ever reads identity fields out of `track`/`metadata` (see
     // _payload_metadata on the server), never the whole object — but
@@ -7006,7 +7006,7 @@ async function renderSettings() {
   $("storageSection")?.classList.toggle("hidden", IS_ANDROID);
   $("aiProviderRow")?.classList.toggle("hidden", IS_ANDROID);
 
-  let engine = state.settings.download_engine || "monochrome";
+  let engine = state.settings.download_engine || "ytp-dl";
   if (IS_ANDROID) {
     const options = androidEngineOptions();
     if (options.length) {

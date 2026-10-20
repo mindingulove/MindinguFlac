@@ -54,7 +54,7 @@ android {
         applicationId = "com.mindinguflac.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
+        versionCode = 13
         versionName = "1.3.2"
 
         ndk {

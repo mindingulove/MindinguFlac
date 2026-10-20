@@ -140,9 +140,9 @@ class AndroidCapabilityReportTest(unittest.TestCase):
         self.assertEqual(manifest["runtimes"]["mutagen"]["version"], "1.0")
         self.assertIn("used_for", manifest["runtimes"]["mutagen"])
 
-    def test_default_engine_prefers_monochrome_then_youtube_and_torrent(self):
+    def test_default_engine_prefers_youtube_then_monochrome_and_torrent(self):
         with patch.object(capabilities, "runtime_report", return_value=_report()):
-            self.assertEqual(capabilities.default_engine(), "monochrome")
+            self.assertEqual(capabilities.default_engine(), "ytp-dl")
         with patch.object(capabilities, "runtime_report", return_value=_report(youtube=False)):
             self.assertEqual(capabilities.default_engine(), "monochrome")
 

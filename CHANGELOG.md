@@ -3,7 +3,13 @@
 All notable changes to Mindinguflac are documented here.
 
 ---
-## [1.3.2] — 2026-10-18
+## [1.3.2] — 2026-10-19
+
+### Added
+- Introduce Monochrome as a new playback engine for direct FLAC streaming on supported tracks.
+- Select YouTube Music by default on fresh installs and preserve the user's choice in Settings.
+- Improve music-video synchronization by matching the audio and video soundtracks, following playback timestamps, and saving automatic offsets and manual nudges per song and clip in normalized SQLite tables. The matching path works on Android and desktop.
+- Prefer curated official-video links from MusicBrainz, then Wikidata and configured Odesli; keep the existing YouTube search and ranking as the fallback.
 
 ### Fixed
 - Resolve ISRC identifiers for tracks consistently before they are saved to the library, and persist resolved ISRCs with saved album tracks in the database.
@@ -15,7 +21,7 @@ All notable changes to Mindinguflac are documented here.
 - Start next-track prefetch while the current track plays and expose separate playback/prefetch concurrency plus metadata-timeout settings.
 - Keep YouTube audio fallback available while FLAC torrent candidates continue in parallel.
 - Remove the ED2K download provider and its bundled runtime while retaining the Torrent engine.
-- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 12.
+- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 13.
 
 ## [1.3.1] — 2026-10-16
 

@@ -105,8 +105,8 @@ class MusicIndexerConfig:
 class AppConfig:
     cache_dir: Path = field(default_factory=default_cache_dir)
     music_dir: Path = field(default_factory=default_music_dir)
-    default_quality: str = "LOSSLESS"
-    download_service: str = "monochrome"
+    default_quality: str = "best"
+    download_service: str = "youtube"
     cache_cleanup_frequency: str = "never"
     last_cache_cleanup: float = 0
     strict_title_match: bool = False
@@ -114,7 +114,7 @@ class AppConfig:
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
     volume: float = 1.0
     track_max_retries: int = 1
-    download_engine: str = "monochrome"
+    download_engine: str = "ytp-dl"
     torrent_playback_candidates: int = 3
     torrent_prefetch_candidates: int = 2
     torrent_metadata_timeout_seconds: int = 60
@@ -212,7 +212,7 @@ class AppConfig:
         return cls(
             cache_dir=_to_path(cache_dir_str, default_cache_dir),
             music_dir=_to_path(music_dir_str, default_music_dir),
-            default_quality=value.get("default_quality", "LOSSLESS"),
+            default_quality=value.get("default_quality", "best"),
             download_service=value.get("download_service", cls.download_service),
             cache_cleanup_frequency=str(value.get("cache_cleanup_frequency", "never") or "never"),
             last_cache_cleanup=float(value.get("last_cache_cleanup", 0) or 0),

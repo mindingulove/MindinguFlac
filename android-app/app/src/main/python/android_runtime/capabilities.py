@@ -182,7 +182,7 @@ def engine_availability() -> dict:
     yt_ok, yt_detail = _probe_import("yt_dlp")
     tags_ok, tags_detail = _probe_import("mutagen")
     engines["ytp-dl"] = {
-        "label": "YouTube audio",
+        "label": "YouTube Music",
         "available": yt_ok and tags_ok,
         "reason": "" if (yt_ok and tags_ok) else f"yt-dlp: {yt_detail}; mutagen: {tags_detail}",
         "services": ["youtube"],
@@ -258,7 +258,7 @@ def available_engines() -> list[str]:
 def default_engine() -> str:
     """The engine a fresh phone install should start on."""
     engines = available_engines()
-    for preferred in ("monochrome", "ytp-dl", "torrent", "spotiflac"):
+    for preferred in ("ytp-dl", "monochrome", "torrent", "spotiflac"):
         if preferred in engines:
             return preferred
     return "ytp-dl"

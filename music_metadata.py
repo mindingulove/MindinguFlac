@@ -1347,6 +1347,13 @@ def enrich_track_identifiers(track: dict) -> dict:
     import db
     track_key = f"{str(enriched.get('artist') or '').strip().lower()}||{str(enriched.get('title') or '').strip().lower()}"
     db.save_track_metadata(track_key, enriched)
+    db.resolve_track_identity(
+        spotify_id=str(enriched.get("spotify_id") or enriched.get("id") or ""),
+        isrc=str(enriched.get("isrc") or ""),
+        title=str(enriched.get("title") or enriched.get("name") or ""),
+        artist=str(enriched.get("artist") or ""),
+        duration_ms=duration_ms,
+    )
 
     return enriched
 

@@ -1119,9 +1119,9 @@ class ServiceDownloadManager:
         proved usable, so a stale client cannot name a desktop-only engine and
         reach an import error instead of a download.
         """
-        engine = (payload.get("engine") or getattr(self.config, "download_engine", "spotiflac") or "spotiflac").lower()
-        service = (payload.get("service") or getattr(self.config, "download_service", "tidal") or "tidal").lower()
-        quality = payload.get("quality") or getattr(self.config, "default_quality", "flac") or "flac"
+        engine = (payload.get("engine") or getattr(self.config, "download_engine", "ytp-dl") or "ytp-dl").lower()
+        service = (payload.get("service") or getattr(self.config, "download_service", "youtube") or "youtube").lower()
+        quality = payload.get("quality") or getattr(self.config, "default_quality", "best") or "best"
         if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
             from android_runtime import capabilities
 
