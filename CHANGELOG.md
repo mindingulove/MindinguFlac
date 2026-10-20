@@ -12,7 +12,7 @@ All notable changes to Mindinguflac are documented here.
 - Prefer curated official-video links from MusicBrainz, then Wikidata and configured Odesli; keep the existing YouTube search and ranking as the fallback.
 
 ### Fixed
-- Resolve ISRC identifiers for tracks consistently before they are saved to the library, and persist resolved ISRCs with saved album tracks in the database.
+- Resolve ISRC and Spotify track URI identifiers consistently before tracks are saved to the library, and persist both with saved album tracks in the database.
 - Fix Android ISRC lookup by using the app's Spotify metadata client before falling back to external providers.
 - Fix Monochrome matching for remastered tracks when the provider uses a different ISRC and its reported duration differs slightly.
 - Reduce duplicate torrent-provider work in the desktop first pass while keeping every selected tracker in the parallel search; use the focused album, track, and lossless queries shared with Android.
@@ -21,8 +21,9 @@ All notable changes to Mindinguflac are documented here.
 - Start next-track prefetch while the current track plays and expose separate playback/prefetch concurrency plus metadata-timeout settings.
 - Keep YouTube audio fallback available while FLAC torrent candidates continue in parallel.
 - Remove the ED2K download provider and its bundled runtime while retaining the Torrent engine.
-- Resolve missing album metadata before opening the current track album from playback controls.
-- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 14.
+- Resolve album title links through the Spotify track metadata client so missing album IDs do not open empty album pages.
+- Fetch and persist each track's canonical Spotify URI (`spotify:track:…`) alongside its Spotify ID and ISRC.
+- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 15.
 
 ## [1.3.1] — 2026-10-16
 

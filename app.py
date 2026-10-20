@@ -980,6 +980,7 @@ def enrich_download_payload(body: dict) -> dict:
         "track": enriched,
         "metadata": enriched,
         "spotify_id": enriched.get("spotify_id", body.get("spotify_id", "")),
+        "spotify_uri": enriched.get("spotify_uri", body.get("spotify_uri", "")),
         "isrc": enriched.get("isrc", body.get("isrc", "")),
     }
 

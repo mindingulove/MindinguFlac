@@ -1138,7 +1138,7 @@ def save_track_metadata(track_key: str, data: dict):
         INSERT OR REPLACE INTO tracks (track_key, metadata_json, last_updated)
         VALUES (?, ?, ?)
     """, (track_key, json.dumps(data), time.time()))
-    for key in ("spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "musicbrainz_artist_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"):
+    for key in ("spotify_id", "spotify_uri", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "musicbrainz_artist_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"):
         value = str(data.get(key) or "").strip()
         if value:
             save_source_alias(f"{key}:{value}", track_key, key)

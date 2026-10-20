@@ -259,6 +259,9 @@ def _legacy_track_item(item: object) -> dict:
         normalized = dict(item)
         normalized["name"] = _metadata_text(item.get("name"))
         normalized["id"] = _metadata_text(item.get("id"))
+        normalized["uri"] = _metadata_text(item.get("uri")) or (
+            f"spotify:track:{normalized['id']}" if normalized["id"] else ""
+        )
         normalized["external_urls"] = dict(item.get("external_urls") or {})
         normalized["external_ids"] = dict(item.get("external_ids") or {})
         album = dict(item.get("album") or {})
@@ -282,12 +285,19 @@ def _legacy_track_item(item: object) -> dict:
         return normalized
     artist_names = [name.strip() for name in _metadata_text(getattr(item, "artists", "")).split(",") if name.strip()]
     cover_url = _metadata_text(getattr(item, "cover_url", ""))
+    album_id = _metadata_text(getattr(item, "album_id", ""))
     return {
         "id": _metadata_text(getattr(item, "id", "")),
+        "uri": _metadata_text(getattr(item, "uri", "")) or (
+            f"spotify:track:{_metadata_text(getattr(item, 'id', ''))}"
+            if _metadata_text(getattr(item, "id", "")) else ""
+        ),
         "name": _metadata_text(getattr(item, "title", "")),
         "artists": [{"name": name} for name in artist_names],
         "album": {
             "name": _metadata_text(getattr(item, "album", "")),
+            "id": album_id,
+            "release_date": _metadata_text(getattr(item, "release_date", "")),
             "images": [{"url": cover_url}] if cover_url else [],
         },
         "duration_ms": getattr(item, "duration_ms", 0) or 0,
@@ -805,6 +815,25 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
             "artists": {"items": [_legacy_simple_item(item, "artist") for item in artists]},
         }
 
+    track_match = re.fullmatch(r"tracks/([^/]+)", endpoint)
+    if track_match and (
+        hasattr(client, "get_track") or hasattr(client, "get_track_async")
+    ):
+        track = call_sync_or_async(
+            client, "get_track", "get_track_async", track_match.group(1)
+        )
+        normalized = _legacy_track_item(track)
+        return {
+            "id": normalized.get("id", track_match.group(1)),
+            "uri": normalized.get("uri", ""),
+            "name": normalized.get("name", ""),
+            "artists": normalized.get("artists", []),
+            "album": normalized.get("album", {}),
+            "duration_ms": normalized.get("duration_ms", 0),
+            "external_urls": normalized.get("external_urls", {}),
+            "external_ids": normalized.get("external_ids", {}),
+        }
+
     playlist_match = re.fullmatch(r"playlists/([^/]+)/tracks", endpoint)
     if playlist_match:
         playlist_result = call_sync_or_async(
@@ -1239,6 +1268,17 @@ def get_alternative_albums_hierarchical(artist: str, title: str) -> list[str]:
         return get_alternative_albums(artist, title)
 
 
+def _spotify_track_id(value: object) -> str:
+    """Extract a Spotify track ID from an ID, URI, or canonical web URL."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(?:spotify:track:|/track/)([A-Za-z0-9]+)", text)
+    if match:
+        return match.group(1)
+    return text if re.fullmatch(r"[A-Za-z0-9]{22}", text) else ""
+
+
 def enrich_track_identifiers(track: dict) -> dict:
     if not isinstance(track, dict) or track.get("type", "track") != "track":
         return dict(track or {})
@@ -1249,7 +1289,7 @@ def enrich_track_identifiers(track: dict) -> dict:
     enriched = dict(track)
     if cached:
         # Merge cached IDs into current track
-        for key in ["spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"]:
+        for key in ["spotify_id", "spotify_uri", "spotify_url", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"]:
             if cached.get(key) and not enriched.get(key):
                 enriched[key] = cached[key]
 
@@ -1260,12 +1300,19 @@ def enrich_track_identifiers(track: dict) -> dict:
         ).items():
             if value and not enriched.get(key):
                 enriched[key] = value
-    spotify_id = enriched.get("spotify_id", "")
+    spotify_id = _spotify_track_id(
+        enriched.get("spotify_id") or enriched.get("spotify_uri") or enriched.get("uri")
+        or enriched.get("spotify_url") or enriched.get("url")
+    )
+    if spotify_id:
+        enriched["spotify_id"] = spotify_id
+        enriched["spotify_uri"] = f"spotify:track:{spotify_id}"
+        enriched["spotify_url"] = f"https://open.spotify.com/track/{spotify_id}"
     if spotify_id:
         for key, value in spotify_track_metadata(spotify_id).items():
             if not value:
                 continue
-            if key in {"title", "artist", "artist_id", "album", "duration_ms", "isrc", "artwork_url", "spotify_url"}:
+            if key in {"title", "artist", "artist_id", "album", "duration_ms", "isrc", "artwork_url", "spotify_url", "spotify_uri"}:
                 enriched[key] = value
             elif not enriched.get(key):
                 enriched[key] = value
@@ -1373,6 +1420,7 @@ def spotify_search_track(artist: str, title: str) -> dict:
         return {
             "spotify_url": (item.get("external_urls") or {}).get("spotify", ""),
             "spotify_id": item.get("id", ""),
+            "spotify_uri": item.get("uri", "") or (f"spotify:track:{item['id']}" if item.get("id") else ""),
             "artist_id": artist_id,
             "album": (item.get("album") or {}).get("name", ""),
             "album_spotify_id": (item.get("album") or {}).get("id", ""),
@@ -1432,6 +1480,7 @@ def _spotify_embed_track_metadata(spotify_id: str) -> dict:
     return {
         "spotify_url": f"https://open.spotify.com/track/{spotify_id}",
         "spotify_id": entity.get("id", spotify_id),
+        "spotify_uri": entity.get("uri", "") or f"spotify:track:{entity.get('id', spotify_id)}",
         "title": entity.get("title") or entity.get("name", ""),
         "artist": artist_names,
         "artist_id": artist_id,
@@ -1462,6 +1511,7 @@ def spotify_track_metadata(spotify_id: str) -> dict:
     return {
         "spotify_url": (item.get("external_urls") or {}).get("spotify", "") or f"https://open.spotify.com/track/{spotify_id}",
         "spotify_id": item.get("id", spotify_id),
+        "spotify_uri": item.get("uri", "") or f"spotify:track:{item.get('id', spotify_id)}",
         "title": item.get("name", ""),
         "artist": artist_names,
         "artist_id": artist_id,

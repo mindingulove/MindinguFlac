@@ -646,7 +646,9 @@ function bindEntityLinks(root = document) {
       const track = JSON.parse(button.dataset.sourceTrack || "{}");
       const album = JSON.parse(button.dataset.openAlbum || "{}");
       const trackAlbum = String(track.album || track.album_title || "").trim();
-      if (isTrackItem(track) && (!trackAlbum || /^unknown(?:\s+album)?$/i.test(trackAlbum))) {
+      const target = albumTarget(track);
+      const hasAlbumId = !!(spotifyAlbumId(target) || musicBrainzReleaseId(target));
+      if (isTrackItem(track) && (!hasAlbumId || !trackAlbum || /^unknown(?:\s+album)?$/i.test(trackAlbum))) {
         resolveTrackAlbumLink(track, album).catch(error => {
           console.warn("Could not resolve the track album before opening it:", error);
           openAlbumLink(album);

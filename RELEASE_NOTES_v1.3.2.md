@@ -7,7 +7,7 @@
 - Prefer curated official-video links from MusicBrainz, then Wikidata and configured Odesli; keep the existing YouTube search and ranking as the fallback.
 
 ## Fixed
-- Resolve ISRC identifiers consistently before saving tracks and persist resolved identifiers with album tracks in the library database.
+- Resolve ISRCs and canonical Spotify track URIs consistently before saving tracks, then persist both with album tracks in the library database.
 - Fix Android ISRC lookup through the app's Spotify metadata client.
 - Match Monochrome remastered tracks when their catalog ISRC differs and the reported duration has a small mastering-related difference.
 - Remove the ED2K download provider and its bundled runtime; keep Torrent downloads available.
@@ -17,8 +17,9 @@
 - Start prefetching upcoming queue tracks during current playback, with separate concurrency controls for playback and background prefetch plus an adjustable metadata timeout.
 - Fix a cache-job crash caused by an album search variable being read before assignment.
 - Keep playlist synchronization and playback settings aligned across devices.
-- Resolve missing album metadata before opening the current track album from playback controls.
-- Settings, backend user-agent, macOS bundle, and Android now report version **1.3.2**. Android versionCode is **14**.
+- Resolve playback title links through Spotify track metadata, including the album ID, so they open the album track list instead of an empty text-only result.
+- Fetch and persist each track's canonical Spotify URI (`spotify:track:…`) with its Spotify ID and ISRC.
+- Settings, backend user-agent, macOS bundle, and Android now report version **1.3.2**. Android versionCode is **15**.
 
 ## Android download
-Download **Mindinguflac-android-arm64-v1.3.2-build14.apk** below. Requires Android 8.0 or newer and a 64-bit ARM device (`arm64-v8a`). The `.apk.sha256` file contains its SHA-256 checksum. The APK is signed with the same certificate as previous Android releases so it can update an existing installation in place.
+Download **Mindinguflac-android-arm64-v1.3.2-build15.apk** below. Requires Android 8.0 or newer and a 64-bit ARM device (`arm64-v8a`). The `.apk.sha256` file contains its SHA-256 checksum. The APK is signed with the same certificate as previous Android releases so it can update an existing installation in place.
