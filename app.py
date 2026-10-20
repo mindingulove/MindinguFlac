@@ -45,7 +45,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, default_cache_dir, default_music_dir, load_config, save_config
 import db
-from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, release_year, search_music, search_relevance, track_credits
+from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, release_year, search_music, search_music_suggestions, search_relevance, track_credits
 from playlist_recommender import generate_one_replacement_recommendation, generate_playlist_recommendations, get_playlist_track_keys, record_recommendation_feedback
 from native_audio import native_audio
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
@@ -54,6 +54,9 @@ from service_downloader import ServiceDownloadManager, is_download_audio_candida
 def _list_audio_output_devices() -> list[dict]:
     """Return audio output devices as [{name, uid}]. macOS uses CoreAudio; Windows uses WMI."""
     import sys
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        from native_audio import android_output_devices
+        return android_output_devices()
     if sys.platform == "win32":
         return _list_audio_output_devices_windows()
     if sys.platform != "darwin":
@@ -150,6 +153,49 @@ def _list_audio_output_devices() -> list[dict]:
         return []
 
 
+_windows_endpoint_cache: dict = {"at": 0.0, "names": None}
+
+
+def _windows_live_render_endpoints() -> list[str] | None:
+    """Names of the playback endpoints Windows has connected right now.
+
+    Read from the PnP AudioEndpoint list, which updates as devices come and
+    go. Render endpoints have "{0.0.0.00000000}" in their device ID (capture
+    ones use "{0.0.1.00000000}"). Returns None if the query fails, so callers
+    keep the PortAudio list unchanged. Cached briefly: PowerShell is slow.
+    """
+    import subprocess, json as _json
+
+    now = time.monotonic()
+    if now - _windows_endpoint_cache["at"] < 5.0:
+        return _windows_endpoint_cache["names"]
+    script = r"""
+try {
+    Get-CimInstance Win32_PnPEntity -Filter "PNPClass='AudioEndpoint'" -ErrorAction Stop |
+        Where-Object { $_.Status -eq 'OK' -and $_.DeviceID -like '*{0.0.0.00000000}*' } |
+        ForEach-Object { $_.Name } | ConvertTo-Json -Compress
+} catch { 'null' }
+"""
+    names = None
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=8, startupinfo=startupinfo,
+        )
+        parsed = _json.loads(result.stdout.strip() or "null")
+        if isinstance(parsed, str):
+            parsed = [parsed]
+        if isinstance(parsed, list):
+            names = [str(name).strip() for name in parsed if str(name or "").strip()]
+    except Exception:
+        names = None
+    _windows_endpoint_cache.update(at=now, names=names)
+    return names
+
+
 def _list_audio_output_devices_windows() -> list[dict]:
     import subprocess, json as _json
     devices: list[dict] = []
@@ -170,6 +216,25 @@ def _list_audio_output_devices_windows() -> list[dict]:
             name = str(info.get("name") or f"Output {index}")
             hostapi = sd.query_hostapis(info.get("hostapi", 0)).get("name", "")
             devices.append({"name": name, "uid": f"sounddevice:{index}", "driver": hostapi})
+        # PortAudio lists every output once per host API (MME, DirectSound,
+        # WASAPI, WDM-KS), and MME truncates names to 31 characters. Show each
+        # device once, by its full WASAPI name; the native player opens WASAPI
+        # with resampling, so any track rate works on any device.
+        wasapi = [device for device in devices if "wasapi" in str(device["driver"]).lower()]
+        if wasapi:
+            devices = wasapi
+        # PortAudio's list is a snapshot from launch: a Bluetooth speaker that
+        # connected later is missing, and one that disconnected is still there.
+        # Windows' endpoint list is live, so use it to drop gone devices and add
+        # new ones. New devices get an "endpoint:<name>" UID; the native player
+        # re-enumerates PortAudio by name when it opens them.
+        live = _windows_live_render_endpoints()
+        if live is not None and wasapi:
+            live_keys = {name.casefold() for name in live}
+            devices = [device for device in devices if device["name"].casefold() in live_keys]
+            known = {device["name"].casefold() for device in devices}
+            devices += [{"name": name, "uid": f"endpoint:{name}", "driver": "Windows WASAPI"}
+                        for name in live if name.casefold() not in known]
     except Exception:
         devices = []
     if devices:
@@ -262,7 +327,7 @@ def runtime_capability_report(refresh: bool = False) -> dict:
         "android": False,
         "dependencies": {"runtimes": {}, "missing": [], "ok": True},
         "engines": {},
-        "available_engines": ["spotiflac", "ytp-dl", "torrent", "monochrome"],
+        "available_engines": ["monochrome", "spotiflac", "ytp-dl", "torrent"],
         "storage_root": str(DATA),
     }
 
@@ -311,6 +376,56 @@ def _sanitize_runtime_config(config: AppConfig) -> AppConfig:
 
 app_config = _sanitize_runtime_config(load_config(CONFIG_PATH))
 service_downloader = ServiceDownloadManager(app_config)
+_native_stream_log_lock = threading.Lock()
+_native_stream_log_state: dict[int, dict] = {}
+
+
+def _log_native_stream_status(status: dict) -> None:
+    """Mirror native Monochrome stream milestones into the visible cache log."""
+    if not status.get("stream_id"):
+        return
+    stream_id = int(status["stream_id"])
+    phase = str(status.get("stream_phase") or "buffering")
+    buffered = float(status.get("buffered_seconds") or 0.0)
+    elapsed = float(status.get("stream_elapsed_seconds") or 0.0)
+    prebuffer_target = float(status.get("prebuffer_target_seconds") or 30.0)
+    metadata = status.get("metadata") or {}
+    title = str(metadata.get("title") or metadata.get("name") or "Monochrome stream")
+    error = str(status.get("error") or "")
+    with _native_stream_log_lock:
+        previous = _native_stream_log_state.get(stream_id, {})
+        message = ""
+        if phase != previous.get("phase"):
+            if phase == "buffering":
+                message = "Opening Monochrome audio stream; prebuffering before playback"
+            elif phase == "playing":
+                message = "Monochrome stream buffer ready; audio playback started"
+            elif phase == "paused":
+                message = "Monochrome stream paused"
+            elif phase == "ended":
+                message = "Monochrome stream ended"
+            elif phase == "error":
+                message = error if error.startswith("Monochrome") else f"Monochrome stream failed: {error or 'unknown audio error'}"
+        elif phase == "buffering" and elapsed - float(previous.get("logged_at") or 0) >= 5:
+            message = (f"Still buffering Monochrome stream after {elapsed:.0f}s; "
+                       f"{buffered:.1f}s of decoded audio ready ({prebuffer_target:.0f}s needed to start)")
+        if message:
+            service_downloader.append_cache_event("stream", message, title=title)
+            _native_stream_log_state[stream_id] = {
+                "phase": phase,
+                "logged_at": elapsed,
+                "buffered_seconds": buffered,
+            }
+        elif phase == "buffering" and buffered >= float(previous.get("buffered_seconds") or 0) + 1.0:
+            service_downloader.append_cache_event(
+                "stream", f"Monochrome prebuffer: {buffered:.1f}s of decoded audio ready",
+                title=title,
+            )
+            _native_stream_log_state[stream_id] = {
+                "phase": phase,
+                "logged_at": elapsed,
+                "buffered_seconds": buffered,
+            }
 
 
 playlists_lock = threading.Lock()
@@ -596,6 +711,38 @@ def _refresh_album_playlist_metadata(playlist: dict) -> bool:
         playlist["year"] = refreshed["year"]
     playlist["metadata_fetched"] = True
     return True
+
+
+def _persist_album_playlist_track_metadata(playlist: dict) -> None:
+    """Keep album-cache track records in sync with identifiers resolved on save."""
+    if str(playlist.get("playlist_origin") or "").strip().lower() != "album":
+        return
+    tracks = [dict(track) for track in (playlist.get("tracks") or []) if isinstance(track, dict)]
+    seed = next((track for track in tracks if track.get("artist") or track.get("album")), {})
+    artist = str(seed.get("artist") or playlist.get("owner") or "").strip()
+    album = str(seed.get("album") or playlist.get("name") or "").strip()
+    if not artist or not album or not tracks:
+        return
+
+    import db
+    album_key = f"{artist.lower()}||{album.lower()}"
+    cached = db.get_album_metadata(album_key) or {}
+    cached_tracks = {
+        _track_match_key(track): track
+        for track in (cached.get("tracks") or [])
+        if isinstance(track, dict)
+    }
+    persisted_tracks = [
+        merge_nonempty_track_metadata(cached_tracks.get(_track_match_key(track), {}), track)
+        for track in tracks
+    ]
+    db.save_album_metadata(album_key, {
+        **cached,
+        "artist": cached.get("artist") or artist,
+        "album": cached.get("album") or album,
+        "track_count": len(persisted_tracks),
+        "tracks": persisted_tracks,
+    })
 
 
 def start_album_playlist_backfill(playlist_id: str) -> None:
@@ -1498,6 +1645,41 @@ def _lookup_youtube_video(identity: dict) -> dict:
             _save_video_cache(cache)
         return result
 
+    # Curated sources (MusicBrainz music-video links, Wikidata, Odesli) name
+    # the official clip directly; only search YouTube when none of them does.
+    try:
+        import video_sources
+        curated = video_sources.curated_music_video(
+            identity, odesli_api_key=str(getattr(app_config, "odesli_api_key", "") or ""))
+    except Exception as exc:
+        print(f"[VideoLookup] curated sources failed: {exc}")
+        curated = None
+    if curated:
+        url = curated["webpage_url"]
+        video_id = curated["video_id"]
+        result = {
+            "ok": True,
+            "found": True,
+            "source": curated["source"],
+            "title": curated.get("title") or "",
+            "uploader": "",
+            "duration": curated.get("duration") or 0,
+            "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+            "webpage_url": url,
+            "embed_url": _youtube_embed_url(url, video_id),
+            "score": 950,
+            "video_start_offset": _music_video_start_offset(
+                {"id": video_id, "webpage_url": url, "title": curated.get("title") or "",
+                 "duration": curated.get("duration") or 0}, identity),
+            "identity": identity,
+        }
+        print(f"[VideoLookup] {identity.get('artist')} - {identity.get('title')}: {curated['source']} -> {url}")
+        with video_cache_lock:
+            cache = _load_video_cache()
+            cache[key] = {k: v for k, v in result.items() if k != "identity"}
+            _save_video_cache(cache)
+        return result
+
     query = f'{identity["artist"]} {identity["title"]} official music video'
     try:
         import yt_dlp
@@ -1851,6 +2033,111 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
     return {"status": "downloading"}
 
 
+def _video_clip_identity(video: Path) -> tuple[str, str]:
+    """(source, external_id) naming the clip itself, not its local file.
+
+    Downloaded clips are stored as <video cache key>.mp4, and that cache entry
+    records which YouTube video it is, so an offset survives re-downloads.
+    Clips without a YouTube id (e.g. Spotify/Votify) are named by content.
+    """
+    with video_cache_lock:
+        entry = _load_video_cache().get(video.stem) or {}
+    youtube_id = _youtube_video_id(str(entry.get("webpage_url") or ""))
+    if youtube_id:
+        return "youtube", youtube_id
+    digest = hashlib.sha1()
+    with video.open("rb") as handle:
+        digest.update(handle.read(1024 * 1024))
+    return "file", f"{digest.hexdigest()}:{video.stat().st_size}"
+
+
+def _video_sync_ids(body: dict) -> tuple[int, int] | None:
+    """(track_id, clip_id) for the sync tables, or None if either is unknown."""
+    video = Path(str(body.get("video_path") or ""))
+    if not video.is_file():
+        return None
+    try:
+        duration_ms = int(float(body.get("duration_ms") or 0)) or None
+    except (TypeError, ValueError):
+        duration_ms = None
+    track_id = db.resolve_track_identity(
+        spotify_id=str(body.get("spotify_id") or ""), isrc=str(body.get("isrc") or ""),
+        title=str(body.get("title") or ""), artist=str(body.get("artist") or ""), duration_ms=duration_ms)
+    if track_id is None:
+        return None
+    return track_id, db.resolve_video_clip(*_video_clip_identity(video))
+
+
+def _video_sync_audio_path(body: dict) -> Path | None:
+    """The song's audio as a local file, without starting any new download."""
+    import video_sync
+
+    audio = Path(str(body.get("audio_path") or ""))
+    if audio.is_file() and audio.suffix.lower() in video_sync.MEDIA_SUFFIXES:
+        return audio
+    stream_url = str(body.get("stream_url") or "")
+    if stream_url:
+        import native_audio as native_audio_module
+
+        # A Monochrome track playing natively is already being downloaded to
+        # a local file; reuse it. Never fetch the track again just for sync.
+        with native_audio_module._monochrome_fetch_lock:
+            fetch = native_audio_module._monochrome_fetches.get(stream_url)
+        if fetch is not None and fetch.size > 0 and fetch.path.is_file():
+            return fetch.path
+        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+            # ExoPlayer streams Monochrome itself; it records the start of the
+            # track to its cache while playing (NativeAudioPlayer.streamHeadPath).
+            try:
+                from java import jclass  # type: ignore
+                head = str(jclass("com.mindinguflac.android.NativeAudioPlayer").streamHeadPath(stream_url) or "")
+            except Exception:
+                head = ""
+            if head and Path(head).is_file():
+                return Path(head)
+    return None
+
+
+def _video_sync(body: dict) -> dict:
+    ids = _video_sync_ids(body)
+    if ids is None:
+        return {"ok": False, "status": "unavailable", "offset": 0.0, "manual_offset": 0.0}
+    try:
+        import video_sync  # needs numpy, plus ffmpeg (desktop) or MediaCodec (Android)
+        supported = video_sync.decoder_available()
+    except Exception:
+        supported = False
+    if not supported:
+        # Matching is impossible here; the manual nudge still works.
+        cached = db.get_track_clip_sync(*ids) or {}
+        return {"ok": True, "status": "unsupported", "offset": 0.0,
+                "manual_offset": float(cached.get("manual_offset") or 0.0)}
+    cached = db.get_track_clip_sync(*ids)
+    manual = float((cached or {}).get("manual_offset") or 0.0)
+    if cached and cached.get("offset") is not None:
+        return {"ok": True, "status": "matched" if cached["matched"] else "unmatched",
+                "offset": float(cached["offset"]) if cached["matched"] else 0.0,
+                "confidence": cached.get("confidence"), "manual_offset": manual}
+    audio = _video_sync_audio_path(body)
+    if audio is None:
+        return {"ok": True, "status": "unavailable", "offset": 0.0, "manual_offset": manual}
+    import video_sync
+
+    try:
+        result = video_sync.compute_offset(audio, body["video_path"])
+    except Exception as exc:
+        print(f"[VideoSync] match failed: {exc}")
+        return {"ok": False, "status": "error", "error": str(exc), "offset": 0.0, "manual_offset": manual}
+    if result.get("pending"):
+        return {"ok": True, "status": "pending", "offset": 0.0, "manual_offset": manual}
+    matched = bool(result.get("matched"))
+    db.save_track_clip_sync(*ids, float(result.get("offset") or 0.0), matched, result.get("confidence"))
+    print(f"[VideoSync] track {ids[0]} / clip {ids[1]}: {result}")
+    return {"ok": True, "status": "matched" if matched else "unmatched",
+            "offset": float(result["offset"]) if matched else 0.0,
+            "confidence": result.get("confidence"), "manual_offset": manual}
+
+
 def safe_static_path(request_path: str) -> Path | None:
     rel = unquote(request_path.lstrip("/"))
     if rel == "":
@@ -2074,7 +2361,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/music/suggest":
                 term = query.get("q", [""])[0].strip()
-                self.send_json({"results": search_music(app_config, term) if term else []})
+                self.send_json({"results": search_music_suggestions(app_config, term) if term else []})
                 return
             if path == "/api/music/suggest/stream":
                 term = query.get("q", [""])[0].strip()
@@ -2373,7 +2660,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
                 return
             if path == "/api/native_audio/status":
-                self.send_json(native_audio.status())
+                status = native_audio.status()
+                _log_native_stream_status(status)
+                self.send_json(status)
                 return
             if path == "/api/bluetooth/state":
                 import bluetooth_scan
@@ -2456,7 +2745,8 @@ class Handler(BaseHTTPRequestHandler):
                     file_complete = False
                 self.stream_local_path(
                     candidate, is_active_job=not is_finished and not file_complete,
-                    audio_hint=True, active_job_id=job_id if job.get("engine") == "torrent" else "",
+                    audio_hint=True,
+                    active_job_id=(job_id if not is_finished and str(job.get("active_audio_path") or "") == str(candidate) else ""),
                 )
                 return
 
@@ -2503,6 +2793,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = read_body(self)
         try:
+            if path == "/api/cache/logs":
+                message = str(body.get("message") or "").strip()
+                title = str(body.get("title") or "").strip()[:160]
+                if not message or len(message) > 500:
+                    self.send_error_json("A log message of 1–500 characters is required", HTTPStatus.BAD_REQUEST)
+                    return
+                service_downloader.append_cache_event("stream", message, title=title)
+                self.send_json({"ok": True})
+                return
             if path == "/api/dock/recent":
                 set_dock_recent_items(body.get("entries") or [])
                 self.send_json({"ok": True})
@@ -2810,6 +3109,23 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error_json("Missing ID or tracks", HTTPStatus.BAD_REQUEST)
                     return
                 with playlists_lock:
+                    playlist_exists = any(
+                        playlist.get("id") == playlist_id
+                        for playlist in load_playlists()
+                    )
+                if not playlist_exists:
+                    self.send_error_json("Playlist not found", HTTPStatus.NOT_FOUND)
+                    return
+                # Resolve each song before saving it. This also writes the
+                # resulting identifiers (including ISRC) to db.tracks, and
+                # keeping network lookups outside playlists_lock lets other
+                # playlist requests continue while providers respond.
+                enriched_tracks = [
+                    enrich_track_identifiers(dict(track))
+                    for track in tracks_to_add
+                    if isinstance(track, dict)
+                ]
+                with playlists_lock:
                     data = load_playlists()
                     pl = next((p for p in data if p["id"] == playlist_id), None)
                     if not pl:
@@ -2820,8 +3136,7 @@ class Handler(BaseHTTPRequestHandler):
                     added_count = 0
                     changed_existing = False
                     added_tracks: list[dict] = []
-                    for t in tracks_to_add:
-                        enriched = enrich_track_identifiers(dict(t))
+                    for enriched in enriched_tracks:
                         key = _track_match_key(enriched)
                         existing = next((saved for saved in pl.get("tracks", []) if _track_match_key(saved) == key), None)
                         if existing:
@@ -2841,6 +3156,8 @@ class Handler(BaseHTTPRequestHandler):
                         _refresh_album_playlist_metadata(pl)
                     if added_count > 0 or changed_existing or str(pl.get("playlist_origin") or "").strip().lower() == "album":
                         save_playlists(data)
+                    saved_playlist = json.loads(json.dumps(pl))
+                _persist_album_playlist_track_metadata(saved_playlist)
                 if added_count > 0:
                     origin = str(pl.get("playlist_origin") or "").strip().lower()
                     if origin in {"manual", "album"}:
@@ -3012,13 +3329,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/native_audio/play":
                 raw_volume = body.get("volume", 1)
                 raw_position = body.get("position", 0)
-                self.send_json(native_audio.play(
-                    body.get("path", ""),
-                    body.get("device_uid", ""),
-                    float(1 if raw_volume is None else raw_volume),
-                    float(0 if raw_position is None else raw_position),
-                    body.get("metadata"),
-                ))
+                volume = float(1 if raw_volume is None else raw_volume)
+                position = float(0 if raw_position is None else raw_position)
+                stream_url = body.get("stream_url", "")
+                if stream_url:
+                    result = native_audio.play_stream(
+                        stream_url, body.get("device_uid", ""), body.get("device_name", ""),
+                        volume, position, body.get("metadata"),
+                    )
+                    if result.get("ok"):
+                        _log_native_stream_status(result)
+                    self.send_json(result)
+                else:
+                    self.send_json(native_audio.play(
+                        body.get("path", ""), body.get("device_uid", ""), volume,
+                        position, body.get("metadata"), device_name=body.get("device_name", ""),
+                    ))
                 return
             if path == "/api/native_audio/pause":
                 self.send_json(native_audio.pause())
@@ -3028,6 +3354,31 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/native_audio/stop":
                 self.send_json(native_audio.stop())
+                return
+            if path == "/api/monochrome/stream_failing":
+                import backend_monochrome
+
+                backend_monochrome.note_stream_failing()
+                self.send_json({"ok": True, "reason": backend_monochrome.stream_block_reason()})
+                return
+            if path == "/api/video/sync":
+                self.send_json(_video_sync(body))
+                return
+            if path == "/api/video/sync/nudge":
+                ids = _video_sync_ids(body)
+                if ids is None:
+                    self.send_error_json("Missing track or video", HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    delta = max(-5.0, min(5.0, float(body.get("delta") or 0)))
+                except (TypeError, ValueError):
+                    delta = 0.0
+                self.send_json({"ok": True, "manual_offset": db.nudge_track_clip_sync(*ids, delta)})
+                return
+            if path == "/api/native_audio/output":
+                self.send_json(native_audio.set_stream_output(
+                    body.get("device_uid", ""), body.get("device_name", ""),
+                ))
                 return
             if path == "/api/native_audio/seek":
                 raw_position = body.get("position", 0)

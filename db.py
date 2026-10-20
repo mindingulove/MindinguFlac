@@ -357,6 +357,49 @@ def _init_db(conn: sqlite3.Connection):
             created_at REAL
         )
     """)
+    # Music-video sync, normalized: a recording, a clip, and the offset between
+    # them (video_time = audio_time + auto_offset + manual_offset). Rows are
+    # keyed by surrogate integer ids; titles are attributes, never keys.
+    #   track_identities - one row per recording; Spotify id is unique, ISRC is
+    #                      indexed, title/artist only identify a track that has
+    #                      neither.
+    #   video_clips      - one row per clip: a YouTube video id, or a content
+    #                      hash for clips without one (e.g. Spotify/Votify).
+    #   track_clip_sync  - the offset for one (track, clip) pair.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS track_identities (
+            track_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            spotify_id  TEXT UNIQUE,
+            isrc        TEXT,
+            title       TEXT NOT NULL DEFAULT '',
+            artist      TEXT NOT NULL DEFAULT '',
+            duration_ms INTEGER,
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_track_identities_isrc ON track_identities(isrc)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_clips (
+            clip_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            source      TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            created_at  REAL NOT NULL,
+            UNIQUE (source, external_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS track_clip_sync (
+            track_id      INTEGER NOT NULL REFERENCES track_identities(track_id),
+            clip_id       INTEGER NOT NULL REFERENCES video_clips(clip_id),
+            auto_offset   REAL,
+            matched       INTEGER NOT NULL DEFAULT 0,
+            confidence    REAL,
+            manual_offset REAL NOT NULL DEFAULT 0,
+            updated_at    REAL NOT NULL,
+            PRIMARY KEY (track_id, clip_id)
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_track_key ON listening_events(track_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_started_at ON listening_events(started_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_event_type ON listening_events(event_type)")
@@ -518,7 +561,16 @@ def _init_db(conn: sqlite3.Connection):
 _ARTIST_ID_FIELDS = ("spotify_artist_id", "artist_id")
 
 
+def _drop_empty_legacy_video_sync(conn: sqlite3.Connection) -> None:
+    """The old video_sync table was keyed by track name + file size. Its rows
+    cannot be mapped to the normalized tables, so it is dropped once empty."""
+    exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='video_sync'").fetchone()
+    if exists and not conn.execute("SELECT 1 FROM video_sync LIMIT 1").fetchone():
+        conn.execute("DROP TABLE video_sync")
+
+
 def _run_one_time_migrations(conn: sqlite3.Connection):
+    _drop_empty_legacy_video_sync(conn)
     """Idempotent, sentinel-guarded migrations. Safe to call on every connect:
     each migration runs once per database (flagged in the meta table)."""
     try:
@@ -1102,6 +1154,94 @@ def get_track_metadata(track_key: str) -> dict | None:
         except Exception:
             pass
     return None
+
+
+def resolve_track_identity(spotify_id: str = "", isrc: str = "", title: str = "", artist: str = "",
+                           duration_ms: int | None = None) -> int | None:
+    """track_id for a recording: by Spotify id, then ISRC, then (only for a
+    track with neither) title + artist. Identifiers learned later are attached
+    to the existing row instead of creating a duplicate."""
+    spotify_id = str(spotify_id or "").strip()
+    isrc = str(isrc or "").strip().upper()
+    title = str(title or "").strip()
+    artist = str(artist or "").strip()
+    if not (spotify_id or isrc or title):
+        return None
+    conn = _get_conn()
+    now = time.time()
+    row = None
+    if spotify_id:
+        row = conn.execute("SELECT * FROM track_identities WHERE spotify_id = ?", (spotify_id,)).fetchone()
+    if row is None and isrc:
+        # The same recording can sit on several releases (several Spotify ids);
+        # only adopt a row that has no conflicting Spotify id.
+        row = conn.execute(
+            "SELECT * FROM track_identities WHERE isrc = ? AND (spotify_id IS NULL OR spotify_id = ?) "
+            "ORDER BY track_id LIMIT 1", (isrc, spotify_id or None)).fetchone()
+    if row is None and not spotify_id and not isrc:
+        row = conn.execute(
+            "SELECT * FROM track_identities WHERE spotify_id IS NULL AND isrc IS NULL "
+            "AND lower(title) = lower(?) AND lower(artist) = lower(?) LIMIT 1", (title, artist)).fetchone()
+    if row is None:
+        cursor = conn.execute(
+            "INSERT INTO track_identities (spotify_id, isrc, title, artist, duration_ms, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (spotify_id or None, isrc or None, title, artist, duration_ms, now, now))
+        conn.commit()
+        return int(cursor.lastrowid)
+    conn.execute(
+        "UPDATE track_identities SET spotify_id = COALESCE(spotify_id, ?), isrc = COALESCE(isrc, ?), "
+        "title = CASE WHEN title = '' THEN ? ELSE title END, artist = CASE WHEN artist = '' THEN ? ELSE artist END, "
+        "duration_ms = COALESCE(duration_ms, ?), updated_at = ? WHERE track_id = ?",
+        (spotify_id or None, isrc or None, title, artist, duration_ms, now, row["track_id"]))
+    conn.commit()
+    return int(row["track_id"])
+
+
+def resolve_video_clip(source: str, external_id: str) -> int:
+    conn = _get_conn()
+    conn.execute("INSERT OR IGNORE INTO video_clips (source, external_id, created_at) VALUES (?, ?, ?)",
+                 (source, external_id, time.time()))
+    conn.commit()
+    return int(conn.execute("SELECT clip_id FROM video_clips WHERE source = ? AND external_id = ?",
+                            (source, external_id)).fetchone()["clip_id"])
+
+
+def get_track_clip_sync(track_id: int, clip_id: int) -> dict | None:
+    row = _get_conn().execute(
+        "SELECT auto_offset, matched, confidence, manual_offset FROM track_clip_sync WHERE track_id = ? AND clip_id = ?",
+        (track_id, clip_id)).fetchone()
+    if not row:
+        return None
+    return {"offset": row["auto_offset"], "matched": bool(row["matched"]),
+            "confidence": row["confidence"], "manual_offset": row["manual_offset"] or 0.0}
+
+
+def save_track_clip_sync(track_id: int, clip_id: int, offset: float | None, matched: bool,
+                         confidence: float | None) -> None:
+    """Store an automatic match, keeping any manual nudge already saved."""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT INTO track_clip_sync (track_id, clip_id, auto_offset, matched, confidence, manual_offset, updated_at)
+        VALUES (?, ?, ?, ?, ?, 0, ?)
+        ON CONFLICT(track_id, clip_id) DO UPDATE SET auto_offset = excluded.auto_offset,
+            matched = excluded.matched, confidence = excluded.confidence, updated_at = excluded.updated_at
+    """, (track_id, clip_id, offset, int(bool(matched)), confidence, time.time()))
+    conn.commit()
+
+
+def nudge_track_clip_sync(track_id: int, clip_id: int, delta: float) -> float:
+    """Add ``delta`` seconds to the manual offset; returns the new manual offset."""
+    conn = _get_conn()
+    conn.execute("""
+        INSERT INTO track_clip_sync (track_id, clip_id, auto_offset, matched, confidence, manual_offset, updated_at)
+        VALUES (?, ?, NULL, 0, NULL, ?, ?)
+        ON CONFLICT(track_id, clip_id) DO UPDATE SET manual_offset = manual_offset + excluded.manual_offset,
+            updated_at = excluded.updated_at
+    """, (track_id, clip_id, float(delta), time.time()))
+    conn.commit()
+    return float(conn.execute("SELECT manual_offset FROM track_clip_sync WHERE track_id = ? AND clip_id = ?",
+                              (track_id, clip_id)).fetchone()["manual_offset"])
 
 
 def _clear_cached_artist_ids_conn(conn: sqlite3.Connection, artist: str | None) -> int:

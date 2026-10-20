@@ -89,10 +89,31 @@ def format_duration_ms(milliseconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+_musicbrainz_throttle_lock = threading.Lock()
+_musicbrainz_last_request = 0.0
+
+
+def musicbrainz_throttle() -> None:
+    """Space every MusicBrainz request in the process at least 1.1 s apart.
+
+    MusicBrainz allows one request per second per client and answers bursts
+    with 503. Metadata enrichment and the music-video lookup (video_sources)
+    both call it, so they share this one gate.
+    """
+    global _musicbrainz_last_request
+    with _musicbrainz_throttle_lock:
+        wait = 1.1 - (time.monotonic() - _musicbrainz_last_request)
+        if wait > 0:
+            time.sleep(wait)
+        _musicbrainz_last_request = time.monotonic()
+
+
 @functools.lru_cache(maxsize=1024)
 def get_json(url: str, timeout: int = 10) -> dict:
-    # Respectful delay for MusicBrainz
-    time.sleep(0.5)
+    if "musicbrainz.org" in url:
+        musicbrainz_throttle()
+    else:
+        time.sleep(0.5)  # Respectful delay for the other metadata services
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -484,12 +505,36 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
             cached = _spotify_search_results_cache.get(key)
             if cached is not None:
                 _spotify_search_results_cache.move_to_end(key)
-                return {name: list(values) for name, values in cached.items()}
+                return {name: (dict(values) if isinstance(values, dict) else list(values)) for name, values in cached.items()}
 
     client = _get_spotify_client(force_refresh=force_refresh)
     if not client:
         return {"tracks": [], "albums": [], "artists": [], "playlists": []}
     results = {}
+    web_client = getattr(client, "web_client", None)
+    payload_builder = getattr(client, "_search_payload", None)
+    if web_client and payload_builder:
+        try:
+            data = web_client.query(payload_builder(query, limit))
+            search_v2 = data.get("data", {}).get("searchV2", {})
+        except Exception:
+            search_v2 = {}
+        if search_v2:
+            normalized = {
+                "tracks": _raw_search_track_items(search_v2),
+                "albums": _raw_search_simple_items(search_v2, "album"),
+                "artists": _raw_search_simple_items(search_v2, "artist"),
+                "playlists": [],
+                "rank": _raw_search_rank(search_v2),
+                "queries": _raw_search_queries(search_v2),
+            }
+            with _spotify_search_results_cache_lock:
+                _spotify_search_results_cache[key] = {name: (dict(values) if isinstance(values, dict) else tuple(values)) for name, values in normalized.items()}
+                _spotify_search_results_cache.move_to_end(key)
+                while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
+                    _spotify_search_results_cache.popitem(last=False)
+            return normalized
+
     try:
         from spotiflac_compat import call_sync_or_async
 
@@ -514,29 +559,6 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
             return normalized
     except Exception:
         pass
-
-    web_client = getattr(client, "web_client", None)
-    payload_builder = getattr(client, "_search_payload", None)
-    if web_client and payload_builder:
-        try:
-            data = web_client.query(payload_builder(query, limit))
-            search_v2 = data.get("data", {}).get("searchV2", {})
-        except Exception:
-            search_v2 = {}
-        if search_v2:
-            normalized = {
-                "tracks": list(results.get("tracks", []) or []) or _raw_search_track_items(search_v2),
-                "albums": _raw_search_simple_items(client, query, limit, "album"),
-                "artists": _raw_search_simple_items(client, query, limit, "artist"),
-                "playlists": [],
-            }
-            if any(normalized.values()):
-                with _spotify_search_results_cache_lock:
-                    _spotify_search_results_cache[key] = {name: tuple(values) for name, values in normalized.items()}
-                    _spotify_search_results_cache.move_to_end(key)
-                    while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
-                        _spotify_search_results_cache.popitem(last=False)
-            return normalized
 
     normalized = {
         "tracks": list(results.get("tracks", []) or []),
@@ -587,6 +609,28 @@ def _raw_search_track_items(search: dict) -> list[dict]:
     return tracks
 
 
+def _raw_search_rank(search: dict) -> dict[str, int]:
+    """Map Spotify entity IDs to their mixed top-results position."""
+    rank = {}
+    section = search.get("topResultsV2") or {}
+    for index, wrapper in enumerate(section.get("itemsV2", []) or []):
+        item = wrapper.get("item", {})
+        node = item.get("data", {})
+        uri = _metadata_text(node.get("uri"))
+        if uri and not uri.startswith("spotify:search:"):
+            rank[uri.rsplit(":", 1)[-1]] = index
+    return rank
+
+
+def _raw_search_queries(search: dict) -> list[dict]:
+    queries = []
+    for wrapper in (search.get("topResultsV2") or {}).get("itemsV2", []) or []:
+        node = wrapper.get("item", {}).get("data", {})
+        if wrapper.get("item", {}).get("__typename") == "SearchAutoCompleteEntity" and node.get("text"):
+            queries.append({"type": "query", "title": str(node["text"]), "query": str(node["text"]), "spotify_url": str(node.get("uri") or "")})
+    return queries
+
+
 def _best_artist_search_match(artist_name: str, items: list[dict]) -> dict:
     if not items:
         return {}
@@ -609,15 +653,7 @@ def _best_artist_search_match(artist_name: str, items: list[dict]) -> dict:
     return items[0] if items else {}
 
 
-def _raw_search_simple_items(client: object, query: str, limit: int, kind: str) -> list[dict]:
-    web_client = getattr(client, "web_client", None)
-    payload_builder = getattr(client, "_search_payload", None)
-    if not web_client or not payload_builder:
-        return []
-    try:
-        search = web_client.query(payload_builder(query, limit)).get("data", {}).get("searchV2", {})
-    except Exception:
-        return []
+def _raw_search_simple_items(search: dict, kind: str) -> list[dict]:
     section = search.get("albumsV2" if kind == "album" else "artists", {})
     results = []
     for wrapper in section.get("items", []):
@@ -640,10 +676,13 @@ def _raw_search_simple_items(client: object, query: str, limit: int, kind: str) 
                 "external_url": f"https://open.spotify.com/album/{spotify_id}",
             })
         else:
+            cover_url = _best_raw_image((node.get("visualIdentity") or {}).get("squareCoverImage", {}))
+            if not cover_url:
+                cover_url = _best_raw_image((node.get("visuals") or {}).get("avatarImage", {}))
             results.append({
                 "id": spotify_id,
                 "name": node.get("profile", {}).get("name", node.get("name", "")),
-                "cover_url": _best_raw_image((node.get("visualIdentity") or {}).get("squareCoverImage", {})),
+                "cover_url": cover_url,
                 "external_url": f"https://open.spotify.com/artist/{spotify_id}",
             })
     return results
@@ -1889,6 +1928,11 @@ class SpotifyIndexer(BaseMusicIndexer):
                 "plays": 0,
             })
 
+        rank = results.get("rank") or {}
+        for item in items:
+            item_id = str(item.get("spotify_id") or "")
+            item["_spotify_rank"] = rank.get(item_id, 100000)
+        items.sort(key=lambda item: item.get("_spotify_rank", 100000))
         return items
 
     def top_tracks(self, limit: int = 20) -> list[dict]:
@@ -2004,8 +2048,13 @@ def search_music(config: AppConfig, query: str) -> list[dict]:
         except Exception as exc:
             logger.exception(
                 "Music indexer %s failed for %r: %s", type(idx).__name__, query, exc)
-    results.sort(key=lambda x: x.get("_relevance", (0, 0, 0, 0)), reverse=True)
-    for r in results: r.pop("_relevance", None)
+    if any("_spotify_rank" in result for result in results):
+        results.sort(key=lambda result: result.get("_spotify_rank", 100000))
+    else:
+        results.sort(key=lambda x: x.get("_relevance", (0, 0, 0, 0)), reverse=True)
+    for r in results:
+        r.pop("_relevance", None)
+        r.pop("_spotify_rank", None)
     cached_results = tuple(results)
     if cached_results:
         with _search_music_cache_lock:
@@ -2014,6 +2063,89 @@ def search_music(config: AppConfig, query: str) -> list[dict]:
             while len(_search_music_cache) > _SEARCH_MUSIC_CACHE_SIZE:
                 _search_music_cache.popitem(last=False)
     return [dict(r) for r in cached_results]
+
+
+def search_music_suggestions(config: AppConfig, query: str) -> list[dict]:
+    """Return typeahead results without letting an exact generic album title win.
+
+    Spotify returns tracks, albums, and artists in separate ranked groups. The
+    full search view uses a blended relevance score, but for a short, one-word
+    typeahead that score can put albums literally named "John" above artists
+    such as John Lennon. Keep each result group's Spotify order and prioritize
+    entity type for one-word queries; use fuzzy relevance for multi-word input.
+    """
+    query = str(query or "").strip()
+    if not query:
+        return []
+    raw_results = _spotify_search_results(query, limit=20)
+    query_items = [dict(item) for item in raw_results.get("queries", [])]
+    items = []
+    seen = set()
+    for indexer in build_music_indexers(None):
+        try:
+            for item in indexer.search(query):
+                spotify_id = str(item.get("spotify_id") or "").strip()
+                dedupe_key = spotify_id or "||".join((
+                    str(item.get("type") or ""),
+                    norm_name(item.get("title") or ""),
+                    norm_name(item.get("artist") or ""),
+                ))
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                items.append(dict(item))
+        except Exception as exc:
+            logger.exception("Music suggestion indexer %s failed for %r: %s", type(indexer).__name__, query, exc)
+
+    words = re.findall(r"[a-z0-9]+", query.casefold())
+    if len(words) == 1:
+        # For a single token, artist names are the most useful completions.
+        # Preserve Spotify's rank within each type rather than inventing a
+        # popularity score (artist popularity is not present in search data).
+        kind_priority = {"artist": 2, "track": 1, "album": 0}
+        ranked = sorted(
+            items,
+            key=lambda item: kind_priority.get(str(item.get("type") or ""), 0),
+            reverse=True,
+        )
+        for item in ranked:
+            item.pop("_spotify_rank", None)
+        return query_items + ranked
+
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            _suggestion_match_score(query, item),
+            {"artist": 2, "track": 1, "album": 0}.get(str(item.get("type") or ""), 0),
+        ),
+        reverse=True,
+    )
+    for item in ranked:
+        item.pop("_spotify_rank", None)
+    return query_items + ranked
+
+
+def _suggestion_match_score(query: str, result: dict) -> int:
+    kind = str(result.get("type") or "track")
+    wanted = norm_name(str(query or ""))
+    artist = norm_name(str(result.get("artist") or ""))
+    title = norm_name(str(result.get("title") or ""))
+    if not wanted:
+        return 0
+    if kind == "artist":
+        score = int(rapidfuzz.fuzz.WRatio(str(query or ""), str(result.get("title") or result.get("artist") or "")))
+        if artist == wanted:
+            score += 2000
+        elif wanted in artist:
+            score += 250
+        return score
+
+    score = int(rapidfuzz.fuzz.WRatio(str(query or ""), str(result.get("title") or "")))
+    if title == wanted:
+        score += 1000
+    if artist == wanted or wanted in artist:
+        score += 900
+    return score
 
 
 def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:
@@ -2152,6 +2284,7 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
 
 def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "", spotify_id: str = "", *, include_extras: bool = True) -> dict:
     import db
+    extras_version = 2
     album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
     cached = db.get_album_metadata(album_key)
     if cached:
@@ -2163,7 +2296,13 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         if cached_year and cached.get("year") != cached_year:
             cached = {**cached, "year": cached_year}
             db.save_album_metadata(album_key, cached)
-        cached = {**cached, "_extras_complete": cached.get("_extras_complete", bool(cached_year))}
+        # Older album rows may be marked complete even though they predate the
+        # Discogs gallery fields. Force one enrichment pass so saved albums and
+        # search-opened albums use the same metadata payload.
+        cached = {
+            **cached,
+            "_extras_complete": bool(cached.get("_extras_complete")) and cached.get("_extras_version") == extras_version,
+        }
         if not include_extras or cached["_extras_complete"]:
             return cached
         cached = {**cached, "spotify_id": cached.get("spotify_id") or spotify_id,
@@ -2312,7 +2451,7 @@ def _enrich_album_metadata(config: AppConfig, base: dict, album_key: str) -> dic
         artist_artwork_url=spotify_artist_artwork(artist),
         discogs_release_url=discogs_release.get("release_url", ""),
         genres=release_genres, genre=release_genres[0] if release_genres else "",
-        _extras_complete=True,
+        _extras_complete=True, _extras_version=2,
     )
     if tracks:
         db.save_album_metadata(album_key, result)

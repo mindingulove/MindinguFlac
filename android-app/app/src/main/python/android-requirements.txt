@@ -15,3 +15,6 @@ cffi==2.0.0
 cryptography==50.0.2
 Pillow==12.3.0
 pycryptodome==3.21.0
+# Soundtrack matching for music videos (video_sync.py); audio is decoded by
+# Android's MediaCodec (NativeAudioPlayer.decodeMono), so no ffmpeg is needed.
+numpy==1.26.2

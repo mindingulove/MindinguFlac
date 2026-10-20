@@ -42,11 +42,11 @@ def _engines(torrent=True, youtube=True, spotiflac=False):
             "lossless": False,
         },
         "torrent": {
-            "label": "FLAC / BitTorrent (jlibtorrent)",
+            "label": "Torrent (Experimental)",
             "available": torrent,
             "reason": "" if torrent else "jlibtorrent native library failed to load",
             "services": ["all", "torlock", "torrentdownloads", "limetorrents", "1337x", "kickass"],
-            "qualities": ["LOSSLESS"],
+            "qualities": ["LOSSLESS", "MP3"],
             "lossless": True,
         },
         "spotiflac": {
@@ -57,8 +57,8 @@ def _engines(torrent=True, youtube=True, spotiflac=False):
             "qualities": ["LOSSLESS"],
             "lossless": True,
         },
-        "monochrome": {"label": "monochrome", "available": False, "reason": "desktop only",
-                       "services": [], "qualities": [], "lossless": False},
+        "monochrome": {"label": "Monochrome (FLAC)", "available": True, "reason": "",
+                       "services": ["monochrome"], "qualities": ["LOSSLESS"], "lossless": True},
     }
 
 
@@ -102,19 +102,19 @@ class AndroidCapabilityReportTest(unittest.TestCase):
 
         self.assertTrue(engines["torrent"]["available"])
         self.assertEqual(engines["torrent"]["reason"], "")
-        self.assertEqual(engines["torrent"]["qualities"], ["LOSSLESS"])
+        self.assertEqual(engines["torrent"]["qualities"], ["LOSSLESS", "MP3"])
 
-    def test_desktop_only_engines_are_reported_with_a_reason_not_omitted(self):
+    def test_monochrome_is_available_on_android_without_a_browser_runtime(self):
         with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}, clear=False), \
                 patch.object(capabilities, "_probe_import", return_value=(True, "ok")), \
                 patch.object(capabilities, "_native_torrent_status", return_value={"ok": True}), \
                 patch.object(capabilities, "_spotiflac_provider_status", return_value={"ok": True}):
             engines = capabilities.engine_availability()
 
-        for name in ("monochrome", "qobuz-dlp"):
-            self.assertIn(name, engines)
-            self.assertFalse(engines[name]["available"])
-            self.assertTrue(engines[name]["reason"])
+        self.assertTrue(engines["monochrome"]["available"])
+        self.assertEqual(engines["monochrome"]["services"], ["monochrome"])
+        self.assertIn("qobuz-dlp", engines)
+        self.assertFalse(engines["qobuz-dlp"]["available"])
 
     def test_spotiflac_stays_off_without_node_or_a_python_provider_extension(self):
         with patch.object(capabilities, "_probe_import", return_value=(True, "ok")), \
@@ -140,11 +140,11 @@ class AndroidCapabilityReportTest(unittest.TestCase):
         self.assertEqual(manifest["runtimes"]["mutagen"]["version"], "1.0")
         self.assertIn("used_for", manifest["runtimes"]["mutagen"])
 
-    def test_default_engine_prefers_youtube_then_torrent(self):
+    def test_default_engine_prefers_monochrome_then_youtube_and_torrent(self):
         with patch.object(capabilities, "runtime_report", return_value=_report()):
-            self.assertEqual(capabilities.default_engine(), "ytp-dl")
+            self.assertEqual(capabilities.default_engine(), "monochrome")
         with patch.object(capabilities, "runtime_report", return_value=_report(youtube=False)):
-            self.assertEqual(capabilities.default_engine(), "torrent")
+            self.assertEqual(capabilities.default_engine(), "monochrome")
 
     def test_runtime_report_is_cached_until_refresh_is_requested(self):
         calls = []
@@ -164,11 +164,11 @@ class AndroidCapabilityReportTest(unittest.TestCase):
 
 
 class AndroidEngineClampTest(unittest.TestCase):
-    def test_a_desktop_only_engine_falls_back_to_an_available_one(self):
+    def test_monochrome_engine_keeps_its_provider_and_lossless_quality(self):
         with patch.object(capabilities, "runtime_report", return_value=_report()):
             self.assertEqual(
-                capabilities.clamp_choice("monochrome", "tidal", "LOSSLESS"),
-                ("ytp-dl", "youtube", "best"),
+                capabilities.clamp_choice("monochrome", "monochrome", "LOSSLESS"),
+                ("monochrome", "monochrome", "LOSSLESS"),
             )
 
     def test_an_available_engine_keeps_a_service_and_quality_it_supports(self):
@@ -181,9 +181,9 @@ class AndroidEngineClampTest(unittest.TestCase):
     def test_an_unsupported_service_or_quality_is_replaced_not_passed_through(self):
         with patch.object(capabilities, "runtime_report", return_value=_report()):
             # piratebay and yts exist on desktop but the Android torrent
-            # backend does not implement them; MP3 is not a lossless quality.
+            # backend does not implement them; AAC is not a supported quality.
             self.assertEqual(
-                capabilities.clamp_choice("torrent", "piratebay", "MP3"),
+                capabilities.clamp_choice("torrent", "piratebay", "AAC"),
                 ("torrent", "all", "LOSSLESS"),
             )
 
@@ -203,7 +203,7 @@ class AndroidEngineClampTest(unittest.TestCase):
         with patch.object(capabilities, "runtime_report", return_value=_report(torrent=False)):
             self.assertEqual(
                 capabilities.clamp_choice("torrent", "all", "LOSSLESS"),
-                ("ytp-dl", "youtube", "best"),
+                ("monochrome", "monochrome", "LOSSLESS"),
             )
 
 
@@ -313,9 +313,9 @@ class AndroidBootstrapConfigTest(unittest.TestCase):
                 bootstrap._initialize_config(data, Path(tmp) / "cache", Path(tmp) / "music")
             saved = json.loads(config_path.read_text("utf-8"))
 
-        self.assertEqual(saved["download_engine"], "ytp-dl")
-        self.assertEqual(saved["download_service"], "youtube")
-        self.assertIn(saved["default_quality"], {"best", "m4a"})
+        self.assertEqual(saved["download_engine"], "monochrome")
+        self.assertEqual(saved["download_service"], "monochrome")
+        self.assertEqual(saved["default_quality"], "LOSSLESS")
 
     def test_initialize_config_survives_a_corrupt_config_file(self):
         import tempfile
@@ -330,7 +330,7 @@ class AndroidBootstrapConfigTest(unittest.TestCase):
                 bootstrap._initialize_config(data, Path(tmp) / "cache", Path(tmp) / "music")
             saved = json.loads((data / "config.json").read_text("utf-8"))
 
-        self.assertEqual(saved["download_engine"], "ytp-dl")
+        self.assertEqual(saved["download_engine"], "monochrome")
 
 
 class AndroidSettingsSanitizerTest(unittest.TestCase):
@@ -340,7 +340,7 @@ class AndroidSettingsSanitizerTest(unittest.TestCase):
 
         config = AppConfig()
         config.download_engine = "monochrome"
-        config.download_service = "tidal"
+        config.download_service = "monochrome"
         config.default_quality = "LOSSLESS"
         config.ai_provider = "duckai"
 
@@ -348,9 +348,9 @@ class AndroidSettingsSanitizerTest(unittest.TestCase):
                 patch.object(capabilities, "runtime_report", return_value=_report()):
             sanitized = app._sanitize_runtime_config(config)
 
-        self.assertEqual(sanitized.download_engine, "ytp-dl")
-        self.assertEqual(sanitized.download_service, "youtube")
-        self.assertIn(sanitized.default_quality, {"best", "m4a"})
+        self.assertEqual(sanitized.download_engine, "monochrome")
+        self.assertEqual(sanitized.download_service, "monochrome")
+        self.assertEqual(sanitized.default_quality, "LOSSLESS")
         self.assertEqual(sanitized.ai_provider, "android")
         self.assertEqual(sanitized.cache_dir, app.default_cache_dir())
         self.assertEqual(sanitized.music_dir, app.default_music_dir())
@@ -370,9 +370,7 @@ class AndroidSettingsSanitizerTest(unittest.TestCase):
 
         self.assertEqual(sanitized.download_engine, "torrent")
         self.assertEqual(sanitized.download_service, "torlock")
-        # MP3 over BitTorrent is not offered on the phone: the native bridge
-        # only ever selects a lossless file, so the label must stay honest.
-        self.assertEqual(sanitized.default_quality, "LOSSLESS")
+        self.assertEqual(sanitized.default_quality, "MP3")
 
     def test_runtime_endpoint_report_is_the_measured_android_one(self):
         import app
@@ -384,6 +382,9 @@ class AndroidSettingsSanitizerTest(unittest.TestCase):
         probe.assert_called_once_with(refresh=True)
         self.assertTrue(report["android"])
         self.assertIn("torrent", report["engines"])
+        self.assertNotIn("ed2k", report["engines"]["torrent"]["services"])
+        self.assertNotIn("ed2k", report["engines"])
+        self.assertIn("monochrome", report["engines"])
 
     def test_runtime_endpoint_report_on_desktop_does_not_probe_android(self):
         import app
@@ -411,7 +412,7 @@ class AndroidDownloadRoutingTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}, clear=False), \
                 patch.object(capabilities, "runtime_report", return_value=_report()):
-            self.assertEqual(manager._requested_engine(payload), ("ytp-dl", "youtube", "best"))
+            self.assertEqual(manager._requested_engine(payload), ("monochrome", "monochrome", "LOSSLESS"))
 
     def test_a_payload_is_left_alone_on_desktop(self):
         manager = self._manager(engine="spotiflac", service="tidal", quality="LOSSLESS")
@@ -432,7 +433,7 @@ class AndroidDownloadRoutingTest(unittest.TestCase):
         manager.config.download_engine = "ytp-dl"
         payload = {
             "engine": "monochrome",
-            "service": "tidal",
+            "service": "monochrome",
             "quality": "LOSSLESS",
             "metadata": {"artist": "Daft Punk", "title": "Veridis Quo", "album": "Discovery"},
         }
@@ -441,9 +442,9 @@ class AndroidDownloadRoutingTest(unittest.TestCase):
                 patch.object(capabilities, "runtime_report", return_value=_report()):
             job = manager._job_from_payload(payload, mode="stream")
 
-        self.assertEqual(job["engine"], "ytp-dl")
-        self.assertEqual(job["service"], "youtube")
-        self.assertEqual(job["quality"], "best")
+        self.assertEqual(job["engine"], "monochrome")
+        self.assertEqual(job["service"], "monochrome")
+        self.assertEqual(job["quality"], "LOSSLESS")
         self.assertEqual(job["title"], "Veridis Quo")
 
     def test_android_torrent_jobs_route_to_the_native_bridge(self):
@@ -557,12 +558,65 @@ class AndroidTorrentCandidateRankingTest(unittest.TestCase):
         self.assertGreater(lossless, lossy)
         self.assertGreater(lossy, 0)
 
+    def test_mp3_quality_prefers_mp3_releases_and_selects_lossy_files(self):
+        mp3_score = torrent_backend._score(
+            {"title": "Daft Punk - Discovery MP3 320", "category": "Audio", "seeders": 10},
+            "Daft Punk", "Veridis Quo", "Discovery", quality="MP3")
+        flac_score = torrent_backend._score(
+            {"title": "Daft Punk - Discovery FLAC", "category": "Audio", "seeders": 10},
+            "Daft Punk", "Veridis Quo", "Discovery", quality="MP3")
+        self.assertGreater(mp3_score, flac_score)
+        self.assertFalse(torrent_backend._require_lossless({"quality": "MP3"}))
+        self.assertTrue(torrent_backend._require_lossless({"quality": "LOSSLESS"}))
+
     def test_feature_credit_in_title_or_album_does_not_block_candidate(self):
         score = torrent_backend._score(
             {"title": "Artist feat Guest Artist - Album feat Guest Artist FLAC",
              "category": "Audio", "seeders": 4},
             "Artist", "Track feat Guest Artist", "Album feat Guest Artist")
         self.assertGreater(score, 0)
+
+    def test_single_word_album_adds_release_year_to_first_pass_searches(self):
+        job = {
+            "artist": "Michael Jackson",
+            "title": "Bad - 2012 Remaster",
+            "album": "Bad",
+            "metadata": {"year": "1987"},
+        }
+        queries = torrent_backend._first_pass_queries(job)
+        self.assertIn("Michael Jackson Bad 1987 FLAC", queries)
+
+    def test_first_pass_searches_artist_album_title_combinations(self):
+        queries = torrent_backend._first_pass_queries({
+            "artist": "Jimi Hendrix",
+            "title": "Voodoo Chile",
+            "album": "Electric Ladyland",
+            "metadata": {},
+        })
+        normalized = {" ".join(query.split()).casefold() for query in queries}
+        self.assertIn("jimi hendrix electric ladyland voodoo chile flac", normalized)
+        self.assertIn("jimi hendrix electric ladyland flac", normalized)
+        self.assertIn("jimi hendrix voodoo chile flac", normalized)
+        self.assertIn("electric ladyland voodoo chile flac", normalized)
+
+    def test_mp3_first_pass_uses_mp3_queries_instead_of_flac_queries(self):
+        queries = torrent_backend._first_pass_queries({
+            "artist": "Jimi Hendrix", "title": "Voodoo Chile",
+            "album": "Electric Ladyland", "quality": "MP3", "metadata": {},
+        })
+        normalized = {query.casefold() for query in queries}
+        self.assertIn("jimi hendrix electric ladyland voodoo chile mp3", normalized)
+        self.assertFalse(any("flac" in query.casefold() for query in normalized))
+
+    def test_release_year_breaks_ties_for_ambiguous_single_word_albums(self):
+        target = {"artist": "Michael Jackson", "title": "Bad - 2012 Remaster", "album": "Bad"}
+        matching_year = torrent_backend._score(
+            {"title": "Michael Jackson - Bad 25th Anniversary (2012) (1987) FLAC", "seeders": 40},
+            **target, album_year="1987")
+        remaster_year_only = torrent_backend._score(
+            {"title": "Michael Jackson - Bad Remastered 2012 FLAC", "seeders": 40},
+            **target, album_year="1987")
+        self.assertGreater(matching_year, remaster_year_only)
 
     def test_the_magnet_hash_is_what_deduplicates_candidates(self):
         first = "magnet:?xt=urn:btih:ABCDEF0123456789&dn=one"
@@ -856,6 +910,56 @@ class AndroidNativeTorrentJobTest(unittest.TestCase):
             torrent_backend.run(self.out, self.job, self.manager)
         delete_source.assert_called_once_with("daft punk||discovery")
         self.assertIn("Removed failed saved album torrent", " ".join(message for _kind, message in self.manager.events))
+
+    def test_out_of_order_pieces_do_not_keep_a_stalled_saved_album_source_alive(self):
+        import db
+
+        known = "magnet:?xt=urn:btih:saved-album"
+        replacement = "magnet:?xt=urn:btih:replacement"
+        good_path = self.out / "replacement.flac"
+
+        class OutOfOrderEngine(FakeNativeTorrentEngine):
+            def status(inner, native_id):
+                if native_id.endswith("::1"):
+                    inner._counts[native_id] += 1
+                    # Total downloaded bytes keep climbing, but the first
+                    # contiguous bytes needed to begin playback remain stuck.
+                    return json.dumps({
+                        "ok": True, "ready": 20000 + inner._counts[native_id] * 4096,
+                        "contiguous": 0, "size": 1000000, "peers": 1,
+                        "finished": False,
+                    })
+                return json.dumps({
+                    "ok": True, "ready": 1000, "contiguous": 1000,
+                    "size": 1000, "peers": 5, "finished": True,
+                })
+
+        engine = OutOfOrderEngine({
+            known: {"start": {"ok": True, "path": str(self.out / "saved.flac"),
+                              "size": 1000000, "create": True}, "frames": []},
+            replacement: {"start": {"ok": True, "path": str(good_path),
+                                    "size": 1000, "create": True}, "frames": []},
+        })
+        self.manager.config = object()
+        cached = {"album_key": "daft punk||discovery", "engine": "torrent", "resolved_url": known}
+        clock = [0.0]
+
+        def tick(_seconds):
+            clock[0] += 30.0
+
+        with patch.object(torrent_backend, "_engine", return_value=engine), \
+                patch.object(torrent_backend, "_ordered_candidates", return_value=self._candidates(replacement)), \
+                patch.object(db, "get_album_source", return_value=cached), \
+                patch.object(db, "delete_album_source") as delete_source, \
+                patch.object(torrent_backend.time, "monotonic", lambda: clock[0]), \
+                patch.object(torrent_backend.time, "sleep", side_effect=tick):
+            torrent_backend.run(self.out, self.job, self.manager)
+
+        self.assertEqual(self.job["resolved_url"], replacement)
+        self.assertEqual({entry["magnet"] for entry in engine.started}, {known, replacement})
+        delete_source.assert_called_once_with("daft punk||discovery")
+        self.assertTrue(any("no track byte progress" in message.lower()
+                            for _kind, message in self.manager.events))
 
     def test_failed_saved_album_magnet_is_deleted_before_parallel_replacements(self):
         import db
@@ -1217,7 +1321,7 @@ class AndroidAudioStreamingTest(unittest.TestCase):
         report = json.loads(body)
         self.assertTrue(report["android"])
         self.assertIn("ytp-dl", report["available_engines"])
-        self.assertFalse(report["engines"]["monochrome"]["available"])
+        self.assertTrue(report["engines"]["monochrome"]["available"])
 
 
 if __name__ == "__main__":

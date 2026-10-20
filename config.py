@@ -106,7 +106,7 @@ class AppConfig:
     cache_dir: Path = field(default_factory=default_cache_dir)
     music_dir: Path = field(default_factory=default_music_dir)
     default_quality: str = "LOSSLESS"
-    download_service: str = "amazon"
+    download_service: str = "monochrome"
     cache_cleanup_frequency: str = "never"
     last_cache_cleanup: float = 0
     strict_title_match: bool = False
@@ -114,7 +114,7 @@ class AppConfig:
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
     volume: float = 1.0
     track_max_retries: int = 1
-    download_engine: str = "ytp-dl"
+    download_engine: str = "monochrome"
     torrent_playback_candidates: int = 3
     torrent_prefetch_candidates: int = 2
     torrent_metadata_timeout_seconds: int = 60
@@ -209,7 +209,6 @@ class AppConfig:
             metadata_timeout = max(10, min(180, int(value.get("torrent_metadata_timeout_seconds", 60))))
         except (ValueError, TypeError, OverflowError):
             metadata_timeout = 60
-
         return cls(
             cache_dir=_to_path(cache_dir_str, default_cache_dir),
             music_dir=_to_path(music_dir_str, default_music_dir),

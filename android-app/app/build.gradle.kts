@@ -130,4 +130,8 @@ dependencies {
     implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
     implementation("com.google.mediapipe:tasks-genai:0.10.21")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // Native playback on a chosen output device (NativeAudioPlayer). The
+    // OkHttp data source gives HTTP/2, which Monochrome's storage requires.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
 }

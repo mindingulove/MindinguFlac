@@ -7,7 +7,9 @@ from pathlib import Path
 # Ensure project root is in path for analysis
 sys.path.insert(0, os.path.abspath('.'))
 
-datas = [('static', 'static')]
+datas = [
+    ('static', 'static'),
+]
 binaries = []
 hiddenimports = [
     'bluetooth_scan', 
@@ -26,6 +28,8 @@ hiddenimports = [
     'backend_spotiflac',
     'backend_tidal_hifi',
     'backend_monochrome',
+    'video_sync',
+    'video_sources',
     'backend_ytpdl',
     'catalog',
     'service_downloader',
@@ -132,6 +136,17 @@ except Exception:
 # the frozen app.
 try:
     tmp_ret = collect_all('imageio_ffmpeg')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+except Exception:
+    pass
+
+# Native direct-to-device streaming decodes Monochrome's HTTP response to PCM
+# and sends it to the selected CoreAudio output without writing a track file.
+try:
+    tmp_ret = collect_all('sounddevice')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('sounddevice')
+    tmp_ret = collect_all('numpy')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 except Exception:
     pass

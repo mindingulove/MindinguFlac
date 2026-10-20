@@ -58,7 +58,13 @@ class FakeRawSearchClient(FakePublicSpotifyClient):
         return {}
 
     def query(self, payload):
+        self.query_count = getattr(self, "query_count", 0) + 1
         return {"data": {"searchV2": {
+            "tracksV2": {"items": [{"item": {"data": {
+                "id": "track-id", "uri": "spotify:track:track-id", "name": "Beat It",
+                "albumOfTrack": {"name": "Thriller", "coverArt": {"sources": [{"url": "https://images.example/cover.jpg", "width": 640}]}},
+                "artists": {"items": [{"profile": {"name": "Michael Jackson"}}]},
+            }}}]},
             "albumsV2": {"items": [{"data": {
                 "uri": "spotify:album:album-id", "name": "Thriller",
                 "artists": {"items": [{"profile": {"name": "Michael Jackson"}}]},
@@ -71,6 +77,26 @@ class FakeRawSearchClient(FakePublicSpotifyClient):
                 "uri": "spotify:artist:no-cover-id", "profile": {"name": "No Cover Artist"},
                 "visualIdentity": None,
             }}]},
+        }}}
+
+
+class FakeUnifiedPathfinderClient(FakeRawSearchClient):
+    def query(self, payload):
+        self.query_count = getattr(self, "query_count", 0) + 1
+        return {"data": {"searchV2": {
+            "topResultsV2": {"itemsV2": [
+                {"item": {"__typename": "SearchAutoCompleteEntity", "data": {"text": "pink floyd", "uri": "spotify:search:pink+floyd"}}},
+                {"item": {"__typename": "ArtistResponseWrapper", "data": {"profile": {"name": "Pink Floyd"}, "uri": "spotify:artist:artist-id"}}},
+                {"item": {"__typename": "TrackResponseWrapper", "data": {"name": "Wish You Were Here", "uri": "spotify:track:track-id"}}},
+                {"item": {"__typename": "AlbumResponseWrapper", "data": {"name": "Animals", "uri": "spotify:album:album-id"}}},
+            ]},
+            "tracksV2": {"items": [{"item": {"data": {
+                "id": "track-id", "uri": "spotify:track:track-id", "name": "Wish You Were Here",
+                "albumOfTrack": {"name": "Wish You Were Here", "coverArt": {}},
+                "artists": {"items": [{"profile": {"name": "Pink Floyd"}}]},
+            }}}]},
+            "albumsV2": {"items": [{"data": {"uri": "spotify:album:album-id", "name": "Animals", "artists": {"items": [{"profile": {"name": "Pink Floyd"}}]}, "coverArt": {}}}]},
+            "artists": {"items": [{"data": {"uri": "spotify:artist:artist-id", "profile": {"name": "Pink Floyd"}, "visualIdentity": {}, "visuals": {"avatarImage": {"sources": [{"url": "https://images.example/pink-floyd-640.jpg", "width": 640}, {"url": "https://images.example/pink-floyd-160.jpg", "width": 160}]}}}}]},
         }}}
 
 
@@ -219,6 +245,65 @@ class SpotifyPublicClientCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(first, [])
         self.assertEqual(second[0]["title"], "Beat It")
+
+    def test_single_word_suggestions_put_artists_before_exact_title_albums(self):
+        class SearchIndexer:
+            def search(self, query):
+                return [
+                    {"type": "album", "title": "John", "artist": "Geisson Augusto", "spotify_id": "album-1"},
+                    {"type": "album", "title": "John", "artist": "Jeris Johnson", "spotify_id": "album-2"},
+                    {"type": "artist", "title": "John Mayer", "artist": "John Mayer", "spotify_id": "artist-1"},
+                    {"type": "artist", "title": "John Lennon", "artist": "John Lennon", "spotify_id": "artist-2"},
+                ]
+
+        with patch.object(music_metadata, "_spotify_search_results", return_value={"queries": []}), patch.object(music_metadata, "build_music_indexers", return_value=[SearchIndexer()]):
+            results = music_metadata.search_music_suggestions(AppConfig(), "john")
+
+        self.assertEqual([item["spotify_id"] for item in results], ["artist-1", "artist-2", "album-1", "album-2"])
+
+    def test_multi_word_suggestions_use_fuzzy_match_relevance(self):
+        class SearchIndexer:
+            def search(self, query):
+                return [
+                    {"type": "artist", "title": "John Lennon", "artist": "John Lennon", "spotify_id": "artist-1"},
+                    {"type": "artist", "title": "John Mayer", "artist": "John Mayer", "spotify_id": "artist-2"},
+                ]
+
+        with patch.object(music_metadata, "_spotify_search_results", return_value={"queries": []}), patch.object(music_metadata, "build_music_indexers", return_value=[SearchIndexer()]):
+            results = music_metadata.search_music_suggestions(AppConfig(), "john lennon")
+
+        self.assertEqual(results[0]["spotify_id"], "artist-1")
+
+    def test_multi_word_suggestions_rank_relevant_results_before_unrelated_artists(self):
+        class SearchIndexer:
+            def search(self, query):
+                return [
+                    {"type": "artist", "title": "Pink Floyd", "artist": "Pink Floyd", "spotify_id": "artist-pink-floyd"},
+                    {"type": "artist", "title": "Guns N' Roses", "artist": "Guns N' Roses", "spotify_id": "artist-guns-roses"},
+                    {"type": "artist", "title": "Scorpions", "artist": "Scorpions", "spotify_id": "artist-scorpions"},
+                    {"type": "artist", "title": "Pink Floyd Tribute Band", "artist": "Pink Floyd Tribute Band", "spotify_id": "artist-tribute"},
+                    {"type": "track", "title": "Wish You Were Here", "artist": "Pink Floyd", "spotify_id": "track-wish-you-were-here"},
+                ]
+
+        with patch.object(music_metadata, "_spotify_search_results", return_value={"queries": []}), patch.object(music_metadata, "build_music_indexers", return_value=[SearchIndexer()]):
+            results = music_metadata.search_music_suggestions(AppConfig(), "pink floyd")
+
+        result_ids = [item["spotify_id"] for item in results]
+        self.assertEqual(result_ids[:2], ["artist-pink-floyd", "track-wish-you-were-here"])
+        self.assertEqual(set(result_ids[-2:]), {"artist-guns-roses", "artist-scorpions"})
+        self.assertIn("artist-tribute", result_ids)
+
+    def test_pathfinder_results_and_query_suggestions_share_one_ordered_response(self):
+        client = FakeUnifiedPathfinderClient()
+        with patch.object(music_metadata, "_spotify_client_cache", client):
+            results = music_metadata.SpotifyIndexer().search("pink floyd")
+            suggestions = music_metadata.search_music_suggestions(AppConfig(), "pink floyd")
+
+        self.assertEqual(client.query_count, 1)
+        self.assertEqual([item["type"] for item in results], ["artist", "track", "album"])
+        self.assertEqual(results[0]["artwork_url"], "/api/image?url=https%3A%2F%2Fimages.example%2Fpink-floyd-640.jpg")
+        self.assertEqual(suggestions[0]["type"], "query")
+        self.assertEqual(suggestions[0]["query"], "pink floyd")
 
     def test_spotify_indexer_normalizes_match_values_without_changing_ids(self):
         class MatchValueClient:

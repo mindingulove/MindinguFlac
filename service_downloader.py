@@ -29,6 +29,8 @@ def is_valid_audio_file(path: Path) -> bool:
     except Exception:
         return False
     suffix = path.suffix.lower()
+    if suffix in {".part", ".tmp"}:
+        suffix = Path(path.stem).suffix.lower()
     if suffix == ".flac":
         return header[:4] == b"fLaC" or header[:3] == b"ID3"
     if suffix in {".ogg", ".opus"}:
@@ -486,7 +488,11 @@ def _has_genre_metadata(metadata: dict) -> bool:
 
 
 def _enrich_download_metadata_for_search(payload: dict, engine: str, metadata: dict) -> dict:
-    if engine not in {"ytp-dl", "torrent"} or _has_genre_metadata(metadata):
+    if engine not in {"ytp-dl", "torrent", "monochrome"}:
+        return metadata
+    # Monochrome can search by ISRC, so run identifier enrichment even when
+    # genre tags are already present. Other engines retain the old fast path.
+    if engine != "monochrome" and _has_genre_metadata(metadata):
         return metadata
     try:
         from music_metadata import enrich_track_identifiers
@@ -870,7 +876,6 @@ class ServiceDownloadManager:
             backend_torrent._unregister_all_for_job(job_id, delete_files=True)
         except Exception:
             pass
-
         if output_dir:
             import time
             p = Path(output_dir)
@@ -1121,6 +1126,13 @@ class ServiceDownloadManager:
             from android_runtime import capabilities
 
             engine, service, quality = capabilities.clamp_choice(engine, service, quality)
+        if engine == "monochrome":
+            import backend_monochrome
+
+            # While Monochrome is refusing this client (403/429), every new
+            # request would only extend the block; stream from YouTube instead.
+            if backend_monochrome.stream_block_reason():
+                engine, service, quality = "ytp-dl", "youtube", "best"
         return engine, service, quality
 
     def _job_from_payload(self, payload: dict, mode: str = "download") -> dict:
@@ -1700,6 +1712,7 @@ class ServiceDownloadManager:
         identity = _track_identity_from_payload(payload)
         track_key = identity["track_key"]
 
+        requested_engine = str(payload.get("engine") or getattr(self.config, "download_engine", "") or "").lower()
         engine, service, _requested_quality = self._requested_engine(payload)
         metadata = _enrich_download_metadata_for_search(payload, engine, metadata)
         # Only the engine is pinned onto the payload: the clamp above may have
@@ -1767,6 +1780,12 @@ class ServiceDownloadManager:
                 job[key] = value
         with self._lock:
             self.jobs[job_id] = job
+        if requested_engine == "monochrome" and engine != "monochrome":
+            import backend_monochrome
+
+            reason = backend_monochrome.stream_block_reason()
+            if reason:
+                self._append_cache_event(job, "provider", f"{reason}; using YouTube for this track")
         threading.Thread(target=self._worker, args=(job_id, payload), daemon=True).start()
         return self._public_job(job)
 
@@ -1824,6 +1843,13 @@ class ServiceDownloadManager:
                 self._ensure_progress_thread()
                 import backend_monochrome
                 backend_monochrome.run(output_dir, job, self)
+                if job.get("direct_stream") and job.get("mode", "stream") == "stream":
+                    # Monochrome playback is a direct HTTP byte-range stream.
+                    # Do not create a local audio copy unless the user chose
+                    # the explicit Download action (mode="download").
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                    self._save_jobs()
+                    return
 
             elif engine == "ytp-dl":
                 with self._lock:
@@ -1870,6 +1896,8 @@ class ServiceDownloadManager:
                 import backend_spotiflac
                 backend_spotiflac.run(resolved_url, output_dir, job, self)
 
+            if str(job.get("id") or "") in self._cancel_flags:
+                return
             self._save_sidecar_files(output_dir, job)
             self._capture_cache_activity(job)
 
@@ -1943,6 +1971,12 @@ class ServiceDownloadManager:
                         job["library_promote_error"] = str(exc)
                     self._save_jobs()
         except Exception as exc:
+            if str(job.get("id") or "") in self._cancel_flags:
+                with self._lock:
+                    job["status"] = "error"
+                    job["error"] = "Cancelled by user"
+                self._save_jobs()
+                return
             logging.getLogger("service_downloader").exception(
                 "Download worker failed before completion: job=%s engine=%s service=%s",
                 job.get("id"),

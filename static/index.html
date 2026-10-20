@@ -116,7 +116,8 @@
               <div class="settings-control">
                 <select id="downloadEngine">
                   <option value="ytp-dl">Loosy - Youtube</option>
-                  <option value="torrent">Looseless - Torrent</option>
+                  <option value="monochrome">Monochrome (FLAC)</option>
+                  <option value="torrent">Torrent (Experimental)</option>
                   <option value="spotiflac">Experimental - Spotiflac</option>
                 </select>
               </div>
@@ -372,6 +373,11 @@
       <div id="sideCoverMedia" class="details-cover-media"></div>
       <button id="sideVideoSwitch" class="side-video-switch" type="button" hidden><i class="bi bi-play-btn"></i><span>Switch to video</span></button>
       <button id="sideVideoRefresh" class="side-video-refresh" type="button" hidden title="Refresh video"><i class="bi bi-arrow-clockwise"></i></button>
+      <div id="sideVideoSync" class="side-video-sync" hidden>
+        <button id="sideVideoEarlier" type="button" title="Picture is ahead of the sound — delay it 0.25s" aria-label="Delay video"><i class="bi bi-dash"></i></button>
+        <span id="sideVideoSyncLabel">Syncing…</span>
+        <button id="sideVideoLater" type="button" title="Picture is behind the sound — advance it 0.25s" aria-label="Advance video"><i class="bi bi-plus"></i></button>
+      </div>
     </div>
     <div id="sideRichContent" class="details-rich-content"></div>
 

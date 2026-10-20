@@ -464,6 +464,54 @@ def _album_similarity_without_track_words(album: str, candidate_title: str, trac
     return rapidfuzz.fuzz.token_set_ratio(" ".join(tokens(album)), candidate_without_track)
 
 
+def _track_filename_match_ratio(track_title: str, filename: str, parent_path: str = "", album_title: str = "") -> float:
+    """Measure the requested song against its filename, never the album folder.
+
+    Parent-folder words may help with abbreviated filenames, but words that
+    identify the album are removed first. This matters when the album and song
+    share a title: an album folder named ``Eye in the Sky`` must not make
+    ``Sirius.flac`` look like ``Eye in the Sky.flac``.
+    """
+    noise_words = {
+        "live", "edit", "version", "mono", "stereo", "mix", "remix", "single",
+        "digitally", "beginning", "part", "ost", "edition", "lossless", "feat",
+        "featuring", "bit", "bits", "khz", "hz", "kbps", "web", "rip",
+    }
+
+    def words(value: str) -> set[str]:
+        return {word for word in re.findall(r"\w+", str(value or "").lower()) if len(word) > 2}
+
+    requested = words(track_title)
+    meaningful = requested - noise_words - {"the", "and", "with"}
+    if not meaningful:
+        meaningful = requested
+    if not meaningful:
+        return 0.0
+
+    filename_words = words(Path(filename).stem)
+    ratio = len(meaningful & filename_words) / len(meaningful)
+    required = 0.65 if len(meaningful) > 2 else 0.85
+    if ratio >= required:
+        return ratio
+
+    parent_words = words(parent_path)
+    parent_words.difference_update(words(album_title))
+    combined = filename_words | parent_words
+    return len(meaningful & combined) / len(meaningful)
+
+
+def _clean_torrent_album_title(album: str) -> str:
+    """Clean edition suffixes while retaining a legitimate same-name album."""
+    if not album or album == "Unknown":
+        return ""
+    cleaned = re.sub(r"\s*[\(\[].*?[\)\]]", "", album).strip()
+    cleaned = re.sub(
+        r"\s*[-–]\s*(remaster|remastered|single|ep|deluxe|expanded|anniversary|edition|version|mono|stereo|re-?master).*$",
+        "", cleaned, flags=re.IGNORECASE,
+    ).strip()
+    return cleaned
+
+
 def _android_parity_torrent_score(item: dict, artist: str, title: str, album: str) -> float:
     """Keep desktop release-title qualification identical to Android's working scorer."""
     candidate_title = str(item.get("title") or "")
@@ -781,18 +829,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
     def clean_term(text):
         if not text or text == "Unknown": return ""
         return re.sub(r'\s*[\(\[].*?[\)\]]', '', text).strip()
-    album_clean = clean_term(album)
-    # Strip remaster/edition/single suffixes that aren't part of the real album
-    # name (e.g. "Empire - Remastered 2003", "... - Single", "... - Deluxe").
-    album_clean = re.sub(
-        r'\s*[-–]\s*(remaster|remastered|single|ep|deluxe|expanded|anniversary|edition|version|mono|stereo|re-?master).*$',
-        '', album_clean, flags=re.IGNORECASE,
-    ).strip()
-    # When the "album" is really just the track title (a single release), Spotify
-    # gave us no real album. Drop it so the MusicBrainz hierarchy below resolves
-    # the track's actual album (e.g. "Silent Lucidity" -> "Empire").
-    if album_clean and title_clean and album_clean.lower() == title_clean.lower():
-        album_clean = ""
+    album_clean = _clean_torrent_album_title(album)
+    # Keep an explicitly supplied album even when its title equals the song.
+    # It is valid for a title track (for example, Eye in the Sky) and the album
+    # context is needed to search the release before matching that exact file.
     allowed_adult_terms = _adult_terms_in_text(
         f"{raw_title} {title_clean} {album} {album_clean}",
         adult_filter_terms,
@@ -961,28 +1001,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         if not artist_found:
                             # Strict penalty for missing artist in path if torrent title is unverified
                             continue
-                    # Significant word check: 
-                    # For short titles (1-2 words), we want a high match to avoid "Kill the King" vs "Temple of the King".
-                    # For longer titles, we allow some flexibility (65%).
-                    # We check the filename stem specifically to avoid "Sirius" matching "Eye in the Sky"
-                    # just because it's inside a folder named "Eye in the Sky".
-                    filename_tokens = set(re.findall(r'\w+', f_path.stem.lower()))
-                    match_count = sum(1 for t in meaningful_tokens if t in filename_tokens)
-                    match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
-                    
+                    # Song identity is determined from the filename. Parent
+                    # folders are only a fallback, with album-title tokens
+                    # removed so an album/title collision cannot mask a wrong
+                    # track in that album folder.
+                    match_ratio = _track_filename_match_ratio(
+                        title_for_tokens, f_path.name, str(f_path.parent), album_clean,
+                    )
                     required_ratio = 0.50 if is_classical_search and len(meaningful_tokens) > 2 else (0.65 if len(meaningful_tokens) > 2 else 0.85)
                     if match_ratio < required_ratio:
-                        # A short filename may inherit track words from its
-                        # parent, but album-folder words cannot satisfy the
-                        # requested track title on their own.
-                        parent_tokens = set(re.findall(r'\w+', f_path.parent.name.lower())) if f_path.parent.name else set()
-                        album_folder_tokens = set(re.findall(r'\w+', clean_term(album_clean).lower()))
-                        parent_tokens.difference_update(album_folder_tokens)
-                        combined_tokens = filename_tokens.union(parent_tokens)
-                        match_count = sum(1 for t in meaningful_tokens if t in combined_tokens)
-                        match_ratio = match_count / len(meaningful_tokens) if meaningful_tokens else 1.0
-                        if match_ratio < required_ratio:
-                            continue
+                        continue
 
                     if title_score < 58: # Balanced for better inclusivity
                         continue
@@ -1275,10 +1303,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         queries.append(album_terms)
                         return list(dict.fromkeys(queries))
                 # Lead with "<artist> <album>" so a short/generic artist name
-                # (e.g. "Skank") doesn't pull unrelated junk; keep the bare
-                # album as a fallback for releases credited to another artist.
+                # (e.g. "Skank") doesn't pull unrelated junk. If metadata is
+                # missing, retain a bare album fallback.
                 queries = [f"{art} {album_name}".strip() for art in artist_variations if art]
-                queries.append(album_name)
+                if not artist_variations:
+                    queries.append(album_name)
                 return list(dict.fromkeys(queries))
 
             def candidate_inventory_queries() -> list[str]:
@@ -1308,7 +1337,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     queries.append(terms)
                     return list(dict.fromkeys(queries))
                 queries = [f"{art_var} {title_clean}".strip() for art_var in artist_variations if art_var]
-                queries.append(title_clean)
+                if not artist_variations:
+                    queries.append(title_clean)
                 return list(dict.fromkeys(queries))
 
             def candidate_first_pass_queries() -> list[dict]:
@@ -1334,22 +1364,22 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         for query in candidate_inventory_queries():
                             add(query, album_clean or "complete")
                 elif album_clean:
-                    # Keep the first pass focused. Every selected tracker runs
-                    # for each query, and 1337x itself searches the album/query
-                    # variants and resolves detail pages. Sending the full
-                    # track + album + six-query artist inventory here caused
-                    # the same provider work to be multiplied across ten
-                    # simultaneous queries; Android's three-query pass found
-                    # healthy album swarms that desktop then missed to timeouts.
+                    # Fan out the key artist/title/album combinations to every
+                    # selected provider. run_search_phase fuzzy-filters and
+                    # ranks each provider's rows, then merges/deduplicates all
+                    # query results into one swarm-ranked candidate list.
                     for artist in artist_variations:
+                        add(f"{artist} {album_clean} {title_clean} FLAC", album_clean)
                         add(f"{artist} {album_clean} FLAC", album_clean)
-                        add(f"{artist} {raw_title} FLAC", "")
+                        add(f"{artist} {title_clean} FLAC", "")
+                        add(f"{album_clean} {title_clean} FLAC", album_clean)
                         add(f"{artist} {album_clean} lossless", album_clean)
                 else:
                     for artist in artist_variations:
-                        add(f"{artist} {raw_title} FLAC", "")
-                        add(f"{raw_title} FLAC", "")
-                        add(f"{artist} {raw_title} lossless", "")
+                        add(f"{artist} {title_clean} FLAC", "")
+                        add(f"{artist} {title_clean} lossless", "")
+                    if not artist_variations:
+                        add(f"{title_clean} FLAC", "")
                 return queries
 
             def stream_to_completion(handle, magnet, save_path: Path | None = None, is_artist_verified: bool = True) -> bool | None:

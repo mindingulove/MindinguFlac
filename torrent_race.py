@@ -45,7 +45,10 @@ def _coverage(wanted: set[str], actual: set[str]) -> float:
     return len(wanted & actual) / len(wanted) if wanted else 0.0
 
 
-def _score(item: dict, artist: str, title: str, album: str) -> float:
+def _score(
+    item: dict, artist: str, title: str, album: str, album_year: str = "",
+    quality: str = "LOSSLESS",
+) -> float:
     from rapidfuzz import fuzz
 
     candidate_title = str(item.get("title") or "")
@@ -62,9 +65,63 @@ def _score(item: dict, artist: str, title: str, album: str) -> float:
     if artist_cov < 0.45 or max(title_cov, album_cov) < 0.35:
         return -1.0
     fuzzy = fuzz.token_set_ratio(f"{artist} {album}", candidate_title) / 100.0
-    lossless = 90 if any(word in lowered for word in ("flac", "lossless", "24bit", "24-bit")) else 0
+    # A year is especially useful for one-word album titles (e.g. "Bad") and
+    # is taken from the release metadata, not from a remaster suffix in title.
+    year_bonus = 24 if album_year and album_year in actual else 0
+    wants_mp3 = str(quality or "LOSSLESS").upper() in {"MP3", "LOSSY"}
+    format_bonus = (
+        90 if "mp3" in lowered else 0
+    ) if wants_mp3 else (
+        90 if any(word in lowered for word in ("flac", "lossless", "24bit", "24-bit")) else 0
+    )
     seeders = min(80, max(0, int(item.get("seeders") or 0)))
-    return (artist_cov * 110) + (title_cov * 80) + (album_cov * 90) + (fuzzy * 50) + lossless + seeders
+    return (artist_cov * 110) + (title_cov * 80) + (album_cov * 90) + (fuzzy * 50) + year_bonus + format_bonus + seeders
+
+
+def _album_search_year(job: dict, metadata: dict | None = None) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    for value in (
+        metadata.get("album_year"), metadata.get("release_year"),
+        metadata.get("year"), metadata.get("release_date"), metadata.get("date"),
+        job.get("album_year"), job.get("year"),
+    ):
+        match = re.search(r"\b(19\d{2}|20\d{2})\b", str(value or ""))
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _first_pass_queries(job: dict) -> list[str]:
+    artist = str(job.get("artist") or "").strip()
+    title = str(job.get("title") or "").strip()
+    album = str(job.get("album") or "").strip()
+    metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    quality = str(job.get("quality") or "LOSSLESS").upper()
+    format_term = "MP3" if quality in {"MP3", "LOSSY"} else "FLAC"
+    # Search the useful combinations up front. Every query fans out to every
+    # selected tracker, and results are deduplicated/ranked together below.
+    # Keep this list bounded so an "all trackers" pass remains practical.
+    queries = [
+        f"{artist} {album} {title} {format_term}",
+        f"{artist} {album} {format_term}",
+        f"{artist} {title} {format_term}",
+        f"{album} {title} {format_term}",
+        f"{artist} {album} {('lossy' if format_term == 'MP3' else 'lossless')}",
+    ]
+    album_tokens = _tokens(album)
+    year = _album_search_year(job, metadata)
+    if len(album_tokens) == 1 and year:
+        queries.append(f"{artist} {album} {year} {format_term}")
+    cleaned = []
+    for query in queries:
+        query = re.sub(r"\s+", " ", query).strip()
+        if query and query not in cleaned:
+            cleaned.append(query)
+    return cleaned
+
+
+def _require_lossless(job: dict) -> bool:
+    return str(job.get("quality") or "LOSSLESS").upper() not in {"MP3", "LOSSY"}
 
 
 def _search(
@@ -115,7 +172,7 @@ def _search(
                 for row in future.result() or []:
                     if int(row.get("seeders") or 0) <= 0:
                         continue
-                    relevance = _score(row, artist, title, album) if artist and title else 0
+                    relevance = _score(row, artist, title, album, _album_search_year({}, metadata)) if artist and title else 0
                     if artist and title and relevance < 0:
                         continue
                     candidate = dict(row)
@@ -143,16 +200,10 @@ def _ordered_candidates(job: dict, manager) -> list[dict]:
     title = str(job.get("title") or "")
     album = str(job.get("album") or "")
     service = str(job.get("service") or "all").lower()
+    quality_label = "FLAC" if _require_lossless(job) else "MP3"
     metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
-    queries = []
-    for query in (
-        f"{artist} {album} FLAC",
-        f"{artist} {title} FLAC",
-        f"{artist} {album} lossless",
-    ):
-        query = re.sub(r"\s+", " ", query).strip()
-        if query and query not in queries:
-            queries.append(query)
+    album_year = _album_search_year(job, metadata)
+    queries = _first_pass_queries(job)
 
     if service == "all":
         manager._append_cache_event(
@@ -161,7 +212,7 @@ def _ordered_candidates(job: dict, manager) -> list[dict]:
             "1337x, KickassTorrents, YTS, SolidTorrents, Knaben, and APIBay in parallel",
         )
     else:
-        manager._append_cache_event(job, "searching", "Searching lossless torrent sources")
+        manager._append_cache_event(job, "searching", f"Searching {quality_label} torrent sources")
     results: list[dict] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as pool:
         futures = [pool.submit(_search, query, service, metadata, artist, title, album) for query in queries]
@@ -178,7 +229,7 @@ def _ordered_candidates(job: dict, manager) -> list[dict]:
             continue
         if int(item.get("seeders") or 0) <= 0:
             continue
-        score = _score(item, artist, title, album)
+        score = _score(item, artist, title, album, album_year, job.get("quality") or "LOSSLESS")
         if score < 0:
             continue
         candidate = dict(item)
@@ -231,9 +282,9 @@ def _ordered_candidates(job: dict, manager) -> list[dict]:
                 if candidate_id in rows_by_id
             }
             if ranked_ids:
-                manager._append_cache_event(job, "trying", "AI advisor ranked FLAC candidates; swarm health controls launch order")
+                manager._append_cache_event(job, "trying", f"AI advisor ranked {('MP3' if str(job.get('quality') or '').upper() == 'MP3' else 'FLAC')} candidates; swarm health controls launch order")
         except Exception as exc:
-            manager._append_cache_event(job, "trying", f"Using deterministic FLAC ranking ({exc})")
+            manager._append_cache_event(job, "trying", f"Using deterministic torrent ranking ({exc})")
     def swarm_order(item: dict) -> tuple[int, float, int, int, float]:
         try:
             seeds = int(item.get("seeders") or 0)
@@ -358,7 +409,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
         return candidate_index, ordered[candidate_index - 1]
     metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
     track_number = str(metadata.get("track_number") or job.get("track_number") or "")
-    last_error = "No usable FLAC torrent source"
+    quality_label = "FLAC" if _require_lossless(job) else "MP3"
+    last_error = f"No usable {quality_label} torrent source"
 
     def slots():
         if known_pending:
@@ -466,7 +518,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
         search_collected = True
         if not ordered:
             executor.shutdown(wait=False)
-            finish_with_youtube_or_raise("No matching FLAC torrent sources were found")
+            finish_with_youtube_or_raise(f"No matching {quality_label} torrent sources were found")
             return
 
     def start(item):
@@ -488,7 +540,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
             "trying",
             (f"Trying {candidate.get('source')} magnet first (swarm count not refreshed): "
              if str(candidate.get("source") or "").startswith("saved ") else
-             f"Parallel FLAC candidate {index} ({candidate.get('source') or 'unknown'}, "
+             f"Parallel {quality_label} candidate {index} ({candidate.get('source') or 'unknown'}, "
              f"{candidate.get('seeders') or 0} seeds/{candidate.get('leechers') or candidate.get('peers') or 0} peers): ") +
             f"{str(candidate.get('title') or '')[:70]}",
         )
@@ -499,7 +551,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 engine.startDownload, native_id, str(candidate.get("magnet") or ""),
                 str(save_path),
                 str(job.get("artist") or ""), str(job.get("title") or ""),
-                str(job.get("album") or ""), track_number, True,
+                str(job.get("album") or ""), track_number, _require_lossless(job),
                 metadata_timeout,
             ),
         }
@@ -530,7 +582,6 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 job.setdefault("torrent_first_byte_at", time.monotonic())
         if ready > state["ready"]:
             state["ready"] = ready
-            state["last_progress"] = time.monotonic()
         state["status"] = status
         return status
 
@@ -555,6 +606,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
             state["save_path"] = Path(started.get("save_path") or state["save_path"])
             state["size"] = int(started.get("size") or 0)
             state["ready"] = 0
+            state["last_contiguous"] = 0
             state["last_progress"] = state["probe_started"] = time.monotonic()
         status = read_status(state)
         if status is None:
@@ -567,9 +619,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
             return max(1, ready)
         age = time.monotonic() - state["probe_started"]
         prefix = int(status.get("contiguous", ready))
+        # Only progress in the contiguous prefix makes the selected track
+        # streamable. Later pieces can keep `ready` increasing while playback
+        # remains pinned at the beginning of the file; do not let those pieces
+        # keep a dead/slow saved-album source in its exclusive slot forever.
+        if prefix > int(state.get("last_contiguous") or 0):
+            state["last_contiguous"] = prefix
+            state["last_progress"] = time.monotonic()
         stall_limit = 90 if prefix >= 2 * 1024 * 1024 else max(60, metadata_timeout)
         if time.monotonic() - state["last_progress"] >= stall_limit:
-            last_error = f"FLAC candidate has no track byte progress for {stall_limit} seconds"
+            last_error = f"{quality_label} candidate has no track byte progress for {stall_limit} seconds"
             manager._append_cache_event(job, "trying", f"{last_error}; replacing this slot and keeping partial data...")
             invalidate_known_album_source(state["candidate"], last_error)
             return False
@@ -628,10 +687,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         job["active_audio_size"] = total
                     job["estimated_total_bytes"] = total
                     job["progress"] = min(99.0, ready / total * 100.0 if total else 0.0)
-                    job["last_status"] = f"FLAC {job['progress']:.1f}% · {int(status.get('peers') or 0)} peers · {len(active)} parallel candidates"
+                    job["last_status"] = f"{quality_label} {job['progress']:.1f}% · {int(status.get('peers') or 0)} peers · {len(active)} parallel candidates"
                 if status.get("finished") and total > 0 and ready >= total:
                     if not selected["path"].is_file():
-                        raise RuntimeError("jlibtorrent finished but the selected FLAC file is missing")
+                        raise RuntimeError(f"jlibtorrent finished but the selected {quality_label} file is missing")
                     final_path = output_dir / selected["path"].name
                     if final_path.resolve() != selected["path"].resolve():
                         shutil.copy2(selected["path"], final_path)

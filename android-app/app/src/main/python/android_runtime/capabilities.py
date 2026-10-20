@@ -57,7 +57,6 @@ PACKAGED_RUNTIMES: dict[str, tuple[str | None, str]] = {
 
 #: Engines the desktop app offers that the phone deliberately does not ship.
 _DESKTOP_ONLY_ENGINES = {
-    "monochrome": "The Monochrome engine needs a desktop browser runtime that is not in the APK.",
     "qobuz-dlp": "backend_qobuz_dlp is not packaged in the Android build.",
 }
 
@@ -206,11 +205,11 @@ def engine_availability() -> dict:
             parts.append(str(native.get("error") or "jlibtorrent unavailable"))
         torrent_reason = "; ".join(parts)
     engines["torrent"] = {
-        "label": "FLAC / BitTorrent (jlibtorrent)",
+        "label": "Torrent (Experimental)",
         "available": torrent_ok,
         "reason": torrent_reason,
         "services": ["all", "torlock", "torrentdownloads", "limetorrents", "1337x", "kickass"],
-        "qualities": ["LOSSLESS"],
+        "qualities": ["LOSSLESS", "MP3"],
         "lossless": True,
         "native": native,
     }
@@ -224,6 +223,18 @@ def engine_availability() -> dict:
         "qualities": ["LOSSLESS"],
         "lossless": True,
         "provider": provider,
+    }
+
+    mono_requests, mono_requests_detail = _probe_import("requests")
+    mono_mutagen, mono_mutagen_detail = _probe_import("mutagen")
+    mono_ok = mono_requests and mono_mutagen
+    engines["monochrome"] = {
+        "label": "Monochrome (FLAC)",
+        "available": mono_ok,
+        "reason": "" if mono_ok else f"requests: {mono_requests_detail}; mutagen: {mono_mutagen_detail}",
+        "services": ["monochrome"],
+        "qualities": ["LOSSLESS"],
+        "lossless": True,
     }
 
     for name, reason in _DESKTOP_ONLY_ENGINES.items():
@@ -247,7 +258,7 @@ def available_engines() -> list[str]:
 def default_engine() -> str:
     """The engine a fresh phone install should start on."""
     engines = available_engines()
-    for preferred in ("ytp-dl", "torrent", "spotiflac"):
+    for preferred in ("monochrome", "ytp-dl", "torrent", "spotiflac"):
         if preferred in engines:
             return preferred
     return "ytp-dl"

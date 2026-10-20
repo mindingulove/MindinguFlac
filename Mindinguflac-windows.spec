@@ -21,6 +21,8 @@ hiddenimports = [
     'backend_spotiflac',
     'backend_tidal_hifi',
     'backend_monochrome',
+    'video_sync',
+    'video_sources',
     'backend_video',
     'vcredist',
     'backend_ytpdl',

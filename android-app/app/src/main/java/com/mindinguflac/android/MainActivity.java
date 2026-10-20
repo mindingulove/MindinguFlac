@@ -58,6 +58,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        NativeAudioPlayer.initialize(getApplicationContext());
         // Route the hardware volume keys at the media stream, so they adjust
         // playback even before the first track starts. The page itself always
         // plays at unity gain on Android; the system owns volume.
@@ -592,6 +593,17 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             runOnUiThread(() -> {
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Exception ignored) {
+                }
+            });
+        }
+
+        /** "Pair new device" in the output menu: Android owns Bluetooth pairing. */
+        @JavascriptInterface
+        public void openBluetoothSettings() {
+            runOnUiThread(() -> {
+                try {
+                    startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
                 } catch (Exception ignored) {
                 }
             });

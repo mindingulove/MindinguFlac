@@ -382,16 +382,22 @@ public final class AndroidTorrentEngine {
             if (!AUDIO_EXTENSIONS.contains(extension)) continue;
             if (requireLossless && !LOSSLESS_EXTENSIONS.contains(extension)) continue;
 
-            Set<String> candidate = tokens(path);
+            // Match the requested track against the audio filename only. The
+            // torrent's parent folders commonly contain album/artist words;
+            // allowing those words to satisfy track matching can select e.g.
+            // Sirius.flac from an "Eye In The Sky" album folder.
+            String fileName = new File(path).getName();
+            Set<String> candidate = tokens(fileName);
             double titleCoverage = coverage(wantedTitle, candidate);
-            double artistCoverage = coverage(wantedArtist, candidate);
-            double albumCoverage = coverage(wantedAlbum, candidate);
+            Set<String> pathTokens = tokens(path);
+            double artistCoverage = coverage(wantedArtist, pathTokens);
+            double albumCoverage = coverage(wantedAlbum, pathTokens);
             double score = (titleCoverage * 120.0) + (artistCoverage * 35.0)
                     + (albumCoverage * 28.0);
             if (".flac".equals(extension)) score += 28.0;
             else if (LOSSLESS_EXTENSIONS.contains(extension)) score += 12.0;
 
-            String fileName = new File(path).getName().toLowerCase(Locale.ROOT);
+            fileName = fileName.toLowerCase(Locale.ROOT);
             if (!paddedTrack.isEmpty()
                     && (fileName.startsWith(paddedTrack + " ")
                     || fileName.startsWith(paddedTrack + ".")

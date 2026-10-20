@@ -120,6 +120,35 @@ class TestBackendTorrentHelpers(unittest.TestCase):
         )
         self.assertLess(score, 85)
 
+    def test_same_name_album_and_title_require_the_track_in_the_filename(self):
+        album = backend_torrent._clean_torrent_album_title("Eye In The Sky (Expanded Edition)")
+        self.assertEqual(album, "Eye In The Sky")
+        self.assertEqual(
+            backend_torrent._track_filename_match_ratio(
+                "Eye In The Sky", "01. Eye In The Sky.flac",
+                "The Alan Parsons Project/Eye In The Sky", album,
+            ),
+            1.0,
+        )
+
+    def test_album_folder_cannot_make_sirius_match_eye_in_the_sky(self):
+        self.assertLess(
+            backend_torrent._track_filename_match_ratio(
+                "Eye In The Sky", "01. Sirius (Instrumental).flac",
+                "The Alan Parsons Project/Eye In The Sky", "Eye In The Sky",
+            ),
+            0.85,
+        )
+
+    def test_same_name_album_still_allows_other_tracks_from_that_release(self):
+        self.assertEqual(
+            backend_torrent._track_filename_match_ratio(
+                "Sirius", "01. Sirius.flac",
+                "The Alan Parsons Project/Eye In The Sky", "Eye In The Sky",
+            ),
+            1.0,
+        )
+
     def test_registration_disables_unrequested_album_files_from_the_start(self):
         if backend_torrent.lt is None:
             self.skipTest("desktop torrent registration now uses the shared jlibtorrent JNI engine")
@@ -435,7 +464,6 @@ class TestTorrentSettings(unittest.TestCase):
             self.assertEqual(actual.torrent_prefetch_candidates, 1)
         old = AppConfig.from_public_dict({})
         self.assertEqual((old.torrent_playback_candidates, old.torrent_prefetch_candidates), (3, 2))
-
     def test_invalid_counts_cannot_overload_or_disable_racing(self):
         from config import AppConfig
         for value, expected in [(0, 1), (99, 8), (None, 3), ("bad", 3)]:

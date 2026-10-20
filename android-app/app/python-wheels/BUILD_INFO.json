@@ -46,6 +46,11 @@
     "charset_normalizer-3.5.2-py3-none-any.whl": "b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685",
     "packaging-26.2-py3-none-any.whl": "40dbb2ada16cb327933e5993df5d9039c0f80f26c5c729200d854075cc1d80bf",
     "typing_extensions-4.16.0-py3-none-any.whl": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
-    "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
-  }
+    "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+    "numpy-1.26.2-0-cp312-cp312-android_21_arm64_v8a.whl": "d144088be25177f118c4a91ee88c7b4c37e38209f7c05c9b496b21480d95cc75",
+    "chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl": "811547210b01eefb0fb850fd35bd27b53a00a76b9466b8c03e049b7e8175004b",
+    "chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl": "1e8e67a4f9e2fcde384890678bafbf7ffefe7b2cb4887e5c2996ba7607f4324c",
+    "chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl": "0b4caed1147f2a19707d4ba730afea57f7b8f2d8c046d8a48cf49377741c4604"
+  },
+  "numpy_source": "Chaquopy package index https://chaquo.com/pypi-13.1/ (numpy 1.26.2 + chaquopy-libcxx/openblas/libgfortran); used by video_sync.py soundtrack matching"
 }

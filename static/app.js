@@ -37,6 +37,9 @@ const state = {
   manualPauseRequested: false,
   currentPlayableReady: false,
   playerStatus: "Choose a track to stream",
+  playerStatusIconMode: "ready",
+  playerStatusIconPct: 0,
+  renderedPlayerStatusIcon: "",
   activeJobPhase: "",
   playbackRequestId: 0,
   listeningSession: null,
@@ -49,6 +52,9 @@ const state = {
   pendingResumePosition: 0,
   restoredPlaybackPending: false,
   nativeAudio: { active: false, playing: false, position: 0, duration: 0, path: "", ended: false },
+  nativeAudioStart: null,
+  nativeAudioStarting: false,
+  nativeAudioPauseAfterStart: false,
   nativeAudioPollTimer: null,
   prefetchedForRequestId: -1,
   preMuteVolume: 1,
@@ -78,6 +84,16 @@ const state = {
   statsPeriod: "month",
   playlistContinuationLoads: new Set(),
   videoMode: false,
+  videoSync: { key: "", status: "", offset: 0, manual: 0, attempts: 0, timer: null },
+  audioBuffering: false,
+  audioHasPlayed: false,
+  directStreamReconnectPending: false,
+  directStreamReconnectTimer: null,
+  directStreamReconnectAttempts: 0,
+  directStreamAttemptPosition: 0,
+  directStreamResumePending: false,
+  directStreamPosition: 0,
+  directStreamNativeFallbackAttempted: false,
   sideVideoTrackKey: "",
   videoFetch: {
     trackKey: "",
@@ -161,6 +177,9 @@ const ENGINE_PROVIDERS = {
     { value: "soundcloud",  label: "SoundCloud" },
     { value: "youtube",     label: "YouTube" },
   ],
+  monochrome: [
+    { value: "monochrome", label: "Monochrome (FLAC)" },
+  ],
 };
 
 const ENGINE_QUALITIES = {
@@ -172,6 +191,9 @@ const ENGINE_QUALITIES = {
   torrent: [
     { value: "LOSSLESS", label: "FLAC / Lossless" },
     { value: "MP3",      label: "MP3 / Lossy" },
+  ],
+  monochrome: [
+    { value: "LOSSLESS", label: "FLAC / Lossless" },
   ],
   spotiflac: null,
 };
@@ -206,8 +228,12 @@ function runtimeEngine(engine) {
 // report, so an engine whose runtime is missing from the APK is never offered.
 function androidEngineOptions() {
   const engines = (state.runtime && state.runtime.engines) || {};
-  const order = ["torrent", "ytp-dl", "spotiflac"];
-  const labels = { "torrent": "FLAC / BitTorrent (libtorrent)", "ytp-dl": "YouTube audio" };
+  const order = ["monochrome", "torrent", "ytp-dl", "spotiflac"];
+  const labels = {
+    "torrent": "Torrent (Experimental)",
+    "monochrome": "Monochrome (FLAC)",
+    "ytp-dl": "YouTube audio",
+  };
   return order
     .filter(name => engines[name] && engines[name].available)
     .map(name => ({ value: name, label: labels[name] || engines[name].label || name }));
@@ -220,7 +246,7 @@ function renderAndroidEngineNotes() {
   const list = $("androidEngineNotes");
   if (!row || !list) return;
   const engines = (state.runtime && state.runtime.engines) || {};
-  const notes = ["torrent", "ytp-dl", "spotiflac"]
+  const notes = ["monochrome", "torrent", "ytp-dl", "spotiflac"]
     .filter(name => engines[name] && !engines[name].available)
     .map(name => {
       const entry = engines[name];
@@ -340,12 +366,14 @@ function persistPlaybackSnapshot(force = false) {
   const position = state.nativeAudio.active
     ? Number(state.nativeAudio.position || 0)
     : Number(audio?.currentTime || state.pendingResumePosition || 0);
+  const spotifyDuration = knownTrackDurationSeconds(state.currentTrack);
+  const directMonochrome = isMonochromeDirectStreamUrl(state.currentStreamUrl);
   const duration = state.nativeAudio.active
     ? Number(state.nativeAudio.duration || 0)
-    : Number(audio?.duration || Number(state.currentTrack.duration_ms || 0) / 1000 || 0);
+    : Number((directMonochrome ? spotifyDuration || audio?.duration : audio?.duration || spotifyDuration) || 0);
   const paused = state.nativeAudio.active
     ? (state.manualPauseRequested || !state.nativeAudio.playing)
-    : !audio || audio.paused;
+    : !audio || audio.paused || state.audioBuffering;
   try {
     const snapshot = {
       track: state.currentTrack,
@@ -910,7 +938,7 @@ function bindMobileLibraryItems() {
   document.querySelectorAll("[data-mobile-playlist-id]").forEach(button => {
     button.onclick = () => {
       const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
-      if (playlist) pushPage(() => renderPlaylistPage(playlist));
+      if (playlist) openLibraryPlaylist(playlist);
     };
     bindLibraryHold(button, event => {
       const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
@@ -925,6 +953,35 @@ function bindMobileLibraryItems() {
     button.onclick = () => pushPage(() => renderAlbumPage(JSON.parse(button.dataset.mobileAlbum || "{}")));
     bindLibraryHold(button, event => showAlbumContextMenu(event, JSON.parse(button.dataset.mobileAlbum || "{}")));
   });
+}
+
+// Album saves are library shortcuts to the canonical album page. Keep custom
+// playlists on their existing playlist page and playback context.
+function openLibraryPlaylist(playlist) {
+  if (inferPlaylistOrigin(playlist) !== "album") {
+    pushPage(() => renderPlaylistPage(playlist));
+    return;
+  }
+  const seed = (playlist.tracks || []).find(track => track && (track.album || track.artist)) || {};
+  const target = albumTarget({
+    ...seed,
+    album: seed.album || playlist.name || "",
+    artist: seed.album_artist || seed.artist || playlist.owner || "",
+    artwork_url: playlist.artwork_url || seed.album_artwork_url || seed.artwork_url || "",
+    year: seed.year || playlist.year || "",
+  });
+  state.activePlaylistId = playlist.id;
+  document.querySelectorAll(".sidebar-playlist-item").forEach(item => {
+    item.classList.toggle("active", item.dataset.playlistId === playlist.id);
+  });
+  target.saved_playlist_context = {
+    kind: "playlist",
+    id: playlist.id,
+    name: playlist.name,
+    origin: "album",
+    allow_playlist_continuation: false,
+  };
+  pushPage(() => renderAlbumPage(target));
 }
 
 // Repaint Your Library in place when the playlist set changes. The phone never
@@ -1061,14 +1118,17 @@ function bindMobileNavigation() {
   });
 }
 
-function setActiveView(id) {
+function setActiveView(id, preservePlaylistId = "") {
   if (id !== "settings") { stopCacheLogPolling(); stopAndroidAdvisorPolling(); }
   if (window.artistEvtSource) {
     window.artistEvtSource.close();
     window.artistEvtSource = null;
   }
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  document.querySelectorAll(".sidebar-playlist-item").forEach(el => el.classList.remove("active"));
+  state.activePlaylistId = preservePlaylistId || null;
+  document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
+    el.classList.toggle("active", !!preservePlaylistId && el.dataset.playlistId === preservePlaylistId);
+  });
   const view = $(id);
   if (view) view.classList.add("active");
 }
@@ -2673,7 +2733,10 @@ async function renderArtistPage(artist) {
 }
 
 async function renderAlbumPage(album) {
-  setActiveView("home");
+  const savedPlaylistId = album?.saved_playlist_context?.kind === "playlist"
+    ? album.saved_playlist_context.id
+    : "";
+  setActiveView("home", savedPlaylistId);
   const content = $("pageContent");
   content.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading ${esc(album.title || album.album)}…</span></div>`;
 
@@ -2875,7 +2938,7 @@ async function renderAlbumPage(album) {
     };
     $("albumImageModalPrevious").onclick = () => showGalleryImage(galleryIndex - 1);
     $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
-    renderTrackList("albumTrackList", data.tracks || [], "album");
+    renderTrackList("albumTrackList", data.tracks || [], "album", album.saved_playlist_context || null);
     const trackList = $("albumTrackList");
     if (data._extras_complete === false) {
       // Artwork scans and secondary metadata must never delay playable tracks.
@@ -2947,6 +3010,15 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   
   const requestId = ++state.playbackRequestId;
   state.rebuffering = false;
+  state.audioBuffering = false;
+  state.audioHasPlayed = false;
+  state.directStreamPosition = 0;
+  state.directStreamReconnectPending = false;
+  state.directStreamReconnectAttempts = 0;
+  state.directStreamResumePending = false;
+  state.directStreamNativeFallbackAttempted = false;
+  if (state.directStreamReconnectTimer) clearTimeout(state.directStreamReconnectTimer);
+  state.directStreamReconnectTimer = null;
   state.rebufferPosition = 0;
   state.rebufferAfterBytes = 0;
   state.lastActiveReadyBytes = 0;
@@ -3042,6 +3114,38 @@ function isActiveJobStreamUrl(url) {
   return !!url && url.includes("/api/library/stream_active_job");
 }
 
+function isMonochromeDirectStreamUrl(url) {
+  return typeof url === "string" && /^https:\/\/tracks\.monochrome\.st\/track\/\d+/.test(url);
+}
+
+function knownTrackDurationSeconds(track = state.currentTrack) {
+  const candidates = [
+    track?.duration_ms,
+    track?.metadata?.duration_ms,
+    track?.duration?.totalMilliseconds,
+    track?.metadata?.duration?.totalMilliseconds,
+    track?.duration,
+    track?.metadata?.duration,
+    track?.length,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value > 1000 ? value / 1000 : value;
+    }
+    if (typeof value === "string") {
+      const clock = value.trim().match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
+      if (clock) {
+        return clock[3]
+          ? Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3])
+          : Number(clock[1]) * 60 + Number(clock[2]);
+      }
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) return numeric > 1000 ? numeric / 1000 : numeric;
+    }
+  }
+  return 0;
+}
+
 function isLibraryStreamUrl(url) {
   if (!url || isActiveJobStreamUrl(url)) return false;
   try {
@@ -3083,18 +3187,42 @@ function seekAfterMetadata(audio, position) {
   const target = Number(position);
   if (!Number.isFinite(target) || target <= 0) return;
 
+  // A media element may ignore currentTime assignments until metadata or a
+  // seekable range exists. Keep retrying after load instead of removing the
+  // listeners after an early, silently ignored assignment.
+  if (audio._resumeSeekHandler) {
+    for (const eventName of ["loadedmetadata", "durationchange", "progress", "canplay", "seeked"]) {
+      audio.removeEventListener(eventName, audio._resumeSeekHandler);
+    }
+  }
   const apply = () => {
+    if (audio.readyState < 1 && !audio.seekable?.length) return;
     const duration = Number(audio.duration);
-    if (!Number.isFinite(duration) || duration <= 0) return;
+    const seekTarget = Number.isFinite(duration) && duration > 0
+      ? Math.max(0, Math.min(target, Math.max(0, duration - 0.25)))
+      : target;
     try {
-      audio.currentTime = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
-    } catch (e) {}
-    audio.removeEventListener("loadedmetadata", apply);
-    audio.removeEventListener("canplay", apply);
+      if (Math.abs(Number(audio.currentTime || 0) - seekTarget) < 0.5) {
+        cleanup();
+        return;
+      }
+      audio.currentTime = seekTarget;
+      if (audio.seeking || Math.abs(Number(audio.currentTime || 0) - seekTarget) < 0.5) cleanup();
+    } catch (e) {
+      // Some WebKit builds only enable seeking after the next range arrives.
+      // Keep the listeners so a later progress/canplay event gets another try.
+    }
   };
-
-  audio.addEventListener("loadedmetadata", apply);
-  audio.addEventListener("canplay", apply);
+  const cleanup = () => {
+    for (const eventName of ["loadedmetadata", "durationchange", "progress", "canplay", "seeked"]) {
+      audio.removeEventListener(eventName, apply);
+    }
+    audio._resumeSeekHandler = null;
+  };
+  audio._resumeSeekHandler = apply;
+  for (const eventName of ["loadedmetadata", "durationchange", "progress", "canplay", "seeked"]) {
+    audio.addEventListener(eventName, apply);
+  }
   apply();
 }
 
@@ -3161,6 +3289,36 @@ async function resumeBrowserAudioFromStableSource(audio) {
   if (!audio) return;
   console.log("[Player] resumeBrowserAudioFromStableSource, current src:", audio.src);
   state.manualPauseRequested = false;
+  if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+    // WebKit closes the active network response on pause. Reopen the provider
+    // URL with a fresh range request at the saved playhead when Play is pressed.
+    const resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+      ? audio.currentTime : Number(state.directStreamPosition || state.rebufferPosition || 0);
+    state.directStreamAttemptPosition = resumeAt;
+    const url = new URL(state.currentStreamUrl);
+    url.searchParams.set("t", Date.now());
+    state.currentStreamUrl = url.toString();
+    state.autoplayWanted = true;
+    state.rebuffering = false;
+    state.audioBuffering = true;
+    state.directStreamResumePending = true;
+    syncPlayPauseButton();
+    audio.src = state.currentStreamUrl;
+    audio.load();
+    seekAfterMetadata(audio, resumeAt);
+    tryStartAudio(audio, state.currentTrack, state.playbackRequestId, null);
+    return;
+  }
+  if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
+    // Pausing closes WebKit's current ranged HTTP response. Reopen the active
+    // job stream at the saved playhead so resume continues from that byte range
+    // instead of reusing a dead response (or restarting the track).
+    const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    state.rebuffering = false;
+    state.rebufferAfterBytes = 0;
+    await reconnectActiveJobStream(audio, state.playbackRequestId, state.activeJobId, resumeAt);
+    return;
+  }
   if (state.rebuffering && isActiveJobStreamUrl(state.currentStreamUrl)) {
     state.autoplayWanted = true;
     return;
@@ -3211,7 +3369,104 @@ async function resumeBrowserAudioFromStableSource(audio) {
 function pauseBrowserAudio(audio) {
   state.manualPauseRequested = true;
   state.autoplayWanted = false;
+  if (isMonochromeDirectStreamUrl(state.currentStreamUrl) && Number.isFinite(audio?.currentTime)) {
+    state.directStreamPosition = audio.currentTime || state.directStreamPosition || 0;
+  }
+  state.directStreamReconnectPending = false;
+  state.directStreamReconnectAttempts = 0;
+  state.directStreamResumePending = false;
+  // A user pause is a stable state, not a buffering condition. WebKit may
+  // emit `waiting` or a late media error after closing the active range.
+  state.audioBuffering = false;
+  if (state.directStreamReconnectTimer) clearTimeout(state.directStreamReconnectTimer);
+  state.directStreamReconnectTimer = null;
   if (audio) audio.pause();
+  if (state.currentTrack) setPlayerStatus("Paused", state.currentTrack);
+  syncPlayPauseButton();
+}
+
+const _monochromePlaybackLogTimes = new Map();
+function logMonochromePlaybackActivity(message, track = state.currentTrack, key = message, cooldownMs = 1000) {
+  const now = Date.now();
+  const dedupeKey = `${trackKey(track || {})}:${key}`;
+  const last = _monochromePlaybackLogTimes.get(dedupeKey) || 0;
+  if (now - last < cooldownMs) return;
+  _monochromePlaybackLogTimes.set(dedupeKey, now);
+  if (_monochromePlaybackLogTimes.size > 100) {
+    for (const [entry, timestamp] of _monochromePlaybackLogTimes) {
+      if (now - timestamp > 60000) _monochromePlaybackLogTimes.delete(entry);
+    }
+  }
+  api("/api/cache/logs", {
+    method: "POST",
+    body: JSON.stringify({ message, title: track?.title || "Monochrome stream" }),
+  }).catch(() => {});
+}
+
+const MAX_MONOCHROME_BROWSER_RECONNECTS = 4;
+
+function reconnectMonochromeAfterBuffer(audio) {
+  if (!audio || state.manualPauseRequested || state.directStreamReconnectPending ||
+      !isMonochromeDirectStreamUrl(state.currentStreamUrl)) return;
+  const requestId = state.playbackRequestId;
+  let resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+    ? audio.currentTime : Number(state.directStreamPosition || state.rebufferPosition || 0);
+  if ((state.directStreamReconnectPending || state.directStreamResumePending) &&
+      resumeAt + 0.75 < Number(state.directStreamAttemptPosition || 0)) {
+    resumeAt = Math.max(resumeAt, Number(state.directStreamAttemptPosition || 0), Number(state.directStreamPosition || 0));
+  }
+  // The browser/WebView <audio> element hides HTTP status, so a Monochrome
+  // 429/403 only looks like a stream that will not come back. Each reconnect
+  // is another request, which keeps a rate limit going; after a few in a row
+  // without audio, start the backend cooldown and play the track from YouTube.
+  // (Attempts reset to 0 whenever audio plays again.)
+  if (state.directStreamReconnectAttempts >= MAX_MONOCHROME_BROWSER_RECONNECTS) {
+    const track = state.currentTrack;
+    state.directStreamReconnectAttempts = 0;
+    api("/api/monochrome/stream_failing", { method: "POST", body: "{}" })
+      .catch(() => null)
+      .then((result) => {
+        if (requestId !== state.playbackRequestId) return;
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        fallbackFromBlockedMonochrome(track, requestId, result?.reason || "Monochrome stream kept failing");
+      });
+    return;
+  }
+  state.directStreamReconnectPending = true;
+  state.directStreamReconnectAttempts += 1;
+  state.directStreamAttemptPosition = resumeAt;
+  state.rebufferPosition = resumeAt;
+  logMonochromePlaybackActivity(
+    `Monochrome stream buffering at ${formatTime(resumeAt)}; retry ${state.directStreamReconnectAttempts} in 5s`,
+    state.currentTrack,
+    `retry-${state.directStreamReconnectAttempts}`,
+  );
+  state.directStreamReconnectTimer = setTimeout(async () => {
+    state.directStreamReconnectTimer = null;
+    if (requestId !== state.playbackRequestId || state.manualPauseRequested ||
+        !isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      state.directStreamReconnectPending = false;
+      return;
+    }
+    // WebKit can leave a stalled range response in a non-paused state forever.
+    // Reopen the Monochrome URL at the saved playhead to request a fresh range.
+    audio.pause();
+    await resumeBrowserAudioFromStableSource(audio).catch((error) => {
+      console.warn("[Player] Monochrome buffer reconnect failed:", error);
+      state.directStreamReconnectPending = false;
+    });
+    if (requestId === state.playbackRequestId && state.directStreamReconnectPending) {
+      state.directStreamReconnectTimer = setTimeout(() => {
+        state.directStreamReconnectTimer = null;
+        if (requestId !== state.playbackRequestId || state.manualPauseRequested ||
+            !state.directStreamReconnectPending) return;
+        state.directStreamReconnectPending = false;
+        reconnectMonochromeAfterBuffer(audio);
+      }, Math.min(30000, 5000 * Math.pow(1.5, Math.min(state.directStreamReconnectAttempts - 1, 8))));
+    }
+  }, 5000);
 }
 
 function syncPlayerStatusTooltip() {
@@ -3245,8 +3500,23 @@ function syncPlayerStatusTooltip() {
 }
 
 function setPlayerStatusIcon(mode, pct) {
+  state.playerStatusIconMode = mode;
+  state.playerStatusIconPct = pct || 0;
+  renderPlayerStatusIcon();
+}
+
+function renderPlayerStatusIcon() {
   const icon = $("playerStatusIcon");
-  icon.className = "player-status " + (mode === "ready" ? "ready" : mode === "error" ? "error" : "downloading");
+  if (!icon) return;
+  // Keep the ready check as the underlying state, but show the established
+  // animated pie while playback is waiting for audio data.
+  const mode = state.audioBuffering && state.playerStatusIconMode === "ready"
+    ? "buffering" : state.playerStatusIconMode;
+  const pct = state.playerStatusIconPct;
+  const renderKey = `${mode}:${mode === "downloading" ? Math.round(pct || 0) : 0}`;
+  if (state.renderedPlayerStatusIcon === renderKey) return;
+  state.renderedPlayerStatusIcon = renderKey;
+  icon.className = "player-status " + (mode === "ready" ? "ready" : mode === "error" ? "error" : mode === "buffering" ? "buffering" : "downloading");
   if (mode === "ready") {
     icon.innerHTML = '<span class="player-status-content"><i class="bi bi-check-circle-fill"></i></span>';
   } else if (mode === "error") {
@@ -3414,9 +3684,14 @@ function prepareSelectedTrackUi(track, status = "Opening stream...") {
   state.currentPlayableReady = false;
   state.activeJobPhase = "";
   state.autoplayWanted = false;
+  // Treat track resolution as busy too. The animated status pie appears as
+  // soon as a new selection starts, so the transport must lock at that point.
+  // Restored paused snapshots remain playable.
+  state.audioBuffering = !/^Paused(?:\b| at\b)/i.test(String(status));
   setPlayerStatusIcon("downloading", 0);
   setPlayerStatus(status, track);
   syncActiveTrackRows();
+  syncPlayPauseButton();
 }
 
 function setPlayerStatus(msg, track, job = null) {
@@ -3462,7 +3737,7 @@ function activeJobHasPlayableAudio(job) {
   const total = Number(job?.active_audio_size || 0);
   const duration = Number(state.currentTrack?.duration_ms || state.currentTrack?.length || 0) / 1000;
   const position = Math.max(0, Number(state.rebufferPosition || 0));
-  const target = Math.max(2 * 1024 * 1024, duration > 0 && total > 0 ? total * (position + 20) / duration : 0);
+  const target = Math.max(512 * 1024, duration > 0 && total > 0 ? total * (position + 1.5) / duration : 0);
   const required = total > 0 ? Math.min(total, target) : target;
   return ready >= required && ready >= Math.min(total || Infinity, Number(state.rebufferAfterBytes || 0));
 }
@@ -3712,6 +3987,7 @@ function renderSideVideoButton() {
     button.innerHTML = '<i class="bi bi-play-btn"></i><span>Switch to video</span>';
   }
   if (refresh) refresh.hidden = !(state.videoMode && hasUsableVideo);
+  renderVideoSyncControls();
 }
 
 function renderSideCover(track) {
@@ -3738,6 +4014,7 @@ function renderSideCover(track) {
         media.style.backgroundImage = "";
         media.innerHTML = `<video id="sideVideoPlayer" playsinline muted src="${esc(videoSrc)}" data-file-path="${esc(videoFilePath)}"></video>`;
         const video = $("sideVideoPlayer");
+        refreshVideoSync().catch(() => {});
         if (video) {
           video.addEventListener("loadedmetadata", () => {
             syncLocalVideoOverlay(currentTime, false, { allowSeek: true });
@@ -5273,27 +5550,176 @@ function currentPlaybackSeconds() {
   return audio && isFinite(audio.currentTime) ? Number(audio.currentTime || 0) : 0;
 }
 
+// Video follows the audio by timestamp: second N of the song is second
+// N + offset of the video. The offset comes from matching the two soundtracks
+// on the backend (video intros, cold opens) plus the user's saved nudge.
+function videoSyncOffset() {
+  return Number(state.videoSync.offset || 0) + Number(state.videoSync.manual || 0);
+}
+
+function videoTimeForAudio(position, video) {
+  const raw = (Number(position) || 0) + videoSyncOffset();
+  return Math.max(0, Math.min(raw, Math.max(0, video.duration - 0.25)));
+}
+
+function currentSideVideoPath() {
+  if (canSwitchToLocalVideo()) return state.currentLibraryPath || "";
+  return state.videoFetch.status === "ready" ? (state.videoFetch.path || "") : "";
+}
+
+function renderVideoSyncControls() {
+  const box = $("sideVideoSync");
+  if (!box) return;
+  const show = !!state.videoMode && !!currentSideVideoPath() && state.videoSync.status !== "same-file";
+  box.hidden = !show;
+  if (!show) return;
+  const total = videoSyncOffset();
+  const signed = `${total >= 0 ? "+" : "−"}${Math.abs(total).toFixed(2).replace(/\.?0+$/, "") || "0"}s`;
+  const label = {
+    matched: `Synced ${signed}`,
+    checking: "Syncing…",
+    pending: "Syncing…",
+  }[state.videoSync.status] || (state.videoSync.manual ? `Offset ${signed}` : "Not matched");
+  $("sideVideoSyncLabel").textContent = label;
+  box.title = state.videoSync.status === "matched"
+    ? "Video lined up to the song by matching their soundtracks. Use − / + to fine-tune."
+    : "Could not match the soundtracks automatically. Use − / + to line the video up.";
+}
+
+// Identity of the recording for the normalized sync tables: Spotify id first,
+// then ISRC; title/artist only identify tracks that have neither.
+function videoSyncTrackFields(track) {
+  return {
+    spotify_id: trackIdentityValue(track, "spotify_id") || "",
+    isrc: trackIdentityValue(track, "isrc") || "",
+    title: track?.title || "",
+    artist: track?.artist || "",
+    duration_ms: Math.round((knownTrackDurationSeconds(track) || 0) * 1000),
+  };
+}
+
+// Ask the backend to match this video against the song's audio. Monochrome
+// audio becomes matchable once enough of the stream has downloaded, so
+// "pending" / "unavailable" answers are retried for a while.
+async function refreshVideoSync() {
+  const track = state.currentTrack;
+  const videoPath = currentSideVideoPath();
+  if (!state.videoMode || !track || !videoPath) {
+    renderVideoSyncControls();
+    return;
+  }
+  const key = `${trackKey(track)}|${videoPath}`;
+  if (state.videoSync.key !== key) {
+    clearTimeout(state.videoSync.timer);
+    state.videoSync = { key, status: "checking", offset: 0, manual: 0, attempts: 0, timer: null };
+  } else if (state.videoSync.status !== "pending" && state.videoSync.status !== "unavailable") {
+    renderVideoSyncControls();
+    return;
+  }
+  if (canSwitchToLocalVideo()) {
+    // Audio and picture come from the same downloaded file: already in sync.
+    state.videoSync.status = "same-file";
+    renderVideoSyncControls();
+    return;
+  }
+  renderVideoSyncControls();
+  state.videoSync.attempts += 1;
+  const audioPath = state.currentLibraryPath && !isVideoLibraryPath(state.currentLibraryPath) ? state.currentLibraryPath : "";
+  const result = await api("/api/video/sync", {
+    method: "POST",
+    body: JSON.stringify({
+      ...videoSyncTrackFields(track),
+      video_path: videoPath,
+      audio_path: audioPath,
+      stream_url: state.nativeAudio.stream_url || "",
+    }),
+  }).catch(() => null);
+  if (state.videoSync.key !== key) return;
+  if (result) {
+    state.videoSync.status = result.status || "unmatched";
+    state.videoSync.offset = Number(result.offset || 0);
+    state.videoSync.manual = Number(result.manual_offset || 0);
+  } else {
+    state.videoSync.status = "unavailable";
+  }
+  renderVideoSyncControls();
+  syncLocalVideoOverlay(audiblePlaybackSeconds(), false, { allowSeek: true });
+  if ((state.videoSync.status === "pending" || state.videoSync.status === "unavailable") && state.videoSync.attempts < 12) {
+    state.videoSync.timer = setTimeout(() => refreshVideoSync().catch(() => {}), 5000);
+  }
+}
+
+async function nudgeVideoSync(delta) {
+  const track = state.currentTrack;
+  const videoPath = currentSideVideoPath();
+  if (!track || !videoPath) return;
+  state.videoSync.manual = Number(state.videoSync.manual || 0) + delta;
+  renderVideoSyncControls();
+  followAudioWithVideo();
+  const result = await api("/api/video/sync/nudge", {
+    method: "POST",
+    body: JSON.stringify({ ...videoSyncTrackFields(track), video_path: videoPath, delta }),
+  }).catch(() => null);
+  if (result?.ok && state.videoSync.key === `${trackKey(track)}|${videoPath}`) {
+    state.videoSync.manual = Number(result.manual_offset || 0);
+    renderVideoSyncControls();
+  }
+}
+
+// What the listener hears now. The native player's position counts PCM handed
+// to the device, which leads the speaker by the output latency (~1s on
+// Bluetooth), so the video would otherwise run ahead.
+function audiblePlaybackSeconds() {
+  if (state.nativeAudio.active) {
+    return Math.max(0, Number(state.nativeAudio.position || 0) - Number(state.nativeAudio.output_latency || 0));
+  }
+  return currentPlaybackSeconds();
+}
+
+// Keep the side video locked to the audio: same play/pause state (including
+// pausing while audio buffers), and drift corrected continuously. Small drift
+// is absorbed by nudging playbackRate so frames are never dropped; only a big
+// jump (seek, stall) re-seeks the video. Runs from audio timeupdate and from
+// the native-audio poll, which has no media events of its own.
+function followAudioWithVideo() {
+  if (!state.videoMode) return;
+  const video = $("sideVideoPlayer");
+  if (!video || video.tagName !== "VIDEO" || !Number.isFinite(video.duration) || video.duration <= 0) return;
+  if (state.manualPauseRequested || !isPlaybackVisiblyActive()) {
+    if (!video.paused) video.pause();
+    video.playbackRate = 1;
+    return;
+  }
+  const raw = audiblePlaybackSeconds() + videoSyncOffset();
+  if (raw < 0 || raw > video.duration - 0.3) {
+    // The song is playing a part the video does not have (e.g. the album
+    // intro before the video starts): hold the nearest frame until it does.
+    const hold = raw < 0 ? 0 : Math.max(0, video.duration - 0.25);
+    if (!video.paused) video.pause();
+    if (Math.abs((video.currentTime || 0) - hold) > 0.3) video.currentTime = hold;
+    video.playbackRate = 1;
+    return;
+  }
+  const target = videoTimeForAudio(audiblePlaybackSeconds(), video);
+  const drift = (video.currentTime || 0) - target;
+  if (Math.abs(drift) > 1.0) {
+    video.currentTime = target;
+    video.playbackRate = 1;
+  } else if (Math.abs(drift) > 0.08) {
+    video.playbackRate = drift > 0 ? 0.95 : 1.05;
+  } else {
+    video.playbackRate = 1;
+  }
+  if (video.paused) video.play().catch(() => {});
+}
+
 function syncLocalVideoOverlay(position = currentPlaybackSeconds(), forcePlay = false, options = {}) {
   if (!state.videoMode) return;
   if (!canSwitchToLocalVideo() && state.videoFetch.status !== "ready") return;
   const video = $("sideVideoPlayer");
   if (!video || video.tagName !== "VIDEO") return;
-  const audio = $("audioPlayer");
-  const audioDuration = state.nativeAudio.active
-    ? Number(state.nativeAudio.duration || 0)
-    : (audio && Number.isFinite(audio.duration) ? Number(audio.duration || 0) : 0);
   if (options.allowSeek && Number.isFinite(position) && position >= 0 && Number.isFinite(video.duration) && video.duration > 0) {
-    let target;
-    const isYoutube = (state.settings.download_engine || "") === "ytp-dl";
-    if (!isYoutube && audioDuration > 0) {
-      // Only use percentage mapping for deliberate seek/start sync. Doing this
-      // on every timeupdate constantly re-seeks different masters and drops frames.
-      target = (position / audioDuration) * video.duration;
-    } else {
-      // YouTube engine: audio and video are from the same download — sync by seconds.
-      target = position;
-    }
-    target = Math.min(target, Math.max(0, video.duration - 0.25));
+    const target = videoTimeForAudio(position, video);
     if (Math.abs((video.currentTime || 0) - target) > 0.4) {
       video.currentTime = target;
     }
@@ -5776,6 +6202,8 @@ async function prefetchOneTrack(next, orderKey) {
 }
 
 function maybePrefetchUpcomingTracks(position) {
+  if (isMonochromeDirectStreamUrl(state.currentStreamUrl) ||
+      (state.nativeAudio.active && isMonochromeDirectStreamUrl(state.nativeAudio.stream_url))) return;
   if (position < 2 || state.manualPauseRequested || state.prefetchedForRequestId === state.playbackRequestId) return;
   state.prefetchedForRequestId = state.playbackRequestId;
   prefetchNextTracks().catch(() => { state.prefetchedForRequestId = -1; });
@@ -6028,9 +6456,11 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
     state.activeJobId = job.id;
     
     if (mode === "stream") {
-      if (job.status === "finished" && job.library_path) {
+      if (job.engine === "monochrome" && job.direct_stream && job.resolved_url) {
+        startMonochromeDirectPlayback(job, track, requestId);
+      } else if (job.status === "finished" && job.library_path) {
         await playFromLibraryPath(job.library_path, track, requestId, job.id, "Playing from cache");
-      } else if (isNativeAudioSelected() || state.pendingResumePosition > 0) {
+      } else if (!canStreamActiveJobInBrowser(job) || state.pendingResumePosition > 0) {
         // Skip browser playback for live jobs if native is selected.
         // NSSound doesn't support streaming URLs, so we wait for the file to finish.
         state.currentPlayableReady = false;
@@ -6059,8 +6489,74 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
     }
     watchServiceDownload(job.id, track, mode, requestId);
   } catch (error) {
+    if (requestId !== state.playbackRequestId) return;
+    state.audioBuffering = false;
+    state.autoplayWanted = false;
+    setPlayerStatusIcon("error");
     setPlayerStatus(error.message || "Download failed", track);
+    syncPlayPauseButton();
   }
+}
+
+function startMonochromeDirectPlayback(job, track, requestId) {
+  if (requestId !== state.playbackRequestId || !job?.resolved_url) return;
+  // Monochrome's direct stream needs no next-track download/prefetch job.
+  // Cancel work queued for a previous track so it cannot compete with or
+  // replace this live stream.
+  cancelAllPrefetchJobs("Monochrome direct stream");
+  const audio = $("audioPlayer");
+  if (!audio) return;
+  const resumeAt = Number(state.pendingResumePosition || 0);
+  state.pendingResumePosition = 0;
+  state.activeJobId = null;
+  state.audioHasPlayed = false;
+  // Keep the play control locked from selection through decode/startup. The
+  // confirmed `playing` event clears this state once audio is actually heard.
+  state.audioBuffering = !state.manualPauseRequested;
+  state.directStreamReconnectPending = false;
+  state.directStreamNativeFallbackAttempted = false;
+  state.currentLibraryPath = "";
+  state.currentStreamUrl = job.resolved_url;
+  state.currentPlayableReady = true;
+  state.activeJobPhase = "";
+  state.autoplayWanted = !state.manualPauseRequested;
+  setPlayerStatusIcon("ready");
+  setPlayerStatus(
+    state.manualPauseRequested ? "Ready — paused" : "Buffering Monochrome stream",
+    track,
+    job,
+  );
+  syncPlayPauseButton();
+  logMonochromePlaybackActivity("Opening Monochrome audio stream", track, "open", 0);
+  // On Android the native player (ExoPlayer) handles Monochrome even on This
+  // phone: it records the start of the track for music-video matching and
+  // seeks without rebuffering. The WebView stays as the fallback.
+  const androidNative = IS_ANDROID && !!window.MindinguflacAndroid && !isNativeAudioSelected();
+  if (isNativeAudioSelected() || androidNative) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    startNativeAudio("", track, requestId, resumeAt, job.resolved_url, androidNative).catch((error) => {
+      if (requestId !== state.playbackRequestId) return;
+      if (androidNative) {
+        logMonochromePlaybackActivity(`Native player unavailable (${error.message || error}); using the WebView`, track, "android-webview-fallback", 0);
+        audio.src = job.resolved_url;
+        audio.load();
+        seekAfterMetadata(audio, resumeAt);
+        if (!state.manualPauseRequested) tryStartAudio(audio, track, requestId, null);
+        return;
+      }
+      state.audioBuffering = false;
+      state.autoplayWanted = false;
+      setPlayerStatus(`Selected audio device unavailable: ${error.message || "native stream failed"}`, track);
+      syncPlayPauseButton();
+    });
+    return;
+  }
+  audio.src = job.resolved_url;
+  audio.load();
+  seekAfterMetadata(audio, resumeAt);
+  if (!state.manualPauseRequested) tryStartAudio(audio, track, requestId, null);
 }
 
 async function watchServiceDownload(jobId, track, mode = "stream", requestId = state.playbackRequestId) {
@@ -6075,10 +6571,12 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       if (!job) return;
       state.lastActiveReadyBytes = Number(job.active_audio_ready_bytes || 0);
       if (job.status === "error") {
+        state.audioBuffering = false;
         if (job.youtube_login_required) {
           state.activeJobId = null;
           setPlayerStatusIcon("error");
           setPlayerStatus("YouTube login required", track, job);
+          syncPlayPauseButton();
           requestYoutubeLoginAndRetry(job, () => startServiceDownload(track, mode, requestId));
           return;
         }
@@ -6094,10 +6592,15 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         }
         setPlayerStatusIcon("error");
         setPlayerStatus(job.error || "Service download failed", track, job);
+        syncPlayPauseButton();
         return;
       }
       const pct = job.progress ? Math.max(0, Math.min(99, Math.round(job.progress))) : 0;
       if (job.status === "finished") {
+        if (mode === "stream" && job.engine === "monochrome" && job.direct_stream && job.resolved_url) {
+          startMonochromeDirectPlayback(job, track, requestId);
+          return;
+        }
         if (mode === "stream" && job.library_path) {
           state.currentLibraryPath = job.library_path;
           state.currentPlayableReady = true;
@@ -6121,15 +6624,17 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
                 : (audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
               await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache", resumeAt);
             } catch (error) {
+              state.audioBuffering = false;
               setPlayerStatusIcon("error");
               setPlayerStatus(error.message || "Native audio failed", track);
+              syncPlayPauseButton();
             }
           }
         }
         state.activeJobId = null;
         return;
       }
-      if (mode === "stream" && !state.currentPlayableReady && activeJobHasPlayableAudio(job) && !isNativeAudioSelected()) {
+      if (mode === "stream" && !state.currentPlayableReady && activeJobHasPlayableAudio(job) && canStreamActiveJobInBrowser(job)) {
         const audio = $("audioPlayer");
         const resumeAt = Number(state.rebufferPosition || 0);
         state.rebuffering = false;
@@ -6159,11 +6664,52 @@ function tryStartAudio(audio, track, requestId, jobId) {
   audio.play().catch((error) => {
     if (requestId !== state.playbackRequestId) return;
     if (error && error.name === "NotAllowedError") {
+      // The Monochrome lookup finishes after WebKit's short-lived click
+      // activation expires. Do not leave the first selected track paused and
+      // waiting for a second click: hand FLAC to the native decoder, which can
+      // start without browser autoplay permission and still uses the selected
+      // app output (or the system default).
+      if (isMonochromeDirectStreamUrl(state.currentStreamUrl) &&
+          navigator.userAgent.includes("Macintosh") && !IS_ANDROID &&
+          !state.directStreamNativeFallbackAttempted && !state.manualPauseRequested) {
+        const fallbackRequestId = state.playbackRequestId;
+        const resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+          ? audio.currentTime : Number(state.directStreamPosition || 0);
+        const streamUrl = state.currentStreamUrl;
+        state.directStreamNativeFallbackAttempted = true;
+        state.audioBuffering = true;
+        state.autoplayWanted = true;
+        logMonochromePlaybackActivity(
+          "Browser autoplay was denied after Monochrome lookup; starting native audio automatically",
+          track,
+          "native-autoplay-fallback",
+          0,
+        );
+        syncPlayPauseButton();
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        startNativeAudio("", track, fallbackRequestId, resumeAt, streamUrl, true).catch((fallbackError) => {
+          if (fallbackRequestId !== state.playbackRequestId) return;
+          state.audioBuffering = false;
+          state.autoplayWanted = false;
+          setPlayerStatus(`Monochrome playback failed: ${fallbackError.message || "native audio unavailable"}`, track);
+          syncPlayPauseButton();
+        });
+        return;
+      }
       state.autoplayWanted = true;
+      state.audioBuffering = false;
+      setPlayerStatusIcon("ready");
       setPlayerStatus("Ready — press play", track);
+      syncPlayPauseButton();
     } else if (error && error.name !== "AbortError") {
       // AbortError means src changed mid-load — keep autoplayWanted so oncanplay retries.
       state.autoplayWanted = false;
+      state.audioBuffering = false;
+      setPlayerStatusIcon("error");
+      setPlayerStatus(error.message || "Playback failed", track);
+      syncPlayPauseButton();
     }
   });
 }
@@ -6234,6 +6780,14 @@ function appendRemainingAsync() {
 }
 
 function suggestionMarkup(item, index) {
+  if (item.type === "query") {
+    return `
+      <button class="suggestion" type="button" data-suggestion="${index}">
+        <div class="suggestion-art"><i class="bi bi-search"></i></div>
+        <div class="suggestion-info"><strong>${esc(item.title || item.query || "")}</strong><div class="suggestion-sub"><span class="pill">Search</span></div></div>
+      </button>
+    `;
+  }
   const art = item.artwork_url || "";
   const name = esc(item.type === "artist" ? item.artist : (item.title || item.artist));
   const typeLabel = { track: "Song", artist: "Artist", album: "Album" }[item.type] || (item.type || "Song");
@@ -6253,6 +6807,10 @@ function suggestionMarkup(item, index) {
 }
 
 function openSuggestionItem(item = {}) {
+  if (item.type === "query") {
+    searchMusic(item.query || item.title || "");
+    return;
+  }
   if (item.type === "artist") {
     pushPage(() => renderArtistPage(artistTarget(item)));
     return;
@@ -6272,7 +6830,7 @@ function bindSuggestionButtons(root = document) {
     button.dataset.bound = "1";
     button.onclick = () => {
       const item = state.suggestionResults[Number(button.dataset.suggestion)];
-      $("searchInput").value = item.title || item.artist || "";
+      $("searchInput").value = item.query || item.title || item.artist || "";
       hideSuggestions();
       openSuggestionItem(item);
     };
@@ -6448,7 +7006,7 @@ async function renderSettings() {
   $("storageSection")?.classList.toggle("hidden", IS_ANDROID);
   $("aiProviderRow")?.classList.toggle("hidden", IS_ANDROID);
 
-  let engine = state.settings.download_engine || (IS_ANDROID ? "ytp-dl" : "spotiflac");
+  let engine = state.settings.download_engine || "monochrome";
   if (IS_ANDROID) {
     const options = androidEngineOptions();
     if (options.length) {
@@ -6884,36 +7442,89 @@ function isNativeAudioSelected() {
   return typeof _activeSinkId === "string" && _activeSinkId.startsWith("native:") && !!_nativeAudioDeviceUid;
 }
 
+function canStreamActiveJobInBrowser(job) {
+  // Monochrome's growing FLAC is played by WebKit while the native player
+  // waits for a complete local file. Hand off to native output after download.
+  return String(job?.engine || "").toLowerCase() === "monochrome" || !isNativeAudioSelected();
+}
+
 function nativeAudioVolume() {
   const audio = $("audioPlayer");
   return audio ? Number(audio.volume || 0) : storedVolume();
 }
 
 async function stopNativeAudio() {
+  if (state.nativeAudio.active) {
+    const result = await api("/api/native_audio/stop", { method: "POST", body: "{}" });
+    if (result && result.ok === false) {
+      throw new Error(result.error || "Native audio did not stop");
+    }
+  }
   if (state.nativeAudioPollTimer) {
     clearInterval(state.nativeAudioPollTimer);
     state.nativeAudioPollTimer = null;
   }
-  if (state.nativeAudio.active) {
-    await api("/api/native_audio/stop", { method: "POST", body: "{}" }).catch(() => {});
-  }
   state.nativeAudio = { active: false, playing: false, position: 0, duration: 0, path: "", ended: false };
+  state.nativeAudioStarting = false;
+  state.nativeAudioPauseAfterStart = false;
   syncPlayPauseButton();
 }
 
-async function startNativeAudio(filePath, track, requestId, position = 0) {
-  if (!isNativeAudioSelected()) return false;
-  const result = await api("/api/native_audio/play", {
+async function startNativeAudio(filePath, track, requestId, position = 0, streamUrl = "", forceNative = false) {
+  if (!forceNative && !isNativeAudioSelected()) return false;
+  const directStreamUrl = streamUrl && isMonochromeDirectStreamUrl(streamUrl) ? streamUrl : "";
+  // Close the startup window where the UI still thinks the browser owns the
+  // player. A pause click during native initialization must never be applied
+  // to the stale HTMLAudio element while this stream takes over.
+  if (directStreamUrl && requestId === state.playbackRequestId) {
+    state.nativeAudioStarting = true;
+    state.audioBuffering = !state.manualPauseRequested;
+    if (state.audioBuffering) setPlayerStatus("Buffering Monochrome stream", track);
+    syncPlayPauseButton();
+  }
+  const deviceUid = isNativeAudioSelected() ? _nativeAudioDeviceUid : "";
+  const startKey = `${requestId}|${deviceUid}|${directStreamUrl || filePath}`;
+  if (state.nativeAudioStart?.key === startKey) {
+    const pendingResult = await state.nativeAudioStart.promise;
+    if (!pendingResult.ok) throw new Error(pendingResult.error || "Native audio failed");
+    return true;
+  }
+  const startPromise = api("/api/native_audio/play", {
     method: "POST",
     body: JSON.stringify({
       path: filePath,
-      device_uid: _nativeAudioDeviceUid,
+      stream_url: directStreamUrl,
+      device_uid: deviceUid,
+      device_name: isNativeAudioSelected() ? String(state.settings?.preferred_audio_output_name || "") : "",
       volume: nativeAudioVolume(),
       position,
       metadata: track,
     }),
   });
+  state.nativeAudioStart = { key: startKey, promise: startPromise };
+  let result;
+  try {
+    result = await startPromise;
+  } catch (error) {
+    if (requestId === state.playbackRequestId && directStreamUrl) {
+      state.nativeAudioStarting = false;
+      state.audioBuffering = false;
+      syncPlayPauseButton();
+    }
+    throw error;
+  } finally {
+    if (state.nativeAudioStart?.promise === startPromise) state.nativeAudioStart = null;
+  }
   if (!result.ok) {
+    if (requestId === state.playbackRequestId && directStreamUrl) {
+      state.nativeAudioStarting = false;
+      state.nativeAudioPauseAfterStart = false;
+      state.audioBuffering = false;
+      syncPlayPauseButton();
+    }
+    if (directStreamUrl && result.stream_blocked && fallbackFromBlockedMonochrome(track, requestId, result.error)) {
+      return false;
+    }
     throw new Error(result.error || "Native audio failed");
   }
   state.nativeAudio = {
@@ -6922,12 +7533,45 @@ async function startNativeAudio(filePath, track, requestId, position = 0) {
     position: result.position || 0,
     duration: result.duration || 0,
     path: filePath,
+    stream_url: directStreamUrl,
     ended: false,
   };
+  state.nativeAudioStarting = false;
+  if (state.nativeAudioPauseAfterStart && requestId === state.playbackRequestId) {
+    state.nativeAudioPauseAfterStart = false;
+    state.manualPauseRequested = true;
+    state.autoplayWanted = false;
+    const paused = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
+    state.nativeAudio.playing = !!paused.playing;
+    if (Number.isFinite(Number(paused.position))) state.nativeAudio.position = Number(paused.position);
+    state.audioBuffering = false;
+  }
+  state.audioBuffering = !!directStreamUrl && !state.nativeAudio.playing && !state.manualPauseRequested;
+  if (state.audioBuffering) setPlayerStatus("Buffering Monochrome stream", track);
   updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
   syncPlayPauseButton();
   updateMediaSession(track);
   startNativeAudioPolling(requestId);
+  return true;
+}
+
+// Monochrome answers repeated requests with 429 and then 403. Retrying the
+// same URL only extends the block, so the backend starts a cooldown during
+// which new jobs use YTP-DL; restart the current track once through it.
+function fallbackFromBlockedMonochrome(track, requestId, reason = "") {
+  if (!track || requestId !== state.playbackRequestId) return false;
+  if (state.monochromeBlockedFallbackRequestId === requestId) return false;
+  state.monochromeBlockedFallbackRequestId = requestId;
+  const message = reason || "Monochrome refused the stream";
+  logMonochromePlaybackActivity(`${message}; switching this track to YouTube`, track, "blocked-fallback", 0);
+  state.nativeAudio = { ...state.nativeAudio, active: false, playing: false, stream_url: "" };
+  state.currentStreamUrl = "";
+  state.directStreamNativeFallbackAttempted = false;
+  state.audioBuffering = !state.manualPauseRequested;
+  setPlayerStatusIcon("downloading", 0);
+  setPlayerStatus(`${message} — trying YouTube`, track);
+  syncPlayPauseButton();
+  startServiceDownload(track, "stream", requestId);
   return true;
 }
 
@@ -6948,7 +7592,13 @@ async function fallbackToDefaultOutputAndResume(requestId, position) {
   await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
   $("btnConnectDevice").classList.toggle("active", false);
   _refreshConnectPanel().catch(() => {});
-  if (libraryPath && track) {
+  if (track && isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+    const audio = $("audioPlayer");
+    audio.src = state.currentStreamUrl;
+    audio.load();
+    seekAfterMetadata(audio, position);
+    if (!state.manualPauseRequested) tryStartAudio(audio, track, requestId, null);
+  } else if (libraryPath && track) {
     await playFromLibraryPath(
       libraryPath, track, requestId, state.activeJobId,
       "Output disconnected — playing on this computer", position
@@ -6972,7 +7622,13 @@ function ensureOutputDisconnectListener() {
     const devs = await api("/api/audio/devices").catch(() => null);
     if (devs && Array.isArray(devs.devices) &&
         !devs.devices.some(d => d.uid === _nativeAudioDeviceUid)) {
-      await fallbackToDefaultOutputAndResume(state.playbackRequestId, state.nativeAudio.position || 0);
+      if (isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)) {
+        await setAudioOutputDevice("");
+        await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
+        await _refreshConnectPanel().catch(() => {});
+      } else {
+        await fallbackToDefaultOutputAndResume(state.playbackRequestId, state.nativeAudio.position || 0);
+      }
     }
   });
 }
@@ -6988,15 +7644,58 @@ function startNativeAudioPolling(requestId) {
     }
     const status = await api("/api/native_audio/status").catch(() => null);
     if (!status) return;
+    if (status.error) {
+      const failedStreamUrl = state.nativeAudio.stream_url;
+      state.nativeAudio = { ...state.nativeAudio, active: false, playing: false };
+      clearInterval(state.nativeAudioPollTimer);
+      state.nativeAudioPollTimer = null;
+      if ([403, 429].includes(Number(status.stream_http_status)) && isMonochromeDirectStreamUrl(failedStreamUrl) &&
+          fallbackFromBlockedMonochrome(state.currentTrack, requestId, status.error)) {
+        publishNowPlayingState(2);
+        return;
+      }
+      state.audioBuffering = false;
+      state.autoplayWanted = false;
+      if (state.currentTrack) setPlayerStatus(`Audio output stopped: ${status.error}`, state.currentTrack);
+      syncPlayPauseButton();
+      publishNowPlayingState(2);
+      return;
+    }
     state.nativeAudio = {
       ...state.nativeAudio,
       playing: !!status.playing,
       position: status.position || 0,
       duration: status.duration || 0,
       ended: !!status.ended,
+      output_latency: Number(status.output_latency || 0),
     };
+    // The worker moves the stream to the default output by itself when the
+    // selected device stops accepting audio (Bluetooth dropped). Follow it so
+    // the device menu and the next switch start from the real route.
+    // (Android's player does the same for files when the chosen output goes.)
+    if ((isMonochromeDirectStreamUrl(state.nativeAudio.stream_url) || IS_ANDROID) && !_outputSwitchesInFlight &&
+        typeof status.device_uid === "string" && status.device_uid !== (_nativeAudioDeviceUid || "")) {
+      _nativeAudioDeviceUid = status.device_uid;
+      _activeSinkId = status.device_uid ? `native:${status.device_uid}` : "";
+      if (status.output_notice && state.currentTrack) setPlayerStatus(status.output_notice, state.currentTrack);
+      _refreshConnectPanel().catch(() => {});
+    }
+    if (status.playing) {
+      const wasBuffering = state.audioBuffering;
+      state.audioBuffering = false;
+      if (isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)) setPlayerStatusIcon("ready");
+      if (wasBuffering && state.currentTrack) {
+        setPlayerStatus(
+          isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)
+            ? "Streaming from Monochrome" : "Playing on selected device",
+          state.currentTrack,
+        );
+      }
+    }
+    else if (state.nativeAudio.stream_url && !state.manualPauseRequested) state.audioBuffering = true;
     updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
     syncNativeAudioUi();
+    followAudioWithVideo();
     updateLyricsPosition(state.nativeAudio.position || 0);
     // Prefetch the next track once playback is underway. The <audio> element's
     // ontimeupdate never fires on the native path, so trigger it here too.
@@ -7012,7 +7711,7 @@ function startNativeAudioPolling(requestId) {
 
 function syncNativeAudioUi() {
   if (!state.nativeAudio.active) return;
-  const duration = state.nativeAudio.duration || 0;
+  const duration = state.nativeAudio.duration || knownTrackDurationSeconds(state.currentTrack);
   const position = state.nativeAudio.position || 0;
   if (duration > 0) {
     $("seekBar").value = (position / duration) * 1000;
@@ -7025,7 +7724,14 @@ function syncNativeAudioUi() {
 }
 
 async function toggleNativeAudioPlayback() {
-  if (!state.nativeAudio.active) return;
+  if (!state.nativeAudio.active) {
+    if (state.nativeAudioStarting) {
+      state.manualPauseRequested = true;
+      state.autoplayWanted = false;
+      state.nativeAudioPauseAfterStart = true;
+    }
+    return;
+  }
 
   // If it already ended, advance to the next track regardless of pause intent.
   if (state.nativeAudio.ended) {
@@ -7040,8 +7746,12 @@ async function toggleNativeAudioPlayback() {
   if (!state.manualPauseRequested) {
     state.manualPauseRequested = true;
     state.autoplayWanted = false;
+    state.audioBuffering = false;
     const status = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
     state.nativeAudio.playing = !!status.playing;
+    if (Number.isFinite(Number(status.position))) state.nativeAudio.position = Number(status.position);
+    if (Number.isFinite(Number(status.duration)) && Number(status.duration) > 0) state.nativeAudio.duration = Number(status.duration);
+    state.audioBuffering = false;
     // If it's still playing after a pause request, it might be out of sync
     if (state.nativeAudio.playing) {
         console.warn("[NativeAudio] Pause request did not stop playback, forcing state update");
@@ -7050,12 +7760,11 @@ async function toggleNativeAudioPlayback() {
     }
     publishNowPlayingState(2);
   } else {
-    if (!state.currentLibraryPath) {
-        console.log("[Player] Native audio has no path to resume, doing nothing.");
-        return;
-    }
     state.manualPauseRequested = false;
+    state.audioBuffering = !!state.nativeAudio.stream_url;
     const status = await api("/api/native_audio/resume", { method: "POST", body: "{}" });
+    if (Number.isFinite(Number(status.position))) state.nativeAudio.position = Number(status.position);
+    if (Number.isFinite(Number(status.duration)) && Number(status.duration) > 0) state.nativeAudio.duration = Number(status.duration);
     if (!status.ok) {
         // If resume failed, maybe it's already playing or needs a hard status check
         const forced = await api("/api/native_audio/status").catch(() => null);
@@ -7067,21 +7776,31 @@ async function toggleNativeAudioPlayback() {
     } else {
         state.nativeAudio.playing = !!status.playing;
     }
+    state.audioBuffering = !!state.nativeAudio.stream_url && !state.nativeAudio.playing;
     publishNowPlayingState(1);
   }
+  syncNativeAudioUi();
   syncPlayPauseButton();
+  followAudioWithVideo();
 }
 
 function syncPlayPauseButton() {
   const audio = $("audioPlayer");
   const playPause = $("playPause");
+  const busy = !!(state.audioBuffering || state.nativeAudioStarting);
   const paused = state.nativeAudio.active
     ? (state.manualPauseRequested || !state.nativeAudio.playing)
-    : !audio || audio.paused;
+    : !audio || audio.paused || state.audioBuffering;
   const icon = playPause?.querySelector("i");
+  if (playPause) {
+    playPause.disabled = busy;
+    playPause.setAttribute("aria-label", busy ? (state.nativeAudioStarting ? "Loading" : "Buffering") : (paused ? "Play" : "Pause"));
+    playPause.setAttribute("aria-busy", busy ? "true" : "false");
+  }
   if (icon) {
     icon.className = paused ? "bi bi-play-fill" : "bi bi-pause-fill";
   }
+  renderPlayerStatusIcon();
   publishDockPlayingState(!paused);
   persistPlaybackSnapshot();
 }
@@ -7190,9 +7909,12 @@ function bindKeyboardControls() {
         toggleNativeAudioPlayback().catch(() => {});
         return;
       }
-      if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack && $("audioPlayer").paused) {
+      if (isNativeAudioSelected() && state.currentTrack && $("audioPlayer").paused &&
+          (state.currentLibraryPath || isMonochromeDirectStreamUrl(state.currentStreamUrl))) {
         state.manualPauseRequested = false;
-        startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch(() => {});
+        startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId,
+          state.nativeAudio.position || state.directStreamPosition || 0,
+          isMonochromeDirectStreamUrl(state.currentStreamUrl) ? state.currentStreamUrl : "").catch(() => {});
         return;
       }
       const audio = $("audioPlayer");
@@ -7342,7 +8064,9 @@ function updateMediaSession(track) {
   };
 
   const audioElement = $("audioPlayer");
-  pushAndroidNowPlaying(payload, Boolean(audioElement && !audioElement.paused));
+  pushAndroidNowPlaying(payload, state.nativeAudio.active
+    ? Boolean(state.nativeAudio.playing && !state.manualPauseRequested)
+    : Boolean(audioElement && !audioElement.paused && !state.audioBuffering));
 
   if (state.settings?.native_now_playing_active) {
     // If the desktop native helper is active, use it as the primary source.
@@ -7390,7 +8114,16 @@ function bindPlayer() {
   audio.volume = storedVolume();
   syncVolumeBar();
   $("playPause").onclick = () => {
-    if (state.restoredPlaybackPending && state.currentTrack) {
+    // A restored snapshot can finish loading after the stream has already
+    // started. Never interpret the first Pause click as a request to reselect
+    // that active track (which restarts it at 0:00). Consume the pending flag
+    // once the player is actually running; only use the special restore path
+    // when playback is still idle and the media element has no source.
+    if (state.restoredPlaybackPending && !audio.paused) {
+      state.restoredPlaybackPending = false;
+    }
+    if (state.restoredPlaybackPending && state.currentTrack && audio.paused &&
+        (!audio.src || audio.src === window.location.href) && !state.nativeAudio.active) {
       const track = state.currentTrack;
       const position = Number(state.pendingResumePosition || 0);
       state.restoredPlaybackPending = false;
@@ -7408,19 +8141,43 @@ function bindPlayer() {
       });
       return;
     }
+    // WebKit cannot decode Monochrome's FLAC, so its audio element is cleared
+    // when we hand off to the native decoder. If that first native request is
+    // rate-limited or otherwise fails, Play must retry the native stream
+    // instead of treating the empty browser element as an idle player.
+    if (state.directStreamNativeFallbackAttempted && state.currentTrack &&
+        isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      if (state.audioBuffering || state.nativeAudioStarting) return;
+      state.manualPauseRequested = false;
+      state.autoplayWanted = true;
+      state.audioBuffering = true;
+      syncPlayPauseButton();
+      startNativeAudio("", state.currentTrack, state.playbackRequestId,
+        state.nativeAudio.position || state.directStreamPosition || 0,
+        state.currentStreamUrl, true).catch((error) => {
+        state.audioBuffering = false;
+        state.autoplayWanted = false;
+        if (state.currentTrack) setPlayerStatus(`Monochrome playback failed: ${error.message || error}`, state.currentTrack);
+        syncPlayPauseButton();
+      });
+      return;
+    }
     // Only hand a click to native-start when the browser isn't already playing.
     // If a switch to native output didn't actually move playback (no cache file
     // yet, or native start failed), the browser keeps playing while
     // isNativeAudioSelected() is true; without this guard every click re-fires
     // startNativeAudio and the pause button can never stop the browser audio.
-    if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack && audio.paused) {
+    if (isNativeAudioSelected() && state.currentTrack && audio.paused &&
+        (state.currentLibraryPath || isMonochromeDirectStreamUrl(state.currentStreamUrl))) {
       state.manualPauseRequested = false;
-      startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch((error) => {
+      startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId,
+        state.nativeAudio.position || state.directStreamPosition || 0,
+        isMonochromeDirectStreamUrl(state.currentStreamUrl) ? state.currentStreamUrl : "").catch((error) => {
         if (state.currentTrack) setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
       });
       return;
     }
-    if (audio.paused) {
+    if (audio.paused || state.audioBuffering) {
       const icon = $("playPause")?.querySelector("i");
       const buttonShowsPause = !!icon && icon.classList.contains("bi-pause-fill");
       if (buttonShowsPause && (state.autoplayWanted || audio.currentTime > 0)) {
@@ -7458,7 +8215,7 @@ function bindPlayer() {
       if (!isPlaybackVisiblyActive()) vid.pause();
       else vid.play().catch(() => {});
     }
-    if (audio.paused) {
+    if (audio.paused || state.audioBuffering) {
       if (state.currentTrack) {
         publishNowPlayingState(2);
       } else {
@@ -7469,11 +8226,38 @@ function bindPlayer() {
     }
   };
   audio.onended = async () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
     // A user-paused stream must never auto-advance. A growing-file active-job
     // stream can fire "ended" when playback reaches the current download head;
     // if the user paused, that would wrap a length-1 queue back onto the same
     // track and replay it from the start.
     if (state.manualPauseRequested) return;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const reportedDuration = knownTrackDurationSeconds(state.currentTrack) ||
+        (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0);
+      const endedAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+        ? audio.currentTime : Number(state.directStreamPosition || 0);
+      // WebKit can signal `ended` when a ranged FLAC response stalls or closes,
+      // even though Spotify metadata says the recording is still in progress.
+      // Treat that as a dropped stream and resume at its last known playhead.
+      if (reportedDuration > 0 && endedAt < reportedDuration - 2) {
+        state.directStreamPosition = endedAt;
+        state.rebufferPosition = endedAt;
+        state.audioBuffering = true;
+        const video = $("sideVideoPlayer");
+        if (video && video.tagName === "VIDEO") video.pause();
+        logMonochromePlaybackActivity(
+          `Monochrome stream ended early at ${formatTime(endedAt)} of ${formatTime(reportedDuration)}; reconnecting without advancing`,
+          state.currentTrack,
+          "premature-ended",
+          0,
+        );
+        if (state.currentTrack) setPlayerStatus("Buffering Monochrome stream", state.currentTrack);
+        syncPlayPauseButton();
+        if (!state.directStreamReconnectPending) reconnectMonochromeAfterBuffer(audio);
+        return;
+      }
+    }
     const endedRequestId = state.playbackRequestId;
     const endedJobId = state.activeJobId;
     if (isActiveJobStreamUrl(state.currentStreamUrl) && endedJobId) {
@@ -7497,20 +8281,50 @@ function bindPlayer() {
     playQueueOffset(1);
   };
   audio.ontimeupdate = () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
     maybePrefetchUpcomingTracks(audio.currentTime || 0);
-    if (!audio.duration) return;
-    updateListeningSessionPosition(audio.currentTime, audio.duration);
+    const spotifyDuration = knownTrackDurationSeconds(state.currentTrack);
+    const duration = isMonochromeDirectStreamUrl(state.currentStreamUrl)
+      ? (spotifyDuration || (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0))
+      : (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : spotifyDuration);
+    const position = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const restoringPosition = state.directStreamReconnectPending || state.directStreamResumePending;
+      // WebKit can emit `playing` before the reopened range produces usable
+      // audio. Only clear the retry loop after the playhead actually advances.
+      if (restoringPosition && position + 0.75 < Number(state.directStreamAttemptPosition || 0)) {
+        // Ignore the transient zero timestamp emitted while the new range is
+        // opening; it is not the current playhead and must not replace the
+        // saved position used by a subsequent retry.
+        state.directStreamPosition = Number(state.directStreamAttemptPosition || state.directStreamPosition || 0);
+      } else {
+        state.directStreamPosition = position;
+      }
+      if (restoringPosition && position > Number(state.directStreamAttemptPosition || 0) + 0.75) {
+        state.directStreamReconnectPending = false;
+        state.directStreamReconnectAttempts = 0;
+        state.directStreamResumePending = false;
+        if (state.directStreamReconnectTimer) clearTimeout(state.directStreamReconnectTimer);
+        state.directStreamReconnectTimer = null;
+      }
+    }
+    if (duration <= 0) return;
+    updateListeningSessionPosition(position, duration);
     if (state.streamRetryCount) state.streamRetryCount = 0; // playback recovered
-    $("seekBar").value = (audio.currentTime / audio.duration) * 1000;
-    $("currentTime").textContent = formatTime(audio.currentTime);
-    $("durationTime").textContent = formatTime(audio.duration);
-    $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
-    setMiniPlayerProgress(audio.currentTime / audio.duration);
-    syncLocalVideoOverlay(audio.currentTime);
-    updateLyricsPosition(audio.currentTime);
+    $("seekBar").value = (position / duration) * 1000;
+    $("currentTime").textContent = formatTime(position);
+    $("durationTime").textContent = formatTime(duration);
+    $("seekBar").style.backgroundSize = `${(position / duration) * 100}% 100%`;
+    setMiniPlayerProgress(position / duration);
+    followAudioWithVideo();
+    updateLyricsPosition(position);
+    if (shouldExposeNowPlaying()) updateMediaSession(state.currentTrack);
     persistPlaybackSnapshot();
   };
   audio.onseeked = () => {
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl) && Number.isFinite(audio.currentTime)) {
+      state.directStreamPosition = audio.currentTime;
+    }
     syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
   };
   audio.onloadedmetadata = () => {
@@ -7527,9 +8341,34 @@ function bindPlayer() {
     if (state.autoplayWanted && !state.manualPauseRequested && !state.rebuffering && audio.paused) {
       audio.play().catch(() => {});
     }
-    syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
+    // canplay only means data is available; wait for the audio element's
+    // `playing` event before resuming video so both tracks restart together.
+    syncLocalVideoOverlay(audio.currentTime || 0, false, { allowSeek: true });
   };
   audio.onwaiting = () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
+    // Safari/WebKit often reports `waiting` as it tears down a ranged response
+    // on pause. Do not convert the user's pause into a reconnect/buffer loop.
+    if (state.manualPauseRequested) {
+      state.audioBuffering = false;
+      syncPlayPauseButton();
+      return;
+    }
+    state.audioBuffering = true;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const position = Number.isFinite(audio.currentTime) ? audio.currentTime : state.directStreamPosition || 0;
+      logMonochromePlaybackActivity(
+        `Monochrome stream is buffering at ${formatTime(position)}`,
+        state.currentTrack,
+        "waiting",
+        5000,
+      );
+    }
+    const video = $("sideVideoPlayer");
+    if (video && video.tagName === "VIDEO") video.pause();
+    syncPlayPauseButton();
+    if (state.currentTrack && !state.manualPauseRequested) publishNowPlayingState(2);
+    reconnectMonochromeAfterBuffer(audio);
     if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl) && !state.manualPauseRequested) {
       waitForActiveJobBuffer(audio);
     }
@@ -7538,19 +8377,37 @@ function bindPlayer() {
     }
   };
   audio.onplaying = () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
     // Do NOT clear manualPauseRequested here. This event also fires on buffer
     // recovery; clearing the user's pause intent would let other auto-play
     // triggers (onended, onerror, the job watcher) resume a track the user
     // deliberately paused. The intent is cleared only by an explicit play /
     // new-track action.
+    const recoveringMonochrome = isMonochromeDirectStreamUrl(state.currentStreamUrl) &&
+      (state.directStreamReconnectAttempts > 0 || state.directStreamResumePending);
     state.autoplayWanted = false;
+    state.audioBuffering = false;
+    state.audioHasPlayed = true;
     state.activeJobPhase = "";
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      setPlayerStatusIcon("ready");
+      logMonochromePlaybackActivity(
+        recoveringMonochrome ? "Monochrome stream recovered; audio playback resumed" : "Monochrome stream audio playback started",
+        state.currentTrack,
+        recoveringMonochrome ? "recovered" : "playing",
+      );
+    }
+    const video = $("sideVideoPlayer");
+    if (video && video.tagName === "VIDEO" && state.videoMode && !state.manualPauseRequested) {
+      video.play().catch(() => {});
+    }
+    syncPlayPauseButton();
     // `playing` is the browser's confirmed transition. Force this update so a
     // newly started desktop/Dock process cannot retain an earlier paused state.
     publishDockPlayingState(true, true);
     if (state.currentTrack) {
         const isCache = isLibraryStreamUrl(state.currentStreamUrl);
-        if (isCache || (state.currentLibraryPath && !isActiveJobStreamUrl(state.currentStreamUrl))) {
+        if (isMonochromeDirectStreamUrl(state.currentStreamUrl) || isCache || (state.currentLibraryPath && !isActiveJobStreamUrl(state.currentStreamUrl))) {
           setPlayerStatusIcon("ready");
         }
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
@@ -7558,10 +8415,18 @@ function bindPlayer() {
     }
   };
   audio.onerror = () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
     const error = audio.error;
     const erroredSrc = audio.currentSrc || audio.src || "";
     // Ignore errors if we don't have a source (common when using native output)
     if (!audio.src || audio.src === window.location.href) return;
+    // WebKit may deliver a late error from the response that was closed by a
+    // pause/reconnect. Do not let that obsolete response start a second search.
+    if (erroredSrc) {
+      try {
+        if (new URL(erroredSrc, window.location.href).href !== new URL(audio.src, window.location.href).href) return;
+      } catch (_) {}
+    }
     if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
       // A growing stream may temporarily run out of data. Keep the download
       // and its already-tested torrents; reselecting cancels and deletes them.
@@ -7569,6 +8434,68 @@ function bindPlayer() {
       return;
     }
     if (state.manualPauseRequested) return;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl) && error && [2, 3, 4].includes(error.code)) {
+      if (error.code === 4 && !state.directStreamNativeFallbackAttempted) {
+        state.directStreamNativeFallbackAttempted = true;
+        const resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+          ? audio.currentTime : Number(state.directStreamPosition || 0);
+        const streamUrl = state.currentStreamUrl;
+        const fallbackRequestId = state.playbackRequestId;
+        logMonochromePlaybackActivity(
+          "Browser cannot decode Monochrome FLAC; switching to the 30-second native audio buffer",
+          state.currentTrack,
+          "native-fallback",
+          0,
+        );
+        state.directStreamPosition = resumeAt;
+        state.audioBuffering = true;
+        state.autoplayWanted = true;
+        syncPlayPauseButton();
+        const video = $("sideVideoPlayer");
+        if (video && video.tagName === "VIDEO") video.pause();
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        startNativeAudio("", state.currentTrack, fallbackRequestId, resumeAt, streamUrl, true)
+          .then((started) => {
+            if (state.playbackRequestId !== fallbackRequestId) {
+              if (started) stopNativeAudio().catch(() => {});
+              return;
+            }
+            if (!started) return;
+            if (state.currentTrack) setPlayerStatus("Buffering Monochrome stream", state.currentTrack);
+          })
+          .catch((fallbackError) => {
+            state.audioBuffering = false;
+            state.autoplayWanted = false;
+            logMonochromePlaybackActivity(
+              `Native Monochrome playback failed: ${fallbackError.message || fallbackError}`,
+              state.currentTrack,
+              "native-fallback-error",
+              0,
+            );
+            setPlayerStatus(`Monochrome playback failed: ${fallbackError.message || "native audio unavailable"}`, state.currentTrack);
+            syncPlayPauseButton();
+          });
+        return;
+      }
+      logMonochromePlaybackActivity(
+        `Monochrome browser audio error ${error.code}; reconnecting from ${formatTime(state.directStreamPosition || audio.currentTime || 0)}`,
+        state.currentTrack,
+        `media-error-${error.code}`,
+        5000,
+      );
+      state.audioBuffering = true;
+      syncPlayPauseButton();
+      const video = $("sideVideoPlayer");
+      if (video && video.tagName === "VIDEO") video.pause();
+      if (state.currentTrack) {
+        setPlayerStatus("Buffering… reconnecting to Monochrome", state.currentTrack);
+        publishNowPlayingState(2);
+      }
+      reconnectMonochromeAfterBuffer(audio);
+      return;
+    }
     // WebKit can still dispatch an error for a previous active-job URL after
     // the player has already switched to the finalized cache file. Do not let
     // that stale failure repaint a currently selected cache source as failed.
@@ -7643,15 +8570,25 @@ function bindPlayer() {
         const position = ($("seekBar").value / 1000) * duration;
         state.nativeAudio.position = position;
         api("/api/native_audio/seek", { method: "POST", body: JSON.stringify({ position }) }).catch(() => {});
-        syncLocalVideoOverlay(position, true, { allowSeek: true });
+        // The native stream rebuffers after a seek; hold the video on the new
+        // frame until the poll sees audio playing again.
+        syncLocalVideoOverlay(position, false, { allowSeek: true });
+        const seekVideo = $("sideVideoPlayer");
+        if (seekVideo && seekVideo.tagName === "VIDEO") seekVideo.pause();
         if (shouldExposeNowPlaying()) {
           updateMediaSession(state.currentTrack);
         }
       }
       return;
     }
-    if (audio.duration) {
-      audio.currentTime = ($("seekBar").value / 1000) * audio.duration;
+    const spotifyDuration = knownTrackDurationSeconds(state.currentTrack);
+    const duration = isMonochromeDirectStreamUrl(state.currentStreamUrl)
+      ? (spotifyDuration || (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0))
+      : (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : spotifyDuration);
+    if (duration > 0) {
+      const position = ($("seekBar").value / 1000) * duration;
+      audio.currentTime = position;
+      if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) state.directStreamPosition = position;
       if (shouldExposeNowPlaying()) {
         updateMediaSession(state.currentTrack);
       }
@@ -7797,7 +8734,7 @@ function renderSidebarPlaylists() {
     el.onclick = (event) => {
       if (event.target.closest("[data-delete-playlist]")) return;
       const pl = state.playlists.find(p => p.id === el.dataset.playlistId);
-      if (pl) pushPage(() => renderPlaylistPage(pl));
+      if (pl) openLibraryPlaylist(pl);
     };
   });
   list.querySelectorAll("[data-delete-playlist]").forEach(btn => {
@@ -8577,9 +9514,16 @@ function bindPlaylistDialogs() {
   });
 }
 
-async function restorePlaybackState() {
+// Boot restores last session's track paused. It runs after the saved output
+// is reactivated (up to 10s while Bluetooth reconnects), so the user may have
+// started a song in the meantime; restoring then would swap in the old track
+// and set the pause intent on the new one. `bootRequestId` is the playback
+// request id from before boot's awaits; any newer selection wins.
+async function restorePlaybackState(bootRequestId = state.playbackRequestId) {
+  const userSelectedSinceBoot = () => state.playbackRequestId !== bootRequestId;
   try {
     const status = await api("/api/native_audio/status");
+    if (userSelectedSinceBoot()) return;
     if (status && status.metadata && status.path) {
       const track = status.metadata;
       state.currentTrack = track;
@@ -8613,6 +9557,7 @@ async function restorePlaybackState() {
   }
 
   const saved = await storedPlaybackSnapshot();
+  if (userSelectedSinceBoot()) return;
   if (!saved) {
     publishDockPlayingState(false);
     return;
@@ -8830,6 +9775,7 @@ function bindNowPlayingSwipe() {
 }
 
 async function boot() {
+  const bootRequestId = state.playbackRequestId;
   state.dockRecentItems = storedDockRecentItems();
   bindSearch();
   bindPlayer();
@@ -8925,7 +9871,7 @@ async function boot() {
   await restorePreferredAudioOutput().catch(() => {});
   
   // Try to restore playback state before showing home page
-  await restorePlaybackState();
+  await restorePlaybackState(bootRequestId);
   
   replacePage(renderHomePage);
 }
@@ -8976,7 +9922,7 @@ function isPlaybackVisiblyActive() {
   const audio = $("audioPlayer");
   return !!(
     (state.nativeAudio && state.nativeAudio.active && state.nativeAudio.playing) ||
-    (audio && !audio.paused)
+    (audio && !audio.paused && !state.audioBuffering)
   );
 }
 
@@ -9009,12 +9955,32 @@ function _findOutputRouteCandidate(preferred, backendDevices, browserOutputs, na
       deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
       nativeUid: nativeAvailable && bd.uid ? bd.uid : "",
     };
+    // Windows UIDs are PortAudio indexes ("sounddevice:5"), which shift when
+    // devices come and go, so a saved index only counts if the name agrees.
+    const nameAgrees = !preferredName || _audioLabelsMatch(candidate.name, preferredName);
+    const uidIsIndex = preferredNativeUid.startsWith("sounddevice:");
     if (
-      (preferredNativeUid && candidate.nativeUid === preferredNativeUid) ||
-      (preferredId && candidate.deviceId === preferredId) ||
-      (preferredName && _audioLabelsMatch(candidate.name, preferredName))
+      (preferredNativeUid && candidate.nativeUid === preferredNativeUid && (!uidIsIndex || nameAgrees)) ||
+      (preferredId && candidate.deviceId === preferredId && (!uidIsIndex || nameAgrees))
     ) {
       return candidate;
+    }
+  }
+  // No exact saved identity: fall back to the device name (also covers names
+  // saved before the device list switched to full WASAPI names).
+  if (preferredName) {
+    for (const bd of (backendDevices || [])) {
+      const label = String(bd.name || "Audio Device");
+      if (!_audioLabelsMatch(label, preferredName)) continue;
+      const match = (browserOutputs || []).find(b =>
+        (b.label && _audioLabelsMatch(b.label, label)) || b.deviceId === bd.uid
+      );
+      const nativeId = bd.uid ? `native:${bd.uid}` : "";
+      return {
+        name: label,
+        deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
+        nativeUid: nativeAvailable && bd.uid ? bd.uid : "",
+      };
     }
   }
 
@@ -9050,7 +10016,7 @@ async function _activatePreferredOutput(preferred, timeoutMs = 8000, persist = t
     const candidate = _findOutputRouteCandidate(preferred, backendDevices, browserOutputs, nativeAvailable);
     if (candidate) {
       const targetId = candidate.nativeUid ? `native:${candidate.nativeUid}` : candidate.deviceId;
-      await setAudioOutputDevice(targetId);
+      await setAudioOutputDevice(targetId, candidate.name);
       if (persist) {
         await _persistPreferredAudioOutput({
           deviceId: targetId,
@@ -9093,9 +10059,87 @@ async function restorePreferredAudioOutput() {
   }
 }
 
-async function setAudioOutputDevice(deviceId) {
+// Output switches run one at a time. Each one tears down and reopens a device
+// (slow on Bluetooth), and overlapping requests used to race each other's
+// rollback, leaving the route on the wrong device. Clicks made while a switch
+// is running collapse to the most recent selection.
+let _outputSwitchChain = Promise.resolve();
+let _outputSwitchSeq = 0;
+let _outputSwitchesInFlight = 0;
+
+function setAudioOutputDevice(deviceId, selectedDeviceName = "") {
+  const seq = ++_outputSwitchSeq;
+  _outputSwitchesInFlight++;
+  const run = _outputSwitchChain.then(() => (
+    seq === _outputSwitchSeq ? _applyAudioOutputDevice(deviceId, selectedDeviceName) : false
+  )).then((switched) => {
+    // Replace the "Switching output…" notice unless the switch already
+    // reported something more specific (an error, buffering, a fallback).
+    if (switched && state.currentTrack && String(state.playerStatus || "").startsWith("Switching output")) {
+      setPlayerStatus(`Playing on ${selectedDeviceName || "This computer"}`, state.currentTrack);
+    }
+    return switched;
+  }).finally(() => { _outputSwitchesInFlight--; });
+  _outputSwitchChain = run.catch(() => false);
+  return run;
+}
+
+async function _applyAudioOutputDevice(deviceId, selectedDeviceName = "") {
+  const nativeTargetUid = typeof deviceId === "string" && deviceId.startsWith("native:")
+    ? deviceId.slice("native:".length) : "";
+  // Preferred-output restoration can finish after a track starts. Reapplying
+  // the same live native route must not tear down and restart that first stream.
+  if (nativeTargetUid && deviceId === _activeSinkId &&
+      nativeTargetUid === _nativeAudioDeviceUid && state.nativeAudio.active) {
+    if (selectedDeviceName && state.settings) {
+      state.settings.preferred_audio_output_name = String(selectedDeviceName);
+    }
+    return true;
+  }
   _activeSinkId = deviceId;
+  if (deviceId && deviceId.startsWith("native:") && selectedDeviceName) {
+    if (!state.settings) state.settings = {};
+    state.settings.preferred_audio_output_name = String(selectedDeviceName);
+  }
   const audio = $("audioPlayer");
+
+  // Keep a healthy Monochrome HTTP/decoder stream alive across output changes.
+  // The native worker swaps only its sounddevice OutputStream and retains its
+  // FFmpeg process, already-decoded PCM queue, playhead, and pause state.
+  const nativeMonochromeUrl = isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)
+    ? state.nativeAudio.stream_url
+    : (isMonochromeDirectStreamUrl(state.currentStreamUrl) ? state.currentStreamUrl : "");
+  if (state.nativeAudio.active && nativeMonochromeUrl) {
+    const previousUid = _nativeAudioDeviceUid;
+    _nativeAudioDeviceUid = nativeTargetUid;
+    const targetName = nativeTargetUid ? String(selectedDeviceName || state.settings?.preferred_audio_output_name || "") : "";
+    const targetLabel = targetName || "This computer";
+    logMonochromePlaybackActivity(`Switching Monochrome output to ${targetLabel}`, state.currentTrack, "output-switch-start", 0);
+    try {
+      const result = await api("/api/native_audio/output", {
+        method: "POST",
+        body: JSON.stringify({ device_uid: nativeTargetUid, device_name: targetName }),
+      });
+      if (!result?.ok) throw new Error(result?.error || "Could not change the audio output");
+      state.nativeAudio.device_uid = nativeTargetUid;
+      if (state.settings) state.settings.preferred_audio_output_name = nativeTargetUid ? targetName : "";
+      logMonochromePlaybackActivity(
+        `Monochrome output switched to ${targetLabel} (route ${result.output_applied_revision ?? result.output_revision ?? "applied"})`,
+        state.currentTrack,
+        "output-switch-applied",
+        0,
+      );
+      syncNativeAudioUi();
+      syncPlayPauseButton();
+      return true;
+    } catch (error) {
+      _nativeAudioDeviceUid = previousUid;
+      _activeSinkId = previousUid ? `native:${previousUid}` : "";
+      logMonochromePlaybackActivity(`Monochrome output switch failed: ${error.message || "output unavailable"}`, state.currentTrack, "output-switch-error", 0);
+      setPlayerStatus(`Could not change audio output: ${error.message || "output unavailable"}`, state.currentTrack);
+      return false;
+    }
+  }
   
   if (deviceId && deviceId.startsWith("native:")) {
     _nativeAudioDeviceUid = deviceId.slice("native:".length);
@@ -9108,6 +10152,32 @@ async function setAudioOutputDevice(deviceId) {
       : (Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
     const shouldKeepPaused = !!state.manualPauseRequested;
     let nativePath = state.currentLibraryPath || "";
+
+    if (!nativePath && state.currentTrack && isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const streamUrl = state.currentStreamUrl;
+      try {
+        await startNativeAudio("", state.currentTrack, state.playbackRequestId, resumeAt, streamUrl);
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        if (shouldKeepPaused) {
+          await api("/api/native_audio/pause", { method: "POST", body: "{}" });
+          state.nativeAudio.playing = false;
+        }
+      } catch (error) {
+        // A stream failure is not a device failure: keep the user's choice so
+        // Play retries on it, and never hand FLAC to WebKit (it cannot decode
+        // it, and each attempt is one more request Monochrome may rate-limit).
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        state.directStreamNativeFallbackAttempted = true;
+        state.directStreamPosition = resumeAt;
+        setPlayerStatus(`Could not start Monochrome on the selected device: ${error.message || "audio output unavailable"}`, state.currentTrack);
+      }
+      syncPlayPauseButton();
+      return true;
+    }
 
     if (!nativePath && state.currentTrack) {
       const source = await api("/api/playback/source", {
@@ -9149,7 +10219,7 @@ async function setAudioOutputDevice(deviceId) {
       setPlayerStatus("Native output will start when cache is ready", state.currentTrack);
     }
     syncPlayPauseButton();
-    return;
+    return true;
   }
   _nativeAudioDeviceUid = "";
   // Capture native playback state before stopping it so we can hand playback
@@ -9182,13 +10252,20 @@ async function setAudioOutputDevice(deviceId) {
   // Coming off a native device, the <audio> element has no src (native took
   // over). Resume browser playback from the cached file at the same position.
   // playFromLibraryPath streams the existing file — it never redownloads.
-  if (wasNativeActive && state.currentLibraryPath && state.currentTrack) {
+  if (wasNativeActive && isMonochromeDirectStreamUrl(state.currentStreamUrl) && state.currentTrack) {
+    audio.src = state.currentStreamUrl;
+    audio.load();
+    seekAfterMetadata(audio, nativeResumeAt || state.directStreamPosition || 0);
+    if (!keepPaused) tryStartAudio(audio, state.currentTrack, state.playbackRequestId, null);
+    else pauseBrowserAudio(audio);
+  } else if (wasNativeActive && state.currentLibraryPath && state.currentTrack) {
     await playFromLibraryPath(
       state.currentLibraryPath, state.currentTrack, state.playbackRequestId,
       state.activeJobId, "Playing from cache", nativeResumeAt
     ).catch(() => {});
     if (keepPaused) pauseBrowserAudio(audio);
   }
+  return true;
 }
 
 async function _getOutputDevices() {
@@ -9263,7 +10340,10 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
   list.innerHTML = "";
   _nativeAudioAvailable = !!nativeAvailable;
 
-  const browserOutputs = await _getOutputDevices();
+  // On desktop, native routing owns device selection. Browser enumeration can
+  // prompt for microphone permission just to reveal labels, delaying the first
+  // open of this panel; native device names already come from the backend.
+  const browserOutputs = nativeAvailable ? [] : await _getOutputDevices();
 
   // Section: available output devices.
   const items = [];
@@ -9282,8 +10362,9 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
     const lname = bd.name.toLowerCase();
     
     // Strictly hide built-in speakers from the list so they don't duplicate "This computer"
-    // except for explicitly allowed external ones.
-    if (filterKeywords.some(k => lname.includes(k)) && !lname.includes("airplay") && !lname.includes("edifier")) {
+    // except for explicitly allowed external ones. Android's list never
+    // contains the built-in speaker, and names like "JBL Flip Speaker" are real.
+    if (!IS_ANDROID && filterKeywords.some(k => lname.includes(k)) && !lname.includes("airplay") && !lname.includes("edifier")) {
         continue;
     }
     
@@ -9349,10 +10430,25 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
     `;
     li.onclick = async () => {
       let targetId = item.deviceId;
+      // "This computer" is already the universal default route. Handle it
+      // before enumerating browser outputs, which can request microphone
+      // permission and delay the first switch away from app-only Bluetooth.
+      if (targetId === "" && isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+        logMonochromePlaybackActivity("Device menu selected This computer", state.currentTrack, "default-output-selected", 0);
+        if (state.currentTrack) setPlayerStatus(`Switching output to ${item.name}…`, state.currentTrack);
+        const switched = await setAudioOutputDevice("", item.name);
+        if (!switched) { await _refreshConnectPanel(); return; }
+        closeConnectPanel();
+        await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
+        await _refreshConnectPanel();
+        return;
+      }
       if (targetId === "__choose_output__") {
         const selected = await _selectBrowserAudioOutput();
         if (!selected) return;
-        await setAudioOutputDevice(selected.deviceId);
+        const switched = await setAudioOutputDevice(selected.deviceId);
+        if (!switched) { await _refreshConnectPanel(); return; }
+        closeConnectPanel();
         await _persistPreferredAudioOutput({
           deviceId: selected.deviceId,
           name: selected.label || item.name,
@@ -9391,7 +10487,10 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
       } // end else (browser path)
 
       console.log("[Audio] Routing to:", item.name, targetId || "Default");
-      await setAudioOutputDevice(targetId);
+      if (state.currentTrack) setPlayerStatus(`Switching output to ${item.name}…`, state.currentTrack);
+      const switched = await setAudioOutputDevice(targetId, item.name);
+      if (!switched) { await _refreshConnectPanel(); return; }
+      closeConnectPanel();
       await _persistPreferredAudioOutput({
         deviceId: targetId,
         name: item.name,
@@ -9401,6 +10500,24 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
       await _refreshConnectPanel();
     };
     list.appendChild(li);
+  }
+
+  // Android owns Bluetooth discovery and pairing; hand that to its settings.
+  // A newly connected device then appears above (the list is read live).
+  if (IS_ANDROID) {
+    if (window.MindinguflacAndroid?.openBluetoothSettings) {
+      const pair = document.createElement("li");
+      pair.className = "connect-device-item";
+      pair.innerHTML = `
+        <div class="connect-device-icon"><i class="bi bi-bluetooth"></i></div>
+        <div class="connect-device-info">
+          <span class="connect-device-name">Pair new device</span>
+          <span class="connect-device-sub">Opens Bluetooth settings</span>
+        </div>`;
+      pair.onclick = () => window.MindinguflacAndroid.openBluetoothSettings();
+      list.appendChild(pair);
+    }
+    return;
   }
 
   // Section: nearby / unpaired Bluetooth devices.
@@ -9844,6 +10961,30 @@ $("sideVideoSwitch").onclick = () => {
   }
   switchSideVideoMode(!state.videoMode);
 };
+// Touchscreens have no hover, so the video controls (which only appear on
+// hover) would be unreachable. A tap reveals them for a few seconds; while they
+// are hidden, a tap that lands on one only reveals it rather than pressing it.
+(function bindTouchVideoControls() {
+  const cover = $("sideCover");
+  if (!cover) return;
+  let hideTimer = null;
+  let revealedAt = 0;
+  cover.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse") return;
+    if (!cover.classList.contains("show-video-controls")) revealedAt = Date.now();
+    cover.classList.add("show-video-controls");
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => cover.classList.remove("show-video-controls"), 4000);
+  });
+  cover.addEventListener("click", (event) => {
+    if (Date.now() - revealedAt < 400 && event.target.closest("button")) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
+})();
+$("sideVideoEarlier").onclick = () => nudgeVideoSync(-0.25).catch(() => {});
+$("sideVideoLater").onclick = () => nudgeVideoSync(0.25).catch(() => {});
 $("sideVideoRefresh").onclick = () => {
   if (!state.currentTrack) return;
   state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };
