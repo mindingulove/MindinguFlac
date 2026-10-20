@@ -17,9 +17,9 @@
 - Start prefetching upcoming queue tracks during current playback, with separate concurrency controls for playback and background prefetch plus an adjustable metadata timeout.
 - Fix a cache-job crash caused by an album search variable being read before assignment.
 - Keep playlist synchronization and playback settings aligned across devices.
-- Resolve playback title links through Spotify track metadata, including the album ID, so they open the album track list instead of an empty text-only result.
+- Resolve playback title links against the current Spotify track metadata, keep track IDs out of album lookups, and bypass stale or empty album caches when an exact release ID is available.
 - Fetch and persist each track's canonical Spotify URI (`spotify:track:…`) with its Spotify ID and ISRC.
-- Settings, backend user-agent, macOS bundle, and Android now report version **1.3.2**. Android versionCode is **15**.
+- Settings, backend user-agent, macOS bundle, and Android now report version **1.3.2**. Android versionCode is **16**.
 
 ## Android download
-Download **Mindinguflac-android-arm64-v1.3.2-build15.apk** below. Requires Android 8.0 or newer and a 64-bit ARM device (`arm64-v8a`). The `.apk.sha256` file contains its SHA-256 checksum. The APK is signed with the same certificate as previous Android releases so it can update an existing installation in place.
+Download **Mindinguflac-android-arm64-v1.3.2-build16.apk** below. Requires Android 8.0 or newer and a 64-bit ARM device (`arm64-v8a`). The `.apk.sha256` file contains its SHA-256 checksum. The APK is signed with the same certificate as previous Android releases so it can update an existing installation in place.

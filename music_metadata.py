@@ -1312,7 +1312,7 @@ def enrich_track_identifiers(track: dict) -> dict:
         for key, value in spotify_track_metadata(spotify_id).items():
             if not value:
                 continue
-            if key in {"title", "artist", "artist_id", "album", "duration_ms", "isrc", "artwork_url", "spotify_url", "spotify_uri"}:
+            if key in {"title", "artist", "artist_id", "album", "album_spotify_id", "year", "duration_ms", "isrc", "artwork_url", "spotify_url", "spotify_uri"}:
                 enriched[key] = value
             elif not enriched.get(key):
                 enriched[key] = value
@@ -2348,7 +2348,20 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
     extras_version = 2
     album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
     cached = db.get_album_metadata(album_key)
-    if cached:
+    cached_tracks = list(cached.get("tracks") or []) if cached else []
+    cached_spotify_id = str((cached or {}).get("spotify_id") or "").strip()
+    cached_release_id = str((cached or {}).get("release_id") or "").strip()
+    requested_spotify_id = str(spotify_id or "").strip()
+    requested_release_id = str(release_id or "").strip()
+    cache_identity_conflict = bool(
+        (requested_spotify_id and cached_spotify_id and cached_spotify_id != requested_spotify_id)
+        or (requested_release_id and cached_release_id and cached_release_id != requested_release_id)
+    )
+    cache_missing_requested_identity = bool(
+        (requested_spotify_id and not cached_spotify_id)
+        or (requested_release_id and not cached_release_id)
+    )
+    if cached and cached_tracks and not cache_identity_conflict and not cache_missing_requested_identity:
         cached_year = release_year(str(cached.get("year") or "")) or next(
             (release_year(str(track.get("year") or track.get("release_date") or ""))
              for track in cached.get("tracks", [])

@@ -543,7 +543,11 @@ function albumTarget(item = {}) {
   const album = item.album || item.title || "";
   const artist = item.artist || item.name || "";
   const artistId = item.spotify_artist_id || item.artist_id || "";
-  const albumId = item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || (item.metadata && (item.metadata.album_spotify_id || item.metadata.spotify_album_id || item.metadata.spotify_id)) || "";
+  const metadataAlbumId = item.metadata && (
+    item.metadata.album_spotify_id || item.metadata.spotify_album_id ||
+    (item.type === "album" ? item.metadata.spotify_id : "")
+  );
+  const albumId = item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || metadataAlbumId || "";
   return {
     type: "album",
     title: album,
@@ -562,7 +566,11 @@ function albumTarget(item = {}) {
 }
 
 function spotifyAlbumId(album = {}) {
-  const value = album.spotify_id || album.album_spotify_id || album.spotify_album_id || (album.metadata && (album.metadata.album_spotify_id || album.metadata.spotify_album_id || album.metadata.spotify_id)) || "";
+  const metadataAlbumId = album.metadata && (
+    album.metadata.album_spotify_id || album.metadata.spotify_album_id ||
+    (album.type === "album" ? album.metadata.spotify_id : "")
+  );
+  const value = album.spotify_id || album.album_spotify_id || album.spotify_album_id || metadataAlbumId || "";
   const match = String(value).match(/(?:open\.spotify\.com\/album\/|spotify:album:)([A-Za-z0-9]+)/);
   return match ? match[1] : String(value).trim();
 }
@@ -645,10 +653,7 @@ function bindEntityLinks(root = document) {
       event.stopPropagation();
       const track = JSON.parse(button.dataset.sourceTrack || "{}");
       const album = JSON.parse(button.dataset.openAlbum || "{}");
-      const trackAlbum = String(track.album || track.album_title || "").trim();
-      const target = albumTarget(track);
-      const hasAlbumId = !!(spotifyAlbumId(target) || musicBrainzReleaseId(target));
-      if (isTrackItem(track) && (!hasAlbumId || !trackAlbum || /^unknown(?:\s+album)?$/i.test(trackAlbum))) {
+      if (isTrackItem(track)) {
         resolveTrackAlbumLink(track, album).catch(error => {
           console.warn("Could not resolve the track album before opening it:", error);
           openAlbumLink(album);
