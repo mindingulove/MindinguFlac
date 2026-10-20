@@ -540,7 +540,10 @@ function artistTarget(item = {}) {
 }
 
 function albumTarget(item = {}) {
-  const album = item.album || item.title || "";
+  // A track's own title is never its album's name: a track without an album
+  // name opens its album through its Spotify id instead (track_spotify_id).
+  const isTrack = item.type === "track" || (item.type !== "album" && !!(item.duration_ms || item.duration || item.length || item.track_number));
+  const album = item.album || (isTrack ? "" : item.title) || "";
   const artist = item.artist || item.name || "";
   const artistId = item.spotify_artist_id || item.artist_id || "";
   const metadataAlbumId = item.metadata && (
@@ -560,8 +563,10 @@ function albumTarget(item = {}) {
     year: item.year || "",
     musicbrainz_release_id: item.musicbrainz_release_id || item.release_id || (item.metadata && (item.metadata.musicbrainz_release_id || item.metadata.release_id)) || "",
     spotify_id: albumId,
-    spotify_url: item.spotify_url || (item.external_urls && item.external_urls.spotify) || "",
-    external_urls: item.external_urls || {},
+    // Only an album link is an album's URL; a track's spotify_url is the track.
+    spotify_url: /open\.spotify\.com\/album\//.test(item.spotify_url || "") ? item.spotify_url : "",
+    external_urls: item.type === "album" ? (item.external_urls || {}) : {},
+    track_spotify_id: item.type === "album" ? "" : (item.track_spotify_id || (isTrack ? (item.spotify_id || item.id) : "") || ""),
   };
 }
 
@@ -2782,7 +2787,10 @@ async function renderAlbumPage(album) {
     const releaseId = album.musicbrainz_release_id || "";
     const spotifyId = album.spotify_id || "";
 
-    const params = new URLSearchParams({ artist: artistName, album: albumTitle, release_id: releaseId, spotify_id: spotifyId });
+    const params = new URLSearchParams({
+      artist: artistName, album: albumTitle, release_id: releaseId, spotify_id: spotifyId,
+      track_spotify_id: spotifyId ? "" : (album.track_spotify_id || ""),
+    });
     let data = await api(`/api/music/album_tracks?${params}&details=0`);
     if (content.firstElementChild !== loadingState) return;
     const savedTracks = album.saved_playlist_context?.tracks || album.tracks || [];

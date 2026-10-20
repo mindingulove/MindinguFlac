@@ -2432,7 +2432,18 @@ class Handler(BaseHTTPRequestHandler):
                 album = query.get("album", [""])[0].strip()
                 release_id = query.get("release_id", [""])[0].strip()
                 spotify_id = query.get("spotify_id", [""])[0].strip()
+                track_spotify_id = query.get("track_spotify_id", [""])[0].strip()
                 include_extras = query.get("details", ["1"])[0] != "0"
+                if track_spotify_id and not spotify_id:
+                    # Opened from a track that does not carry its album id:
+                    # the track itself names its exact album, so never guess
+                    # by album name (slow, and wrong or empty for decorated
+                    # titles like "Brothers In Arms (Remastered 1996)").
+                    from music_metadata import spotify_album_for_track
+                    found = spotify_album_for_track(track_spotify_id)
+                    spotify_id = found.get("album_spotify_id", "") or spotify_id
+                    album = found.get("album") or album
+                    artist = artist or found.get("artist", "")
                 self.send_json(album_tracks(app_config, artist, album, release_id, spotify_id, include_extras=include_extras))
                 return
             if path == "/api/test/hypebot/concerts":

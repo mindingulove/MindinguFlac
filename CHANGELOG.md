@@ -21,9 +21,9 @@ All notable changes to Mindinguflac are documented here.
 - Start next-track prefetch while the current track plays and expose separate playback/prefetch concurrency plus metadata-timeout settings.
 - Keep YouTube audio fallback available while FLAC torrent candidates continue in parallel.
 - Remove the ED2K download provider and its bundled runtime while retaining the Torrent engine.
-- Resolve playback title links against the current Spotify track metadata, keep track IDs out of album lookups, and bypass stale album caches when an exact release ID is available. Show the saved album's own track list if Spotify cannot reload it.
+- Resolve playback title links from the Spotify track ID, keep track IDs out of album lookups, and bypass stale album caches when an exact release ID is available. Use saved album tracks if Spotify cannot reload them.
 - Fetch and persist each track's canonical Spotify URI (`spotify:track:…`) alongside its Spotify ID and ISRC.
-- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 17.
+- Update Settings, backend user-agent, macOS bundle, and Android versions to 1.3.2; increment Android versionCode to 18.
 
 ## [1.3.1] — 2026-10-16
 

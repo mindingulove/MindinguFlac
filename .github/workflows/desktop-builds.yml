@@ -8,13 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Build target (windows, macos, all)
+        description: Build target (windows, macos, macos-x86_64, all)
         required: true
         default: windows
         type: choice
         options:
           - windows
           - macos
+          - macos-x86_64
           - all
       publish_release:
         description: Attach successful build ZIPs to an existing GitHub release
@@ -121,7 +122,9 @@ jobs:
   macos-x86_64:
     name: macOS x86_64
     needs: prepare-release
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'all') }}
+    # "macos-x86_64" builds only the Intel app, so an arm64 build attached to
+    # the release by hand is not overwritten.
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'macos-x86_64' || github.event.inputs.target == 'all') || github.event_name == 'workflow_call' && (github.event.inputs.target == 'macos' || github.event.inputs.target == 'macos-x86_64' || github.event.inputs.target == 'all') }}
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4

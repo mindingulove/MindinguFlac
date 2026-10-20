@@ -203,7 +203,7 @@ class AndroidEngineClampTest(unittest.TestCase):
         with patch.object(capabilities, "runtime_report", return_value=_report(torrent=False)):
             self.assertEqual(
                 capabilities.clamp_choice("torrent", "all", "LOSSLESS"),
-                ("monochrome", "monochrome", "LOSSLESS"),
+                ("ytp-dl", "youtube", "best"),  # YouTube Music is the default engine
             )
 
 
@@ -313,9 +313,9 @@ class AndroidBootstrapConfigTest(unittest.TestCase):
                 bootstrap._initialize_config(data, Path(tmp) / "cache", Path(tmp) / "music")
             saved = json.loads(config_path.read_text("utf-8"))
 
-        self.assertEqual(saved["download_engine"], "monochrome")
-        self.assertEqual(saved["download_service"], "monochrome")
-        self.assertEqual(saved["default_quality"], "LOSSLESS")
+        self.assertEqual(saved["download_engine"], "ytp-dl")  # YouTube Music is the default engine
+        self.assertEqual(saved["download_service"], "youtube")
+        self.assertEqual(saved["default_quality"], "best")
 
     def test_initialize_config_survives_a_corrupt_config_file(self):
         import tempfile
@@ -330,7 +330,7 @@ class AndroidBootstrapConfigTest(unittest.TestCase):
                 bootstrap._initialize_config(data, Path(tmp) / "cache", Path(tmp) / "music")
             saved = json.loads((data / "config.json").read_text("utf-8"))
 
-        self.assertEqual(saved["download_engine"], "monochrome")
+        self.assertEqual(saved["download_engine"], "ytp-dl")  # YouTube Music is the default engine
 
 
 class AndroidSettingsSanitizerTest(unittest.TestCase):
@@ -412,7 +412,7 @@ class AndroidDownloadRoutingTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}, clear=False), \
                 patch.object(capabilities, "runtime_report", return_value=_report()):
-            self.assertEqual(manager._requested_engine(payload), ("monochrome", "monochrome", "LOSSLESS"))
+            self.assertEqual(manager._requested_engine(payload), ("ytp-dl", "youtube", "best"))
 
     def test_a_payload_is_left_alone_on_desktop(self):
         manager = self._manager(engine="spotiflac", service="tidal", quality="LOSSLESS")

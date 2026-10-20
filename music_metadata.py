@@ -1490,6 +1490,28 @@ def _spotify_embed_track_metadata(spotify_id: str) -> dict:
 
 
 @functools.lru_cache(maxsize=2048)
+def spotify_album_for_track(track_spotify_id: str) -> dict:
+    """{album_spotify_id, album, artist} for a Spotify track, cached in SQLite.
+
+    Opening "the album of this track" is a frequent action; one lookup per
+    track ever, then it is answered from the database.
+    """
+    track_spotify_id = str(track_spotify_id or "").strip()
+    if not track_spotify_id:
+        return {}
+    import db
+    cache_key = f"spotify_track_album:{track_spotify_id}"
+    cached = db.get_track_metadata(cache_key)
+    if cached and cached.get("album_spotify_id"):
+        return cached
+    meta = spotify_track_metadata(track_spotify_id)
+    found = {"album_spotify_id": meta.get("album_spotify_id", ""), "album": meta.get("album", ""),
+             "artist": meta.get("artist", "")}
+    if found["album_spotify_id"]:
+        db.save_track_metadata(cache_key, found)
+    return found
+
+
 def spotify_track_metadata(spotify_id: str) -> dict:
     spotify_id = str(spotify_id or "").strip()
     if not spotify_id:

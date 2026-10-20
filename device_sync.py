@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -29,6 +30,30 @@ _desktop: "DesktopPairingService | None" = None
 _android: "AndroidPairingClient | None" = None
 _settings_revision_lock = threading.RLock()
 _settings_revision_value: float | None = None
+
+
+# Sync messages carry the full playlist store, recent rows and listening
+# statistics; a desktop with a few thousand plays already exceeds 10 MB of
+# JSON. They are gzip-compressed (about 10x smaller) and the limits apply to
+# both the compressed body and the decoded JSON, so a bad message cannot
+# exhaust memory. Uncompressed bodies from older versions are still accepted.
+MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
+MAX_DECODED_BYTES = 256 * 1024 * 1024
+
+
+def _encode_body(payload: dict) -> bytes:
+    return zlib.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), 6, wbits=31)  # gzip
+
+
+def _decode_body(raw: bytes, content_encoding: str) -> dict:
+    if len(raw) > MAX_COMPRESSED_BYTES:
+        raise ValueError("Sync message too large")
+    if str(content_encoding or "").strip().lower() == "gzip":
+        inflater = zlib.decompressobj(wbits=31)
+        raw = inflater.decompress(raw, MAX_DECODED_BYTES)
+        if inflater.unconsumed_tail:
+            raise ValueError("Sync message too large when decompressed")
+    return json.loads(raw.decode("utf-8") or "{}")
 
 
 def _state_dir() -> Path:
@@ -278,17 +303,26 @@ class DesktopPairingService:
                 pass
 
             def respond(self, payload: dict, status: int = 200):
-                data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                compress = "gzip" in str(self.headers.get("Accept-Encoding") or "").lower()
+                data = _encode_body(payload) if compress else json.dumps(payload, separators=(",", ":")).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
+                if compress:
+                    self.send_header("Content-Encoding", "gzip")
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
 
             def read_body(self):
-                size = min(int(self.headers.get("Content-Length", "0") or 0), 8 * 1024 * 1024)
-                return json.loads(self.rfile.read(size).decode("utf-8")) if size else {}
+                size = int(self.headers.get("Content-Length", "0") or 0)
+                if size > MAX_COMPRESSED_BYTES:
+                    raise ValueError("Sync message too large")
+                if not size:
+                    return {}
+                # Never truncate: a cut-off body is broken JSON, which made
+                # every sync fail once the history grew past the old 8 MB cap.
+                return _decode_body(self.rfile.read(size), self.headers.get("Content-Encoding", ""))
 
             def do_POST(self):
                 try:
@@ -539,22 +573,24 @@ class AndroidPairingClient:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        conn = http.client.HTTPSConnection(device["address"], int(device["port"]), context=context, timeout=5)
+        conn = http.client.HTTPSConnection(device["address"], int(device["port"]), context=context, timeout=60)
         conn.connect()
         cert = conn.sock.getpeercert(binary_form=True)
         fingerprint = hashlib.sha256(cert).hexdigest()
         if not secrets.compare_digest(fingerprint, str(device["fingerprint"])):
             conn.close()
             raise ValueError("Desktop certificate fingerprint does not match the scanned QR")
-        headers = {"Content-Type": "application/json", "X-Mindinguflac-Device": str(payload.get("device_id") or "")}
+        headers = {"Content-Type": "application/json", "Content-Encoding": "gzip", "Accept-Encoding": "gzip",
+                   "X-Mindinguflac-Device": str(payload.get("device_id") or "")}
         if secret:
             headers["X-Mindinguflac-Pair-Secret"] = secret
-        conn.request("POST", path, body=json.dumps(payload).encode("utf-8"), headers=headers)
+        conn.request("POST", path, body=_encode_body(payload), headers=headers)
         response = conn.getresponse()
-        raw = response.read(8 * 1024 * 1024)
+        raw = response.read(MAX_COMPRESSED_BYTES + 1)
         status = response.status
+        encoding = response.getheader("Content-Encoding", "")
         conn.close()
-        result = json.loads(raw.decode("utf-8") or "{}")
+        result = _decode_body(raw, encoding)
         if status not in (200, 410):
             raise RuntimeError(str(result.get("error") or f"Pairing request failed ({status})"))
         result["_status"] = status
