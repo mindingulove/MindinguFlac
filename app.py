@@ -2434,6 +2434,8 @@ class Handler(BaseHTTPRequestHandler):
                 spotify_id = query.get("spotify_id", [""])[0].strip()
                 track_spotify_id = query.get("track_spotify_id", [""])[0].strip()
                 include_extras = query.get("details", ["1"])[0] != "0"
+                album_started = time.monotonic()
+                album_route = "album id" if spotify_id else ("track id" if track_spotify_id else ("MusicBrainz release" if release_id else "album name search"))
                 if track_spotify_id and not spotify_id:
                     # Opened from a track that does not carry its album id:
                     # the track itself names its exact album, so never guess
@@ -2444,7 +2446,17 @@ class Handler(BaseHTTPRequestHandler):
                     spotify_id = found.get("album_spotify_id", "") or spotify_id
                     album = found.get("album") or album
                     artist = artist or found.get("artist", "")
-                self.send_json(album_tracks(app_config, artist, album, release_id, spotify_id, include_extras=include_extras))
+                from music_metadata import musicbrainz_priority
+                with musicbrainz_priority():  # a person is waiting on this page
+                    album_data = album_tracks(app_config, artist, album, release_id, spotify_id, include_extras=include_extras)
+                album_seconds = time.monotonic() - album_started
+                if album_seconds > 3 and include_extras is False:
+                    # Visible in the app's log: says which lookup was slow, so a
+                    # slow album page can be traced to its cause.
+                    service_downloader.append_cache_event(
+                        "album", f"Album page took {album_seconds:.1f}s (found by {album_route}; "
+                                 f"{len(album_data.get('tracks') or [])} tracks)", title=album or artist or "Album")
+                self.send_json(album_data)
                 return
             if path == "/api/test/hypebot/concerts":
                 import hypebot_tour

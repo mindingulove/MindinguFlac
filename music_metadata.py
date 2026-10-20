@@ -17,6 +17,7 @@ import urllib.request
 import logging
 import rapidfuzz
 import re
+import contextlib
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,23 +90,52 @@ def format_duration_ms(milliseconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
-_musicbrainz_throttle_lock = threading.Lock()
+_musicbrainz_gate = threading.Condition()
 _musicbrainz_last_request = 0.0
+_musicbrainz_priority_waiting = 0
+_musicbrainz_priority = threading.local()
+
+
+@contextlib.contextmanager
+def musicbrainz_priority():
+    """Mark MusicBrainz requests made inside as interactive (someone is
+    waiting on a page). They go ahead of background enrichment in the gate."""
+    previous = getattr(_musicbrainz_priority, "on", False)
+    _musicbrainz_priority.on = True
+    try:
+        yield
+    finally:
+        _musicbrainz_priority.on = previous
 
 
 def musicbrainz_throttle() -> None:
     """Space every MusicBrainz request in the process at least 1.1 s apart.
 
     MusicBrainz allows one request per second per client and answers bursts
-    with 503. Metadata enrichment and the music-video lookup (video_sources)
-    both call it, so they share this one gate.
+    with 503. Metadata enrichment, the music-video lookup and page loads all
+    share this one gate. Background work queues behind it, so an album page
+    would otherwise wait for every queued enrichment request (tens of
+    seconds); requests under musicbrainz_priority() are served first.
     """
-    global _musicbrainz_last_request
-    with _musicbrainz_throttle_lock:
-        wait = 1.1 - (time.monotonic() - _musicbrainz_last_request)
-        if wait > 0:
-            time.sleep(wait)
-        _musicbrainz_last_request = time.monotonic()
+    global _musicbrainz_last_request, _musicbrainz_priority_waiting
+    priority = getattr(_musicbrainz_priority, "on", False)
+    with _musicbrainz_gate:
+        if priority:
+            _musicbrainz_priority_waiting += 1
+        try:
+            while True:
+                if not priority and _musicbrainz_priority_waiting:
+                    _musicbrainz_gate.wait(0.25)
+                    continue
+                wait = 1.1 - (time.monotonic() - _musicbrainz_last_request)
+                if wait <= 0:
+                    break
+                _musicbrainz_gate.wait(wait)
+            _musicbrainz_last_request = time.monotonic()
+        finally:
+            if priority:
+                _musicbrainz_priority_waiting -= 1
+            _musicbrainz_gate.notify_all()
 
 
 @functools.lru_cache(maxsize=1024)

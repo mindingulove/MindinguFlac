@@ -566,7 +566,9 @@ function albumTarget(item = {}) {
     // Only an album link is an album's URL; a track's spotify_url is the track.
     spotify_url: /open\.spotify\.com\/album\//.test(item.spotify_url || "") ? item.spotify_url : "",
     external_urls: item.type === "album" ? (item.external_urls || {}) : {},
-    track_spotify_id: item.type === "album" ? "" : (item.track_spotify_id || (isTrack ? (item.spotify_id || item.id) : "") || ""),
+    // Any non-album item is a track here (player-bar tracks often have no
+    // "type" or duration), so its Spotify id locates the exact album.
+    track_spotify_id: item.type === "album" ? "" : (item.track_spotify_id || item.spotify_id || (isTrack ? item.id : "") || ""),
   };
 }
 
@@ -2778,7 +2780,26 @@ async function renderAlbumPage(album) {
     : "";
   setActiveView("home", savedPlaylistId);
   const content = $("pageContent");
-  content.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading ${esc(album.title || album.album)}…</span></div>`;
+  // Show the header straight away from what the click already knows (cover,
+  // album, artist); the songs fill in when the backend answers.
+  const headerTitle = album.title || album.album || "";
+  const headerArt = album.artwork_url || album.album_artwork_url || "";
+  content.innerHTML = `
+    <div class="scroll-area album-page-loading">
+      <div class="entity-hero">
+        <div class="album-gallery-wrap">
+          <div class="entity-art album-gallery">
+            ${headerArt ? `<img src="${esc(headerArt)}" alt="${esc(headerTitle)} artwork">` : ""}
+          </div>
+        </div>
+        <div>
+          <span class="eyebrow">Album</span>
+          <h1>${esc(headerTitle || "Loading album…")}</h1>
+          ${album.artist ? `<div class="hero-meta-row"><span class="hero-artist-link">${esc(album.artist)}</span></div>` : ""}
+        </div>
+      </div>
+      <div class="loading"><div class="spinner"></div><span>Loading songs…</span></div>
+    </div>`;
 
   const loadingState = content.firstElementChild;
   try {
