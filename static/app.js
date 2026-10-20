@@ -543,7 +543,10 @@ function albumTarget(item = {}) {
   // A track's own title is never its album's name: a track without an album
   // name opens its album through its Spotify id instead (track_spotify_id).
   const isTrack = item.type === "track" || (item.type !== "album" && !!(item.duration_ms || item.duration || item.length || item.track_number));
-  const album = item.album || (isTrack ? "" : item.title) || "";
+  // "Unknown" / "Unknown Album" are placeholders, not names: searching for
+  // them finds nothing, so treat them as no name and locate the album by id.
+  const placeholder = (value) => /^unknown(\s+album)?$/i.test(String(value || "").trim());
+  const album = (placeholder(item.album) ? "" : item.album) || (isTrack || placeholder(item.title) ? "" : item.title) || "";
   const artist = item.artist || item.name || "";
   const artistId = item.spotify_artist_id || item.artist_id || "";
   const metadataAlbumId = item.metadata && (

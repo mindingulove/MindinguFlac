@@ -2440,6 +2440,8 @@ class Handler(BaseHTTPRequestHandler):
                 spotify_id = query.get("spotify_id", [""])[0].strip()
                 track_spotify_id = query.get("track_spotify_id", [""])[0].strip()
                 include_extras = query.get("details", ["1"])[0] != "0"
+                if album.casefold() in ("unknown", "unknown album"):
+                    album = ""  # a placeholder, not an album name to search for
                 album_started = time.monotonic()
                 album_route = "album id" if spotify_id else ("track id" if track_spotify_id else ("MusicBrainz release" if release_id else "album name search"))
                 if track_spotify_id and not spotify_id:

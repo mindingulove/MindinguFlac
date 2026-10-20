@@ -1535,6 +1535,11 @@ def spotify_album_for_track(track_spotify_id: str) -> dict:
     if cached and cached.get("album_spotify_id"):
         return cached
     meta = spotify_track_metadata(track_spotify_id)
+    if not meta.get("album_spotify_id"):
+        # The API can briefly refuse (rate limit); its embed-page fallback has
+        # no album at all. One retry before giving up on the exact album.
+        time.sleep(1.0)
+        meta = spotify_track_metadata(track_spotify_id) or meta
     found = {"album_spotify_id": meta.get("album_spotify_id", ""), "album": meta.get("album", ""),
              "artist": meta.get("artist", "")}
     if found["album_spotify_id"]:
@@ -1999,7 +2004,11 @@ class SpotifyIndexer(BaseMusicIndexer):
                 "title": legacy_track.get("name", "Unknown"),
                 "artist": artist_name,
                 "artist_id": artist_id,
-                "album": (legacy_track.get("album") or {}).get("name", "Unknown"),
+                # Never invent "Unknown" as an album name: opening it searched
+                # for an album literally called "Unknown" (0 tracks). Keep the
+                # album's own id instead, which opens the exact album.
+                "album": (legacy_track.get("album") or {}).get("name", ""),
+                "album_spotify_id": (legacy_track.get("album") or {}).get("id", ""),
                 "artwork_url": proxy_artwork_url(cover) if cover else "",
                 "spotify_url": (legacy_track.get("external_urls") or {}).get("spotify", ""),
                 "spotify_id": legacy_track.get("id", ""),
