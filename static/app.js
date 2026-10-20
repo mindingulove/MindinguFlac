@@ -2799,7 +2799,7 @@ async function renderAlbumPage(album) {
         </div>
         <div>
           <span class="eyebrow">Album</span>
-          <h1>${esc(headerTitle || "Loading album…")}</h1>
+          <h1 id="albumLoadingTitle">${esc(headerTitle || "Loading album…")}</h1>
           ${album.artist ? `<div class="hero-meta-row"><span class="hero-artist-link">${esc(album.artist)}</span></div>` : ""}
         </div>
       </div>
@@ -2809,9 +2809,24 @@ async function renderAlbumPage(album) {
   const loadingState = content.firstElementChild;
   try {
     const artistName = album.artist || "";
-    const albumTitle = album.title || album.album || "";
+    let albumTitle = album.title || album.album || "";
     const releaseId = album.musicbrainz_release_id || "";
-    const spotifyId = album.spotify_id || "";
+    let spotifyId = album.spotify_id || "";
+
+    // Opened from a track that carries no album name or id (e.g. a queue or
+    // top-tracks entry): ask which album it is first. That small lookup is
+    // answered from the database once known, so the header shows the album
+    // name long before the songs, which are then loaded straight by album id.
+    if (!spotifyId && album.track_spotify_id) {
+      const found = await api(`/api/music/track_album?spotify_id=${encodeURIComponent(album.track_spotify_id)}`).catch(() => null);
+      if (content.firstElementChild !== loadingState) return;
+      if (found?.album_spotify_id) {
+        spotifyId = found.album_spotify_id;
+        albumTitle = albumTitle || found.album || "";
+        const titleEl = $("albumLoadingTitle");
+        if (titleEl && albumTitle) titleEl.textContent = albumTitle;
+      }
+    }
 
     const params = new URLSearchParams({
       artist: artistName, album: albumTitle, release_id: releaseId, spotify_id: spotifyId,

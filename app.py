@@ -2427,6 +2427,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"SSE error: {e}")
                 return
+            if path == "/api/music/track_album":
+                # Which album a Spotify track is on: lets the album page show
+                # its name before the songs load. Cached in SQLite.
+                from music_metadata import spotify_album_for_track
+                self.send_json(spotify_album_for_track(query.get("spotify_id", [""])[0].strip()))
+                return
             if path == "/api/music/album_tracks":
                 artist = query.get("artist", [""])[0].strip()
                 album = query.get("album", [""])[0].strip()
