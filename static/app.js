@@ -866,9 +866,11 @@ function mobileLibraryItemsHtml(playlists) {
         if (!title) continue;
         const albumArtist = String(track.album_artist || track.metadata?.album_artist || primary).trim();
         const key = `${title}\u0000${albumArtist}`.normalize("NFKC").toLocaleLowerCase();
-        if (!items.has(key)) items.set(key, { title, album: title, artist: albumArtist, type: "album", artwork_url: track.album_artwork_url || track.artwork_url || "", artist_artwork_url: track.artist_artwork_url || "", spotify_id: track.album_spotify_id || track.spotify_album_id || track.metadata?.album_spotify_id || track.metadata?.spotify_album_id || "", musicbrainz_release_id: track.musicbrainz_release_id || track.release_id || track.metadata?.musicbrainz_release_id || "", year: track.year || "", trackKeys: new Set() });
+        if (!items.has(key)) items.set(key, { title, album: title, artist: albumArtist, type: "album", artwork_url: track.album_artwork_url || track.artwork_url || "", artist_artwork_url: track.artist_artwork_url || "", spotify_id: track.album_spotify_id || track.spotify_album_id || track.metadata?.album_spotify_id || track.metadata?.spotify_album_id || "", musicbrainz_release_id: track.musicbrainz_release_id || track.release_id || track.metadata?.musicbrainz_release_id || "", year: track.year || "", tracks: [], trackKeys: new Set() });
         const entry = items.get(key);
-        entry.trackKeys.add(trackKey(track));
+        const keyForTrack = trackKey(track);
+        if (!entry.trackKeys.has(keyForTrack)) entry.tracks.push(track);
+        entry.trackKeys.add(keyForTrack);
         if (!entry.artwork_url && (track.album_artwork_url || track.artwork_url)) entry.artwork_url = track.album_artwork_url || track.artwork_url;
         if (!entry.year && track.year) entry.year = track.year;
       }
@@ -978,7 +980,11 @@ function bindMobileLibraryItems() {
     bindLibraryHold(button, event => showArtistContextMenu(event, JSON.parse(button.dataset.mobileArtist || "{}")));
   });
   document.querySelectorAll("[data-mobile-album]").forEach(button => {
-    button.onclick = () => pushPage(() => renderAlbumPage(JSON.parse(button.dataset.mobileAlbum || "{}")));
+    button.onclick = () => {
+      const album = JSON.parse(button.dataset.mobileAlbum || "{}");
+      album.saved_playlist_context = { kind: "saved-album", tracks: album.tracks || [] };
+      pushPage(() => renderAlbumPage(album));
+    };
     bindLibraryHold(button, event => showAlbumContextMenu(event, JSON.parse(button.dataset.mobileAlbum || "{}")));
   });
 }
@@ -1008,6 +1014,7 @@ function openLibraryPlaylist(playlist) {
     name: playlist.name,
     origin: "album",
     allow_playlist_continuation: false,
+    tracks: playlist.tracks || [],
   };
   pushPage(() => renderAlbumPage(target));
 }
@@ -2776,8 +2783,19 @@ async function renderAlbumPage(album) {
     const spotifyId = album.spotify_id || "";
 
     const params = new URLSearchParams({ artist: artistName, album: albumTitle, release_id: releaseId, spotify_id: spotifyId });
-    const data = await api(`/api/music/album_tracks?${params}&details=0`);
+    let data = await api(`/api/music/album_tracks?${params}&details=0`);
     if (content.firstElementChild !== loadingState) return;
+    const savedTracks = album.saved_playlist_context?.tracks || album.tracks || [];
+    const useSavedTracks = Array.isArray(savedTracks) && savedTracks.length > 0;
+    if (useSavedTracks) {
+      data = {
+        ...data,
+        tracks: savedTracks,
+        track_count: savedTracks.length,
+        total_duration: data.total_duration || formatDuration(savedTracks),
+        _extras_complete: true,
+      };
+    }
     const artistArtwork = data.artist_artwork_url || album.artist_artwork_url || "";
     const year = data.year || album.year || "";
     const albumMeta = [
@@ -2968,7 +2986,7 @@ async function renderAlbumPage(album) {
     $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
     renderTrackList("albumTrackList", data.tracks || [], "album", album.saved_playlist_context || null);
     const trackList = $("albumTrackList");
-    if (data._extras_complete === false) {
+    if (data._extras_complete === false && !useSavedTracks) {
       // Artwork scans and secondary metadata must never delay playable tracks.
       api(`/api/music/album_tracks?${params}`, { timeout: 90000 }).then(details => {
         if ($("albumTrackList") !== trackList) return;
