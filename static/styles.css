@@ -4973,6 +4973,12 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
     background: transparent;
     color: #fff;
   }
+  /* The rules above outrank .play-round:disabled; restate the locked look so
+     the phone shows the button is locked while a track loads. */
+  .player-controls .play-round:disabled {
+    color: var(--muted);
+    opacity: 0.78;
+  }
   .player-controls .progress-row,
   .player-tools { display: none; }
 
@@ -5172,6 +5178,11 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
     border-radius: 50%;
     background: #fff;
     color: #080808;
+  }
+  body.mobile-now-playing .player-controls .play-round:disabled {
+    background: #292d35;
+    color: var(--muted);
+    opacity: 0.78;
   }
   body.mobile-now-playing .player-controls .progress-row {
     display: grid;
