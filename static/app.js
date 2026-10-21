@@ -5722,7 +5722,9 @@ async function refreshVideoSync() {
   }
   renderVideoSyncControls();
   state.videoSync.attempts += 1;
-  const audioPath = state.currentLibraryPath && !isVideoLibraryPath(state.currentLibraryPath) ? state.currentLibraryPath : "";
+  // Past the same-file check, the playing file is audio — including the
+  // .webm/.mp4 audio-only downloads from YouTube, which share video extensions.
+  const audioPath = state.currentLibraryPath || "";
   const result = await api("/api/video/sync", {
     method: "POST",
     body: JSON.stringify({
