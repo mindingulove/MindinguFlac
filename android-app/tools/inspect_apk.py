@@ -1,5 +1,6 @@
 """Prove the required Android runtime is actually inside the APK."""
 import sys, zipfile, io, json
+from email.parser import BytesParser
 from pathlib import Path
 
 apk = Path(sys.argv[1])
@@ -86,6 +87,17 @@ for dist, label in (("yt_dlp", "yt-dlp"), ("requests", "Requests"), ("mutagen", 
                     ("packaging", "packaging"), ("dotenv", "python-dotenv"),
                     ("urllib3", "urllib3"), ("certifi", "certifi")):
     check(f"{label} wheel installed into the APK", dist in req_tops)
+
+# Check the installed payload, since changing a requirements file alone does
+# not replace the offline native wheel used by Chaquopy.
+pillow_metadata = [n for n in reqs.namelist()
+                   if n.lower().startswith("pillow-") and n.endswith(".dist-info/METADATA")]
+pillow_version = ""
+if len(pillow_metadata) == 1:
+    pillow_version = BytesParser().parsebytes(reqs.read(pillow_metadata[0])).get("Version", "")
+check("patched Pillow 13.0.0 installed into the APK",
+      pillow_version == "13.0.0" and "PIL/_imaging.so" in reqs.namelist(),
+      pillow_version or "missing or ambiguous Pillow metadata")
 
 # --- things that must NOT be there ---
 forbidden = {
