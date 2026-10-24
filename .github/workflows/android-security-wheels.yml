@@ -75,7 +75,7 @@ jobs:
           +pyo3 = { version = "0.29", features = ["abi3", "abi3t", "abi3-py312"] }
           PATCH
           sed -i 's/version: "1.17.1"/version: "2.0.0"/' custom-recipes/cffi/meta.yaml
-          sed -i 's/version: "11.0.0"/version: "12.3.0"/' custom-recipes/pillow/meta.yaml
+          sed -i 's/version: "11.0.0"/version: "13.0.0"/' custom-recipes/pillow/meta.yaml
           sed -i 's/version: "42.0.8"/version: "50.0.2"/' custom-recipes/cryptography/meta.yaml
           sed -i 's/- openssl/- cffi 2.0.0/' custom-recipes/cryptography/meta.yaml
           python "$GITHUB_WORKSPACE/scripts/prepare_android_crypto_builder.py" .
@@ -90,11 +90,11 @@ jobs:
           echo 'fd1f4eeb3217fe2aea9b8f027122d7e4baf11d227d9438f2a41828136a125f0a  dist/cffi/cffi-2.0.0-1-cp312-cp312-android_24_arm64_v8a.whl' | sha256sum --check
           cp dist/cffi/cffi-2.0.0-1-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
 
-      - name: Build Pillow 12.3.0 for Android
+      - name: Build Pillow 13.0.0 for Android
         working-directory: .work/chaquopy/server/pypi
         run: |
           python build-wheel.py --python 3.12 --abi arm64-v8a "custom-recipes/pillow"
-          cp dist/pillow/pillow-12.3.0-*-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
+          cp dist/pillow/pillow-13.0.0-*-cp312-cp312-android_24_arm64_v8a.whl "$RUNNER_TEMP/android-wheels/"
 
       - name: Install native CFFI for cryptography build helpers
         working-directory: .work/chaquopy/server/pypi

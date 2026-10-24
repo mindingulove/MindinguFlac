@@ -1,3 +1,3 @@
 # Desktop packaging-only dependencies. Runtime app dependencies live in requirements.txt.
 pyinstaller>=6.12
-pillow>=10.0
+pillow>=13.0.0
