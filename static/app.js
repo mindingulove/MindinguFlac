@@ -846,9 +846,8 @@ function mobileLibraryItemsHtml(playlists) {
   if (filter === "playlists") {
     if (!playlists.length) return '<div class="mobile-empty-state">Your playlists will appear here.</div>';
     return playlists.map(pl => {
-      const art = pl.artwork_url || (pl.tracks?.[0] || {}).artwork_url || "";
       return `<button class="mobile-library-item" type="button" data-mobile-playlist-id="${esc(pl.id)}">
-        <span class="mobile-library-art" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : '<i class="bi bi-music-note-list"></i>'}</span>
+        ${playlistArtworkHtml(pl, "mobile-library-art")}
         <span><strong>${esc(pl.name)}</strong><small>Playlist · ${pl.tracks?.length || 0} songs</small></span>
       </button>`;
     }).join("");
@@ -953,8 +952,7 @@ function showPlaylistContextMenu(event, playlist) {
   const menu = $("playlistContextMenu");
   $("ctxPlaylistTitle").textContent = playlist.name || "Playlist";
   $("ctxPlaylistSubtitle").textContent = `Playlist · ${playlist.tracks?.length || 0} songs`;
-  const art = playlist.artwork_url || playlist.tracks?.[0]?.artwork_url || "";
-  $("ctxPlaylistArt").style.backgroundImage = art ? `url('${art}')` : "";
+  $("ctxPlaylistArt").outerHTML = playlistArtworkHtml(playlist, "context-menu-header-art", "ctxPlaylistArt");
   const url = playlistShareUrl(playlist);
   const share = $("ctxPlaylistShare");
   share.disabled = !url;
@@ -975,6 +973,7 @@ function showPlaylistContextMenu(event, playlist) {
       if (error.name !== "AbortError") showToast("Could not share the playlist link.");
     }
   };
+  $("ctxPlaylistDelete").style.display = isReadOnlyPlaylist(playlist) ? "none" : "";
   $("ctxPlaylistDelete").onclick = () => { menu.hidden = true; deletePlaylist(playlist.id); };
   openContextMenu(event, menu);
 }
@@ -2305,7 +2304,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
                      ((item.spotify_id && item.spotify_id === current.spotify_id) ||
                       (item.title === current.title && item.artist === current.artist));
     const typeLabel = { track: "Song", artist: "Artist", album: "Album" }[item.type] || (item.type || "Song");
-    const col6 = isTrack ? makeLibraryBtn(idx, null) : "";
+    const col6 = isTrack ? makeLibraryBtn(idx, item.offline ? { in_library: true } : null) : "";
     const playsValue = trackPlaysValue(item);
 
     let col2 = `<strong>${isTrack ? albumLinkHtml(item, item.title || item.name || item.artist) : esc(item.title || item.name || item.artist)}</strong>`;
@@ -2387,7 +2386,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
   // Phase 2: single batch request → update download icons in-place.
   const trackIdxs = items.reduce((acc, item, idx) => {
-    if (isTrackItem(item)) acc.push(idx);
+    if (isTrackItem(item) && !item.offline) acc.push(idx);
     return acc;
   }, []);
   if (!trackIdxs.length) return;
@@ -3170,6 +3169,13 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
     refreshQueuePanel();
   }
 
+  // Offline playback must use the saved file even if the selected provider's
+  // preferred quality is higher than this download's quality.
+  if (item.offline && item.library_path) {
+    await playFromLibraryPath(item.library_path, item, requestId, null, "Playing offline");
+    return;
+  }
+
   try {
     const source = await api("/api/playback/source", { method: "POST", body: JSON.stringify(serviceDownloadPayload(item, "stream")) });
     if (requestId !== state.playbackRequestId) return;
@@ -3879,6 +3885,7 @@ function localMediaStreamUrl(filePath) {
 
 
 async function fetchVideoForTrack(track, { force = false } = {}) {
+  if (track?.offline) return;
   const key = trackKey(track || {});
   if (!track) return state.videoFetch;
   if (!force && state.videoFetch.trackKey === key) {
@@ -5502,6 +5509,7 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
 function trackIdentitySnapshot(track) {
   if (!track || typeof track !== "object") return {};
   return {
+    ...(track.offline && track.library_path ? { offline: true, library_path: track.library_path } : {}),
     type: track.type || "track",
     title: track.title || "",
     artist: track.artist || "",
@@ -6276,6 +6284,7 @@ function playQueueOffset(delta) {
 }
 
 async function prefetchOneTrack(next, orderKey) {
+  if (next.offline && next.library_path) return;
   const key = trackKey(next);
   if (state.prefetchJobs.has(key)) return;
   try {
@@ -6329,6 +6338,7 @@ async function prefetchNextTracks() {
 const _videoPrefetchInflight = new Set();
 
 function _triggerVideoFetchForTrack(track) {
+  if (track?.offline) return;
   const key = trackKey(track);
   if (_videoPrefetchInflight.has(key)) return;
   if (canSwitchToLocalVideo(track)) return;
@@ -6396,6 +6406,7 @@ async function toggleTrackLibrary(track, button, refresh) {
       await waitForLibraryToggle(track, activeJobId, button);
     }
     if (typeof refresh === "function") refresh();
+    loadPlaylists();
   } catch (error) {
     if (button.dataset.cancelled !== "1") {
       button.title = error.message || "Library update failed";
@@ -8772,12 +8783,42 @@ function formatTime(s) { const m = Math.floor(s / 60); return `${m}:${Math.floor
 // Playlists
 // ---------------------------------------------------------------------------
 
+const OFFLINE_PLAYLIST_ID = "__offline__";
+
+function isReadOnlyPlaylist(playlist) {
+  return !!playlist && (playlist.id === OFFLINE_PLAYLIST_ID || playlist.read_only === true);
+}
+
+function playlistArtworkHtml(playlist, className, id = "") {
+  const idAttr = id ? ` id="${esc(id)}"` : "";
+  if (playlist.id === OFFLINE_PLAYLIST_ID) {
+    const covers = playlist.artwork_urls || [];
+    const tiles = Array.from({ length: 4 }, (_, i) => covers.length
+      ? `<img src="${esc(covers[i % covers.length])}" alt="" loading="lazy">`
+      : '<span><i class="bi bi-music-note-beamed"></i></span>').join("");
+    return `<div${idAttr} class="${className} playlist-art-grid" role="img" aria-label="Offline playlist cover">${tiles}</div>`;
+  }
+  const art = playlist.artwork_url || playlist.tracks?.[0]?.artwork_url || "";
+  return `<div${idAttr} class="${className}" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : '<i class="bi bi-music-note-list"></i>'}</div>`;
+}
+
 async function loadPlaylists() {
   try {
     const playlists = await api("/api/playlists");
     if (JSON.stringify(state.playlists) !== JSON.stringify(playlists)) {
       state.playlists = playlists;
       renderSidebarPlaylists();
+      if (state.activePlaylistId === OFFLINE_PLAYLIST_ID && $("pageContent")?.querySelector('[data-playlist-page="__offline__"]')) {
+        const offline = playlists.find(pl => pl.id === OFFLINE_PLAYLIST_ID);
+        if (offline) {
+          const scrollTop = $("pageContent").querySelector(".scroll-area")?.scrollTop || 0;
+          _renderPlaylistContent(offline, { kind: "playlist", id: offline.id, name: offline.name, origin: "offline", read_only: true, allow_playlist_continuation: false });
+          $("pageContent").querySelector(".scroll-area").scrollTop = scrollTop;
+        } else {
+          state.activePlaylistId = null;
+          replacePage(window.matchMedia("(max-width: 900px)").matches ? renderMobileLibraryPage : renderHomePage);
+        }
+      }
     }
     if (!state.playlistSyncRefreshTimer) {
       state.playlistSyncRefreshTimer = setInterval(() => {
@@ -8811,21 +8852,18 @@ function renderSidebarPlaylists() {
     return;
   }
   list.innerHTML = state.playlists.map(pl => {
-    const art = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
-    const artStyle = art ? `style="background-image: url('${art}')"` : "";
-    const artIcon = art ? "" : `<i class="bi bi-music-note-list"></i>`;
     const origin = inferPlaylistOrigin(pl);
-    const originLabel = origin === "album" ? "Album" : "Created";
+    const originLabel = origin === "album" ? "Album" : origin === "offline" ? "Downloaded" : "Created";
     const yearLabel = origin === "album" && pl.year ? ` · ${esc(pl.year)}` : "";
     const isActive = state.activePlaylistId === pl.id;
     return `
       <div class="sidebar-playlist-item${isActive ? " active" : ""}" data-playlist-id="${pl.id}">
-        <div class="sidebar-playlist-art" ${artStyle}>${artIcon}</div>
+        ${playlistArtworkHtml(pl, "sidebar-playlist-art")}
         <div class="sidebar-playlist-info">
           <div class="sidebar-playlist-name">${esc(pl.name)}</div>
           <div class="sidebar-playlist-count">${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}${yearLabel} · ${esc(originLabel)}</div>
         </div>
-        <button class="sidebar-playlist-delete" type="button" data-delete-playlist="${pl.id}" aria-label="Delete playlist" title="Delete playlist"><i class="bi bi-trash3"></i></button>
+        ${isReadOnlyPlaylist(pl) ? "" : `<button class="sidebar-playlist-delete" type="button" data-delete-playlist="${pl.id}" aria-label="Delete playlist" title="Delete playlist"><i class="bi bi-trash3"></i></button>`}
       </div>
     `;
   }).join("");
@@ -8848,7 +8886,7 @@ function renderSidebarPlaylists() {
 
 async function deletePlaylist(id) {
   const playlist = state.playlists.find(item => item.id === id);
-  if (!playlist) return;
+  if (!playlist || isReadOnlyPlaylist(playlist)) return;
   const dialog = $("deletePlaylistDialog");
   if (dialog.open) return;
   $("deletePlaylistMessage").textContent = `Delete “${playlist.name || "this playlist"}” from your library? Your music files will be kept.`;
@@ -8881,6 +8919,11 @@ function formatDuration(tracks) {
 }
 
 function renderPlaylistPage(playlist) {
+  if (playlist.id === OFFLINE_PLAYLIST_ID && !state.playlists.some(pl => pl.id === OFFLINE_PLAYLIST_ID)) {
+    state.activePlaylistId = null;
+    replacePage(window.matchMedia("(max-width: 900px)").matches ? renderMobileLibraryPage : renderHomePage);
+    return;
+  }
   setActiveView("home");
   if (window.matchMedia("(max-width: 900px)").matches) setMobileNavActive("library");
   document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
@@ -8894,6 +8937,7 @@ function renderPlaylistPage(playlist) {
     id: pl.id,
     name: pl.name,
     origin: playlistOrigin,
+    read_only: isReadOnlyPlaylist(pl),
     allow_playlist_continuation: playlistOrigin === "manual",
   };
   _renderPlaylistContent(pl, playlistPlaybackContext);
@@ -8945,12 +8989,10 @@ function renderPlaylistPage(playlist) {
 }
 
 function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
-  const heroArt = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
-  const artStyle = heroArt ? `background-image: url('${heroArt}')` : "";
-  const artIcon = artStyle ? "" : `<i class="bi bi-music-note-list"></i>`;
   const duration = formatDuration(pl.tracks);
   const playlistOrigin = String(pl.playlist_origin || "").trim().toLowerCase();
   const isAlbumPlaylist = playlistOrigin === "album";
+  const showRecommendations = !isAlbumPlaylist && !isReadOnlyPlaylist(pl);
   const primaryTrack = (pl.tracks || []).find(track => track && (track.artist || track.album)) || (pl.tracks || [])[0] || {};
   const heroArtist = primaryTrack.artist || pl.owner || "";
   const heroYear = primaryTrack.year || pl.year || "";
@@ -8969,8 +9011,8 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
 
   $("pageContent").innerHTML = `
     <div class="scroll-area">
-      <div class="playlist-hero">
-        <div class="playlist-hero-art" style="${artStyle}">${artIcon}</div>
+      <div class="playlist-hero" data-playlist-page="${esc(pl.id)}">
+        ${playlistArtworkHtml(pl, "playlist-hero-art")}
         <div class="playlist-hero-info">
           <span class="eyebrow">${isAlbumPlaylist ? "Album" : "Playlist"}</span>
           <h1>${esc(pl.name)}</h1>
@@ -8999,13 +9041,13 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
 
       <div id="playlistTrackList" class="track-list"></div>
 
-      <div class="playlist-recommendations-head" ${isAlbumPlaylist ? 'style="display:none"' : ""}>
+      <div class="playlist-recommendations-head" ${showRecommendations ? "" : 'style="display:none"'}>
         <div>
           <h2>Recommended</h2>
           <p>Based on this playlist and your listening taste</p>
         </div>
       </div>
-      <div id="playlistRecommendations" class="playlist-recommendations" ${isAlbumPlaylist ? 'style="display:none"' : ""}></div>
+      <div id="playlistRecommendations" class="playlist-recommendations" ${showRecommendations ? "" : 'style="display:none"'}></div>
     </div>
   `;
 
@@ -9042,6 +9084,7 @@ function queueTrackKeys() {
 }
 
 function inferPlaylistOrigin(pl = {}) {
+  if (pl.id === OFFLINE_PLAYLIST_ID) return "offline";
   const origin = String(pl.playlist_origin || "").trim().toLowerCase();
   return origin === "album" ? "album" : "manual";
 }
@@ -9436,7 +9479,7 @@ function openPlaylistPicker(track) {
   function renderPickerList() {
     const body = $("playlistPickerBody");
     const filtered = state.playlists.filter(pl =>
-      !searchVal || pl.name.toLowerCase().includes(searchVal.toLowerCase())
+      !isReadOnlyPlaylist(pl) && (!searchVal || pl.name.toLowerCase().includes(searchVal.toLowerCase()))
     );
 
     const sections = [];
@@ -11617,7 +11660,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   // Remove from playlist
   const btnRemoveFromPlaylist = $("ctxRemoveFromPlaylist");
   if (btnRemoveFromPlaylist) {
-    const playlistCtx = contextInfo && contextInfo.kind === "playlist" ? contextInfo : null;
+    const playlistCtx = contextInfo && contextInfo.kind === "playlist" && contextInfo.id !== OFFLINE_PLAYLIST_ID && !contextInfo.read_only ? contextInfo : null;
     btnRemoveFromPlaylist.style.display = playlistCtx ? "flex" : "none";
     if (playlistCtx) {
       btnRemoveFromPlaylist.onclick = async () => {

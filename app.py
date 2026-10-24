@@ -49,6 +49,7 @@ from music_metadata import album_metadata, album_tracks, artist_page, artist_tou
 from playlist_recommender import generate_one_replacement_recommendation, generate_playlist_recommendations, get_playlist_track_keys, record_recommendation_feedback
 from native_audio import native_audio
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
+from offline_playlist import OFFLINE_PLAYLIST_ID, build_offline_playlist, read_artwork
 
 
 def _list_audio_output_devices() -> list[dict]:
@@ -967,6 +968,10 @@ def enrich_download_payload(body: dict) -> dict:
     track = body.get("track") if isinstance(body.get("track"), dict) else {}
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else track
     source = {**metadata, **track}
+    if source.get("offline") and source.get("library_path"):
+        local_path = Path(source["library_path"]).resolve()
+        if local_path.is_relative_to(Path(app_config.music_dir).resolve()) and local_path.is_file():
+            return {**body, "track": source, "metadata": source}
     track_key = str(source.get("track_key") or body.get("track_key") or "").strip()
     if track_key:
         prefix, sep, value = track_key.partition(":")
@@ -2556,6 +2561,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/playlists":
                 with playlists_lock:
                     playlists = load_playlists()
+                offline = build_offline_playlist(service_downloader)
+                if offline:
+                    playlists.insert(0, offline)
                 for playlist in playlists:
                     if str(playlist.get("playlist_origin") or "").strip().lower() == "album":
                         tracks = list(playlist.get("tracks") or [])
@@ -2748,6 +2756,19 @@ class Handler(BaseHTTPRequestHandler):
                 audio_only = query.get("audio", [""])[0] == "1"
                 self.stream_local_path(file_path, audio_hint=audio_only)
                 return
+            if path == "/api/library/artwork":
+                artwork = read_artwork(Path(query.get("path", [""])[0]), app_config.music_dir)
+                if not artwork:
+                    self.send_error_json("Artwork not found", HTTPStatus.NOT_FOUND)
+                    return
+                data, mime = artwork
+                self.send_response(200)
+                self.send_header("Content-Type", mime if mime in {"image/jpeg", "image/png", "image/webp", "image/gif"} else "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path == "/api/library/stream_active_job":
                 job_id = query.get("job_id", [""])[0].strip()
                 job = service_downloader.get_job(job_id)
@@ -2848,6 +2869,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = read_body(self)
         try:
+            if path.startswith("/api/playlists") and (
+                body.get("id") == OFFLINE_PLAYLIST_ID
+                or body.get("playlist_id") == OFFLINE_PLAYLIST_ID
+                or path.startswith(f"/api/playlists/{OFFLINE_PLAYLIST_ID}/")
+            ):
+                self.send_error_json("The Offline playlist is managed automatically", HTTPStatus.FORBIDDEN)
+                return
             if path == "/api/cache/logs":
                 message = str(body.get("message") or "").strip()
                 title = str(body.get("title") or "").strip()[:160]
@@ -3465,6 +3493,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/playlists":
                 body = read_body(self)
                 playlist_id = body.get("id", "")
+                if playlist_id == OFFLINE_PLAYLIST_ID:
+                    self.send_error_json("The Offline playlist is managed automatically", HTTPStatus.FORBIDDEN)
+                    return
                 with playlists_lock:
                     data = load_playlists()
                     data = [p for p in data if p["id"] != playlist_id]
