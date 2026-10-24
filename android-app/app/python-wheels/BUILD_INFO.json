@@ -85,11 +85,11 @@
   },
   "mornye_apk_verification": {
     "variant": "debug",
-    "sha256": "b7eeef87e2f2d902f254a4cd2d9a14dffe2c42be59e7d89e942b4a60de83e18e",
+    "sha256": "4169fb689f1091fe51aca34173817d87b16f659a41746e157f7805f7fbc6e760",
     "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment",
     "device_runtime": "Not tested: no Android device connected",
     "versionName": "1.4",
-    "versionCode": 20
+    "versionCode": 21
   },
   "lyrics_audio_alignment": {
     "engine": "whisper.cpp 1.9.5 CPU, cross-attention DTW word timing",

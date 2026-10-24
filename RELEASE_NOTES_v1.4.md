@@ -1,6 +1,7 @@
 # Mindinguflac v1.4
 
 ## Added
+- Album header Play and Download All controls on desktop and Android. Download All queues the existing song action in order with the selected engine and quality, skips equal-or-better saved tracks, and shows remaining tracks in its progress ring. Queues survive navigation and resume when the app reopens.
 - An automatic Offline playlist on desktop and Android, containing music downloaded on that device, with a four-cover artwork grid. It cannot be deleted and disappears when the device has no downloaded music.
 
 ## Changed
@@ -8,6 +9,7 @@
 - Retain local artist-profile and lyrics implementations as compatibility fallbacks, and preserve already installed local provider extensions during migration.
 
 ## Fixed
+- Show download errors with a visible retry state, retry punctuation-sensitive Monochrome searches without weakening recording matching, and prevent saved album siblings from supplying another track's progress or completion file.
 - Restore desktop music search when file-based logging prevented the embedded Mornye API from starting.
 - Keep Android playback controls locked during native startup and Monochrome buffering, and unlock them after a failed start so playback can be retried.
 - Allow verified original-album recordings when a compilation edition is unavailable, while preserving the requested and resolved ISRCs.
@@ -22,6 +24,6 @@
 
 ## Security and version
 - Upgrade Pillow to 13.0.0, including the bundled native Android decoder.
-- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **20**.
+- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **21**.
 
 Mornye provider downloads require an installed provider extension. Monochrome, YouTube and torrent backends remain independent.

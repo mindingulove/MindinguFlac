@@ -145,6 +145,20 @@ class MonochromeBackendTests(unittest.TestCase):
             self.assertIsNone(backend_monochrome._select_equivalent_recording_item([candidate], 'Save Tonight - 7" Mix',
                         'Eagle-Eye Cherry', 'GBAKW0201563', 230520))
 
+    def test_punctuation_search_retries_tokens_without_weakening_identity(self):
+        row={'id':'123','title':'...Album Intro','artistNames':['Artist'],'isrc':'XX1234567890','duration':80000}
+        queries=[]
+        def search(requests, query, **kwargs):
+            queries.append(query)
+            return [row] if query == 'album intro artist' else []
+        job={'id':'job','title':'...Album Intro','artist':'Artist','isrc':'XX1234567890',
+             'mode':'stream','metadata':{'duration_ms':80000}}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(backend_monochrome,'_search_items',side_effect=search):
+            backend_monochrome.run(Path(tmp),job,_Manager())
+        self.assertEqual(job['status'],'finished')
+        self.assertIn('album intro artist',queries)
+        self.assertEqual(job['source_recording']['isrc'],'XX1234567890')
+
     def tearDown(self):
         import native_audio
         for fetch in list(native_audio._monochrome_fetches.values()):

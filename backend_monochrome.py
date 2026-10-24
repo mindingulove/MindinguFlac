@@ -522,6 +522,10 @@ def run(output_dir: Path, job: dict, manager) -> None:
     import requests
     from service_downloader import is_valid_audio_file
 
+    if job.get("mode") == "download":
+        blocked = stream_block_reason()
+        if blocked:
+            raise RuntimeError(blocked)
     title = str(job.get("title") or "Unknown").strip()
     artist = str(job.get("artist") or "Unknown").strip()
     metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
@@ -564,6 +568,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         break
                 except Exception as exc:
                     search_errors.append(f"query {query!r}: {exc}")
+            normalized_query = f"{_norm(title)} {_norm(artist)}".strip()
+            if match is None and normalized_query and normalized_query != text_query.casefold():
+                # Catalog search is occasionally inconsistent around leading
+                # ellipses, quotes and punctuation. Retry a token-only query;
+                # selection still requires the same recording identity.
+                try:
+                    items.extend(_search_items(requests, normalized_query, api_base=api_base, site_origin=site_origin))
+                    match = _select_matching_item(items, title, artist, isrc, duration_ms)
+                except Exception as exc:
+                    search_errors.append(f"normalized query: {exc}")
             refused = ""
             if items:
                 match, refused = _resolve_version(items, match, title, artist, isrc, duration_ms)

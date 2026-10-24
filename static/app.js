@@ -334,6 +334,7 @@ const STORAGE_KEYS = {
   volume: "streambox.volume",
   dockRecents: "mindinguflac.dockRecents",
   playbackSession: "mindinguflac.playbackSession.v1",
+  albumDownloads: "mindinguflac.albumDownloads.v1",
 };
 
 let _lastPlaybackSnapshotWrite = 0;
@@ -2298,7 +2299,8 @@ function renderTrackList(containerId, items, context = "general", playbackContex
   function makeLibraryBtn(idx, status) {
     const isDownloaded = !!(status && status.in_library);
     const isBusy = !!(status && status.library_requested);
-    const label = isDownloaded ? "Remove from library" : (isBusy ? "Cancel library download" : "Add to library");
+    const error = !isDownloaded && !isBusy ? libraryDownloadErrors.get(trackKey(items[idx])) : "";
+    const label = isBusy ? "Cancel library download" : isDownloaded ? "Remove from library" : error ? `Retry download: ${error}` : "Add to library";
     let iconHtml;
     if (!status) {
       iconHtml = `<i class="bi bi-arrow-down-circle"></i>`;
@@ -2307,7 +2309,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
     } else {
       iconHtml = `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
     }
-    return `<button class="track-library-btn${isDownloaded ? " downloaded" : ""}${isBusy ? " progress" : ""}" type="button" aria-label="${label}" title="${label}" data-library-action="${idx}" data-active-job-id="${(status && status.active_job_id) || ""}">${iconHtml}</button>`;
+    return `<button class="track-library-btn${isDownloaded ? " downloaded" : ""}${isBusy ? " progress" : ""}${error ? " download-error" : ""}" type="button" aria-label="${esc(label)}" title="${esc(label)}" data-library-action="${idx}" data-active-job-id="${(status && status.active_job_id) || ""}">${iconHtml}</button>`;
   }
 
   // Phase 1: render immediately with placeholder download icons (no network wait).
@@ -2420,6 +2422,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
   function applyStatuses(chunkIdxs, statuses) {
     if (!container.isConnected) return;
+    if (context === "album") updateAlbumLibraryStatuses(chunkIdxs.map(index => items[index]), statuses);
     chunkIdxs.forEach((itemIdx, i) => {
       const btn = container.querySelector(`[data-library-action="${itemIdx}"]`);
       if (!btn) return;
@@ -2433,7 +2436,13 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       // button freezes on a static pie and never finalizes to "downloaded".
       if (status.library_requested && !status.in_library) {
         newBtn.dataset.activeJobId = status.active_job_id || "";
-        waitForLibraryToggle(items[itemIdx], status.active_job_id || "", newBtn).catch(() => {});
+        waitForLibraryToggle(items[itemIdx], status.active_job_id || "", newBtn, {
+          onStatus:next => { if (context === "album") updateAlbumLibraryStatuses([items[itemIdx]], [next]); },
+        }).catch(error => {
+          const live = findLiveLibraryButtonForTrack(items[itemIdx]) || newBtn;
+          reportLibraryDownloadError(items[itemIdx], live, error);
+          refreshLibraryButtonState(items[itemIdx], live);
+        });
       }
     });
     bindLibraryButtons();
@@ -2795,6 +2804,199 @@ async function renderArtistPage(artist) {
   es.onerror = (err) => { if ($("artistLoading")) $("artistLoading").remove(); es.close(); };
 }
 
+// Album header controls wrap the existing per-track library action.
+const libraryDownloadErrors = new Map();
+const albumDownloadBatches = new Map();
+let albumDownloadWorker = false;
+let visibleAlbumControls = null;
+let albumQueueRevision = Date.now();
+
+function persistAlbumDownloadQueue(force = false) {
+  try {
+    const batches = [...albumDownloadBatches.values()].filter(batch => ["queued", "running", "error"].includes(batch.status));
+    albumQueueRevision = Math.max(Date.now(), albumQueueRevision + 1);
+    const snapshot = {updated_at:albumQueueRevision, batches};
+    const serialized = JSON.stringify(snapshot);
+    localStorage.setItem(STORAGE_KEYS.albumDownloads, serialized);
+    // Loopback ports change on restart, so localStorage alone cannot retain
+    // a queue across launches. Persist the same bookkeeping on this device.
+    if (force && navigator.sendBeacon) {
+      navigator.sendBeacon(`${API_BASE}/api/library/album_queue`, new Blob([serialized], {type:"application/json"}));
+    } else {
+      api("/api/library/album_queue", {method:"POST", body:serialized}).catch(() => {});
+    }
+  } catch (_) {}
+}
+
+async function restoreAlbumDownloadQueue() {
+  try {
+    const remote = await api("/api/library/album_queue").catch(() => null);
+    let local = null;
+    try { local = JSON.parse(localStorage.getItem(STORAGE_KEYS.albumDownloads) || "null"); } catch (_) {}
+    const snapshot = !remote || Number(local?.updated_at || 0) > Number(remote.updated_at || 0) ? local : remote;
+    const batches = Array.isArray(snapshot) ? snapshot : snapshot?.batches || [];
+    albumQueueRevision = Math.max(albumQueueRevision, Number(snapshot?.updated_at || 0));
+    for (const saved of batches) {
+      if (!saved || typeof saved.key !== "string" || !Array.isArray(saved.items) || !saved.items.length) continue;
+      const items = saved.items.filter(item => isTrackItem(item?.track) && item.payload && typeof item.payload === "object");
+      if (items.length !== saved.items.length) continue;
+      albumDownloadBatches.set(saved.key, {...saved, items, cancelled:false,
+        status:saved.status === "error" ? "error" : "queued",
+        resumedOwnedJobId:saved.ownsActive ? saved.activeJobId : "", ownsActive:false, activeJobId:""});
+    }
+  } catch (_) {}
+  runAlbumDownloadQueue().catch(() => {});
+}
+
+function reportLibraryDownloadError(track, button, error, notify = true) {
+  const key = trackKey(track);
+  const message = error.message || "Download failed";
+  const previous = libraryDownloadErrors.get(key);
+  libraryDownloadErrors.set(key, message);
+  if (button) {
+    button.classList.remove("progress");
+    button.classList.add("download-error");
+    button.title = `Retry download: ${message}`;
+    button.setAttribute("aria-label", button.title);
+    button.innerHTML = '<i class="bi bi-arrow-down-circle"></i>';
+  }
+  if (notify && previous !== message) showToast(`${track.title || "Track"}: ${message}`, 6500);
+}
+
+function albumControlKey(album, tracks) {
+  return String(album.spotify_id || album.album_spotify_id || album.musicbrainz_release_id ||
+    tracks[0]?.album_spotify_id || `${album.artist || ""}|${album.album || album.title || ""}`);
+}
+
+function albumDownloadSatisfied(status) {
+  return !!(status && (status.download_satisfied ?? status.in_library));
+}
+
+function updateAlbumLibraryStatuses(tracks, statuses) {
+  const view = visibleAlbumControls;
+  if (!view) return;
+  tracks.forEach((track, index) => view.statuses.set(trackKey(track), statuses[index] || {}));
+  renderAlbumHeaderControls();
+}
+
+function renderAlbumHeaderControls() {
+  const view = visibleAlbumControls;
+  const button = $("albumDownloadAll");
+  if (!view || !button || button.dataset.albumKey !== view.key) return;
+  const batch = albumDownloadBatches.get(view.key);
+  const busy = batch && ["queued", "running"].includes(batch.status);
+  const saved = view.tracks.filter(track => track.offline || albumDownloadSatisfied(view.statuses.get(trackKey(track)))).length;
+  const remaining = busy ? Math.max(0, batch.total - batch.completed) : Math.max(0, view.tracks.length - saved);
+  button.classList.toggle("progress", !!busy);
+  button.classList.toggle("downloaded", !busy && remaining === 0 && view.tracks.length > 0);
+  const hasFailures = remaining > 0 && !!batch?.failed;
+  button.classList.toggle("download-error", !busy && hasFailures);
+  button.disabled = !view.tracks.length || (!busy && remaining === 0);
+  const label = !view.tracks.length ? "No songs available" : busy ? `Cancel album downloads: ${remaining} tracks remaining`
+    : remaining === 0 ? "Album downloaded" : `Download album for offline listening (${remaining} tracks)`;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.innerHTML = busy
+    ? `<span class="track-progress-ring determinate" style="--pct:${100 * batch.completed / Math.max(1, batch.total)}"><span class="track-progress-core">${remaining}</span></span>`
+    : `<i class="bi ${remaining === 0 ? "bi-arrow-down-circle-fill" : "bi-arrow-down-circle"}"></i>`;
+  const status = $("albumDownloadStatus");
+  if (status) status.textContent = busy ? `${remaining} tracks remaining${batch.failed ? ` · ${batch.failed} failed` : ""}`
+    : remaining === 0 && view.tracks.length ? "Available offline"
+    : batch?.status === "cancelled" ? "Album download cancelled"
+    : hasFailures ? `${batch.failed} downloads failed — retry remaining tracks` : "";
+  const play = $("albumPlayAll");
+  if (play) play.disabled = !view.tracks.length;
+}
+
+async function cancelAlbumDownloads(batch) {
+  batch.cancelled = true;
+  batch.status = "cancelled";
+  if (batch.ownsActive && batch.activeJobId) {
+    await api("/api/service/cancel", {method:"DELETE",body:JSON.stringify({job_id:batch.activeJobId})}).catch(() => {});
+  }
+  persistAlbumDownloadQueue();
+  renderAlbumHeaderControls();
+}
+
+async function queueAlbumDownloads(view) {
+  const existing = albumDownloadBatches.get(view.key);
+  if (existing && ["queued", "running"].includes(existing.status)) return cancelAlbumDownloads(existing);
+  // Capture the selected engine/service/quality once; navigation or Settings
+  // changes must not silently change the remainder of an accepted queue.
+  const pending = view.tracks.filter(track => !track.offline && !albumDownloadSatisfied(view.statuses.get(trackKey(track))));
+  const items = pending.map(track => ({track, payload:{...serviceDownloadPayload(track, "download"), ensure_download:true}}));
+  const batch = {key:view.key, name:view.name, items, nextIndex:0, total:view.tracks.length,
+    completed:view.tracks.length - items.length, failed:0,
+    cancelled:false, status:"queued", activeJobId:"", ownsActive:false};
+  albumDownloadBatches.set(view.key, batch);
+  persistAlbumDownloadQueue();
+  renderAlbumHeaderControls();
+  runAlbumDownloadQueue().catch(error => showToast(error.message || "Album download failed", 6000));
+}
+
+async function runAlbumDownloadQueue() {
+  if (albumDownloadWorker) return;
+  albumDownloadWorker = true;
+  try {
+    for (;;) {
+      const batch = [...albumDownloadBatches.values()].find(item => item.status === "queued" && !item.cancelled);
+      if (!batch) break;
+      batch.status = "running";
+      for (let index = batch.nextIndex || 0; index < batch.items.length; index++) {
+        const item = batch.items[index];
+        if (batch.cancelled) break;
+        batch.activeJobId = "";
+        batch.ownsActive = false;
+        const button = document.createElement("button");
+        const result = await toggleTrackLibrary(item.track, button, null, {
+          downloadOnly:true, payload:item.payload, reportErrors:false,
+          isCancelled:() => batch.cancelled,
+          onJob:result => {
+            batch.activeJobId = result.job?.id || result.active_job_id || "";
+            batch.ownsActive = result.action === "started" || batch.activeJobId === batch.resumedOwnedJobId;
+            persistAlbumDownloadQueue();
+            if (batch.cancelled && batch.ownsActive) cancelAlbumDownloads(batch).catch(() => {});
+          },
+          onStatus:status => updateAlbumLibraryStatuses([item.track], [status]),
+        });
+        if (batch.cancelled) break;
+        if (result?.ok) batch.completed += 1;
+        else batch.failed += 1;
+        batch.nextIndex = index + 1;
+        persistAlbumDownloadQueue();
+        renderAlbumHeaderControls();
+      }
+      batch.activeJobId = "";
+      if (!batch.cancelled) {
+        batch.status = batch.failed ? "error" : "finished";
+        showToast(batch.failed ? `${batch.name}: ${batch.failed} tracks could not be downloaded. Retry to continue.`
+          : `${batch.name} is available offline`, batch.failed ? 6000 : 3000);
+      }
+      persistAlbumDownloadQueue();
+      renderAlbumHeaderControls();
+    }
+  } finally {
+    albumDownloadWorker = false;
+  }
+}
+
+function bindAlbumHeaderControls(album, tracks) {
+  const unique = [...new Map(tracks.filter(playableQueueItem).map(track => [trackKey(track), track])).values()];
+  const key = albumControlKey(album, unique);
+  const view = {key, name:album.album || album.title || "Album", tracks:unique, statuses:new Map()};
+  visibleAlbumControls = view;
+  const download = $("albumDownloadAll");
+  download.dataset.albumKey = key;
+  download.onclick = () => queueAlbumDownloads(view);
+  $("albumPlayAll").onclick = () => {
+    const first = unique[0];
+    if (!first) return;
+    state.pendingResumePosition = 0;
+    selectMusicItem(first, "stream", unique, album.saved_playlist_context || null);
+  };
+  renderAlbumHeaderControls();
+}
+
 async function renderAlbumPage(album) {
   const savedPlaylistId = album?.saved_playlist_context?.kind === "playlist"
     ? album.saved_playlist_context.id
@@ -2923,7 +3125,12 @@ async function renderAlbumPage(album) {
           </div>
         </div>
 
-        <div class="track-list-header" style="margin-top: 24px">
+        <div class="album-header-actions" role="group" aria-label="Album actions">
+          <button class="album-play-all" id="albumPlayAll" type="button" aria-label="Play album" title="Play album"><i class="bi bi-play-fill"></i></button>
+          <button class="album-download-all" id="albumDownloadAll" type="button" aria-label="Download album for offline listening" title="Download album for offline listening"><i class="bi bi-arrow-down-circle"></i></button>
+          <span class="album-download-status" id="albumDownloadStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="track-list-header">
           <div>#</div>
           <div>Title</div>
           <div class="plays-column">Plays</div>
@@ -3062,6 +3269,7 @@ async function renderAlbumPage(album) {
     };
     $("albumImageModalPrevious").onclick = () => showGalleryImage(galleryIndex - 1);
     $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
+    bindAlbumHeaderControls({...album, spotify_id:data.spotify_id || spotifyId, album:data.album || albumTitle, artist:data.artist || artistName}, data.tracks || []);
     renderTrackList("albumTrackList", data.tracks || [], "album", album.saved_playlist_context || null);
     const trackList = $("albumTrackList");
     if (data._extras_complete === false && !useSavedTracks) {
@@ -5545,6 +5753,11 @@ function trackIdentitySnapshot(track) {
     artist: track.artist || "",
     artist_id: track.artist_id || "",
     album: track.album || "",
+    album_spotify_id: track.album_spotify_id || "",
+    album_artist: track.album_artist || "",
+    is_compilation: !!track.is_compilation,
+    ...(track.album_context ? {album_context:{spotify_id:track.album_context.spotify_id || "", album:track.album_context.album || "",
+      album_artist:track.album_context.album_artist || "", artwork_url:track.album_context.artwork_url || ""}} : {}),
     year: track.year || "",
     artwork_url: track.artwork_url || "",
     spotify_id: track.spotify_id || "",
@@ -6477,36 +6690,46 @@ function prefetchNextVideos() {
   });
 }
 
-async function toggleTrackLibrary(track, button, refresh) {
-  if (!isTrackItem(track)) return;
-  if (button.classList.contains("progress")) {
+async function toggleTrackLibrary(track, button, refresh, options = {}) {
+  if (!isTrackItem(track)) return {ok:false};
+  if (button.classList.contains("progress") && !options.downloadOnly) {
     await cancelLibraryDownload(track, button, refresh);
-    return;
+    return {ok:false, cancelled:true};
   }
+  libraryDownloadErrors.delete(trackKey(track));
   button.classList.add("progress");
-  button.classList.remove("downloaded");
+  button.classList.remove("downloaded", "download-error");
   button.dataset.cancelled = "";
   button.innerHTML = progressButtonMarkup({ progress: 0 });
+  const payload = options.payload || serviceDownloadPayload(track, "download");
   try {
     const result = await api("/api/library/toggle", {
-      method: "POST",
-      body: JSON.stringify(serviceDownloadPayload(track, "download")),
+      method: "POST", body: JSON.stringify({...payload, ...(options.downloadOnly ? {ensure_download:true} : {})}),
     });
+    if (result.ok === false) throw new Error(result.error || "Download failed");
+    options.onJob?.(result);
     prefetchLyricsForTrack(track);
-    const activeJobId = (result.job && result.job.id) || result.active_job_id || "";
+    const activeJobId = result.job?.id || result.active_job_id || "";
     if (activeJobId) button.dataset.activeJobId = activeJobId;
+    let status = result;
     if (result.action === "started" || result.action === "queued") {
-      await waitForLibraryToggle(track, activeJobId, button);
-    }
+      status = await waitForLibraryToggle(track, activeJobId, button, {...options, payload});
+      if (!status) return {ok:false, cancelled:!!options.isCancelled?.()};
+    } else if (status.in_library) exportLibraryDownloadToPhone(status.library_path);
+    options.onStatus?.(status);
     if (typeof refresh === "function") refresh();
     loadPlaylists();
+    return {ok:true, ...result, status};
   } catch (error) {
-    if (button.dataset.cancelled !== "1") {
-      button.title = error.message || "Library update failed";
+    if (button.dataset.cancelled !== "1" && !options.isCancelled?.()) {
+      reportLibraryDownloadError(track, findLiveLibraryButtonForTrack(track) || button, error, options.reportErrors !== false);
     }
+    return {ok:false, error:error.message || "Download failed"};
   } finally {
     button.classList.remove("progress");
     button.dataset.activeJobId = "";
+    await refreshLibraryButtonState(track, findLiveLibraryButtonForTrack(track) || button);
+    renderAlbumHeaderControls();
   }
 }
 
@@ -6579,9 +6802,9 @@ function findLiveLibraryButtonForTrack(track) {
   return null;
 }
 
-async function waitForLibraryToggle(track, jobId = "", button = null) {
+async function waitForLibraryToggle(track, jobId = "", button = null, options = {}) {
   for (let attempt = 0; attempt < 900; attempt++) {
-    if (button && button.dataset.cancelled === "1") return null;
+    if (button && button.dataset.cancelled === "1" || options.isCancelled?.()) return null;
     // The button that started this poll may have been replaced by a later
     // render. Re-acquire the current one for this same track by identity
     // before deciding there is nothing left to update — losing a DOM
@@ -6593,20 +6816,21 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       button = findLiveLibraryButtonForTrack(track);
     }
     await new Promise(resolve => setTimeout(resolve, 1000));
-    if (button && button.dataset.cancelled === "1") return null;
+    if (button && button.dataset.cancelled === "1" || options.isCancelled?.()) return null;
     if (button && !button.isConnected) {
       button = findLiveLibraryButtonForTrack(track);
     }
     const status = await api("/api/library/status", {
       method: "POST",
-      body: JSON.stringify(serviceDownloadPayload(track, "download")),
+      body: JSON.stringify(options.payload || serviceDownloadPayload(track, "download")),
     }).catch(() => null);
+    if (status) options.onStatus?.(status);
     if (status && status.active_job_id && button) button.dataset.activeJobId = status.active_job_id;
     if (status && typeof status.progress !== "undefined") {
       updateLibraryProgressButton(button, status);
     }
     if (status && status.active_job_status === "error") throw new Error("Download cancelled");
-    if (status && status.in_library) {
+    if (status && (options.downloadOnly ? albumDownloadSatisfied(status) : status.in_library)) {
       if (button) {
         button.classList.remove("progress");
         button.classList.add("downloaded");
@@ -6635,6 +6859,9 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       }
       if (job && job.status === "error") throw new Error(job.error || "Download failed");
       if (job && job.status === "finished") {
+        if (options.downloadOnly && status?.in_library && status.download_satisfied === false) {
+          throw new Error("Saved audio does not meet the requested quality. Choose an available quality and retry.");
+        }
         updateLibraryProgressButton(button, { ...job, progress: 100 });
       } else if (job && typeof job.progress !== "undefined") {
         updateLibraryProgressButton(button, job);
@@ -10081,6 +10308,7 @@ async function boot() {
   } else {
     state.settings = await api("/api/settings").catch(() => ({}));
   }
+  await restoreAlbumDownloadQueue();
   const _audio = $("audioPlayer");
   _audio.volume = storedVolume();
   syncVolumeBar();
@@ -11594,7 +11822,10 @@ async function refreshLibraryButtonState(track, button) {
     const busy = !!status.library_requested;
     button.classList.toggle("downloaded", downloaded);
     button.classList.toggle("progress", busy);
-    const label = downloaded ? "Remove from library" : (busy ? "Cancel library download" : "Add to library");
+    const error = !downloaded && !busy ? libraryDownloadErrors.get(trackKey(track)) : "";
+    button.classList.toggle("download-error", !!error);
+    const label = busy ? "Cancel library download" : downloaded ? "Remove from library" : error ? `Retry download: ${error}` : "Add to library";
+    updateAlbumLibraryStatuses([track], [status]);
     button.setAttribute("aria-label", label);
     button.title = label;
     button.innerHTML = busy
@@ -12216,6 +12447,7 @@ $("ctxAlbumGoArtist")?.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  persistAlbumDownloadQueue(true);
   persistPlaybackSnapshot(true);
   beaconListeningSession("", "beforeunload");
 });

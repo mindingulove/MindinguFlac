@@ -274,6 +274,8 @@ CONFIG_PATH = DATA / "config.json"
 PLAYLISTS_PATH = DATA / "playlists.json"
 DOCK_RECENTS_PATH = DATA / "dock_recents.json"
 PLAYBACK_SESSION_PATH = DATA / "playback_session.json"
+ALBUM_DOWNLOAD_QUEUE_PATH = DATA / "album_download_queue.json"
+album_download_queue_lock = threading.Lock()
 LYRICS_DIR = DATA / "lyrics"
 VIDEO_CACHE_PATH = DATA / "video_cache.json"
 VIDEO_FILES_DIR = DATA / "video_files"
@@ -990,6 +992,47 @@ def enrich_download_payload(body: dict) -> dict:
         "spotify_uri": enriched.get("spotify_uri", body.get("spotify_uri", "")),
         "isrc": enriched.get("isrc", body.get("isrc", "")),
     }
+
+
+def load_album_download_queue() -> dict:
+    with album_download_queue_lock:
+        try:
+            value = json.loads(ALBUM_DOWNLOAD_QUEUE_PATH.read_text("utf-8"))
+            if not isinstance(value, dict) or not isinstance(value.get("batches"), list):
+                return {"updated_at": 0, "batches": []}
+            return {"updated_at": int(value.get("updated_at") or 0), "batches": value["batches"]}
+        except (OSError, ValueError):
+            return {"updated_at": 0, "batches": []}
+
+
+def save_album_download_queue(body: dict) -> bool:
+    if not isinstance(body, dict) or not isinstance(body.get("batches"), list):
+        return False
+    try:
+        updated_at = int(body.get("updated_at") or 0)
+        if updated_at <= 0 or len(json.dumps(body)) > 4_000_000:
+            return False
+        for batch in body["batches"]:
+            if not isinstance(batch, dict) or not isinstance(batch.get("key"), str) or not isinstance(batch.get("items"), list):
+                return False
+    except (ValueError, TypeError, OverflowError):
+        return False
+    with album_download_queue_lock:
+        try:
+            existing = json.loads(ALBUM_DOWNLOAD_QUEUE_PATH.read_text("utf-8"))
+        except (OSError, ValueError):
+            existing = {}
+        try:
+            existing_revision = int(existing.get("updated_at") or 0)
+        except (ValueError, TypeError, AttributeError):
+            existing_revision = 0
+        if existing_revision > updated_at:
+            return True
+        ALBUM_DOWNLOAD_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = ALBUM_DOWNLOAD_QUEUE_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"updated_at": updated_at, "batches": body["batches"]}), "utf-8")
+        temporary.replace(ALBUM_DOWNLOAD_QUEUE_PATH)
+    return True
 
 
 def dock_recent_item_key(entry: dict) -> str:
@@ -2635,6 +2678,12 @@ class Handler(BaseHTTPRequestHandler):
                 import device_sync
                 self.send_json(device_sync.status())
                 return
+            if path == "/api/library/album_queue":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                self.send_json(load_album_download_queue())
+                return
             if path == "/api/playback/session":
                 if not self.trusted_local_origin():
                     self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
@@ -3017,6 +3066,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/dock/recent":
                 set_dock_recent_items(body.get("entries") or [])
+                self.send_json({"ok": True})
+                return
+            if path == "/api/library/album_queue":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                if not save_album_download_queue(body):
+                    self.send_error_json("Invalid album download queue", HTTPStatus.BAD_REQUEST)
+                    return
                 self.send_json({"ok": True})
                 return
             if path == "/api/playback/session":

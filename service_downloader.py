@@ -647,6 +647,7 @@ class ServiceDownloadManager:
         self.jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._start_lock = threading.Lock()
+        self._library_toggle_lock = threading.RLock()
         self._cancel_flags: set[str] = set()
         self._progress_thread_running = False
         self._cache_events: list[dict] = []
@@ -1023,6 +1024,9 @@ class ServiceDownloadManager:
             active = self._find_active_library_job(identity)
         return {
             "in_library": bool(library),
+            "download_satisfied": bool(library and library["quality"] >= _quality_rank(
+                Path(f"requested.{payload.get('quality') or self.config.default_quality or 'flac'}"),
+                payload.get("quality") or self.config.default_quality or "flac")),
             "library_path": str(library["path"]) if library else "",
             "library_quality": library["quality"] if library else 0,
             "cached": bool(cache),
@@ -1086,14 +1090,29 @@ class ServiceDownloadManager:
         return {"source": "", "path": "", **status}
 
     def toggle_library(self, payload: dict) -> dict:
+        with self._library_toggle_lock:
+            return self._toggle_library(payload)
+
+    def _toggle_library(self, payload: dict) -> dict:
+        ensure_download = bool(payload.get("ensure_download"))
+        quality = payload.get("quality") or self.config.default_quality or "flac"
+        requested_rank = _quality_rank(Path(f"requested.{quality}"), quality)
         identity = _track_identity_from_payload(payload)
         library = self._find_library_entry(identity)
         if library:
-            self._delete_library_entry(library["path"])
-            return {"ok": True, "action": "deleted", **self.library_status(payload)}
+            if not ensure_download:
+                self._delete_library_entry(library["path"])
+                return {"ok": True, "action": "deleted", **self.library_status(payload)}
+            if library["quality"] >= requested_rank:
+                return {"ok": True, "action": "saved", **self.library_status(payload)}
 
+        # An album queue may meet a download started from a row. Join it rather
+        # than starting another worker or toggling a completed file off.
+        active_library = self._find_active_library_job(identity)
+        if ensure_download and active_library:
+            return {"ok": True, "action": "queued", "job": active_library, **self.library_status(payload)}
         cache = self._find_cache_entry(identity)
-        if cache:
+        if cache and cache["quality"] >= requested_rank:
             job = cache.get("job") or self._job_from_payload(payload, mode="download")
             if cache.get("job"):
                 with self._lock:
@@ -1103,7 +1122,7 @@ class ServiceDownloadManager:
             return {"ok": True, "action": "copied", **result, **self.library_status(payload)}
 
         active = self._find_active_cache_job(identity)
-        if active:
+        if active and _quality_rank(Path(f"requested.{active.get('quality') or ''}"), active.get("quality") or "") >= requested_rank:
             with self._lock:
                 job = self.jobs.get(active["id"])
                 if job:
@@ -1146,7 +1165,7 @@ class ServiceDownloadManager:
 
             # While Monochrome is refusing this client (403/429), every new
             # request would only extend the block; stream from YouTube instead.
-            if backend_monochrome.stream_block_reason():
+            if payload.get("mode", "stream") != "download" and backend_monochrome.stream_block_reason():
                 engine, service, quality = "ytp-dl", "youtube", "best"
         return engine, service, quality
 
@@ -1376,6 +1395,8 @@ class ServiceDownloadManager:
         if current.exists() and is_valid_audio_file(current):
             return False
         for candidate in _find_audio_files(Path(job["output_dir"])):
+            if job.get("mode") == "download" and not _audio_path_matches_track(candidate, job.get("title", ""), job.get("artist", "")):
+                continue
             matches, _ = downloaded_track_matches_request(candidate, job)
             if not matches:
                 continue
@@ -1548,8 +1569,18 @@ class ServiceDownloadManager:
         if not output_dir:
             return False
         root = Path(output_dir)
+        engine = str(job.get("engine") or "").lower()
+        active_path = Path(job["active_audio_path"]) if job.get("active_audio_path") else None
+        if engine == "monochrome" and not active_path:
+            return False  # a sibling in the shared album folder is not progress
         try:
-            candidates = [p for p in root.rglob("*") if p.is_file() and is_download_audio_candidate(p)]
+            if active_path and active_path.is_file():
+                candidates = [active_path]
+            else:
+                candidates = [p for p in root.rglob("*") if p.is_file() and is_download_audio_candidate(p)]
+                if job.get("mode") == "download":
+                    candidates = [p for p in candidates if _audio_path_matches_track(
+                        Path(re.sub(r"\.(part|tmp)$", "", str(p))), job.get("title", ""), job.get("artist", ""))]
             if not candidates:
                 return False
             biggest = max(candidates, key=lambda p: p.stat().st_size)
@@ -1563,7 +1594,7 @@ class ServiceDownloadManager:
         engine = str(job.get("engine") or "").lower()
         engine_bytes = int(job.get("active_audio_ready_bytes") or 0)
         engine_total = int(job.get("active_audio_size") or 0)
-        use_engine_progress = engine == "torrent"
+        use_engine_progress = engine == "torrent" or (engine == "monochrome" and engine_total > 0)
 
         if use_engine_progress:
             progress_bytes = min(engine_bytes, engine_total) if engine_total > 0 else 0
@@ -1894,6 +1925,13 @@ class ServiceDownloadManager:
                 audio_path = Path(job["library_path"])
             else:
                 audio_files = _find_audio_files(output_dir)
+                active_path = Path(job["active_audio_path"]) if job.get("active_audio_path") else None
+                if active_path and active_path in audio_files:
+                    audio_files.remove(active_path)
+                    audio_files.insert(0, active_path)
+                elif job.get("mode") == "download":
+                    matching = [p for p in audio_files if _audio_path_matches_track(p, job.get("title", ""), job.get("artist", ""))]
+                    audio_files = matching or [p for p in audio_files if p.stat().st_mtime >= float(job.get("created_at") or time.time())]
                 if not audio_files:
                     raise RuntimeError("Download finished but no playable audio file was found")
                 # A multi-file album/discography torrent drops several tracks in
