@@ -217,14 +217,14 @@ Vendored Python source (embedded in the APK rather than installed as a wheel):
 
 Bundled wheels are in `app/python-wheels/` with their SHA-256 sums in
 `app/python-wheels/SHA256SUMS`; verify them with
-`shasum -a 256 -c app/python-wheels/SHA256SUMS` from the repository root. The
+`shasum -a 256 -c android-app/app/python-wheels/SHA256SUMS` from the repository root. The
 pinned set is: `yt-dlp 2026.8.19`, `requests 2.34.2`, `mutagen 1.48.1`,
 `PySocks 1.7.1`, `httpx 0.28.1` (with `h2 4.4.1`, `hpack 4.2.0`,
 `hyperframe 6.1.0`, `httpcore 1.0.9`, `h11 0.16.0`, `socksio 1.0.0`,
 `anyio 4.15.1`, `sniffio 1.3.1`, `exceptiongroup 1.3.1`), `aiofiles 25.1.0`,
 `tenacity 9.2.1`, `tqdm 4.70.1`, `packaging 26.2`, `python-dotenv 1.2.4`,
 `typing-extensions 4.16.0`, `cryptography 50.0.2` (with `cffi 2.0.0`,
-`pycparser 3.1`, statically linked OpenSSL 3.5.9), `Pillow 12.3.0` (with
+`pycparser 3.1`, statically linked OpenSSL 3.5.9), `Pillow 13.0.0` (with
 `chaquopy-libjpeg 1.5.3`, `chaquopy-freetype 2.9.1`),
 `pycryptodome 3.21.0`, `urllib3 2.8.0`, `charset-normalizer 3.5.2`,
 `idna 3.20`, `certifi 2026.7.22`.
@@ -232,16 +232,19 @@ pinned set is: `yt-dlp 2026.8.19`, `requests 2.34.2`, `mutagen 1.48.1`,
 The Python 3.12 CFFI 2.0.0 wheel comes from
 https://pypi.flet.dev/cffi/; its published SHA-256 was checked on download.
 The Python 3.12 pycryptodome wheel comes from https://chaquo.com/pypi-13.1/.
-Cryptography 50.0.2 and Pillow 12.3.0 are built locally using Chaquopy commit
+Cryptography 50.0.2 and Pillow 13.0.0 use the wheel builder at Chaquopy commit
 `75197ed5c8280c38881af0e03fede591f1abc11e`, Android NDK 27.3.13750724 and
 API 24. Cryptography uses static OpenSSL 3.5.9 LTS built with
 `scripts/build_android_openssl.sh`; its source checksum is pinned in that
 script. The reproducible build steps are in
 `.github/workflows/android-security-wheels.yml`. Runtime verification uses
 `/api/runtime`, including native CFFI/Pillow imports and the loaded OpenSSL
-version. The Python 3.12 runtime trial was tested on the physical phone through ADB.
-The patched dependency build passed APK packaging checks; its device runtime
-check is pending because the phone disconnected before installation.
+version. The previous Pillow 12.3.0 build was tested on the physical phone
+through ADB. The Pillow 13.0.0 wheel was built successfully in
+[GitHub Actions run 40119813867](https://github.com/mindingulove/MindinguFlac/actions/runs/40119813867).
+A fresh debug APK passed `tools/inspect_apk.py`, which verifies the installed
+Pillow version and native decoder. Device runtime verification of this new
+wheel is pending because no Android device is connected.
 
 ### Built artifacts, 2026-10-11
 
