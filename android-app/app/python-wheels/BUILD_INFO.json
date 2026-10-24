@@ -85,8 +85,10 @@
   },
   "mornye_apk_verification": {
     "variant": "debug",
-    "sha256": "882c4533a8fd29f9077dfcb42b5f45e780a71ee17f7d6fd0191e9a73f6ecb8f4",
+    "sha256": "260ddfe9ef233bfcc96f1c3626bb1cea5fa35aa863285c88cf5ba184016ad737",
     "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment",
-    "device_runtime": "Not tested: no Android device connected"
+    "device_runtime": "Not tested: no Android device connected",
+    "versionName": "1.4",
+    "versionCode": 19
   }
 }

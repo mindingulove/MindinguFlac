@@ -282,11 +282,11 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
         self.assertEqual(stored["isrc"], "")
 
     def test_fetch_lyrics_includes_lrclib_provider(self):
-        captured = {}
+        captured = []
 
         async def fake_fetch_lyrics_async(**kwargs):
-            captured.update(kwargs)
-            return "[00:01.00]Line", "lrclib"
+            captured.extend(kwargs["providers"])
+            return ("[00:01.00]Line", "lrclib") if kwargs["providers"] == ["lrclib"] else ("", "")
 
         identity = {
             "title": "Song",
@@ -302,7 +302,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
                 with patch("local_metadata.lyrics.fetch_lyrics_async", side_effect=fake_fetch_lyrics_async):
                     result = app._fetch_lyrics(identity)
 
-        self.assertEqual(captured["providers"], ["spotify", "apple", "musixmatch", "lrclib", "amazon"])
+        self.assertEqual(captured, ["spotify", "apple", "musixmatch", "lrclib", "amazon"])
         self.assertTrue(result["found"])
         self.assertTrue(result["synced"])
         self.assertEqual(result["provider"], "lrclib")

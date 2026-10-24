@@ -664,11 +664,13 @@ def _refresh_album_playlist_metadata(playlist: dict) -> bool:
         ),
         {},
     )
-    artist = str(seed.get("artist") or playlist.get("owner") or "").strip()
+    artist = str(seed.get("album_artist") or playlist.get("owner") or seed.get("artist") or "").strip()
     album = str(seed.get("album") or playlist.get("name") or "").strip()
     release_id = str(seed.get("musicbrainz_release_id") or "").strip()
     spotify_id = str(
-        seed.get("album_spotify_id")
+        playlist.get("album_spotify_id")
+        or (re.search(r"/album/([A-Za-z0-9]+)", playlist.get("spotify_url") or "").group(1) if re.search(r"/album/([A-Za-z0-9]+)", playlist.get("spotify_url") or "") else "")
+        or seed.get("album_spotify_id")
         or seed.get("spotify_album_id")
         or (seed.get("metadata") or {}).get("album_spotify_id")
         or ""
@@ -720,7 +722,7 @@ def _persist_album_playlist_track_metadata(playlist: dict) -> None:
         return
     tracks = [dict(track) for track in (playlist.get("tracks") or []) if isinstance(track, dict)]
     seed = next((track for track in tracks if track.get("artist") or track.get("album")), {})
-    artist = str(seed.get("artist") or playlist.get("owner") or "").strip()
+    artist = str(seed.get("album_artist") or playlist.get("owner") or seed.get("artist") or "").strip()
     album = str(seed.get("album") or playlist.get("name") or "").strip()
     if not artist or not album or not tracks:
         return
@@ -1104,6 +1106,9 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
                 "artist": get_val(track, "artists") or get_val(track, "artist"),
                 "artist_id": get_val(track, "artist_id"),
                 "album": get_val(track, "album"),
+                "album_spotify_id": get_val(track, "album_id") or (album_m.group(1) if album_m else ""),
+                "album_artist": get_val(track, "album_artist") or (pl_owner if album_m else ""),
+                "is_compilation": str(get_val(track, "album_artist") or "").casefold() in {"various artists", "various", "vários artistas"},
                 "year": get_val(track, "year") or (pl_year if album_m else ""),
                 "artwork_url": get_val(track, "cover_url") or get_val(track, "artwork_url"),
                 "spotify_id": t_id,
@@ -1340,6 +1345,7 @@ def _lyrics_identity(payload: dict) -> dict:
 
 def _lyrics_cache_key(identity: dict) -> str:
     preferred = {
+        "version": 2,
         "spotify_id": identity.get("spotify_id") or "",
         "isrc": identity.get("isrc") or "",
         "title": (identity.get("title") or "").casefold(),
@@ -1391,6 +1397,25 @@ def _write_cached_lyrics(identity: dict, lyrics: str, provider: str) -> None:
     }, indent=2), encoding="utf-8")
 
 
+async def _fetch_timed_lyrics(identity: dict) -> tuple[str, str]:
+    """Use Mornye's provider functions, preferring timed over plain answers."""
+    from local_metadata.lyrics import fetch_lyrics_async
+    kwargs = dict(track_name=identity.get("title") or "", artist_name=identity.get("artist") or "",
+                  album_name=identity.get("album") or "", duration_s=int(identity.get("duration_s") or 0),
+                  track_id=identity.get("spotify_id") or "", isrc=identity.get("isrc") or "")
+    results = await asyncio.gather(*(fetch_lyrics_async(**kwargs, providers=[provider])
+        for provider in ("spotify", "apple", "musixmatch", "lrclib", "amazon")), return_exceptions=True)
+    plain = ("", "")
+    for result in results:
+        if isinstance(result, BaseException) or not result or not result[0]:
+            continue
+        if _lyrics_is_synced(result[0]):
+            return result
+        if not plain[0]:
+            plain = result
+    return plain
+
+
 def _fetch_lyrics(identity: dict) -> dict:
     cached = _read_cached_lyrics(identity)
     if cached:
@@ -1398,16 +1423,7 @@ def _fetch_lyrics(identity: dict) -> dict:
     if not identity.get("title") or not identity.get("artist"):
         return {"ok": False, "found": False, "error": "Missing title or artist", "identity": identity}
     try:
-        from local_metadata.lyrics import fetch_lyrics_async
-        lyrics, provider = asyncio.run(fetch_lyrics_async(
-            track_name=identity.get("title") or "",
-            artist_name=identity.get("artist") or "",
-            album_name=identity.get("album") or "",
-            duration_s=int(identity.get("duration_s") or 0),
-            track_id=identity.get("spotify_id") or "",
-            isrc=identity.get("isrc") or "",
-            providers=["spotify", "apple", "musixmatch", "lrclib", "amazon"],
-        ))
+        lyrics, provider = asyncio.run(_fetch_timed_lyrics(identity))
         if lyrics and lyrics.strip():
             _write_cached_lyrics(identity, lyrics.strip(), provider or "")
             return {
@@ -2097,6 +2113,27 @@ def _video_sync_ids(body: dict) -> tuple[int, int] | None:
     return track_id, db.resolve_video_clip(*_video_clip_identity(video))
 
 
+def _monochrome_stream_url(value: str) -> str:
+    """Only official catalog track URLs can enter the local streaming proxy."""
+    import backend_monochrome
+    parsed = urlparse(str(value or ""))
+    allowed = {urlparse(base).netloc for base, _ in backend_monochrome._INSTANCES}
+    if parsed.scheme == "https" and parsed.netloc in allowed and re.fullmatch(r"/track/[0-9]+", parsed.path):
+        return f"https://{parsed.netloc}{parsed.path}"
+    return ""
+
+
+def _video_sync_audio_key(body: dict) -> str:
+    source = _monochrome_stream_url(body.get("stream_url", ""))
+    if not source:
+        audio = Path(str(body.get("audio_path") or ""))
+        if audio.is_file():
+            stat = audio.stat()
+            source = f"{audio.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+    identity = f"sync-v2|{body.get('isrc', '')}|{body.get('duration_ms', '')}|{source}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
 def _video_sync_audio_path(body: dict) -> Path | None:
     """The song's audio as a local file, without starting any new download."""
     import video_sync
@@ -2104,7 +2141,7 @@ def _video_sync_audio_path(body: dict) -> Path | None:
     audio = Path(str(body.get("audio_path") or ""))
     if audio.is_file() and audio.suffix.lower() in video_sync.MEDIA_SUFFIXES:
         return audio
-    stream_url = str(body.get("stream_url") or "")
+    stream_url = _monochrome_stream_url(body.get("stream_url", ""))
     if stream_url:
         import native_audio as native_audio_module
 
@@ -2131,6 +2168,7 @@ def _video_sync(body: dict) -> dict:
     ids = _video_sync_ids(body)
     if ids is None:
         return {"ok": False, "status": "unavailable", "offset": 0.0, "manual_offset": 0.0}
+    audio_key = _video_sync_audio_key(body)
     try:
         import video_sync  # needs numpy, plus ffmpeg (desktop) or MediaCodec (Android)
         supported = video_sync.decoder_available()
@@ -2138,10 +2176,10 @@ def _video_sync(body: dict) -> dict:
         supported = False
     if not supported:
         # Matching is impossible here; the manual nudge still works.
-        cached = db.get_track_clip_sync(*ids) or {}
+        cached = db.get_track_clip_sync(*ids, audio_key=audio_key) or {}
         return {"ok": True, "status": "unsupported", "offset": 0.0,
                 "manual_offset": float(cached.get("manual_offset") or 0.0)}
-    cached = db.get_track_clip_sync(*ids)
+    cached = db.get_track_clip_sync(*ids, audio_key=audio_key)
     manual = float((cached or {}).get("manual_offset") or 0.0)
     if cached and cached.get("offset") is not None:
         return {"ok": True, "status": "matched" if cached["matched"] else "unmatched",
@@ -2156,11 +2194,17 @@ def _video_sync(body: dict) -> dict:
         result = video_sync.compute_offset(audio, body["video_path"])
     except Exception as exc:
         print(f"[VideoSync] match failed: {exc}")
-        return {"ok": False, "status": "error", "error": str(exc), "offset": 0.0, "manual_offset": manual}
-    if result.get("pending"):
+        # Partial encoded frames are normal while a stream is growing.
+        status = "pending" if _monochrome_stream_url(body.get("stream_url", "")) else "error"
+        return {"ok": status == "pending", "status": status, "error": str(exc), "offset": 0.0, "manual_offset": manual}
+    # A growing prefix can be too short to contain the common section. Do
+    # not persist an early negative and prevent later buffered audio matching.
+    streaming = bool(_monochrome_stream_url(body.get("stream_url", "")))
+    if result.get("pending") or (streaming and not result.get("matched")
+            and float(result.get("audio_seconds") or 0) < video_sync.AUDIO_SECONDS - 1):
         return {"ok": True, "status": "pending", "offset": 0.0, "manual_offset": manual}
     matched = bool(result.get("matched"))
-    db.save_track_clip_sync(*ids, float(result.get("offset") or 0.0), matched, result.get("confidence"))
+    db.save_track_clip_sync(*ids, float(result.get("offset") or 0.0), matched, result.get("confidence"), audio_key=audio_key)
     print(f"[VideoSync] track {ids[0]} / clip {ids[1]}: {result}")
     return {"ok": True, "status": "matched" if matched else "unmatched",
             "offset": float(result["offset"]) if matched else 0.0,
@@ -2249,7 +2293,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.3.2"
+    server_version = "SpotiFLACStreamer/1.4"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -2343,6 +2387,28 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            if path == "/api/monochrome/stream":
+                url = _monochrome_stream_url(query.get("url", [""])[0])
+                if not url:
+                    self.send_error_json("Invalid Monochrome track URL", HTTPStatus.BAD_REQUEST)
+                    return
+                import native_audio as audio_module
+                fetch = audio_module._monochrome_fetch(url, pin=True)
+                try:
+                    deadline = time.monotonic() + 30
+                    with fetch.condition:
+                        while not (fetch.total and fetch.size) and not (fetch.done or fetch.error or fetch.cancelled.is_set()):
+                            wait = deadline - time.monotonic()
+                            if wait <= 0:
+                                break
+                            fetch.condition.wait(min(wait, 1))
+                    if not fetch.size or not (fetch.total or fetch.done):
+                        self.send_error_json(fetch.error or "Stream is not ready", HTTPStatus.BAD_GATEWAY)
+                        return
+                    self.stream_local_path(fetch.path, is_active_job=True, stream_fetch=fetch)
+                finally:
+                    audio_module._release_monochrome_fetch(fetch)
+                return
             if path == "/api/health":
                 self.send_json({
                     "ok": True,
@@ -2458,7 +2524,10 @@ class Handler(BaseHTTPRequestHandler):
                     found = spotify_album_for_track(track_spotify_id)
                     spotify_id = found.get("album_spotify_id", "") or spotify_id
                     album = found.get("album") or album
-                    artist = artist or found.get("artist", "")
+                    artist = found.get("album_artist") or found.get("artist") or artist
+                    if not spotify_id:
+                        self.send_error_json("Could not resolve this track's album. Please try again.", HTTPStatus.BAD_GATEWAY)
+                        return
                 from music_metadata import musicbrainz_priority
                 with musicbrainz_priority():  # a person is waiting on this page
                     album_data = album_tracks(app_config, artist, album, release_id, spotify_id, include_extras=include_extras)
@@ -3303,6 +3372,7 @@ class Handler(BaseHTTPRequestHandler):
                     "followers": imported.get("followers", 0),
                     "year": imported.get("year", ""),
                     "spotify_url": spotify_url,
+                    "album_spotify_id": (re.search(r"/album/([A-Za-z0-9]+)", spotify_url).group(1) if re.search(r"/album/([A-Za-z0-9]+)", spotify_url) else ""),
                     "playlist_origin": origin,
                     "tracks": imported["tracks"],
                     "metadata_fetched": bool(spotify_url and imported["tracks"] and (origin != "album" or imported.get("year"))),
@@ -3460,7 +3530,7 @@ class Handler(BaseHTTPRequestHandler):
                     delta = max(-5.0, min(5.0, float(body.get("delta") or 0)))
                 except (TypeError, ValueError):
                     delta = 0.0
-                self.send_json({"ok": True, "manual_offset": db.nudge_track_clip_sync(*ids, delta)})
+                self.send_json({"ok": True, "manual_offset": db.nudge_track_clip_sync(*ids, delta, audio_key=_video_sync_audio_key(body))})
                 return
             if path == "/api/native_audio/output":
                 self.send_json(native_audio.set_stream_output(
@@ -3564,9 +3634,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def stream_local_path(self, path: Path, is_active_job: bool = False, audio_hint: bool = False, active_job_id: str = "") -> None:
+    def stream_local_path(self, path: Path, is_active_job: bool = False, audio_hint: bool = False, active_job_id: str = "", stream_fetch=None) -> None:
         try:
-            size = path.stat().st_size
+            size = (stream_fetch.total or stream_fetch.size) if stream_fetch is not None else path.stat().st_size
             if is_active_job and active_job_id:
                 stream_job = service_downloader.get_job(active_job_id) or {}
                 size = int(stream_job.get("active_audio_size") or size)
@@ -3578,7 +3648,7 @@ class Handler(BaseHTTPRequestHandler):
             if audio_hint and mime == "video/mp4":
                 mime = "audio/mp4"
 
-            if is_active_job and not active_job_id and _candidate_is_streamable(path):
+            if is_active_job and not active_job_id and stream_fetch is None and _candidate_is_streamable(path):
                 self.send_response(200)
                 self.send_cors_headers()
                 self.send_header("Content-Type", mime)
@@ -3654,12 +3724,22 @@ class Handler(BaseHTTPRequestHandler):
             if status == 206:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
-            with path.open("rb", buffering=0 if is_active_job and active_job_id else -1) as f:
+            with path.open("rb", buffering=0 if stream_fetch is not None or (is_active_job and active_job_id) else -1) as f:
                 f.seek(start)
                 remaining = content_length
                 idle_since = time.monotonic()
                 while remaining > 0:
                     readable = remaining
+                    if stream_fetch is not None:
+                        with stream_fetch.condition:
+                            readable = min(remaining, max(0, stream_fetch.size - f.tell()))
+                            if readable <= 0:
+                                if (stream_fetch.done or stream_fetch.error or stream_fetch.cancelled.is_set()
+                                        or time.monotonic() - idle_since > 120):
+                                    self.close_connection = True
+                                    return
+                                stream_fetch.condition.wait(0.5)
+                                continue
                     if is_active_job and active_job_id:
                         current_job = service_downloader.get_job(active_job_id)
                         if not current_job or current_job.get("status") == "error":

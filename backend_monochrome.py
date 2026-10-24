@@ -139,6 +139,7 @@ def _decode_error(path: Path) -> str:
 
 def _norm(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join("-" if unicodedata.category(char) == "Pd" else char for char in text)
     text = text.encode("ascii", "ignore").decode("ascii").casefold()
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
 
@@ -297,6 +298,34 @@ def _musicbrainz_isrc_recordings(isrc: str) -> list[dict]:
         return []
 
 
+def _select_equivalent_recording_item(items: list[dict], title: str, artist: str,
+                                      isrc: str, duration_ms: float) -> dict | None:
+    """Different catalog ISRCs can identify the exact same recording.
+
+    A shared MusicBrainz recording ID, performer and compatible durations is
+    stronger evidence than version-label spelling (7-inch/single/remaster).
+    """
+    if not isrc or not duration_ms:
+        return None
+    base = _split_version(title)[0]
+    requested = {row.get("id"): row for row in _musicbrainz_isrc_recordings(isrc)
+                 if row.get("id") and _split_version(row.get("title", ""))[0] == base
+                 and _same_artist(artist, [credit.get("name") or (credit.get("artist") or {}).get("name")
+                     for credit in row.get("artist-credit", []) if isinstance(credit, dict)])
+                 and _duration_ms(row) and abs(_duration_ms(row) - duration_ms) <= 10000}
+    if not requested:
+        return None
+    for candidate in sorted(items, key=lambda row: abs(_duration_ms(row) - duration_ms)):
+        if (not candidate.get("isrc") or not _same_artist(artist, _artists(candidate))
+                or _split_version(candidate.get("title", ""))[0] != base or not _duration_ms(candidate)):
+            continue
+        for recording in _musicbrainz_isrc_recordings(str(candidate["isrc"])):
+            if (recording.get("id") in requested and _duration_ms(recording)
+                    and abs(_duration_ms(recording) - _duration_ms(candidate)) <= 10000):
+                return {**candidate, "_original_recording_id": recording["id"], "_recording_match_kind": "same_recording"}
+    return None
+
+
 def _select_original_album_item(items: list[dict], title: str, artist: str,
                                 isrc: str, duration_ms: float) -> dict | None:
     """Last resort for an unlabelled compilation edit: verify the studio album
@@ -337,6 +366,78 @@ def _select_original_album_item(items: list[dict], title: str, artist: str,
                     and _duration_ms(recording)
                     and abs(_duration_ms(recording) - _duration_ms(candidate)) <= 5000):
                 return {**candidate, "_original_recording_id": recording.get("id", "")}
+    return None
+
+
+def _recording_details(recording_id: str) -> dict:
+    try:
+        from music_metadata import get_json
+        return get_json(f"https://musicbrainz.org/ws/2/recording/{urllib.parse.quote(recording_id)}?fmt=json&inc=artist-credits%2Bisrcs%2Bwork-rels%2Breleases%2Brelease-groups")
+    except Exception:
+        return {}
+
+
+def _select_compilation_album_item(items: list[dict], title: str, artist: str,
+                                   isrc: str, duration_ms: float) -> dict | None:
+    """A shortened compilation cut may use the verified studio-album take.
+
+    Require the same performer and musical work, matching provider/recording
+    durations, and a non-compilation studio album release. Never infer this
+    mapping from title similarity or a broad duration window alone.
+    """
+    forbidden = re.compile(r"\b(remix|live|demo|acoustic|instrumental|karaoke|re.?recorded)\b", re.I)
+    if not isrc or not duration_ms or _version_text(title):
+        return None
+
+    def credits(recording):
+        return [row.get("name") or (row.get("artist") or {}).get("name")
+                for row in recording.get("artist-credit", []) if isinstance(row, dict)]
+
+    def works(recording):
+        return {(row.get("work") or {}).get("id") for row in recording.get("relations", [])
+                if row.get("type") == "performance" and (row.get("work") or {}).get("id")}
+
+    source_work_ids = set()
+    requested = sorted(_musicbrainz_isrc_recordings(isrc), key=lambda row: abs(_duration_ms(row) - duration_ms) if _duration_ms(row) else float("inf"))
+    for recording in requested:
+        text = f"{recording.get('title', '')} {recording.get('disambiguation', '')}"
+        if (forbidden.search(text) or _split_version(recording.get("title", ""))[0] != _norm(title)
+                or not _same_artist(artist, credits(recording)) or not recording.get("id")):
+            continue
+        # Confirm the metadata identifies this selected edit, not a conflicting
+        # entry sharing an ISRC. A missing duration cannot establish the edit.
+        if not _duration_ms(recording) or abs(_duration_ms(recording) - duration_ms) > 10000:
+            continue
+        source_work_ids.update(works(_recording_details(recording["id"])))
+    if not source_work_ids:
+        return None
+
+    candidates = [row for row in items if _same_song_title(title, row.get("title", ""))
+                  and _same_artist(artist, _artists(row)) and row.get("isrc") and _duration_ms(row)
+                  and abs(_duration_ms(row) - duration_ms) <= max(120000, duration_ms * 0.5)]
+    candidates.sort(key=lambda row: abs(_duration_ms(row) - duration_ms))
+    checked = set()
+    for candidate in candidates:
+        candidate_isrc = str(candidate["isrc"]).upper()
+        if candidate_isrc in checked:
+            continue
+        checked.add(candidate_isrc)
+        for recording in _musicbrainz_isrc_recordings(candidate_isrc):
+            text = f"{recording.get('title', '')} {recording.get('disambiguation', '')}"
+            if (forbidden.search(text) or re.search(r"\b(edit|short|radio|single)\b", text, re.I)
+                    or not _same_artist(artist, credits(recording))
+                    or not _same_song_title(title, recording.get("title", ""))
+                    or not _duration_ms(recording)
+                    or abs(_duration_ms(recording) - _duration_ms(candidate)) > 5000):
+                continue
+            detail = _recording_details(recording.get("id", ""))
+            if not (works(detail) & source_work_ids):
+                continue
+            albums = [release for release in detail.get("releases", [])
+                      if (release.get("release-group") or {}).get("primary-type") == "Album"
+                      and not set((release.get("release-group") or {}).get("secondary-types", [])) & {"Compilation", "Live", "Remix"}]
+            if albums:
+                return {**candidate, "_original_recording_id": recording["id"], "_source_album": albums[0].get("title", "")}
     return None
 
 
@@ -467,7 +568,11 @@ def run(output_dir: Path, job: dict, manager) -> None:
             if items:
                 match, refused = _resolve_version(items, match, title, artist, isrc, duration_ms)
                 if match is None:
+                    match = _select_equivalent_recording_item(items, title, artist, isrc, duration_ms)
+                if match is None:
                     match = _select_original_album_item(items, title, artist, isrc, duration_ms)
+                if match is None and (metadata.get("is_compilation") or str(metadata.get("album_artist") or "").casefold() in {"various artists", "various", "vários artistas"}):
+                    match = _select_compilation_album_item(items, title, artist, isrc, duration_ms)
             if match is None:
                 detail = (f"search failed ({'; '.join(search_errors)})" if search_errors
                           else refused or "no exact ISRC or title/artist match")
@@ -479,20 +584,30 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 failures.append(f"{api_base}: invalid track ID")
                 continue
             candidate_url = f"{api_base}/track/{urllib.parse.quote(track_id, safe='')}"
+            with manager._lock:
+                job["source_recording"] = {
+                    "title": str(match.get("title") or title), "artist": " / ".join(_artists(match)) or artist,
+                    "isrc": str(match.get("isrc") or isrc), "duration_ms": _duration_ms(match),
+                    "album": str(match.get("_source_album") or ""),
+                    # A compilation Spotify ID does not identify fallback audio.
+                    "spotify_id": "" if match.get("_original_recording_id") else str(metadata.get("spotify_id") or ""),
+                }
             if match.get("_original_recording_id"):
                 # Keep the requested Spotify edition as provenance while the
                 # actual audio is tagged and timed as the verified album take.
                 resolved_isrc = str(match.get("isrc") or "").upper()
                 with manager._lock:
-                    job["recording_match"] = {"kind": "original_album", "requested_isrc": isrc,
+                    job["recording_match"] = {"kind": match.get("_recording_match_kind", "original_album"), "requested_isrc": isrc,
                         "resolved_isrc": resolved_isrc, "requested_duration_ms": duration_ms,
-                        "duration_ms": _duration_ms(match)}
+                        "duration_ms": _duration_ms(match), "source_album": match.get("_source_album", "")}
                     job["isrc"] = resolved_isrc
                     job["metadata"] = {**metadata, "requested_isrc": isrc, "isrc": resolved_isrc,
                         "requested_duration_ms": duration_ms, "duration_ms": _duration_ms(match),
+                        "source_album": match.get("_source_album", ""), "source_isrc": resolved_isrc,
                         "musicbrainz_recording_id": match["_original_recording_id"]}
-                manager._append_cache_event(job, "provider",
-                    f"Compilation edition unavailable; using verified original album version (ISRC {resolved_isrc})")
+                message = ("Matched the same verified recording under its catalog ISRC" if match.get("_recording_match_kind") == "same_recording"
+                           else "Compilation edition unavailable; using verified original album version")
+                manager._append_cache_event(job, "provider", f"{message} (ISRC {resolved_isrc})")
             if job.get("mode", "stream") == "stream":
                 manager._append_cache_event(job, "provider",
                     f"Monochrome matched {match.get('title')} — {' / '.join(_artists(match))} at {site_origin}; streaming directly")

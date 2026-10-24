@@ -90,6 +90,61 @@ def _patched_fetch(responses):
 
 
 class MonochromeBackendTests(unittest.TestCase):
+    def test_compilation_edit_maps_to_verified_studio_album_without_changing_album(self):
+        row = {'id': '173847391828508672', 'title': 'One Of Us', 'artistNames': ['Joan Osborne'],
+               'isrc': 'USPR39500200', 'duration': 320466}
+        records = {
+            'USPR39507368': [{'id': 'edit', 'title': 'One of Us (edit)', 'length': 256453, 'artist-credit': [{'name': 'Joan Osborne'}]}],
+            'USPR39500200': [{'id': 'album-take', 'title': 'One of Us', 'length': 320133, 'artist-credit': [{'name': 'Joan Osborne'}]}],
+        }
+        details = {
+            'edit': {'relations': [{'type': 'performance', 'work': {'id': 'same-work'}}]},
+            'album-take': {'relations': [{'type': 'performance', 'work': {'id': 'same-work'}}],
+                          'releases': [{'title': 'Relish', 'release-group': {'primary-type': 'Album', 'secondary-types': []}}]},
+        }
+        job = {'id': 'job', 'title': 'One Of Us', 'artist': 'Joan Osborne', 'album': 'Hits Of The 90s',
+               'isrc': 'USPR39507368', 'mode': 'stream', 'metadata': {'duration_ms': 256320,
+               'is_compilation': True, 'album_artist': 'Various Artists', 'album_spotify_id': 'compilation-id'}}
+        manager = _Manager()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(backend_monochrome, '_search_items', return_value=[row]), \
+                patch.object(backend_monochrome, '_musicbrainz_isrc_title', return_value='One of Us (edit)'), \
+                patch.object(backend_monochrome, '_musicbrainz_isrc_recordings', side_effect=lambda code: records.get(code, [])), \
+                patch.object(backend_monochrome, '_recording_details', side_effect=lambda key: details.get(key, {})):
+            backend_monochrome.run(Path(tmp), job, manager)
+            self.assertEqual(job['status'], 'finished')
+            self.assertEqual(job['isrc'], 'USPR39500200')
+            self.assertEqual(job['metadata']['requested_isrc'], 'USPR39507368')
+            self.assertEqual(job['metadata']['album_spotify_id'], 'compilation-id')
+            self.assertEqual(job['metadata']['source_album'], 'Relish')
+            self.assertEqual(job['album'], 'Hits Of The 90s')
+            # A title/artist match alone, or only a compilation release, is
+            # insufficient even though the provider row has a plausible length.
+            details['album-take']['relations'][0]['work']['id'] = 'other-work'
+            self.assertIsNone(backend_monochrome._select_compilation_album_item([row], 'One Of Us', 'Joan Osborne', 'USPR39507368', 256320))
+            details['album-take']['relations'][0]['work']['id'] = 'same-work'
+            details['album-take']['releases'][0]['release-group']['secondary-types'] = ['Compilation']
+            self.assertIsNone(backend_monochrome._select_compilation_album_item([row], 'One Of Us', 'Joan Osborne', 'USPR39507368', 256320))
+
+    def test_alternate_catalog_isrc_uses_shared_recording_identity(self):
+        candidate = {'id': '123', 'title': 'Save Tonight', 'artists': [{'name': 'Eagle-Eye Cherry'}],
+                     'isrc': 'USSM10027246', 'duration': 239226}
+        same = {'id': 'shared-recording', 'title': 'Save Tonight', 'length': 236000,
+                'artist-credit': [{'name': 'Eagle‐Eye Cherry'}]}
+        records = {'GBAKW0201563': [same], 'USSM10027246': [same]}
+        with patch.object(backend_monochrome, '_musicbrainz_isrc_recordings', side_effect=lambda code: records.get(code, [])):
+            match = backend_monochrome._select_equivalent_recording_item([candidate], 'Save Tonight - 7" Mix',
+                        'Eagle-Eye Cherry', 'GBAKW0201563', 230520)
+            self.assertIsNotNone(match)
+            self.assertEqual(match['_recording_match_kind'], 'same_recording')
+            records['USSM10027246'] = [{**same, 'id': 'different-remix'}]
+            self.assertIsNone(backend_monochrome._select_equivalent_recording_item([candidate], 'Save Tonight - 7" Mix',
+                        'Eagle-Eye Cherry', 'GBAKW0201563', 230520))
+            records['USSM10027246'] = [same]
+            candidate['artists'] = [{'name': 'Cover Band'}]
+            self.assertIsNone(backend_monochrome._select_equivalent_recording_item([candidate], 'Save Tonight - 7" Mix',
+                        'Eagle-Eye Cherry', 'GBAKW0201563', 230520))
+
     def tearDown(self):
         import native_audio
         for fetch in list(native_audio._monochrome_fetches.values()):

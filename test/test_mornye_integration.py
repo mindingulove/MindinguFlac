@@ -91,10 +91,22 @@ class MornyeRoutingTests(unittest.TestCase):
         fallback.assert_awaited_once()
 
     def test_track_metadata_uses_resolve_api_and_preserves_isrc(self):
+        client = mornye_bridge.SpotifyMetadataClient()
+        client._sdk_instance = SimpleNamespace(get_track_async=AsyncMock(return_value=SimpleNamespace(
+            id="123", album_id="compilation-album", album_artist="Various Artists")))
         with patch.object(mornye_runtime, "request", return_value={"tracks": [{"id": "123", "title": "Song", "isrc": "ISRC123"}]}) as request:
-            result = asyncio.run(mornye_bridge.SpotifyMetadataClient().get_track_async("123"))
+            result = asyncio.run(client.get_track_async("123"))
         self.assertEqual(result.isrc, "ISRC123")
+        self.assertEqual(result.album_id, "compilation-album")
         request.assert_called_once_with("POST", "/resolve", payload={"url": "spotify:track:123"})
+
+    def test_album_resolve_retains_requested_album_id_and_various_artist(self):
+        client = mornye_bridge.SpotifyMetadataClient()
+        with patch.object(mornye_runtime, "request", return_value={"name": "Hits Of The 90s", "tracks": [
+            {"id": "one-of-us", "artists": "Joan Osborne", "album_artist": "Various Artists"}]}):
+            info, tracks = asyncio.run(client.get_album_tracks_async("compilation-album"))
+        self.assertEqual(info["artist"], "Various Artists")
+        self.assertEqual(tracks[0].album_id, "compilation-album")
 
     def test_provider_job_uses_rest_output_directory_and_polls(self):
         manager = SimpleNamespace(_lock=threading.Lock(), _cancel_flags=set(), _append_cache_event=Mock())

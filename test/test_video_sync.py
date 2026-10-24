@@ -75,6 +75,12 @@ class VideoSyncMatchTests(unittest.TestCase):
         self.assertTrue(result["matched"], result)
         self.assertAlmostEqual(result["offset"], -8.0, delta=0.05)
 
+    def test_video_can_omit_a_long_album_intro(self):
+        song = _song(200, seed=25)
+        result = self._match(_master(song[: int(120 * SR)]), song[int(62 * SR):])
+        self.assertTrue(result["matched"], result)
+        self.assertAlmostEqual(result["offset"], -62.0, delta=0.05)
+
     def test_unrelated_song_is_not_matched(self):
         result = self._match(_song(90, seed=3), _song(160, seed=4))
         self.assertFalse(result["matched"], result)

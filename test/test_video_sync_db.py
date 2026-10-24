@@ -56,6 +56,18 @@ class NormalizedVideoSyncTests(unittest.TestCase):
         other_clip = db.resolve_video_clip("youtube", "aaaaaaaaaaa")
         self.assertIsNone(db.get_track_clip_sync(track, other_clip))
 
+    def test_album_and_edit_audio_do_not_reuse_offsets_or_failed_matches(self):
+        track = db.resolve_track_identity("spotify-1", "", "Song", "Artist")
+        clip = db.resolve_video_clip("youtube", "abcdefghijk")
+        db.save_track_clip_sync(track, clip, 0, False, 1)
+        self.assertIsNone(db.get_track_clip_sync(track, clip, audio_key="studio"))
+        db.nudge_track_clip_sync(track, clip, 0.25, audio_key="studio")
+        db.save_track_clip_sync(track, clip, -32, True, 9, audio_key="studio")
+        db.save_track_clip_sync(track, clip, 2, True, 8, audio_key="edit")
+        self.assertEqual(db.get_track_clip_sync(track, clip, audio_key="studio")["offset"], -32)
+        self.assertEqual(db.get_track_clip_sync(track, clip, audio_key="studio")["manual_offset"], 0.25)
+        self.assertEqual(db.get_track_clip_sync(track, clip, audio_key="edit")["manual_offset"], 0)
+
     def test_empty_legacy_name_keyed_table_is_dropped(self):
         conn = db._get_conn()
         conn.execute("CREATE TABLE video_sync (sync_key TEXT PRIMARY KEY)")

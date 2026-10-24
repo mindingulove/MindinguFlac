@@ -21,11 +21,11 @@ import numpy as np
 SAMPLE_RATE = 11025
 HOP = 256                      # ~23 ms per onset frame
 N_FFT = 1024
-AUDIO_SECONDS = 90.0           # how much of the song to match
-VIDEO_SECONDS = 160.0          # video window: allows intros up to ~70 s
+AUDIO_SECONDS = 120.0           # how much of the song to match
+VIDEO_SECONDS = 190.0          # video window: allows intros up to ~70 s
 MIN_AUDIO_SECONDS = 40.0       # below this the match is not trustworthy yet
 MAX_INTRO_SECONDS = 70.0       # video starts this much before the song
-MAX_LATE_START_SECONDS = 20.0  # video skips this much of the song's start
+MAX_LATE_START_SECONDS = 70.0  # video skips this much of the song's start
 # Acceptance, tuned on 12 real music videos x 3 offsets plus unrelated pairs:
 # accepted 29/34 correct offsets (all within 10 ms) and 0/14 wrong ones.
 MIN_Z = 5.0                    # best offset vs the score at every other offset
@@ -189,4 +189,5 @@ def compute_offset(audio_path: str | Path, video_path: str | Path) -> dict:
     video = decode_mono(video_path, VIDEO_SECONDS)
     if video.size < MIN_AUDIO_SECONDS * SAMPLE_RATE:
         return {"matched": False, "reason": "video has no usable soundtrack"}
-    return match_features(features(audio), features(video))
+    return {**match_features(features(audio), features(video)),
+            "audio_seconds": audio.size / SAMPLE_RATE, "video_seconds": video.size / SAMPLE_RATE}

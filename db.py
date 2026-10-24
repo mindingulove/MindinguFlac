@@ -400,6 +400,17 @@ def _init_db(conn: sqlite3.Connection):
             PRIMARY KEY (track_id, clip_id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS track_clip_sync_sources (
+            track_id INTEGER NOT NULL REFERENCES track_identities(track_id),
+            clip_id INTEGER NOT NULL REFERENCES video_clips(clip_id),
+            audio_key TEXT NOT NULL,
+            auto_offset REAL, matched INTEGER NOT NULL DEFAULT 0,
+            confidence REAL, manual_offset REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (track_id, clip_id, audio_key)
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_track_key ON listening_events(track_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_started_at ON listening_events(started_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_event_type ON listening_events(event_type)")
@@ -1207,10 +1218,16 @@ def resolve_video_clip(source: str, external_id: str) -> int:
                             (source, external_id)).fetchone()["clip_id"])
 
 
-def get_track_clip_sync(track_id: int, clip_id: int) -> dict | None:
+def _sync_table(audio_key: str):
+    return (("track_clip_sync_sources", ", audio_key", " AND audio_key = ?", ", ?", (audio_key,))
+            if audio_key else ("track_clip_sync", "", "", "", ()))
+
+
+def get_track_clip_sync(track_id: int, clip_id: int, audio_key: str = "") -> dict | None:
+    table, _, where, _, args = _sync_table(audio_key)
     row = _get_conn().execute(
-        "SELECT auto_offset, matched, confidence, manual_offset FROM track_clip_sync WHERE track_id = ? AND clip_id = ?",
-        (track_id, clip_id)).fetchone()
+        f"SELECT auto_offset, matched, confidence, manual_offset FROM {table} WHERE track_id = ? AND clip_id = ?{where}",
+        (track_id, clip_id, *args)).fetchone()
     if not row:
         return None
     return {"offset": row["auto_offset"], "matched": bool(row["matched"]),
@@ -1218,30 +1235,31 @@ def get_track_clip_sync(track_id: int, clip_id: int) -> dict | None:
 
 
 def save_track_clip_sync(track_id: int, clip_id: int, offset: float | None, matched: bool,
-                         confidence: float | None) -> None:
-    """Store an automatic match, keeping any manual nudge already saved."""
+                         confidence: float | None, audio_key: str = "") -> None:
+    """Store an automatic match for this audio source, retaining its nudge."""
+    table, column, _, placeholder, args = _sync_table(audio_key)
     conn = _get_conn()
-    conn.execute("""
-        INSERT INTO track_clip_sync (track_id, clip_id, auto_offset, matched, confidence, manual_offset, updated_at)
-        VALUES (?, ?, ?, ?, ?, 0, ?)
-        ON CONFLICT(track_id, clip_id) DO UPDATE SET auto_offset = excluded.auto_offset,
+    conn.execute(f"""
+        INSERT INTO {table} (track_id, clip_id{column}, auto_offset, matched, confidence, manual_offset, updated_at)
+        VALUES (?, ?{placeholder}, ?, ?, ?, 0, ?)
+        ON CONFLICT(track_id, clip_id{column}) DO UPDATE SET auto_offset = excluded.auto_offset,
             matched = excluded.matched, confidence = excluded.confidence, updated_at = excluded.updated_at
-    """, (track_id, clip_id, offset, int(bool(matched)), confidence, time.time()))
+    """, (track_id, clip_id, *args, offset, int(bool(matched)), confidence, time.time()))
     conn.commit()
 
 
-def nudge_track_clip_sync(track_id: int, clip_id: int, delta: float) -> float:
-    """Add ``delta`` seconds to the manual offset; returns the new manual offset."""
+def nudge_track_clip_sync(track_id: int, clip_id: int, delta: float, audio_key: str = "") -> float:
+    table, column, where, placeholder, args = _sync_table(audio_key)
     conn = _get_conn()
-    conn.execute("""
-        INSERT INTO track_clip_sync (track_id, clip_id, auto_offset, matched, confidence, manual_offset, updated_at)
-        VALUES (?, ?, NULL, 0, NULL, ?, ?)
-        ON CONFLICT(track_id, clip_id) DO UPDATE SET manual_offset = manual_offset + excluded.manual_offset,
+    conn.execute(f"""
+        INSERT INTO {table} (track_id, clip_id{column}, auto_offset, matched, confidence, manual_offset, updated_at)
+        VALUES (?, ?{placeholder}, NULL, 0, NULL, ?, ?)
+        ON CONFLICT(track_id, clip_id{column}) DO UPDATE SET manual_offset = manual_offset + excluded.manual_offset,
             updated_at = excluded.updated_at
-    """, (track_id, clip_id, float(delta), time.time()))
+    """, (track_id, clip_id, *args, float(delta), time.time()))
     conn.commit()
-    return float(conn.execute("SELECT manual_offset FROM track_clip_sync WHERE track_id = ? AND clip_id = ?",
-                              (track_id, clip_id)).fetchone()["manual_offset"])
+    return float(conn.execute(f"SELECT manual_offset FROM {table} WHERE track_id = ? AND clip_id = ?{where}",
+                              (track_id, clip_id, *args)).fetchone()["manual_offset"])
 
 
 def _clear_cached_artist_ids_conn(conn: sqlite3.Connection, artist: str | None) -> int:
@@ -1428,7 +1446,7 @@ def _musicbrainz_json(url: str) -> dict:
     if cached is not None:
         return cached
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mindinguflac/1.3.2"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mindinguflac/1.4"})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
             if isinstance(data, dict) and data:
