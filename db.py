@@ -411,6 +411,14 @@ def _init_db(conn: sqlite3.Connection):
             PRIMARY KEY (track_id, clip_id, audio_key)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS lyrics_audio_alignment (
+            alignment_key TEXT PRIMARY KEY,
+            auto_result TEXT,
+            manual_offset REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_track_key ON listening_events(track_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_started_at ON listening_events(started_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_listening_events_event_type ON listening_events(event_type)")
@@ -1260,6 +1268,29 @@ def nudge_track_clip_sync(track_id: int, clip_id: int, delta: float, audio_key: 
     conn.commit()
     return float(conn.execute(f"SELECT manual_offset FROM {table} WHERE track_id = ? AND clip_id = ?{where}",
                               (track_id, clip_id, *args)).fetchone()["manual_offset"])
+
+
+def get_lyrics_audio_alignment(key: str) -> dict:
+    row = _get_conn().execute("SELECT auto_result, manual_offset FROM lyrics_audio_alignment WHERE alignment_key = ?", (key,)).fetchone()
+    return ({"result": json.loads(row["auto_result"]) if row["auto_result"] else None,
+             "manual_offset": float(row["manual_offset"])} if row else {"result": None, "manual_offset": 0.0})
+
+
+def save_lyrics_audio_alignment(key: str, result: dict) -> None:
+    conn = _get_conn()
+    conn.execute("""INSERT INTO lyrics_audio_alignment (alignment_key, auto_result, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(alignment_key) DO UPDATE SET auto_result=excluded.auto_result, updated_at=excluded.updated_at""",
+        (key, json.dumps(result), time.time()))
+    conn.commit()
+
+
+def nudge_lyrics_audio_alignment(key: str, delta: float) -> float:
+    conn = _get_conn()
+    conn.execute("""INSERT INTO lyrics_audio_alignment (alignment_key, manual_offset, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(alignment_key) DO UPDATE SET manual_offset=manual_offset+excluded.manual_offset, updated_at=excluded.updated_at""",
+        (key, float(delta), time.time()))
+    conn.commit()
+    return get_lyrics_audio_alignment(key)["manual_offset"]
 
 
 def _clear_cached_artist_ids_conn(conn: sqlite3.Connection, artist: str | None) -> int:

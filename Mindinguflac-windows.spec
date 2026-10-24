@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
@@ -117,6 +118,16 @@ import shutil
 _ffmpeg = shutil.which('ffmpeg.exe') or shutil.which('ffmpeg')
 if _ffmpeg:
     binaries.append((_ffmpeg, '.'))
+
+# The lyrics aligner ships its verified model and native CPU bridge.
+import subprocess
+subprocess.run([sys.executable, 'scripts/prepare_lyrics_alignment.py', '--build-desktop'], check=True)
+_lyrics_build = Path('build/lyrics-whisper/windows/Release') if sys.platform == 'win32' else Path('build/lyrics-whisper/macos')
+_lyrics_library = _lyrics_build / ('lyrics_whisper.dll' if sys.platform == 'win32' else 'liblyrics_whisper.dylib')
+binaries.append((str(_lyrics_library), '.'))
+datas.append(('assets/lyrics-alignment', 'assets/lyrics-alignment'))
+datas += [(str(Path('native/lyrics_alignment') / name), 'assets/lyrics-alignment') for name in ('assets.json', 'THIRD_PARTY_NOTICES.md')]
+hiddenimports.append('lyrics_alignment')
 
 a = Analysis(
     ['desktop.py'],

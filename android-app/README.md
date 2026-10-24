@@ -36,7 +36,7 @@ for updates; do not commit the keystore or its passwords.
 # Set APK_STORE_PASSWORD and APK_KEY_PASSWORD securely in the environment.
 python3 tools/package_release.py \
   app/build/outputs/apk/release/app-release-unsigned.apk \
-  ../dist/android/Mindinguflac-android-arm64-v1.4-build19.apk \
+  ../dist/android/Mindinguflac-android-arm64-v1.4-build20-debug.apk \
   --build-tools "$ANDROID_HOME/build-tools/36.1.0" \
   --keystore /private/path/to/existing.keystore --alias existing-key
 ```
@@ -282,3 +282,11 @@ Retained local metadata implementations are fallback-only. The APK contains
 real Pydantic plus native arm64 pydantic-core, FastAPI and Uvicorn; the old
 SpotiFLAC source and Pydantic stand-in are no longer packaged. See
 [the integration notes](../docs/MORNYE_MIGRATION.md).
+
+The lyric audio aligner bundles a verified multilingual Whisper base-q5_1 model
+(about 60 MB) and builds a native CPU bridge with NDK 27.3.13750724 and CMake
+3.22.1. Gradle prepares the pinned source/model using
+`scripts/prepare_lyrics_alignment.py`; first builds need network access.
+Recognition stays on the device and reads the playback buffer, with no
+microphone permission. The language is detected from audio. Singing which does
+not yield several clear phrase matches keeps the provider timing.

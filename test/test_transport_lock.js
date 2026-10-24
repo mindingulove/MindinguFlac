@@ -17,7 +17,7 @@ const context = vm.createContext({
   nativeAudioVolume: () => 1, _nativeAudioDeviceUid: '', _outputSwitchesInFlight: 1,
   setPlayerStatus: () => {}, setPlayerStatusIcon: () => {}, updateMediaSession: () => {},
   updateListeningSessionPosition: () => {}, ensureOutputDisconnectListener: () => {},
-  followAudioWithVideo: () => {}, updateLyricsPosition: () => {}, maybePrefetchUpcomingTracks: () => {},
+  followAudioWithVideo: () => {}, updateLyricsPosition: () => {}, audiblePlaybackSeconds: () => 0, maybePrefetchUpcomingTracks: () => {},
   clearInterval: () => {}, startNativeAudioPolling: () => {},
 });
 vm.runInContext(section('function playbackTransportBusy()', 'let _lastDockPlayingState'), context);

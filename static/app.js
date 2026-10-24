@@ -112,7 +112,12 @@ const state = {
     activeIndex: -1,
     programmaticScroll: false,
     lastScrollAt: 0,
-    syncOffset: 0.1,  // seconds to delay lyrics display relative to LRC timestamps
+    syncOffset: 0,  // manual delay, saved per audio source and lyrics
+    autoOffset: 0,
+    alignmentStatus: "",
+    alignmentKey: "",
+    alignmentTimer: null,
+    alignmentAttempts: 0,
   },
 };
 
@@ -3473,7 +3478,7 @@ async function resumeBrowserAudioFromStableSource(audio) {
   }
 
   state.autoplayWanted = true;
-  audio.play().catch((error) => {
+  prepareBrowserAudioClock(audio).then(() => audio.play()).catch((error) => {
     console.error("[Player] Play failed:", error);
     if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
       waitForActiveJobBuffer(audio);
@@ -5593,6 +5598,8 @@ function parseLyrics(raw) {
   const text = String(raw || "").trim();
   if (!text) return [];
   const lines = [];
+  const offsetTag = text.match(/\[offset:([+-]?\d+)\]/i);
+  const advance = offsetTag ? Number(offsetTag[1]) / 1000 : 0;
   text.split(/\r?\n/).forEach((line) => {
     const stamps = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g)]
       .map(match => parseLrcTimestamp(match[1]))
@@ -5611,7 +5618,7 @@ function parseLyrics(raw) {
       .replace(/<\d{1,2}:\d{2}(?:[.:]\d{1,3})?>/g, "")
       .replace(/\s+/g, " ")
       .trim();
-    times.forEach(time => lines.push({ time, text: content, instrumental: !content }));
+    times.forEach(time => lines.push({ time: time - advance, text: content, instrumental: !content }));
   });
   return lines.sort((a, b) => a.time - b.time);
 }
@@ -5811,7 +5818,7 @@ function audiblePlaybackSeconds() {
   if (state.nativeAudio.active) {
     return Math.max(0, Number(state.nativeAudio.position || 0) - Number(state.nativeAudio.output_latency || 0));
   }
-  return currentPlaybackSeconds();
+  return Math.max(0, currentPlaybackSeconds() - browserOutputLatencySeconds());
 }
 
 // Keep the side video locked to the audio: same play/pause state (including
@@ -5873,7 +5880,7 @@ function currentLyricsIndex(position) {
   let lo = 0, hi = lines.length - 1, best = -1;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if (lines[mid].time <= position - state.lyrics.syncOffset) {
+    if (lines[mid].time <= position - state.lyrics.autoOffset - state.lyrics.syncOffset) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -5896,7 +5903,7 @@ function renderLyricsContent(message = "") {
       const text = line.instrumental ? '<i class="bi bi-music-note-beamed"></i>' : esc(line.text);
       return `<div class="lyrics-line${line.instrumental ? " instrumental" : ""}" data-lyrics-index="${index}">${text}</div>`;
     }).join("");
-    updateLyricsPosition(currentPlaybackSeconds(), true);
+    updateLyricsPosition(audiblePlaybackSeconds(), true);
     return;
   }
   if (state.lyrics.raw) {
@@ -5920,11 +5927,11 @@ function scrollActiveLyricsLine(force = false) {
   const line = document.querySelector(`.lyrics-line[data-lyrics-index="${idx}"]`);
   if (!line) return;
   state.lyrics.programmaticScroll = true;
-  line.scrollIntoView({ block: "center", behavior: force ? "smooth" : "smooth" });
+  line.scrollIntoView({ block: "center", behavior: force ? "auto" : "smooth" });
   setTimeout(() => { state.lyrics.programmaticScroll = false; }, 450);
 }
 
-function updateLyricsPosition(position = currentPlaybackSeconds(), forceScroll = false) {
+function updateLyricsPosition(position = audiblePlaybackSeconds(), forceScroll = false) {
   if (!state.lyrics.open || !(state.lyrics.lines || []).length) return;
   const idx = currentLyricsIndex(position);
   if (idx === state.lyrics.activeIndex && !forceScroll) return;
@@ -5939,6 +5946,11 @@ function updateLyricsPosition(position = currentPlaybackSeconds(), forceScroll =
 async function loadLyricsForTrack(track, { force = false } = {}) {
   const key = JSON.stringify(lyricsPayload(track));
   if (!track || (!force && state.lyrics.trackKey === key && (state.lyrics.lines.length || state.lyrics.raw))) return;
+  clearTimeout(state.lyrics.alignmentTimer);
+  state.lyrics.autoOffset = 0;
+  state.lyrics.syncOffset = 0;
+  state.lyrics.alignmentKey = "";
+  state.lyrics.alignmentStatus = "";
   state.lyrics.loading = true;
   state.lyrics.trackKey = key;
   state.lyrics.lines = [];
@@ -5956,10 +5968,61 @@ async function loadLyricsForTrack(track, { force = false } = {}) {
     state.lyrics.lines = data.synced ? parseLyrics(data.lyrics || "") : [];
     renderLyricsContent(data.found ? "" : "No synced lyrics found");
     setLyricsSynced(true);
+    refreshLyricsAlignment().catch(() => {});
   } catch (error) {
     if (state.lyrics.trackKey === key) renderLyricsContent("Lyrics unavailable");
   } finally {
     state.lyrics.loading = false;
+  }
+}
+
+function lyricsAlignmentBody() {
+  return { ...lyricsPayload(state.currentTrack), lyrics: state.lyrics.raw,
+    duration_ms: Math.round((knownTrackDurationSeconds(state.currentTrack) || 0) * 1000),
+    audio_path: state.currentLibraryPath || "",
+    stream_url: state.nativeAudio.stream_url || state.currentStreamUrl || "",
+    output_latency: state.nativeAudio.active ? Number(state.nativeAudio.output_latency || 0) : browserOutputLatencySeconds() };
+}
+
+function renderLyricsAlignment() {
+  const label = $("lyricsAlignmentStatus");
+  const status = state.lyrics.alignmentStatus;
+  if (label) {
+    label.textContent = ({ checking: "Aligning to music…", pending: "Waiting for audio…",
+      matched: "Aligned to music", unmatched: "Provider timing", unsupported: "Provider timing" })[status] || "";
+    label.title = status === "matched" ? "Lyric phrases matched against the playing audio on this device."
+      : "Automatic alignment needs several clear matching vocal phrases. Manual adjustment is available.";
+  }
+  const offset = $("lyricsOffsetLabel");
+  if (offset) offset.textContent = `${(state.lyrics.autoOffset + state.lyrics.syncOffset).toFixed(2)}s`;
+}
+
+async function refreshLyricsAlignment() {
+  if (!state.lyrics.open || !state.lyrics.lines.length || !state.currentTrack) return;
+  const body = lyricsAlignmentBody();
+  const key = JSON.stringify({...body, output_latency: undefined});
+  if (state.lyrics.alignmentKey !== key) {
+    clearTimeout(state.lyrics.alignmentTimer);
+    state.lyrics.alignmentKey = key;
+    state.lyrics.alignmentAttempts = 0;
+    state.lyrics.alignmentStatus = "checking";
+    state.lyrics.autoOffset = 0;
+    state.lyrics.syncOffset = 0;
+  } else if (!["checking", "pending"].includes(state.lyrics.alignmentStatus)) return;
+  state.lyrics.alignmentAttempts += 1;
+  renderLyricsAlignment();
+  const result = await api("/api/lyrics/align", {method:"POST",body:JSON.stringify(body)}).catch(() => null);
+  if (state.lyrics.alignmentKey !== key) return;
+  state.lyrics.alignmentStatus = result?.status || "pending";
+  if (result?.status === "matched") state.lyrics.autoOffset = Number(result.offset || 0);
+  if (result) state.lyrics.syncOffset = Number(result.manual_offset || 0);
+  renderLyricsAlignment();
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
+  if (["checking", "pending"].includes(state.lyrics.alignmentStatus) && state.lyrics.alignmentAttempts < 60) {
+    state.lyrics.alignmentTimer = setTimeout(() => refreshLyricsAlignment().catch(() => {}), 5000);
+  } else if (["checking", "pending"].includes(state.lyrics.alignmentStatus)) {
+    state.lyrics.alignmentStatus = "unmatched";
+    renderLyricsAlignment();
   }
 }
 
@@ -5980,22 +6043,22 @@ function openLyricsPanel() {
   const bg = $("lyricsBg");
   if (bg) bg.hidden = false;
   $("btnLyrics")?.classList.add("active");
-  const label = $("lyricsOffsetLabel");
-  if (label) label.textContent = state.lyrics.syncOffset.toFixed(1) + "s";
+  renderLyricsAlignment();
   if (!state.currentTrack) {
     renderLyricsContent("Play a song to see lyrics");
     return;
   }
   applyLyricsPalette(state.currentTrack);
   setLyricsSynced(true);
-  loadLyricsForTrack(state.currentTrack, { force: false }).catch(() => {});
-  updateLyricsPosition(currentPlaybackSeconds(), true);
+  loadLyricsForTrack(state.currentTrack, { force: false }).then(() => refreshLyricsAlignment()).catch(() => {});
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
 }
 
 function closeLyricsPanel() {
   const panel = $("lyricsPanel");
   if (!panel) return;
   state.lyrics.open = false;
+  clearTimeout(state.lyrics.alignmentTimer);
   panel.hidden = true;
   const bg = $("lyricsBg");
   if (bg) bg.hidden = true;
@@ -6815,7 +6878,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
 }
 
 function tryStartAudio(audio, track, requestId, jobId) {
-  audio.play().catch((error) => {
+  prepareBrowserAudioClock(audio).then(() => audio.play()).catch((error) => {
     if (requestId !== state.playbackRequestId) return;
     if (error && error.name === "NotAllowedError") {
       // The Monochrome lookup finishes after WebKit's short-lived click
@@ -7857,7 +7920,7 @@ function startNativeAudioPolling(requestId) {
     updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
     syncNativeAudioUi();
     followAudioWithVideo();
-    updateLyricsPosition(state.nativeAudio.position || 0);
+    updateLyricsPosition(audiblePlaybackSeconds());
     // Prefetch the next track once playback is underway. The <audio> element's
     // ontimeupdate never fires on the native path, so trigger it here too.
     maybePrefetchUpcomingTracks(state.nativeAudio.position);
@@ -8491,7 +8554,7 @@ function bindPlayer() {
     $("seekBar").style.backgroundSize = `${(position / duration) * 100}% 100%`;
     setMiniPlayerProgress(position / duration);
     followAudioWithVideo();
-    updateLyricsPosition(position);
+    updateLyricsPosition(audiblePlaybackSeconds());
     if (shouldExposeNowPlaying()) updateMediaSession(state.currentTrack);
     persistPlaybackSnapshot();
   };
@@ -8507,7 +8570,7 @@ function bindPlayer() {
     }
     if (audio.duration) {
       updateListeningSessionPosition(audio.currentTime || 0, audio.duration);
-      updateLyricsPosition(audio.currentTime || 0, true);
+      updateLyricsPosition(audiblePlaybackSeconds(), true);
       syncLocalVideoOverlay(audio.currentTime || 0, false, { allowSeek: true });
     }
   };
@@ -8562,6 +8625,7 @@ function bindPlayer() {
     state.autoplayWanted = false;
     state.audioBuffering = false;
     state.audioHasPlayed = true;
+    logMonochromePlaybackActivity(`Measured browser output delay: ${browserOutputLatencySeconds().toFixed(3)}s`, state.currentTrack, "output-clock", 60000);
     state.activeJobPhase = "";
     if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
       setPlayerStatusIcon("ready");
@@ -10116,13 +10180,49 @@ let _activeSinkId = "";  // "" = default (this computer)
 let _nativeAudioDeviceUid = "";
 let _nativeAudioAvailable = false;
 
-function _ensureAudioContext() {
-  if (_audioCtx) return _audioCtx;
-  _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const audio = $("audioPlayer");
-  _audioSrcNode = _audioCtx.createMediaElementSource(audio);
-  _audioSrcNode.connect(_audioCtx.destination);
+function _ensureAudioContext(route = true) {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (route && !_audioSrcNode) {
+    _audioSrcNode = _audioCtx.createMediaElementSource($("audioPlayer"));
+    _audioSrcNode.connect(_audioCtx.destination);
+  }
   return _audioCtx;
+}
+
+async function prepareBrowserAudioClock(audio) {
+  // The playback buffer is same-origin. Remote previews without CORS must
+  // keep their original route or a MediaElementSource would silence them.
+  try {
+    const Constructor = window.AudioContext || window.webkitAudioContext;
+    if (!Constructor || !audio?.src || new URL(audio.src, window.location.href).origin !== window.location.origin) return;
+    if (!Constructor.prototype.getOutputTimestamp && !("outputLatency" in Constructor.prototype)) return;
+    const canRoute = !(typeof audio.setSinkId === "function" && typeof Constructor.prototype.setSinkId !== "function");
+    const context = _ensureAudioContext(false);
+    if (context.state === "suspended") {
+      await Promise.race([context.resume(), new Promise(resolve => setTimeout(resolve, 200))]);
+    }
+    // Connect only after resume succeeds, preserving ordinary playback if
+    // WebKit denies the context outside a user gesture.
+    if (context.state === "running" && canRoute) _ensureAudioContext(true);
+  } catch (_) {}
+}
+
+function browserOutputLatencySeconds() {
+  const context = _audioCtx;
+  if (!context || context.state !== "running") return 0;
+  if (!_audioSrcNode && _activeSinkId) return 0;
+  try {
+    if (_audioSrcNode && typeof context.getOutputTimestamp === "function") {
+      const stamp = context.getOutputTimestamp();
+      const age = (performance.now() - Number(stamp.performanceTime)) / 1000;
+      if (stamp.contextTime > 0 && stamp.performanceTime > 0 && age >= 0 && age < 2) {
+        const latency = context.currentTime - (stamp.contextTime + age);
+        if (Number.isFinite(latency) && latency >= 0 && latency < 5) return latency;
+      }
+    }
+    const latency = Number(context.outputLatency || 0) + Number(context.baseLatency || 0);
+    return Number.isFinite(latency) && latency >= 0 && latency < 5 ? latency : 0;
+  } catch (_) { return 0; }
 }
 
 function isPlaybackVisiblyActive() {
@@ -10436,7 +10536,12 @@ async function _applyAudioOutputDevice(deviceId, selectedDeviceName = "") {
   const keepPaused = !!state.manualPauseRequested;
   await stopNativeAudio();
 
-  if (typeof audio.setSinkId === "function") {
+  if (_audioCtx && _audioSrcNode && typeof _audioCtx.setSinkId === "function") {
+    try {
+      if (_audioCtx.state === "suspended") await _audioCtx.resume();
+      await _audioCtx.setSinkId(deviceId);
+    } catch (e) { console.warn("AudioContext.setSinkId failed:", e); }
+  } else if (typeof audio.setSinkId === "function") {
     try {
       await audio.setSinkId(deviceId);
     } catch (e) {
@@ -11144,21 +11249,40 @@ $("btnLyrics").onclick = toggleLyricsPanel;
 $("lyricsBg").onclick = closeLyricsPanel;
 $("lyricsSync").onclick = () => {
   setLyricsSynced(true);
-  updateLyricsPosition(currentPlaybackSeconds(), true);
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
 };
-function updateLyricsOffset(delta) {
+async function updateLyricsOffset(delta) {
   state.lyrics.syncOffset = Math.round((state.lyrics.syncOffset + delta) * 100) / 100;
-  const label = $("lyricsOffsetLabel");
-  if (label) label.textContent = state.lyrics.syncOffset.toFixed(1) + "s";
-  updateLyricsPosition(currentPlaybackSeconds(), true);
+  renderLyricsAlignment();
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
+  if (!state.currentTrack || !state.lyrics.raw) return;
+  const key = state.lyrics.alignmentKey;
+  const result = await api("/api/lyrics/align/nudge", {method:"POST",
+    body:JSON.stringify({...lyricsAlignmentBody(), delta})}).catch(() => null);
+  if (result?.ok && state.lyrics.alignmentKey === key) {
+    state.lyrics.syncOffset = Number(result.manual_offset || 0);
+    renderLyricsAlignment();
+  }
 }
-$("lyricsOffsetDown").onclick = () => updateLyricsOffset(-0.25);
-$("lyricsOffsetUp").onclick = () => updateLyricsOffset(0.25);
-$("lyricsScroll").addEventListener("scroll", () => {
-  if (!state.lyrics.open || state.lyrics.programmaticScroll) return;
+$("lyricsOffsetDown").onclick = () => updateLyricsOffset(-0.25).catch(() => {});
+$("lyricsOffsetUp").onclick = () => updateLyricsOffset(0.25).catch(() => {});
+function pauseLyricsFollowFromInput() {
+  if (!state.lyrics.open) return;
   state.lyrics.lastScrollAt = Date.now();
   setLyricsSynced(false);
-}, { passive: true });
+}
+// A scroll event does not identify its cause. React to user input instead:
+// long smooth animations and overlapping callbacks must keep following.
+$("lyricsScroll").addEventListener("wheel", pauseLyricsFollowFromInput, { passive: true });
+$("lyricsScroll").addEventListener("touchmove", pauseLyricsFollowFromInput, { passive: true });
+$("lyricsScroll").addEventListener("keydown", event => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) pauseLyricsFollowFromInput();
+});
+$("lyricsScroll").addEventListener("pointerdown", event => {
+  const scroll = $("lyricsScroll");
+  if (event.pointerType === "mouse" && event.target === scroll &&
+      event.clientX >= scroll.getBoundingClientRect().left + scroll.clientWidth) pauseLyricsFollowFromInput();
+});
 $("sideVideoSwitch").onclick = () => {
   if (!state.videoMode && state.videoFetch.status === "not_found" && state.currentTrack) {
     state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };

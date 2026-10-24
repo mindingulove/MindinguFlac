@@ -2211,6 +2211,67 @@ def _video_sync(body: dict) -> dict:
             "confidence": result.get("confidence"), "manual_offset": manual}
 
 
+_lyrics_alignment_lock = threading.Lock()
+_lyrics_alignment_slot = threading.BoundedSemaphore(1)
+_lyrics_alignment_jobs: dict[str, dict] = {}
+
+
+def _lyrics_alignment_key(body: dict) -> str:
+    text = str(body.get("lyrics") or "")[:65536]
+    identity = f"lyrics-v3|{_video_sync_audio_key(body)}|{hashlib.sha256(text.encode()).hexdigest()}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _align_lyrics(body: dict) -> dict:
+    import lyrics_alignment
+    text = str(body.get("lyrics") or "")
+    if not text or len(text) > 65536 or len(lyrics_alignment.parse_lines(text)) < 4:
+        return {"ok": True, "status": "untimed", "offset": 0.0, "manual_offset": 0.0}
+    key = _lyrics_alignment_key(body)
+    saved = db.get_lyrics_audio_alignment(key)
+    base = {"ok": True, "key": key, "offset": 0.0, "scale": 1.0, "manual_offset": saved["manual_offset"]}
+    if saved["result"] is not None:
+        return {**base, **saved["result"]}
+    if not lyrics_alignment.available():
+        return {**base, "status": "unsupported"}
+    audio = _video_sync_audio_path(body)
+    if audio is None:
+        return {**base, "status": "pending"}
+    with _lyrics_alignment_lock:
+        if key in _lyrics_alignment_jobs:
+            return {**base, **_lyrics_alignment_jobs[key]}
+        if not _lyrics_alignment_slot.acquire(blocking=False):
+            return {**base, "status": "pending"}
+        _lyrics_alignment_jobs[key] = {"status": "checking"}
+
+    def worker():
+        try:
+            print(f"[LyricsAlign] measured output delay {float(body.get('output_latency') or 0):.3f}s")
+            result = lyrics_alignment.compute_alignment(audio, text)
+            growing = bool(_monochrome_stream_url(body.get("stream_url", "")))
+            pending = result.get("pending") or (growing and not result.get("matched")
+                and float(result.get("audio_seconds") or 0) < lyrics_alignment.AUDIO_SECONDS - 1)
+            if pending:
+                with _lyrics_alignment_lock:
+                    _lyrics_alignment_jobs.pop(key, None)
+                return
+            result["status"] = "matched" if result.get("matched") else "unmatched"
+            db.save_lyrics_audio_alignment(key, result)
+            with _lyrics_alignment_lock:
+                _lyrics_alignment_jobs[key] = result
+                while len(_lyrics_alignment_jobs) > 64:
+                    _lyrics_alignment_jobs.pop(next(iter(_lyrics_alignment_jobs)))
+        except Exception as exc:
+            print(f"[LyricsAlign] {exc}")
+            with _lyrics_alignment_lock:
+                _lyrics_alignment_jobs.pop(key, None)
+        finally:
+            _lyrics_alignment_slot.release()
+
+    threading.Thread(target=worker, daemon=True, name="lyrics-audio-align").start()
+    return {**base, "status": "checking"}
+
+
 def safe_static_path(request_path: str) -> Path | None:
     rel = unquote(request_path.lstrip("/"))
     if rel == "":
@@ -3517,6 +3578,19 @@ class Handler(BaseHTTPRequestHandler):
 
                 backend_monochrome.note_stream_failing()
                 self.send_json({"ok": True, "reason": backend_monochrome.stream_block_reason()})
+                return
+            if path == "/api/lyrics/align":
+                self.send_json(_align_lyrics(body))
+                return
+            if path == "/api/lyrics/align/nudge":
+                if not body.get("lyrics") or len(str(body["lyrics"])) > 65536:
+                    self.send_error_json("Missing timed lyrics", HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    delta = max(-5.0, min(5.0, float(body.get("delta") or 0)))
+                except (ValueError, TypeError):
+                    delta = 0.0
+                self.send_json({"ok": True, "manual_offset": db.nudge_lyrics_audio_alignment(_lyrics_alignment_key(body), delta)})
                 return
             if path == "/api/video/sync":
                 self.send_json(_video_sync(body))

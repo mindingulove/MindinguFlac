@@ -57,7 +57,7 @@ def decoder_available() -> bool:
     return bool(_ffmpeg())
 
 
-def decode_mono(path: str | Path, seconds: float) -> np.ndarray:
+def decode_mono(path: str | Path, seconds: float, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     """First ``seconds`` of a file's audio as mono float32 at SAMPLE_RATE.
 
     Reads a partially downloaded file too (decoding stops at what exists).
@@ -65,12 +65,12 @@ def decode_mono(path: str | Path, seconds: float) -> np.ndarray:
     if _on_android():
         from java import jclass  # type: ignore
         decoder = jclass("com.mindinguflac.android.AudioPcmDecoder")
-        return np.frombuffer(bytes(decoder.decodeMono(str(path), float(seconds), SAMPLE_RATE)), dtype="<f4")
+        return np.frombuffer(bytes(decoder.decodeMono(str(path), float(seconds), sample_rate)), dtype="<f4")
     ffmpeg = _ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg is required for video sync")
     command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-t", f"{seconds:.2f}",
-               "-i", str(path), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"]
+               "-i", str(path), "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "pipe:1"]
     result = subprocess.run(command, capture_output=True, timeout=60,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     samples = np.frombuffer(result.stdout, dtype=np.float32)

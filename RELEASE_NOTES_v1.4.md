@@ -14,6 +14,7 @@
 - Keep compilation album IDs and album artists distinct from track performers, preserve each saved release in title links, and prevent exact album requests from opening a different album by name.
 - Verify shortened compilation edits against the same performer, musical work and studio-album release before using the available original recording.
 - Reload lyrics using the actual streaming recording’s title, ISRC and duration, prefer timed lyrics over plain text, and label untimed lyrics clearly.
+- Align lyrics against independently recognized buffered vocals on desktop and Android. Apply a measured offset only when multiple phrases agree; retain manual adjustments per recording and lyric version, and use the audible native playback clock.
 - Match alternate catalog ISRCs through shared recording identities and normalize Unicode punctuation in performer names.
 - Match streaming audio to video through the shared playback buffer, retry incomplete prefixes, and keep offsets separate for each audio source. Allow videos which omit a long album intro.
 - Preserve explicitly selected deluxe/remaster album links even when Spotify reuses a track ID.
@@ -21,6 +22,6 @@
 
 ## Security and version
 - Upgrade Pillow to 13.0.0, including the bundled native Android decoder.
-- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **19**.
+- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **20**.
 
 Mornye provider downloads require an installed provider extension. Monochrome, YouTube and torrent backends remain independent.

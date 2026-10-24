@@ -5464,3 +5464,10 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+.lyrics-alignment-status {
+  position: absolute; right: 0; bottom: calc(100% + 6px);
+  padding: 5px 9px; border-radius: 10px; white-space: nowrap;
+  background: rgba(0,0,0,.45); color: rgba(255,255,255,.9); font-size: 12px;
+}
+.lyrics-alignment-status:empty { display: none; }

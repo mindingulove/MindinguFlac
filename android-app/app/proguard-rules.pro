@@ -21,3 +21,6 @@
 # treat the dangling references as an error.
 -dontwarn javax.lang.model.**
 -dontwarn autovalue.shaded.**
+
+# Python calls this bridge and its method is bound by JNI name.
+-keep class com.mindinguflac.android.LyricsAlignment { *; }

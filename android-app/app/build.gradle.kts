@@ -12,7 +12,14 @@ val jlibtorrentNativeJar = projectDir.resolve("libs/jlibtorrent-android-arm64-2.
 val localWheelDir = providers.environmentVariable("MINDINGUFLAC_ANDROID_WHEELS").orNull
 val bundledWheelDir = projectDir.resolve("python-wheels")
 
+val prepareLyricsAlignment by tasks.registering(Exec::class) {
+    workingDir(repositoryRoot)
+    commandLine(providers.environmentVariable("MINDINGUFLAC_BUILD_PYTHON").orElse("python3.12").get(),
+        "scripts/prepare_lyrics_alignment.py")
+}
+
 val syncPythonSources by tasks.registering(Sync::class) {
+    dependsOn(prepareLyricsAlignment)
     includeEmptyDirs = false
     from(repositoryRoot) {
         include("*.py", "local_metadata/**")
@@ -29,6 +36,14 @@ val syncPythonSources by tasks.registering(Sync::class) {
     from(repositoryRoot.resolve("static")) {
         exclude(".DS_Store", "**/.DS_Store")
         into("android_runtime/static")
+    }
+    from(repositoryRoot.resolve("assets/lyrics-alignment")) {
+        include("*.bin", "LICENSE*")
+        into("android_runtime/lyrics_models")
+    }
+    from(repositoryRoot.resolve("native/lyrics_alignment")) {
+        include("assets.json", "THIRD_PARTY_NOTICES.md")
+        into("android_runtime/lyrics_models")
     }
     into(generatedPython)
 }
@@ -54,16 +69,27 @@ val extractJlibtorrentNative by tasks.registering(Copy::class) {
 android {
     namespace = "com.mindinguflac.android"
     compileSdk = 35
+    ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "com.mindinguflac.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
+        versionCode = 20
         versionName = "1.4"
 
+        externalNativeBuild {
+            cmake { arguments += listOf("-DANDROID_STL=c++_static") }
+        }
         ndk {
             abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = repositoryRoot.resolve("native/lyrics_alignment/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
@@ -118,6 +144,9 @@ tasks.named("preBuild").configure {
 }
 
 tasks.configureEach {
+    if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
+        dependsOn(prepareLyricsAlignment)
+    }
     if (name.startsWith("merge") && name.endsWith("PythonSources")) {
         dependsOn(syncPythonSources)
     }
