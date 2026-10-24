@@ -6,9 +6,35 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import service_downloader
+import backend_spotiflac
 
 
 class PlaybackSourceTests(unittest.TestCase):
+    def test_physical_lossy_file_is_not_lossless_just_because_job_requested_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'youtube.webm'
+            path.write_bytes(b'webm')
+            self.assertLess(service_downloader._quality_rank(path, 'LOSSLESS'), 700)
+            self.assertEqual(service_downloader._quality_rank(Path('requested.LOSSLESS'), 'LOSSLESS'), 700)
+
+    def test_saved_m4a_uses_actual_codec_for_lossless_rank(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Song.m4a"
+            path.write_bytes(b"test")
+            for codec, expected in (("alac", 700), ("mp4a.40.2", 430)):
+                with self.subTest(codec=codec), patch("mutagen.mp4.MP4", return_value=SimpleNamespace(info=SimpleNamespace(codec=codec))):
+                    self.assertEqual(service_downloader._quality_rank(path, "LOSSLESS"), expected)
+
+    def test_reuses_equal_or_better_file_across_engines_and_only_fetches_for_upgrade(self):
+        manager = object.__new__(service_downloader.ServiceDownloadManager)
+        manager.config = SimpleNamespace(default_quality='LOSSLESS')
+        for quality in (700, 800, 380):
+            status = {'library_path': '/Music/Song.flac', 'cache_path': '', 'library_quality': quality, 'cache_quality': 0}
+            with self.subTest(saved_rank=quality), patch.object(manager, 'library_status', return_value=status):
+                source = manager.playback_source({'engine': 'monochrome', 'quality': 'LOSSLESS'})
+            self.assertEqual(bool(source['path']), quality >= 700)
+        self.assertEqual(service_downloader._quality_rank(Path('Song.wav')), service_downloader._quality_rank(Path('Song.flac')))
+
     def test_builds_spotify_track_url_from_existing_spotify_id(self):
         url = service_downloader.resolve_download_url(
             {"spotify_id": "7J1uxwnxfQLu4APicE5Rnj", "title": "Billie Jean"},
@@ -177,7 +203,7 @@ class PlaybackSourceTests(unittest.TestCase):
             def model_copy(self, update):
                 return update
 
-        updated = service_downloader.requested_spotiflac_track_metadata(Track(), {
+        updated = backend_spotiflac.requested_spotiflac_track_metadata(Track(), {
             "title": "Two Hearts",
             "artist": "Phil Collins",
             "album": "Love Songs",
@@ -190,7 +216,7 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertEqual(updated["duration_ms"], 204386)
 
     def test_spotiflac_options_only_use_supported_enrichment_parameters(self):
-        options = service_downloader.spotiflac_download_options(
+        options = backend_spotiflac.spotiflac_download_options(
             Path("/tmp/cache"),
             {
                 "title": "Shout",
@@ -210,18 +236,18 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertNotIn("verbose", options)
 
     def test_spotiflac_error_does_not_surface_incidental_tidal_gist_warning(self):
-        message = service_downloader.spotiflac_failure_message([
+        message = backend_spotiflac.spotiflac_failure_message([
             "[tidal] gist fetch failed: Tidal API gist did not return a JSON array",
         ])
 
         self.assertEqual(message, "All providers failed and no playable audio file was found")
 
     def test_atmos_fallback_stays_with_lossless_providers_and_translates_quality(self):
-        services = service_downloader.spotiflac_fallback_services("tidal", "DOLBY_ATMOS")
+        services = backend_spotiflac.spotiflac_fallback_services("tidal", "DOLBY_ATMOS")
 
-        self.assertEqual(services, ["tidal", "qobuz", "amazon", "deezer"])
-        self.assertEqual(service_downloader.spotiflac_provider_quality("DOLBY_ATMOS", "qobuz"), "27")
-        self.assertEqual(service_downloader.spotiflac_provider_quality("DOLBY_ATMOS", "deezer"), "LOSSLESS")
+        self.assertEqual(services, ["tidal", "qobuz", "deezer", "amazon", "apple"])
+        self.assertEqual(backend_spotiflac.spotiflac_provider_quality("DOLBY_ATMOS", "qobuz"), "27")
+        self.assertEqual(backend_spotiflac.spotiflac_provider_quality("DOLBY_ATMOS", "deezer"), "LOSSLESS")
 
     def test_spotiflac_does_not_consult_sqlite_source_recovery(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -403,7 +429,7 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertEqual(source["path"], "")
         self.assertFalse(source["cached"])
 
-    def test_ignores_cached_provider_result_with_wrong_duration(self):
+    def test_reuses_completed_audio_despite_remaster_duration_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             cache_path = root / "cache" / "job-id" / "Two Hearts.flac"
@@ -435,8 +461,8 @@ class PlaybackSourceTests(unittest.TestCase):
                         "spotify_id": "two-hearts",
                     })
 
-        self.assertEqual(source["source"], "")
-        self.assertFalse(source["cached"])
+        self.assertEqual(source["source"], "cache")
+        self.assertTrue(source["cached"])
 
     def test_renames_valid_unknown_cache_file_from_saved_track_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -633,7 +659,7 @@ class PlaybackSourceTests(unittest.TestCase):
         self.assertFalse(cached_file.exists())
         self.assertEqual(set(manager.jobs), {"library-job"})
 
-    def test_completed_stream_clears_stale_cancel_error(self):
+    def test_progress_watcher_does_not_mark_stable_partial_audio_finished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_dir = root / "cache" / "job-id"
@@ -660,8 +686,8 @@ class PlaybackSourceTests(unittest.TestCase):
                     manager._sync_progress_from_files(job)
                     manager._sync_progress_from_files(job)
 
-        self.assertEqual(job["status"], "finished")
-        self.assertEqual(job["error"], "")
+        self.assertEqual(job["status"], "running")
+        self.assertLess(job["progress"], 100)
 
     def test_intermediate_webm_does_not_finish_stream_before_conversion(self):
         with tempfile.TemporaryDirectory() as tmpdir:

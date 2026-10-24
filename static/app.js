@@ -6611,6 +6611,11 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
 
 function startMonochromeDirectPlayback(job, track, requestId) {
   if (requestId !== state.playbackRequestId || !job?.resolved_url) return;
+  if (job.recording_match?.kind === "original_album") {
+    track = { ...track, requested_isrc: job.recording_match.requested_isrc,
+      isrc: job.recording_match.resolved_isrc, duration_ms: job.recording_match.duration_ms };
+    state.currentTrack = track;
+  }
   // Monochrome's direct stream needs no next-track download/prefetch job.
   // Cancel work queued for a previous track so it cannot compete with or
   // replace this live stream.

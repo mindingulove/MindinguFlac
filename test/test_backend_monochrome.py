@@ -328,6 +328,48 @@ class MonochromeBackendTests(unittest.TestCase):
         live = [{"id": "1", "title": "Time", "artistNames": ["Pink Floyd"], "isrc": "LIVE0001", "duration": 470000}]
         self.assertIsNone(backend_monochrome._select_matching_item(live, "Time", "Pink Floyd", "GBN9Y1100079", 413000))
 
+    def test_compilation_can_use_a_verified_original_album_recording(self):
+        rows = [{"id": "155103623456493568", "title": "Hungry Like the Wolf - 2009 Remaster",
+                 "artistNames": ["Duran Duran"], "isrc": "GBAYE0901090", "duration": 220626},
+                {"id": "2", "title": "Hungry Like the Wolf - Night Version; 2009 Remaster",
+                 "artistNames": ["Duran Duran"], "isrc": "GBAYE0901101", "duration": 311613}]
+        recordings = {
+            "GBAYE8200051": [{"title": "Hungry Like the Wolf", "length": 209546, "artist-credit": [{"name": "Duran Duran"}]}],
+            "GBAYE0901090": [{"id": "original-album", "title": "Hungry Like the Wolf", "length": 220626,
+                "disambiguation": "original album version", "artist-credit": [{"name": "Duran Duran"}]}],
+        }
+        self.assertIsNone(backend_monochrome._select_matching_item(rows, "Hungry Like the Wolf", "Duran Duran", "GBAYE8200051", 209546))
+        with patch.object(backend_monochrome, "_musicbrainz_isrc_recordings", side_effect=lambda isrc: recordings.get(isrc, [])):
+            selected = backend_monochrome._select_original_album_item(rows, "Hungry Like the Wolf", "Duran Duran", "GBAYE8200051", 209546)
+        self.assertEqual(selected["isrc"], "GBAYE0901090")
+        self.assertEqual(selected["_original_recording_id"], "original-album")
+
+    def test_original_album_stream_preserves_requested_edition_and_actual_isrc(self):
+        selected = {"id": "155103623456493568", "title": "Hungry Like the Wolf - 2009 Remaster",
+                    "artistNames": ["Duran Duran"], "isrc": "GBAYE0901090", "duration": 220626,
+                    "_original_recording_id": "original-album"}
+        job = {"id": "job", "title": "Hungry Like the Wolf", "artist": "Duran Duran", "album": "Greatest",
+               "mode": "stream", "isrc": "GBAYE8200051", "metadata": {"isrc": "GBAYE8200051", "duration_ms": 209546}}
+        manager = _Manager()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("requests.get", return_value=_Response({"tracks": [selected]})), \
+                patch.object(backend_monochrome, "_resolve_version", return_value=(None, "")), \
+                patch.object(backend_monochrome, "_select_original_album_item", return_value=selected):
+            backend_monochrome.run(Path(tmp), job, manager)
+        self.assertEqual(job["status"], "finished")
+        self.assertTrue(job["direct_stream"])
+        self.assertEqual(job["metadata"]["requested_isrc"], "GBAYE8200051")
+        self.assertEqual(job["metadata"]["isrc"], "GBAYE0901090")
+        self.assertEqual(job["metadata"]["duration_ms"], 220626)
+        self.assertEqual(job["album"], "Greatest")
+
+    def test_original_album_fallback_needs_evidence_and_rejects_named_versions(self):
+        rows = [{"id": "1", "title": "Song", "artistNames": ["Artist"], "isrc": "OTHER", "duration": 220000}]
+        with patch.object(backend_monochrome, "_musicbrainz_isrc_recordings", return_value=[]):
+            self.assertIsNone(backend_monochrome._select_original_album_item(rows, "Song", "Artist", "REQUESTED", 209000))
+            self.assertIsNone(backend_monochrome._select_original_album_item(rows, "Song - Radio Edit", "Artist", "REQUESTED", 209000))
+            self.assertIsNone(backend_monochrome._select_original_album_item(rows, "Song (Live)", "Artist", "REQUESTED", 209000))
+
     def test_monochrome_download_enriches_missing_isrc_even_with_genres(self):
         import service_downloader
 

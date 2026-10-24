@@ -592,24 +592,39 @@ def _job_matches_identity(job: dict, identity: dict) -> bool:
 
 _QUALITY_RANK = {
     # Video containers rank 900 only when quality="video" (see _quality_rank below)
-    # Do NOT list .mp4/.webm etc here — a cached video-only mp4 must not beat audio files
+    # A cached video-only MP4 must not beat audio files. YouTube's audio-only
+    # WebM/Opus is lossy; it ranks below lossless even if a job requested FLAC.
     ".flac": 700,
-    ".alac": 690,
-    ".wav": 650,
+    ".alac": 700,
+    ".wav": 700,
+    ".aiff": 700,
+    ".aif": 700,
     ".m4a": 430,
     ".aac": 400,
     ".ogg": 390,
     ".opus": 380,
+    ".webm": 380,
     ".mp3": 300,
 }
 
 
 def _quality_rank(path: Path, quality: object = "") -> int:
     rank = _QUALITY_RANK.get(path.suffix.lower(), 0)
+    if path.suffix.lower() == ".m4a" and path.is_file():
+        # M4A is a container: inspect its codec to distinguish AAC from ALAC.
+        try:
+            from mutagen.mp4 import MP4
+            if str(getattr(MP4(path).info, "codec", "")).lower() == "alac":
+                rank = 700
+        except Exception:
+            pass
     text = str(quality or "").casefold()
     if "video" in text:
         rank = max(rank, 900)
-    elif "lossless" in text or "flac" in text:
+    elif ("lossless" in text or "flac" in text) and not path.is_file():
+        # A job's requested quality is not proof of what was saved. A lossy
+        # YouTube/WebM fallback must not become "lossless" because of its job
+        # label, and PCM/WAV is equivalent to FLAC rather than an upgrade target.
         rank = max(rank, 700)
     elif "320" in text:
         rank = max(rank, 320)

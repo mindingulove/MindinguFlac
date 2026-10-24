@@ -179,7 +179,7 @@ _REMASTER_DURATION_TOLERANCE_MS = 10000
 
 def _duration_ms(item: dict) -> float:
     try:
-        value = float(item.get("duration") or item.get("duration_ms") or 0)
+        value = float(item.get("duration") or item.get("duration_ms") or item.get("length") or 0)
     except (TypeError, ValueError):
         return 0.0
     return value if value > 1000 else value * 1000
@@ -286,6 +286,58 @@ def _musicbrainz_isrc_title(isrc: str) -> str:
         return ""
     recordings = data.get("recordings") or []
     return str(recordings[0].get("title") or "") if recordings else ""
+
+
+def _musicbrainz_isrc_recordings(isrc: str) -> list[dict]:
+    try:
+        from music_metadata import get_json
+        data = get_json(f"https://musicbrainz.org/ws/2/isrc/{urllib.parse.quote(isrc)}?fmt=json&inc=artist-credits%2Bisrcs")
+        return [row for row in data.get("recordings", []) if isinstance(row, dict)]
+    except Exception:
+        return []
+
+
+def _select_original_album_item(items: list[dict], title: str, artist: str,
+                                isrc: str, duration_ms: float) -> dict | None:
+    """Last resort for an unlabelled compilation edit: verify the studio album
+    recording through MusicBrainz instead of guessing an ISRC or widening the
+    normal exact-version matcher. Explicit remixes/live takes stay distinct.
+    """
+    if not isrc or not duration_ms or _split_version(title)[1]:
+        return None
+    requested = _musicbrainz_isrc_recordings(isrc)
+    if not requested:
+        return None
+    requested = sorted(requested, key=lambda row: abs(_duration_ms(row) - duration_ms) if _duration_ms(row) else float("inf"))
+    official = requested[0]
+    credits = [credit.get("name") or (credit.get("artist") or {}).get("name")
+               for credit in official.get("artist-credit", []) if isinstance(credit, dict)]
+    if not _same_artist(artist, credits) or not _same_song_title(title, official.get("title") or "") or re.search(
+        r"\b(remix|live|edit|extended|acoustic|instrumental|radio)\b",
+        str(official.get("disambiguation") or ""), re.I,
+    ):
+        return None
+    candidates = [row for row in items if
+        _same_song_title(title, row.get("title") or "")
+        and _same_artist(artist, _artists(row)) and row.get("isrc")
+        and _duration_ms(row) and abs(_duration_ms(row) - duration_ms) <= max(15000, duration_ms * 0.08)]
+    candidates.sort(key=lambda row: abs(_duration_ms(row) - duration_ms))
+    checked = set()
+    for candidate in candidates:
+        candidate_isrc = str(candidate["isrc"]).strip().upper()
+        if candidate_isrc in checked:
+            continue
+        checked.add(candidate_isrc)
+        for recording in _musicbrainz_isrc_recordings(candidate_isrc):
+            credits = [credit.get("name") or (credit.get("artist") or {}).get("name")
+                       for credit in recording.get("artist-credit", []) if isinstance(credit, dict)]
+            if (_norm(recording.get("disambiguation")) == "original album version"
+                    and _same_song_title(title, recording.get("title") or "")
+                    and _same_artist(artist, credits)
+                    and _duration_ms(recording)
+                    and abs(_duration_ms(recording) - _duration_ms(candidate)) <= 5000):
+                return {**candidate, "_original_recording_id": recording.get("id", "")}
+    return None
 
 
 def _select_named_version(items: list[dict], title: str, artist: str, isrc: str,
@@ -414,6 +466,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
             refused = ""
             if items:
                 match, refused = _resolve_version(items, match, title, artist, isrc, duration_ms)
+                if match is None:
+                    match = _select_original_album_item(items, title, artist, isrc, duration_ms)
             if match is None:
                 detail = (f"search failed ({'; '.join(search_errors)})" if search_errors
                           else refused or "no exact ISRC or title/artist match")
@@ -425,6 +479,20 @@ def run(output_dir: Path, job: dict, manager) -> None:
                 failures.append(f"{api_base}: invalid track ID")
                 continue
             candidate_url = f"{api_base}/track/{urllib.parse.quote(track_id, safe='')}"
+            if match.get("_original_recording_id"):
+                # Keep the requested Spotify edition as provenance while the
+                # actual audio is tagged and timed as the verified album take.
+                resolved_isrc = str(match.get("isrc") or "").upper()
+                with manager._lock:
+                    job["recording_match"] = {"kind": "original_album", "requested_isrc": isrc,
+                        "resolved_isrc": resolved_isrc, "requested_duration_ms": duration_ms,
+                        "duration_ms": _duration_ms(match)}
+                    job["isrc"] = resolved_isrc
+                    job["metadata"] = {**metadata, "requested_isrc": isrc, "isrc": resolved_isrc,
+                        "requested_duration_ms": duration_ms, "duration_ms": _duration_ms(match),
+                        "musicbrainz_recording_id": match["_original_recording_id"]}
+                manager._append_cache_event(job, "provider",
+                    f"Compilation edition unavailable; using verified original album version (ISRC {resolved_isrc})")
             if job.get("mode", "stream") == "stream":
                 manager._append_cache_event(job, "provider",
                     f"Monochrome matched {match.get('title')} — {' / '.join(_artists(match))} at {site_origin}; streaming directly")
