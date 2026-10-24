@@ -474,6 +474,19 @@ class TestAndroidNativePlayback(unittest.TestCase):
         self.assertEqual(result["position"], 12.5)
         self.assertEqual(result["device_uid"], "android:7")
 
+    def test_exoplayer_buffering_is_exposed_until_audio_plays(self):
+        import backend_monochrome
+        manager = NativeAudioManager()
+        self.player.snapshot |= {"playing": False, "buffering": True}
+        with patch.object(backend_monochrome, "_stream_blocked_until", 0.0):
+            result = manager.play_stream("https://tracks.monochrome.st/track/1", "", "This phone")
+        self.assertTrue(result["buffering"])
+        self.assertEqual(result["stream_phase"], "buffering")
+        self.player.snapshot |= {"playing": True, "buffering": False}
+        status = manager.status()
+        self.assertFalse(status["buffering"])
+        self.assertEqual(status["stream_phase"], "playing")
+
     def test_http_429_reports_clearly_and_starts_cooldown(self):
         import backend_monochrome
         manager = NativeAudioManager()

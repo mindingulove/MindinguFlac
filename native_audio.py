@@ -933,6 +933,7 @@ class NativeAudioManager:
                 phase = "buffering"
             result = {
                 "available": True, "playing": playing, "ended": ended,
+                "buffering": bool(snapshot.get("buffering")) and not self._paused and not error and not ended,
                 "position": float(snapshot.get("position") or 0.0),
                 "duration": float(snapshot.get("duration") or 0.0) or _metadata_duration_ms(self._metadata) / 1000.0,
                 "path": self._path if active else "", "device_uid": self._device_uid, "volume": self._volume,

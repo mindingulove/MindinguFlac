@@ -7624,7 +7624,10 @@ async function startNativeAudio(filePath, track, requestId, position = 0, stream
     }
     throw error;
   } finally {
-    if (state.nativeAudioStart?.promise === startPromise) state.nativeAudioStart = null;
+    if (state.nativeAudioStart?.promise === startPromise) {
+      state.nativeAudioStart = null;
+      syncPlayPauseButton();
+    }
   }
   if (!result.ok) {
     if (requestId === state.playbackRequestId && directStreamUrl) {
@@ -7645,6 +7648,8 @@ async function startNativeAudio(filePath, track, requestId, position = 0, stream
     duration: result.duration || 0,
     path: filePath,
     stream_url: directStreamUrl,
+    stream_phase: result.stream_phase || "",
+    buffering: !!result.buffering || result.stream_phase === "buffering",
     ended: false,
   };
   state.nativeAudioStarting = false;
@@ -7775,6 +7780,8 @@ function startNativeAudioPolling(requestId) {
     state.nativeAudio = {
       ...state.nativeAudio,
       playing: !!status.playing,
+      stream_phase: status.stream_phase || "",
+      buffering: !!status.buffering || status.stream_phase === "buffering",
       position: status.position || 0,
       duration: status.duration || 0,
       ended: !!status.ended,
@@ -7835,6 +7842,7 @@ function syncNativeAudioUi() {
 }
 
 async function toggleNativeAudioPlayback() {
+  if (playbackTransportBusy()) return;
   if (!state.nativeAudio.active) {
     if (state.nativeAudioStarting) {
       state.manualPauseRequested = true;
@@ -7895,10 +7903,20 @@ async function toggleNativeAudioPlayback() {
   followAudioWithVideo();
 }
 
+function playbackTransportBusy() {
+  const native = state.nativeAudio || {};
+  const pendingStart = state.nativeAudioStarting || !!state.nativeAudioStart?.promise;
+  const nativeWaiting = native.active && !native.ended && !state.manualPauseRequested && (
+    native.buffering || ["opening", "buffering", "resolving", "connecting"].includes(native.stream_phase)
+    || (native.stream_url && !native.playing)
+  );
+  return !!(state.audioBuffering || pendingStart || nativeWaiting);
+}
+
 function syncPlayPauseButton() {
   const audio = $("audioPlayer");
   const playPause = $("playPause");
-  const busy = !!(state.audioBuffering || state.nativeAudioStarting);
+  const busy = playbackTransportBusy();
   const paused = state.nativeAudio.active
     ? (state.manualPauseRequested || !state.nativeAudio.playing)
     : !audio || audio.paused || state.audioBuffering;
@@ -8016,6 +8034,7 @@ function bindKeyboardControls() {
     if (isTypingTarget(event.target)) return;
     if (event.code === "Space") {
       event.preventDefault();
+      if (playbackTransportBusy()) return;
       if (state.nativeAudio.active) {
         toggleNativeAudioPlayback().catch(() => {});
         return;
@@ -8225,6 +8244,7 @@ function bindPlayer() {
   audio.volume = storedVolume();
   syncVolumeBar();
   $("playPause").onclick = () => {
+    if (playbackTransportBusy()) return;
     // A restored snapshot can finish loading after the stream has already
     // started. Never interpret the first Pause click as a request to reselect
     // that active track (which restarts it at 0:00). Consume the pending flag
