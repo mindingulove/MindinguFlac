@@ -120,7 +120,7 @@ check("the torrent engine is withheld off-device instead of offered and failing"
       if not get_json("/api/runtime")["engines"]["torrent"]["available"]
       else (_ for _ in ()).throw(RuntimeError("torrent reported available without jlibtorrent")))
 
-check("the SpotiFLAC engine is withheld until a provider extension exists",
+check("the Mornye engine is withheld until a provider extension exists",
       lambda: ("withheld: " + get_json("/api/runtime")["engines"]["spotiflac"]["reason"][:160])
       if not get_json("/api/runtime")["engines"]["spotiflac"]["available"]
       else "available")
@@ -174,7 +174,7 @@ check("settings and the managed storage root survive a kill/relaunch",
       settings_persist_across_restart)
 
 print()
-print("== SpotiFLAC-backed metadata (live network) ==")
+print("== Mornye-backed metadata (live network) ==")
 
 TRACK = {"artist": "Daft Punk", "title": "Veridis Quo", "album": "Discovery"}
 found: dict = {}
@@ -198,7 +198,7 @@ def music_search():
     return f"{len(items)} results; first track = {tracks[0].get('artist')} - {tracks[0].get('title')}"
 
 
-check("music search returns tracks through the embedded SpotiFLAC metadata client", music_search)
+check("music search returns tracks through the embedded Mornye metadata client", music_search)
 
 
 def artist_top_tracks():

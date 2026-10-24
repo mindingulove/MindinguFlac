@@ -209,7 +209,7 @@ def _get_spotify_client(force_refresh: bool = False):
         if _spotify_client_cache is not None:
             return _spotify_client_cache if _spotify_client_cache is not False else None
         try:
-            from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
+            from mornye_bridge import SpotifyMetadataClient  # type: ignore
             _spotify_client_cache = SpotifyMetadataClient()
             return _spotify_client_cache
         except ImportError as exc:
@@ -490,8 +490,12 @@ def _spotify_track_playcount(track_id: str, force_refresh: bool = False) -> int:
         try:
             from spotiflac_compat import call_sync_or_async
 
-            track = call_sync_or_async(client, "get_track", "get_track_async", track_id)
-            raw_plays = track.get("plays") if isinstance(track, dict) else getattr(track, "plays", 0)
+            if callable(getattr(client, "get_track_playcount_async", None)):
+                from spotiflac_compat import run_async_blocking
+                raw_plays = run_async_blocking(client.get_track_playcount_async(track_id))
+            else:
+                track = call_sync_or_async(client, "get_track", "get_track_async", track_id)
+                raw_plays = track.get("plays") if isinstance(track, dict) else getattr(track, "plays", 0)
             playcount = _numeric_plays(raw_plays)
         except Exception:
             playcount = 0
@@ -3399,14 +3403,30 @@ def spotify_album_playcounts(album_id: str) -> dict[str, int]:
 
 
 def _load_artist_about(artist_id: str) -> dict:
-    # Use SpotiFLAC's SpotifyWebClient — it handles TOTP via the community secrets
-    # repo and adds the required Client-Token header. The old approach of extracting
-    # the TOTP secret from Spotify's JS bundle (let eU=[{secret:...}]) no longer
-    # works because Spotify removed that inline format.
+    # Mornye owns core profile fields. The existing parser below supplies
+    # gallery, related artists and city data its SDK response does not expose.
     sf_client = _get_spotify_client()
+    primary = {}
+    if sf_client:
+        try:
+            from spotiflac_compat import call_sync_or_async
+            profile_result = call_sync_or_async(sf_client, "get_artist_profile", "get_artist_profile_async", artist_id)
+            profile_fields = profile_result.get("profile") or {}
+            profile_stats = profile_result.get("stats") or {}
+            primary = {
+                "name": profile_fields.get("name"),
+                "biography": profile_fields.get("biography"),
+                "monthly_listeners": profile_stats.get("listeners"),
+                "followers": profile_stats.get("followers"),
+                "global_chart_position": profile_stats.get("rank"),
+                "avatar": profile_result.get("avatar"),
+            }
+            primary = {key: value for key, value in primary.items() if value and value != "Unknown"}
+        except Exception:
+            pass
     web_client = getattr(sf_client, "web_client", None) if sf_client else None
     if not web_client:
-        return {}
+        return primary
 
     # Try to pull the live queryArtistOverview hash from Spotify's JS bundle so we
     # always use the current persisted-query document (which includes relatedContent).
@@ -3429,7 +3449,7 @@ def _load_artist_about(artist_id: str) -> dict:
         response = web_client.query(body)
     except Exception as e:
         print(f"[SpotifyWeb] queryArtistOverview failed for {artist_id}: {e}")
-        return {}
+        return primary
     data = response.get("data", {})
     artist = data.get("artistUnion") or data.get("artist") or {}
     stats = artist.get("stats") or {}
@@ -3492,6 +3512,7 @@ def _load_artist_about(artist_id: str) -> dict:
         "hero_image": _pick_feature_image(),
         "verified": bool(profile.get("verified")),
         "related_artists": related_artists,
+        **primary,
     }
 
 

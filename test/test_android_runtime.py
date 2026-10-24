@@ -127,7 +127,7 @@ class AndroidCapabilityReportTest(unittest.TestCase):
 
     def test_dependency_manifest_lists_every_runtime_that_failed_to_import(self):
         def probe(name):
-            if name in {"yt_dlp", "SpotiFLAC"}:
+            if name in {"yt_dlp", "mornye"}:
                 return False, "ModuleNotFoundError: nope"
             return True, "ok"
 
@@ -136,7 +136,7 @@ class AndroidCapabilityReportTest(unittest.TestCase):
             manifest = capabilities.dependency_manifest()
 
         self.assertFalse(manifest["ok"])
-        self.assertEqual(manifest["missing"], ["SpotiFLAC", "yt_dlp"])
+        self.assertEqual(manifest["missing"], ["mornye", "yt_dlp"])
         self.assertEqual(manifest["runtimes"]["mutagen"]["version"], "1.0")
         self.assertIn("used_for", manifest["runtimes"]["mutagen"])
 

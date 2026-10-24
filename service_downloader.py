@@ -240,7 +240,7 @@ def _resolve_platform_url(candidate_url: str, service: str) -> str:
 
 def _search_spotify_url(artist: str, title: str, album: str = "", kind: str = "track", isrc: str = "") -> str:
     try:
-        from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from mornye_bridge import SpotifyMetadataClient  # type: ignore
         from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
 
@@ -1530,61 +1530,6 @@ class ServiceDownloadManager:
 
     def _sync_progress(self) -> None:
         updated = False
-        try:
-            from SpotiFLAC.core.progress import DownloadManager
-            stats = DownloadManager().get_stats()
-            queue = stats.get("queue", [])
-            with self._lock:
-                for item in queue:
-                    s_id = item.get("id") or item.get("spotify_id")
-                    i_title = item.get("track_name")
-                    i_artist = item.get("artist_name")
-                    if not s_id and not i_title: continue
-
-                    for job in self.jobs.values():
-                        if job.get("status") != "running": continue
-
-                        matched = False
-                        meta = job.get("metadata") or {}
-
-                        if s_id and (job.get("isrc") == s_id or job.get("id") == s_id or meta.get("id") == s_id or meta.get("spotify_id") == s_id):
-                            matched = True
-                        if not matched and i_title and i_artist:
-                            if clean_part(i_title).lower() == clean_part(job.get("title", "")).lower() and \
-                               clean_part(i_artist).lower() == clean_part(job.get("artist", "")).lower():
-                                matched = True
-                        if not matched and s_id and "open.spotify.com/track/" in job.get("resolved_url", ""):
-                            u_id = job["resolved_url"].split("/track/")[1].split("?")[0].split("/")[0]
-                            if u_id == s_id: matched = True
-
-                        if matched:
-                            prog_mb = float(item.get("progress") or 0)
-                            total_mb = float(item.get("total_size") or 0)
-
-                            if total_mb > 0.1:
-                                progress = min(95.0, (prog_mb / total_mb) * 100.0)
-                            else:
-                                dur = (
-                                    _parse_duration_ms(meta.get("duration_ms"))
-                                    or _parse_duration_ms(meta.get("length"))
-                                    or _parse_duration_ms(meta.get("duration"))
-                                )
-                                if dur > 0:
-                                    factor = 9.5 if any(k in job.get("quality", "").lower() for k in ["flac", "lossless", "27"]) else 2.2
-                                    est = (dur / 60000) * factor
-                                    progress = min(95.0, (prog_mb / max(0.1, est)) * 100.0)
-                                else:
-                                    progress = min(95.0, prog_mb * 4.0)
-
-                            if progress > float(job.get("progress") or 0):
-                                job["progress"] = progress
-                                updated = True
-
-                            if job["progress"] > 0:
-                                print(f"[Progress] {job.get('title')} -> {job['progress']:.1f}%")
-        except Exception:
-            pass
-
         with self._lock:
             running_jobs = [job for job in self.jobs.values() if job.get("status") == "running"]
 

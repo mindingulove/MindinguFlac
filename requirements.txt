@@ -1,8 +1,8 @@
 rapidfuzz
 free-proxy
 PySocks
-git+https://github.com/BartolomeoRusso9/SpotiFLAC-Module-Version.git@a471fdc5374101a53137949d449f41e76249148c#egg=SpotiFLAC
-# SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers. Keep it
+./vendor/mornye-python
+# Mornye browser-backed session helpers use pydoll. Keep it
 # explicit so desktop dependency audits and frozen-build collection stay clear.
 pydoll-python>=2.9.0
 nodriver>=0.36

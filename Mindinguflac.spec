@@ -8,6 +8,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath('.'))
 
 datas = [
+    ("local_metadata/LICENSE", "local_metadata"),
+    ("local_metadata/PROVENANCE.md", "local_metadata"),
     ('static', 'static'),
 ]
 binaries = []
@@ -25,7 +27,9 @@ hiddenimports = [
     'discogs_metadata',
     'backend_torrent',
     'backend_video',
-    'backend_spotiflac',
+    'backend_spotiflac', 'backend_mornye', 'mornye_bridge', 'mornye_runtime',
+    'local_metadata.artist_profile', 'local_metadata.lyrics', 'local_metadata.apple_ttml',
+    'local_metadata.spotify_totp', 'local_metadata.response_cache', 'local_metadata.apple_music_metadata', 'local_metadata.http',
     'backend_tidal_hifi',
     'backend_monochrome',
     'video_sync',
@@ -44,15 +48,15 @@ hiddenimports = [
     'db'
 ]
 hiddenimports += collect_submodules('qrcode')
-# SpotiFLAC — all imports now use 'SpotiFLAC.*' (updated from old 'backend.*' API).
+# Embedded Mornye REST service and narrowly scoped metadata adapters.
 try:
-    tmp_ret = collect_all('SpotiFLAC')
+    tmp_ret = collect_all('mornye')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-    hiddenimports += collect_submodules('SpotiFLAC')
+    hiddenimports += collect_submodules('mornye')
 except Exception:
     pass
 
-# SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers.
+# Mornye browser-backed session helpers use pydoll.
 try:
     tmp_ret = collect_all('pydoll')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -181,14 +185,6 @@ datas = [
     for src, dest in datas
     if Path(src).name not in {'.endpoints_cache.txt', 'endpoints_cache.txt'}
 ]
-try:
-    import SpotiFLAC.core as _spotiflac_endpoints
-
-    _seed = Path(_spotiflac_endpoints._CACHE_FILE)
-    if _seed.is_file():
-        datas.append((str(_seed), 'spotiflac_cache'))
-except Exception:
-    pass
 
 
 helper = Path('build/macos/MindinguflacNowPlayingHelper')
@@ -209,8 +205,8 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['runtime_hook_spotiflac_cache.py'],
-    excludes=['MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
+    runtime_hooks=['runtime_hook_mornye.py'],
+    excludes=['SpotiFLAC', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
     noarchive=False,
     optimize=0,
 )

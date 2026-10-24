@@ -13,8 +13,13 @@ val localWheelDir = providers.environmentVariable("MINDINGUFLAC_ANDROID_WHEELS")
 val bundledWheelDir = projectDir.resolve("python-wheels")
 
 val syncPythonSources by tasks.registering(Sync::class) {
+    includeEmptyDirs = false
     from(repositoryRoot) {
-        include("*.py")
+        include("*.py", "local_metadata/**")
+        exclude("**/__pycache__/**", "**/*.pyc")
+    }
+    from(repositoryRoot.resolve("vendor/mornye-python")) {
+        include("mornye/**")
         exclude("**/__pycache__/**", "**/*.pyc")
     }
     from("src/main/python") {

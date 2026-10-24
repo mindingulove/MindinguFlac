@@ -1,103 +1,84 @@
-# Replacing SpotiFLAC with Mornye
+# Embedded Mornye integration
 
-Assessed upstream commit `297c780c3e7bcd9dffab65a65f8b1bc686da238b`
-(package version 1.0.4) on 2026-10-24. This document describes the migration;
-the current application still uses its pinned SpotiFLAC dependency.
+Mindinguflac vendors Mornye-Python 1.0.4 at commit
+`297c780c3e7bcd9dffab65a65f8b1bc686da238b` under `vendor/mornye-python`.
+The retired SpotiFLAC repository is not needed for installation, packaging or
+runtime. The upstream source and MIT license are retained together.
 
-Mornye's core includes metadata resolution, but no download providers or default
-extension registry. A provider extension source must be selected before replacing
-the existing downloader. An unconfigured replacement would remove working
-Tidal/Qobuz/etc. support. Monochrome, YouTube and torrent backends are independent.
+## Routing
 
-## Selected approach: embedded REST API on each device
-
-The user selected local execution inside Mindinguflac on both desktop and
-Android. Prefer upstream's versioned `/api/v1` contract for the functions it
-covers, rather than monkeypatching downloader internals. This is an architecture
-decision, not an implemented replacement in the current build.
-
-Mindinguflac should own the service lifecycle, start it on an OS-assigned
-loopback port, use a per-run authentication token, wait for `/api/v1/info`, and
-stop it when the app exits. No separately configured server or public listener
-is needed. Keep Mornye data, cache, extensions and database under Mindinguflac's
-writable application directory.
-
-| Mindinguflac operation | Mornye contract |
+| Feature | Primary implementation |
 | --- | --- |
-| Health/version check | `GET /api/v1/info` |
-| Track search | `GET /api/v1/search?q=...` |
-| Track/album/playlist metadata, including ISRC | `POST /api/v1/resolve` |
-| Queue provider download into a job-specific local directory | `POST /api/v1/downloads` |
-| Observe completion/failure | `GET /api/v1/downloads/{id}` |
-| Installed provider extensions | `GET /api/v1/extensions` |
+| Track search | Mornye `GET /api/v1/search` |
+| Track/album/playlist tracks with ISRC | Mornye `POST /api/v1/resolve` |
+| Provider downloads, progress and cancellation | Mornye `/api/v1/downloads` jobs |
+| Installed extension health | Mornye `GET /api/v1/extensions` |
+| Artist profile | Mornye `SpotifyMetadataClient.get_artist_profile_async` |
+| Lyrics | Mornye `core.lyrics.fetch_lyrics_async` |
+| Uncovered artist/album search, discography and play counts | Isolated Mornye SDK adapter |
 
-Both components run on the same device, so they can share an application-owned
-job directory. After completion, Mindinguflac can validate and serve the saved
-file through its existing local range/stream endpoints. Mornye's API does not
-provide an audio-stream/file-transfer endpoint and deliberately omits file paths
-from download history; do not infer a remote playable URL from a completed job.
+Mornye has artist-profile and lyrics functions, so they are the primary route.
+`local_metadata` retains the SpotiFLAC implementations as a compatibility fallback
+only when the corresponding Mornye function is missing. It carries the original
+MIT license and provenance. An upstream network error does not silently select a
+different implementation. Existing Mindinguflac endpoints and lyric caches remain.
 
-The stable v1 surface currently has no artist-profile or lyrics endpoints, and
-its search response contains tracks only. Keep those uncovered features behind
-a small, isolated adapter using public Mornye SDK methods until upstream adds
-matching REST endpoints. Do not replace them with undocumented GUI RPC calls
-and then describe the whole integration as versioned REST.
+`mornye_bridge.py` isolates SDK use. No downloader monkeypatches, GUI RPC methods,
+or imports of the retired SpotiFLAC package are used. The old `spotiflac` engine
+setting is retained as a compatibility ID; the visible engine is Mornye.
 
-Android needs real API dependencies: the existing small Pydantic stand-in is
-insufficient for FastAPI. Package a matching native `pydantic-core` Android arm64
-wheel with real Pydantic, FastAPI and Uvicorn, and verify service startup on
-Android. Upstream's web entry point also imports pywebview: assess this desktop
-GUI dependency for a headless Android entry point. JavaScript provider extensions
-still require Node.js; using HTTP does not remove dependencies from the embedded
-server. Python extensions remain the first Android runtime to assess.
+## Service lifecycle
 
-## SDK adapter and packaging changes
+`mornye_runtime.py` lazily starts the official upstream FastAPI application on an
+OS-assigned `127.0.0.1` port with a random per-run token, verifies `/api/v1/info`,
+and stops the service with Mindinguflac. It runs inside the same app on desktop
+and Android, without a companion server. All Mornye state is under Mindinguflac's
+writable data directory. Upstream GUI installers and subscription schedulers are
+not started by this embedded service.
 
-- Pin the selected Mornye commit in requirements and desktop build scripts.
-- Route covered metadata calls through REST. For the uncovered artist/lyrics
-  features, replace old imports inside the isolated SDK adapter with Mornye
-  public equivalents; retain ISRC persistence.
-- Replace provider orchestration in `backend_spotiflac.py` with the REST client.
-  Replace old service names with IDs of installed extensions (`ext:<id>`), and
-  derive availability and fallback order from installed extensions.
-- Remove old downloader metadata injection and progress monkeypatches from the
-  active download path. Poll REST jobs and retain the original selection as
-  provenance alongside the actual downloaded file metadata.
-- Configure `MORNYE_DATA_DIR`, `MORNYE_CACHE_DIR`, `MORNYE_EXT_DIR` and the download
-  directory to writable application-managed locations before importing Mornye.
-  Replace the old frozen endpoint-cache runtime hook; upstream does not migrate
-  previous state automatically.
-- Preserve Mindinguflac's library, playlists, queue and quality-reuse policy.
-  Mornye should supply metadata/provider downloads, rather than replace our app UI.
-- Collect Mornye and the chosen extension runtime/dependencies in macOS and
-  Windows bundles. Document the exact extension source and pinned versions.
+The components share device-local storage. Jobs receive a local output directory;
+Mindinguflac validates and plays resulting files through its own existing range
+endpoints. A successful API job is not treated as a remote audio-stream URL.
 
-## Android
+Android packages real Pydantic, a verified Android arm64 `pydantic-core` wheel,
+FastAPI and Uvicorn. A headless `webview` import adapter prevents Mornye from
+opening a second GUI. The old Pydantic stand-in and SpotiFLAC package are removed.
 
-Vendor the pinned Mornye source in place of the old SpotiFLAC package and verify
-imports with the phone's actual dependency set, including our Pydantic stand-in.
-A successful desktop import does not validate the Android package.
+## Providers and verification limits
 
-Python extensions execute in-process, making them the first runtime to assess on
-Chaquopy. JavaScript extensions require a Node.js bridge; this Android app does
-not currently package that runtime. Check each chosen extension's native and
-browser dependencies before enabling it on Android.
+Mornye ships no default provider extensions or registry. Already installed local
+Mornye/SpotiFLAC extensions are copied once into the app data directory, without
+overwriting newer app copies or contacting an extension registry. Only installed extensions
+are submitted to its API. Android exposes the provider engine only when a Python
+extension, or an extension with a usable runtime, is present. JavaScript
+extensions still require Node.js, which the Android package does not contain.
+Monochrome, YouTube and torrent backends remain independent.
 
-## Verification before switching
+Contract tests exercise the actual authenticated REST server, resolution, service
+shutdown/restart, primary SDK artist/lyrics routing, fallback selection and
+provider-job request/cancellation mapping. Live desktop checks resolved the
+Hungry Like the Wolf Spotify track with its ISRC, fetched Duran Duran's artist
+profile and obtained synced lyrics through Mornye. No third-party provider
+extension transfer or physical Android runtime test is claimed.
 
-1. Confirm installed extension IDs, supported qualities and fallback behavior.
-2. Exercise Spotify track, album, playlist and lyrics metadata with ISRC preserved.
-3. Verify a real provider transfer, cancellation, progress and file metadata.
-4. Confirm equal/better saved files are reused and lower-quality files upgrade.
-5. Build frozen arm64 macOS and Android packages, inspect their contents, then
-   test Android buffering controls and extension downloads on a physical device.
-
-The upstream public metadata/downloader imports and `run_async` signature were
-smoke-tested from the pinned source in the current desktop environment. No
-extension was installed and no Mornye provider download was claimed as tested.
-
-References:
-- https://github.com/mornyeapp/Mornye-Python/blob/main/docs/guide/migration.md
-- https://github.com/mornyeapp/Mornye-Python/blob/main/docs/guide/extensions.md
-- https://github.com/mornyeapp/Mornye-Python/blob/main/docs/guide/api-reference.md
+Sources:
 - https://github.com/mornyeapp/Mornye-Python/blob/main/docs/guide/rest-api.md
+- https://github.com/mornyeapp/Mornye-Python/blob/main/docs/guide/extensions.md
+- https://github.com/mornyeapp/Mornye-Python/blob/main/docs/guide/migration.md
+
+The native desktop log writer is not a terminal. The embedded Uvicorn service
+uses the app's logging configuration; using Uvicorn's default formatter prevented
+startup through an `isatty` call and made search appear empty. A real API startup
+test with file-only logging covers that regression.
+
+Focused migration/playback tests pass (223 tests plus 7 subtests, and the two
+JavaScript suites). The legacy `test_music_metadata.py` suite also has existing
+fixture/cache failures reproduced against the pre-migration module; these are
+not included in the passing focused count. `test_spotify_web_metadata.py` already
+refers to a module absent from the checkout and cannot be collected.
+
+Final frozen macOS verification: the rebuilt arm64 app returned 60 results for
+`pink floyd` (20 tracks, 20 artists, 20 albums). The native UI search, Artists tab
+and Albums tab were exercised. Packaged code and UI match source, and deep strict
+code-signature verification passes. Android APK signature/content checks pass;
+physical Android execution remains untested.

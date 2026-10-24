@@ -50,7 +50,16 @@
     "chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl": "811547210b01eefb0fb850fd35bd27b53a00a76b9466b8c03e049b7e8175004b",
     "chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl": "1e8e67a4f9e2fcde384890678bafbf7ffefe7b2cb4887e5c2996ba7607f4324c",
     "chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl": "0b4caed1147f2a19707d4ba730afea57f7b8f2d8c046d8a48cf49377741c4604",
-    "pillow-13.0.0-0-cp312-cp312-android_24_arm64_v8a.whl": "4c589e97df98a2a8261b90ccaf5018a7e7d3dece90f51a83ee47017b05205cb1"
+    "pillow-13.0.0-0-cp312-cp312-android_24_arm64_v8a.whl": "4c589e97df98a2a8261b90ccaf5018a7e7d3dece90f51a83ee47017b05205cb1",
+    "pydantic_core-2.46.4-1-cp312-cp312-android_24_arm64_v8a.whl": "29deff6bd5e8c1f6d6c82b0fda705be11f892ecf1308b33c6c7c088ba9a5002a",
+    "click-8.5.0-py3-none-any.whl": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+    "annotated_doc-0.0.5-py3-none-any.whl": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+    "fastapi-0.141.1-py3-none-any.whl": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+    "typing_inspection-0.4.4-py3-none-any.whl": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+    "starlette-1.6.0-py3-none-any.whl": "a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c",
+    "uvicorn-0.53.0-py3-none-any.whl": "e8dca71ec86dce5f04e333f0d56cdedf942446e6643b9cea1af0d6d3a02cb03e",
+    "pydantic-2.13.4-py3-none-any.whl": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
+    "annotated_types-0.8.0-py3-none-any.whl": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
   },
   "numpy_source": "Chaquopy package index https://chaquo.com/pypi-13.1/ (numpy 1.26.2 + chaquopy-libcxx/openblas/libgfortran); used by video_sync.py soundtrack matching",
   "pillow_source": {
@@ -67,5 +76,17 @@
     "variant": "debug",
     "sha256": "f09ac6914b9dc029e31f67d71aae60b16746740aa562f088c7da1b5be434e61d",
     "checks": "tools/inspect_apk.py: all APK checks passed, including installed Pillow 13.0.0 metadata and PIL/_imaging.so"
+  },
+  "pydantic_core_source": {
+    "version": "2.46.4",
+    "url": "https://pypi.flet.dev/-/ver_aixZY/pydantic_core-2.46.4-1-cp312-cp312-android_24_arm64_v8a.whl",
+    "sha256": "29deff6bd5e8c1f6d6c82b0fda705be11f892ecf1308b33c6c7c088ba9a5002a",
+    "runtime_verification": "Pending Android device runtime; wheel hash and ELF architecture verified"
+  },
+  "mornye_apk_verification": {
+    "variant": "debug",
+    "sha256": "882c4533a8fd29f9077dfcb42b5f45e780a71ee17f7d6fd0191e9a73f6ecb8f4",
+    "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment",
+    "device_runtime": "Not tested: no Android device connected"
   }
 }

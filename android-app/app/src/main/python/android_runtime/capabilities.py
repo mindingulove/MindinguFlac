@@ -34,23 +34,26 @@ from pathlib import Path
 #: ``None`` as the distribution means the APK carries the Python source
 #: directly rather than installing a wheel.
 PACKAGED_RUNTIMES: dict[str, tuple[str | None, str]] = {
-    "SpotiFLAC": (None, "Spotify metadata, search, artist/album/playlist, lyrics"),
+    "mornye": (None, "Spotify metadata, search, artist/album/playlist, lyrics"),
     "rapidfuzz": (None, "deterministic fuzzy artist/title/album matching"),
-    "pydantic": (None, "SpotiFLAC data containers (pure-Python stand-in)"),
+    "pydantic": ("pydantic", "Mornye REST request and response validation"),
+    "pydantic_core": ("pydantic_core", "native Mornye REST validation"),
+    "fastapi": ("fastapi", "embedded Mornye REST API"),
+    "uvicorn": ("uvicorn", "embedded Mornye HTTP server"),
     "yt_dlp": ("yt-dlp", "YouTube audio engine"),
     "mutagen": ("mutagen", "audio tag read/write and format validation"),
     "requests": ("requests", "torrent source search and HTTP metadata"),
     "socks": ("PySocks", "SOCKS proxy support for yt-dlp"),
-    "httpx": ("httpx", "SpotiFLAC async HTTP transport"),
-    "aiofiles": ("aiofiles", "SpotiFLAC async file IO"),
-    "tenacity": ("tenacity", "SpotiFLAC retry policy"),
-    "tqdm": ("tqdm", "SpotiFLAC progress reporting"),
-    "packaging": ("packaging", "SpotiFLAC version handling"),
-    "dotenv": ("python-dotenv", "SpotiFLAC configuration loading"),
-    "typing_extensions": ("typing-extensions", "SpotiFLAC typing backports"),
-    "cryptography": ("cryptography", "SpotiFLAC signed-session provider calls"),
+    "httpx": ("httpx", "Mornye async HTTP transport"),
+    "aiofiles": ("aiofiles", "Mornye async file IO"),
+    "tenacity": ("tenacity", "Mornye retry policy"),
+    "tqdm": ("tqdm", "Mornye progress reporting"),
+    "packaging": ("packaging", "Mornye version handling"),
+    "dotenv": ("python-dotenv", "Mornye configuration loading"),
+    "typing_extensions": ("typing-extensions", "Mornye typing backports"),
+    "cryptography": ("cryptography", "Mornye signed-session provider calls"),
     "_cffi_backend": ("cffi", "native cryptography bindings"),
-    "Crypto": ("pycryptodome", "SpotiFLAC provider payload decryption"),
+    "Crypto": ("pycryptodome", "Mornye provider payload decryption"),
     "PIL": ("Pillow", "artwork decoding and embedded cover art"),
     "PIL._imaging": ("Pillow", "native artwork decoder"),
 }
@@ -91,6 +94,8 @@ def _module_version(name: str) -> str:
 
 def dependency_manifest() -> dict:
     """Import every packaged runtime and report what resolved where."""
+    from mornye_runtime import configure
+    configure()
     entries: dict[str, dict] = {}
     for import_name, (distribution, used_for) in sorted(PACKAGED_RUNTIMES.items()):
         imported, detail = _probe_import(import_name)
@@ -134,22 +139,24 @@ def _native_torrent_status() -> dict:
 
 
 def _spotiflac_provider_status() -> dict:
-    """Is there a SpotiFLAC *download* provider this device can actually run?
+    """Is there a Mornye *download* provider this device can actually run?
 
-    SpotiFLAC 3.x moved its providers out of the package and into extensions.
+    Mornye supplies download providers through extensions.
     JavaScript extensions need ``node`` on PATH; Python ``.sflx`` extensions
     are imported in-process and so only need to be installed. The phone ships
-    neither, which is why the SpotiFLAC engine stays off until one is present.
+    neither, which is why the Mornye engine stays off until one is present.
     """
-    imported, detail = _probe_import("SpotiFLAC")
+    imported, detail = _probe_import("mornye")
     if not imported:
-        return {"ok": False, "error": f"SpotiFLAC is not importable ({detail})"}
+        return {"ok": False, "error": f"Mornye is not importable ({detail})"}
 
+    from mornye_runtime import configure
+    configure()
     node = shutil.which("node")
     installed: list[str] = []
     error = ""
     try:
-        from SpotiFLAC.extensions import ExtensionManager  # type: ignore
+        from mornye.extensions import ExtensionManager  # type: ignore
 
         manager = ExtensionManager(auto_install_downloads=False)
         for extension in manager.list_installed():
@@ -166,7 +173,7 @@ def _spotiflac_provider_status() -> dict:
     if installed:
         return {"ok": True, "providers": sorted(installed), "node": bool(node)}
     reason = (
-        "SpotiFLAC 3.9.0 imports, but its download path needs a provider "
+        "Mornye 1.0.4 imports, but its download path needs a provider "
         "extension: JavaScript extensions require Node.js (not in the APK) and "
         "no Python provider extension is installed."
     )
@@ -216,7 +223,7 @@ def engine_availability() -> dict:
 
     provider = _spotiflac_provider_status()
     engines["spotiflac"] = {
-        "label": "SpotiFLAC",
+        "label": "Mornye",
         "available": bool(provider.get("ok")),
         "reason": "" if provider.get("ok") else str(provider.get("error") or ""),
         "services": ["tidal", "qobuz", "deezer", "amazon"],
@@ -270,7 +277,7 @@ def clamp_choice(engine: str, service: str, quality: str) -> tuple[str, str, str
     The persisted config is already guarded, but a download payload carries its
     own engine/service/quality, so a stale phone client or a replayed request
     could still name a desktop-only engine. That would fall through
-    ``service_downloader``'s engine dispatch to the SpotiFLAC default and fail
+    ``service_downloader``'s engine dispatch to the Mornye default and fail
     with an import error instead of downloading, so clamp it against the
     measured capability report instead.
     """

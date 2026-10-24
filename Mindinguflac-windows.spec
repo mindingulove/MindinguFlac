@@ -3,7 +3,11 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
-datas = [('static', 'static')]
+datas = [
+    ("local_metadata/LICENSE", "local_metadata"),
+    ("local_metadata/PROVENANCE.md", "local_metadata"),
+    ('static', 'static'),
+]
 binaries = []
 hiddenimports = [
     'bluetooth_scan',
@@ -18,7 +22,9 @@ hiddenimports = [
     'isrc_resolver',
     'discogs_metadata',
     'backend_torrent',
-    'backend_spotiflac',
+    'backend_spotiflac', 'backend_mornye', 'mornye_bridge', 'mornye_runtime',
+    'local_metadata.artist_profile', 'local_metadata.lyrics', 'local_metadata.apple_ttml',
+    'local_metadata.spotify_totp', 'local_metadata.response_cache', 'local_metadata.apple_music_metadata', 'local_metadata.http',
     'backend_tidal_hifi',
     'backend_monochrome',
     'video_sync',
@@ -53,8 +59,8 @@ def _collect_package(package_name, include_submodules=False):
 
 
 for _pkg in (
-    'SpotiFLAC',
-    # SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers.
+    'mornye',
+    # Mornye browser-backed session helpers use pydoll.
     'pydoll',
     'torrfetch',
     'yt_dlp',
@@ -121,7 +127,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['AppKit', 'Foundation', 'IOBluetooth', 'objc', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
+    excludes=['SpotiFLAC', 'AppKit', 'Foundation', 'IOBluetooth', 'objc', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
     noarchive=False,
     optimize=0,
 )

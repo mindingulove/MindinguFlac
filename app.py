@@ -1055,7 +1055,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
     album_m = re.search(r"(?:album/|spotify:album:)([A-Za-z0-9]+)", spotify_url)
     
     try:
-        from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from mornye_bridge import SpotifyMetadataClient  # type: ignore
         from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
         pl_year = ""
@@ -1398,7 +1398,7 @@ def _fetch_lyrics(identity: dict) -> dict:
     if not identity.get("title") or not identity.get("artist"):
         return {"ok": False, "found": False, "error": "Missing title or artist", "identity": identity}
     try:
-        from SpotiFLAC.core.lyrics import fetch_lyrics_async
+        from local_metadata.lyrics import fetch_lyrics_async
         lyrics, provider = asyncio.run(fetch_lyrics_async(
             track_name=identity.get("title") or "",
             artist_name=identity.get("artist") or "",
@@ -3714,6 +3714,8 @@ def create_server(host: str = "0.0.0.0", port: int = 8888) -> ThreadingHTTPServe
 
 
 def _shutdown_browser_workers() -> None:
+    import mornye_runtime
+    mornye_runtime.stop()
     for mod_name, fn_name in (("duck_proxy", "shutdown"), ("gemini_proxy", "shutdown")):
         try:
             module = __import__(mod_name)

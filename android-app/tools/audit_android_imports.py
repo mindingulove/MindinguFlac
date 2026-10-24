@@ -105,7 +105,7 @@ MODULES = [
     "config",
     "db",
     "rapidfuzz",
-    "SpotiFLAC",
+    "mornye",
     "spotiflac_compat",
     "torrent_sources",
     "music_metadata",

@@ -297,8 +297,8 @@ function updateEngineControls(engine, currentService, currentQuality) {
     duckModelRow.style.display = engine === "torrent" || engine === "ytp-dl" ? "" : "none";
   }
 
-  // Show/hide retries row (Tor is SpotiFLAC-only)
-  if (retriesRow) retriesRow.style.display = engine === "spotiflac" ? "" : "none";
+  // Mornye owns provider retries; the former Tor retry setting is obsolete.
+  if (retriesRow) retriesRow.style.display = "none";
 
   // Populate service options
   serviceSel.innerHTML = providers.map(p => `<option value="${p.value}">${p.label}</option>`).join("");

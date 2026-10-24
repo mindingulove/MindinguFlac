@@ -131,7 +131,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
             "/fallback-cover",
         ))
 
-        with patch("SpotiFLAC.core.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("mornye_bridge.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("https://open.spotify.com/playlist/playlist-id?si=test")
 
         self.assertEqual(imported["name"], "Imported Playlist")
@@ -142,7 +142,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
     def test_import_accepts_spotify_playlist_uri(self):
         client = SimpleNamespace(get_playlist_tracks=lambda playlist_id: ({"name": playlist_id}, [], ""))
 
-        with patch("SpotiFLAC.core.spotify_metadata.SpotifyMetadataClient", return_value=client):
+        with patch("mornye_bridge.SpotifyMetadataClient", return_value=client):
             imported = app._spotify_import_playlist("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M")
 
         self.assertEqual(imported["name"], "37i9dQZF1DXcBWIGoYBM5M")
@@ -299,7 +299,7 @@ class SpotifyPlaylistImportTests(unittest.TestCase):
 
         with patch.object(app, "_read_cached_lyrics", return_value=None):
             with patch.object(app, "_write_cached_lyrics") as write_cache:
-                with patch("SpotiFLAC.core.lyrics.fetch_lyrics_async", side_effect=fake_fetch_lyrics_async):
+                with patch("local_metadata.lyrics.fetch_lyrics_async", side_effect=fake_fetch_lyrics_async):
                     result = app._fetch_lyrics(identity)
 
         self.assertEqual(captured["providers"], ["spotify", "apple", "musixmatch", "lrclib", "amazon"])

@@ -1,0 +1,188 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mornye"
+version = "1.0.4"
+description = "A Python module for metadata and user-configured music-provider extensions."
+readme = "README.md"
+# 3.11 is the floor because Pillow 13+ now requires it. This aligns the
+# package metadata, the formatter/mypy target, and the CI matrix with the
+# currently supported interpreter range.
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    { name = "Mornye" }
+]
+
+keywords = [
+    "spotify", "flac", "downloader", "music", "lossless", "lossless-music",
+    "tidal", "qobuz", "amazon-music", "audio", "mornye", "spotify-metadata",
+    "no-account", "hi-res"
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+dependencies = [
+    "httpx[http2]>=0.27.0",
+    "mutagen>=1.47.0",
+    "Pillow>=13.0.0",
+    "pydantic>=2.7.0",
+    "cryptography>=50.0.0",
+    "pycryptodome>=3.20.0",
+    "packaging>=23.0",
+    "yt-dlp>=2026.7.4",
+    "tqdm>=4.66.3",
+    "pywebview>=5.0.0",
+    # Base, not an extra: --tui is the guided mode, so it cannot be the one
+    # that might not be installed. Textual is pure Python (rich, markdown-it-py,
+    # platformdirs) and lighter than the pywebview line above it, which pulls
+    # native bindings — pyobjc on macOS, GTK/Qt on Linux.
+    "textual>=1.0",
+    "aiofiles>=23.2.1",
+    "tenacity>=8.3.0",
+    "python-dotenv>=1.2.2",
+    "requests>=2.33.0",
+    "pydoll-python==2.27.0",
+    # Not imported here: it arrives through pydoll's aiohttp. Pinned because
+    # 6.7.0–6.9.0 leak references in items-view union/subtraction.
+    "multidict>=6.9.1",
+    # Base, not an extra: --verify-hires used to be a flag that silently did
+    # nothing unless you had also installed `mornye-python[hires]`. That extra
+    # pulled librosa, and with it numba, llvmlite, scipy and scikit-learn —
+    # some 346 MB to use six functions. core/hires_check.py now does the
+    # analysis on numpy and soundfile directly (verified verdict-for-verdict
+    # against the librosa version), which is ~36 MB and no native toolchain,
+    # so the check can simply always be available.
+    "numpy>=1.24.0",
+    "soundfile>=0.12.1",
+    # Base, not an extra: webapp.py and webapi/routes.py import FastAPI at
+    # module level, so `mornye --web` was not a degraded experience
+    # without it — it was an ImportError. An entry point that cannot start
+    # is not an optional feature.
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    # Base too. It is a thin wrapper, and the weight of acoustic
+    # fingerprinting is in `fpcalc` (Chromaprint), a system binary pip could
+    # never have installed anyway — so gating the Python half behind an
+    # extra only added a second way for the feature to be missing.
+    "pyacoustid>=1.3.0"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/mornyeapp/Mornye-Python"
+"Repository" = "https://github.com/mornyeapp/Mornye-Python"
+"Bug Tracker" = "https://github.com/mornyeapp/Mornye-Python/issues"
+
+[project.scripts]
+mornye = "mornye.launcher:main"
+
+[tool.setuptools]
+packages = { find = { include = ["mornye*"] } }
+include-package-data = true
+
+[tool.setuptools.package-data]
+# py.typed is the PEP 561 marker: without it type checkers ignore every
+# annotation in this package for anyone who installs it, which for a library
+# meant to be imported into other projects is most of the value of having
+# written them.
+"mornye" = [
+    "py.typed",
+    "extensions/*.js",
+    "extensions/**/*.js",
+    "frontend/*",
+    "frontend/assets/icons/*",
+    # Textual reads the TUI's stylesheet from disk at startup (CSS_PATH), so
+    # an install without it opens on an unstyled screen rather than failing
+    # loudly — worth listing here explicitly.
+    "tui/*.tcss",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-httpx>=0.21",
+    "httpx>=0.27",
+    "pytest-cov>=5.0",
+    "ruff>=0.12.0",
+    "black>=26.3.1",
+    "mypy>=1.10",
+    "pre-commit>=3.0",
+]
+smb = [
+    "smbprotocol>=1.15.0",
+    "keyring>=25.0.0",
+]
+# `web`, `hires` and `dedup` used to live here. Everything they installed is
+# part of the base install now, and pip treats a request for an extra that no
+# longer exists as a warning rather than an error, so an old
+# `pip install 'mornye-python[web]'` still gets a working install.
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# Pin the rule set explicitly. With no `select`, Ruff applies whatever its
+# current default is — and Ruff 0.16 (Aug 2026) expanded that default, which
+# turned CI red (500+ findings: BLE001, RUF012, S110, N999, …) with zero code
+# changes. This is the historical default set; broaden it deliberately later
+# and fix findings in batches rather than having a release do it for us.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Imports deliberately placed after module-level setup code (see the
+# comments at each site): a circular-import guard in core/__init__.py,
+# a warnings.filterwarnings() call that must run before the import it's
+# silencing in tools/hires_check_cli.py, and a pytest.importorskip()
+# guard that must run before `from mornye import launcher` in the
+# web-flags test (an inline `# noqa` there gets stripped by the release
+# workflow's `ruff check --fix`).
+"mornye/core/__init__.py" = ["E402"]
+"mornye/tools/hires_check_cli.py" = ["E402"]
+"tests/test_launcher_web_flags.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+explicit_package_bases = true
+ignore_missing_imports = true
+# Baseline as of 2026-08: ~177 pre-existing errors across the codebase (most
+# of it predates type checking entirely). Kept intentionally lenient and
+# run as advisory-only in CI (see .github/workflows/ci.yml) rather than
+# blocking, so it can be tightened module-by-module over time instead of
+# requiring one large cleanup pass up front.
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_unused_ignores = false
+warn_redundant_casts = true
+exclude = ["build/", "dist/"]
+
+[[tool.mypy.overrides]]
+# The audio-analysis deps, used only by core/hires_check.py. They are part of
+# the base install now (librosa, which needed this override to avoid aborting
+# the run on PEP 695 syntax, is gone), but their source is still skipped
+# rather than followed: numpy's stubs pull a large graph into an advisory-only
+# run, and every finding here would be in numpy rather than in this codebase.
+module = ["numpy.*", "soundfile.*"]
+follow_imports = "skip"
+
+[tool.coverage.run]
+source = ["mornye"]
+omit = [
+    "mornye/frontend/*",
+    "*/__pycache__/*",
+]
