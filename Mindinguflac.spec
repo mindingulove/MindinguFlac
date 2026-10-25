@@ -37,7 +37,7 @@ hiddenimports = [
     'backend_ytpdl',
     'catalog',
     'service_downloader',
-    'device_sync',
+    'device_sync', 'remote_playback',
     'playlist_sync',
     'ai_reranker',
     'duck_proxy',

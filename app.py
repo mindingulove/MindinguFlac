@@ -2674,6 +2674,13 @@ class Handler(BaseHTTPRequestHandler):
                 settings_dict["native_now_playing_active"] = bool(_np_update_fn)
                 self.send_json(settings_dict)
                 return
+            if path == "/api/remote/status":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                import remote_playback
+                self.send_json(remote_playback.controller_request("status"))
+                return
             if path == "/api/pairing/status":
                 import device_sync
                 self.send_json(device_sync.status())
@@ -3455,6 +3462,15 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     print(f"[Device sync] Could not update shared-settings revision: {exc}")
                 self.send_json({"ok": True})
+                return
+            if path in ("/api/remote/local", "/api/remote/connect", "/api/remote/command", "/api/remote/disconnect"):
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                import remote_playback
+                result = (remote_playback.local_bridge(body) if path.endswith("/local") else
+                          remote_playback.controller_request(path.rsplit("/", 1)[-1], body))
+                self.send_json(result)
                 return
             if path == "/api/pairing/invitation":
                 import device_sync

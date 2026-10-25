@@ -2901,7 +2901,7 @@ function renderAlbumHeaderControls() {
     : `<i class="bi ${remaining === 0 ? "bi-arrow-down-circle-fill" : "bi-arrow-down-circle"}"></i>`;
   const status = $("albumDownloadStatus");
   if (status) status.textContent = busy ? `${remaining} tracks remaining${batch.failed ? ` · ${batch.failed} failed` : ""}`
-    : remaining === 0 && view.tracks.length ? "Available offline"
+    : remaining === 0 && view.tracks.length ? ""
     : batch?.status === "cancelled" ? "Album download cancelled"
     : hasFailures ? `${batch.failed} downloads failed — retry remaining tracks` : "";
   const play = $("albumPlayAll");
@@ -2980,10 +2980,55 @@ async function runAlbumDownloadQueue() {
   }
 }
 
+function savedAlbumPlaylist(album) {
+  const target = albumTarget(album), url = spotifyAlbumUrl(target);
+  return (state.playlists || []).find(pl => inferPlaylistOrigin(pl) === "album" &&
+    (url ? pl.spotify_url === url || !!target.spotify_id && pl.album_spotify_id === target.spotify_id
+      : pl.name === (target.title || album.album) && pl.tracks?.[0]?.artist === target.artist));
+}
+
+async function saveAlbumToLibrary(album) {
+  const existing = savedAlbumPlaylist(album);
+  if (existing) return existing;
+  const tracks = album.tracks?.length ? album.tracks : await fetchAlbumTracks(album);
+  if (!tracks.length) throw new Error("No songs available to save");
+  const target = albumTarget(album);
+  const playlist = await api("/api/playlists", {method:"POST", body:JSON.stringify({
+    name:target.title || album.album || album.name || "Album", spotify_url:spotifyAlbumUrl(target), origin:"album",
+  })});
+  await api("/api/playlists/tracks/add", {method:"POST",body:JSON.stringify({id:playlist.id,
+    tracks:tracks.map(track => ({...track,kind:"track"}))})});
+  await loadPlaylists();
+  return playlist;
+}
+
+function renderAlbumLibraryControl(album) {
+  const button = $("albumSaveLibrary");
+  if (!button) return;
+  const saved = savedAlbumPlaylist(album);
+  button.classList.toggle("active", !!saved);
+  button.title = saved ? "Remove album from library" : "Add album to library";
+  button.setAttribute("aria-label", button.title);
+  button.innerHTML = `<i class="bi ${saved ? "bi-check-circle-fill" : "bi-plus-circle"}"></i>`;
+}
+
+async function shareAlbumLink(album) {
+  const url = spotifyAlbumUrl(albumTarget(album)) || musicBrainzReleaseUrl(albumTarget(album));
+  if (!url) { showToast("This album has no public link to share."); return; }
+  try {
+    const title = album.album || album.title || "Album";
+    if (window.MindinguflacAndroid?.sharePlaylistLink) window.MindinguflacAndroid.sharePlaylistLink(title,url);
+    else if (navigator.share) await navigator.share({title,url});
+    else { await navigator.clipboard.writeText(url); showToast("Album link copied"); }
+  } catch (error) { if (error.name !== "AbortError") showToast("Could not share the album link."); }
+}
+
 function bindAlbumHeaderControls(album, tracks) {
   const unique = [...new Map(tracks.filter(playableQueueItem).map(track => [trackKey(track), track])).values()];
   const key = albumControlKey(album, unique);
   const view = {key, name:album.album || album.title || "Album", tracks:unique, statuses:new Map()};
+  const headerAlbum = {...album, tracks:unique};
+  view.album = headerAlbum;
   visibleAlbumControls = view;
   const download = $("albumDownloadAll");
   download.dataset.albumKey = key;
@@ -2994,6 +3039,30 @@ function bindAlbumHeaderControls(album, tracks) {
     state.pendingResumePosition = 0;
     selectMusicItem(first, "stream", unique, album.saved_playlist_context || null);
   };
+  const save = $("albumSaveLibrary");
+  if (save) save.onclick = async () => {
+    save.disabled = true;
+    try {
+      const existing = savedAlbumPlaylist(headerAlbum);
+      if (existing) await deletePlaylist(existing.id);
+      else await saveAlbumToLibrary(headerAlbum);
+      renderAlbumLibraryControl(headerAlbum);
+    } catch (error) { showToast(error.message || "Could not update album library",6000); }
+    finally { save.disabled = false; }
+  };
+  const shuffle = $("albumShuffle");
+  if (shuffle) {
+    shuffle.classList.toggle("active", !!state.isShuffle);
+    shuffle.setAttribute("aria-pressed", String(!!state.isShuffle));
+    shuffle.onclick = async () => {
+      await $("btnShuffle").onclick();
+      shuffle.classList.toggle("active", !!state.isShuffle);
+      shuffle.setAttribute("aria-pressed", String(!!state.isShuffle));
+    };
+  }
+  const share = $("albumShare");
+  if (share) share.onclick = () => shareAlbumLink(headerAlbum);
+  renderAlbumLibraryControl(headerAlbum);
   renderAlbumHeaderControls();
 }
 
@@ -3127,7 +3196,10 @@ async function renderAlbumPage(album) {
 
         <div class="album-header-actions" role="group" aria-label="Album actions">
           <button class="album-play-all" id="albumPlayAll" type="button" aria-label="Play album" title="Play album"><i class="bi bi-play-fill"></i></button>
+          <button class="album-secondary-action" id="albumSaveLibrary" type="button" aria-label="Add album to library" title="Add album to library"><i class="bi bi-plus-circle"></i></button>
           <button class="album-download-all" id="albumDownloadAll" type="button" aria-label="Download album for offline listening" title="Download album for offline listening"><i class="bi bi-arrow-down-circle"></i></button>
+          <button class="album-secondary-action" id="albumShuffle" type="button" aria-label="Shuffle album" title="Shuffle album" aria-pressed="false"><i class="bi bi-shuffle"></i></button>
+          <button class="album-secondary-action" id="albumShare" type="button" aria-label="Share album" title="Share album"><i class="bi bi-share"></i></button>
           <span class="album-download-status" id="albumDownloadStatus" role="status" aria-live="polite"></span>
         </div>
         <div class="track-list-header">
@@ -3269,7 +3341,7 @@ async function renderAlbumPage(album) {
     };
     $("albumImageModalPrevious").onclick = () => showGalleryImage(galleryIndex - 1);
     $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
-    bindAlbumHeaderControls({...album, spotify_id:data.spotify_id || spotifyId, album:data.album || albumTitle, artist:data.artist || artistName}, data.tracks || []);
+    bindAlbumHeaderControls({...album, ...data, spotify_id:data.spotify_id || spotifyId, album:data.album || albumTitle, artist:data.artist || artistName}, data.tracks || []);
     renderTrackList("albumTrackList", data.tracks || [], "album", album.saved_playlist_context || null);
     const trackList = $("albumTrackList");
     if (data._extras_complete === false && !useSavedTracks) {
@@ -9090,6 +9162,8 @@ function bindPlayer() {
   if (btnShuffle) {
     btnShuffle.onclick = () => {
       state.isShuffle = !state.isShuffle;
+      $("albumShuffle")?.classList.toggle("active", state.isShuffle);
+      $("albumShuffle")?.setAttribute("aria-pressed", String(state.isShuffle));
       btnShuffle.classList.toggle("active", state.isShuffle);
 
       cancelAllPrefetchJobs("queue order changed");
@@ -9157,11 +9231,17 @@ function playlistArtworkHtml(playlist, className, id = "") {
 }
 
 async function loadPlaylists() {
+    if (!state.playlistSyncRefreshTimer) {
+      state.playlistSyncRefreshTimer = setInterval(() => {
+        if (!document.hidden) loadPlaylists();
+      }, 5000);
+    }
   try {
     const playlists = await api("/api/playlists");
     if (JSON.stringify(state.playlists) !== JSON.stringify(playlists)) {
       state.playlists = playlists;
       renderSidebarPlaylists();
+      if (visibleAlbumControls?.album) renderAlbumLibraryControl(visibleAlbumControls.album);
       if (state.activePlaylistId === OFFLINE_PLAYLIST_ID && $("pageContent")?.querySelector('[data-playlist-page="__offline__"]')) {
         const offline = playlists.find(pl => pl.id === OFFLINE_PLAYLIST_ID);
         if (offline) {
@@ -9173,11 +9253,6 @@ async function loadPlaylists() {
           replacePage(window.matchMedia("(max-width: 900px)").matches ? renderMobileLibraryPage : renderHomePage);
         }
       }
-    }
-    if (!state.playlistSyncRefreshTimer) {
-      state.playlistSyncRefreshTimer = setInterval(() => {
-        if (!document.hidden) loadPlaylists();
-      }, 5000);
     }
   } catch (e) {
     console.error("loadPlaylists failed", e);
@@ -10373,6 +10448,7 @@ async function boot() {
   await restorePlaybackState(bootRequestId);
   
   replacePage(renderHomePage);
+  await window.MindinguflacRemote?.initialize();
 }
 
 boot().catch(error => {
@@ -10968,7 +11044,9 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
       </div>
       ${item.deviceId === _activeSinkId ? `<i class="bi bi-check-circle-fill connect-active-check"></i>` : ""}
     `;
+    li.dataset.audioOutput = "true";
     li.onclick = async () => {
+      if (window.MindinguflacRemote?.isController()) await window.MindinguflacRemote.disconnect();
       let targetId = item.deviceId;
       // "This computer" is already the universal default route. Handle it
       // before enumerating browser outputs, which can request microphone
@@ -11041,6 +11119,8 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
     };
     list.appendChild(li);
   }
+
+  await window.MindinguflacRemote?.renderDevices(list);
 
   // Android owns Bluetooth discovery and pairing; hand that to its settings.
   // A newly connected device then appears above (the list is read live).
@@ -12403,40 +12483,11 @@ $("ctxAlbumCopyMusicBrainz")?.addEventListener("click", () => {
 });
 
 $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
-  if (contextMenuTargetAlbum) {
-    // 1. Fetch tracks if not present
-    let tracks = contextMenuTargetAlbum.tracks || [];
-    if (!tracks.length) {
-      try {
-        tracks = await fetchAlbumTracks(contextMenuTargetAlbum);
-      } catch (e) {
-        console.error("Failed to fetch album tracks:", e);
-      }
-    }
-    if (!tracks.length) {
-        $("albumContextMenu").hidden = true;
-        return;
-    }
-
-    // 2. Create playlist
-    try {
-        const target = albumTarget(contextMenuTargetAlbum);
-        const pl = await api("/api/playlists", {
-          method: "POST",
-          body: JSON.stringify({
-            name: target.title || contextMenuTargetAlbum.name || "New Playlist",
-            spotify_url: spotifyAlbumUrl(target),
-            origin: "album",
-          }),
-        });
-        // 3. Add tracks
-        await api("/api/playlists/tracks/add", { method: "POST", body: JSON.stringify({ id: pl.id, tracks: tracks.map(t => ({ ...t, kind: "track" })) }) });
-        await loadPlaylists();
-    } catch (e) {
-        alert("Failed to add album to playlist: " + e.message);
-    }
-  }
+  const album = contextMenuTargetAlbum;
   $("albumContextMenu").hidden = true;
+  if (!album) return;
+  try { await saveAlbumToLibrary(album); }
+  catch (error) { showToast(error.message || "Could not save album", 6000); }
 });
 
 $("ctxAlbumGoArtist")?.addEventListener("click", () => {

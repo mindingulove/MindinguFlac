@@ -70,6 +70,7 @@ vm.runInContext(section('async function loadPlaylists()', 'function trackInPlayl
   context.replacePage = page => { destination = page; };
   context.renderHomePage = () => {};
   context.renderMobileLibraryPage = () => {};
+  context.visibleAlbumControls = null;
   context.setInterval = () => 1;
   context.state.activePlaylistId = '__offline__';
   const scrollArea = { scrollTop: 25 };

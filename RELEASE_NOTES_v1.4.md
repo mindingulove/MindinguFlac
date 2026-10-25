@@ -1,6 +1,8 @@
 # Mindinguflac v1.4
 
 ## Added
+- Paired-computer playback in the Android Devices list over the existing pinned Wi-Fi connection. Forward song selection, queue and transport actions to the receiving desktop, show Listening on / Controlled by banners, and clear sessions on exit, timeout or pairing removal.
+- Album header Share, Shuffle and Add to Library controls, reusing the existing sharing and saved-album paths. Remove the extra Available offline header label.
 - Album header Play and Download All controls on desktop and Android. Download All queues the existing song action in order with the selected engine and quality, skips equal-or-better saved tracks, and shows remaining tracks in its progress ring. Queues survive navigation and resume when the app reopens.
 - An automatic Offline playlist on desktop and Android, containing music downloaded on that device, with a four-cover artwork grid. It cannot be deleted and disappears when the device has no downloaded music.
 
@@ -24,6 +26,6 @@
 
 ## Security and version
 - Upgrade Pillow to 13.0.0, including the bundled native Android decoder.
-- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **21**.
+- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **22**.
 
 Mornye provider downloads require an installed provider extension. Monochrome, YouTube and torrent backends remain independent.

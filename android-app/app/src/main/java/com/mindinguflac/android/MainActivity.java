@@ -280,7 +280,9 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         runOnUiThread(() -> {
             if (webView == null) return;
             webView.evaluateJavascript(
-                    "(function(){var a=document.getElementById('audioPlayer');"
+                    "(function(){var r=window.MindinguflacRemote;"
+                    + "if(r&&r.isController()){r.command('pause').catch(function(){});return;}"
+                    + "var a=document.getElementById('audioPlayer');"
                     + "if(a&&!a.paused){var b=document.getElementById('playPause');if(b)b.click();}})()",
                     null);
         });

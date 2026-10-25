@@ -85,11 +85,11 @@
   },
   "mornye_apk_verification": {
     "variant": "debug",
-    "sha256": "4169fb689f1091fe51aca34173817d87b16f659a41746e157f7805f7fbc6e760",
+    "sha256": "33c0e8f76fa09af8dc90de22e539c4b91de5600857b1a4ab47d1ecc1441b0c4c",
     "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment",
-    "device_runtime": "Not tested: no Android device connected",
+    "device_runtime": "Build 22 pending device installation: Android phone disconnected from ADB",
     "versionName": "1.4",
-    "versionCode": 21
+    "versionCode": 22
   },
   "lyrics_audio_alignment": {
     "engine": "whisper.cpp 1.9.5 CPU, cross-attention DTW word timing",

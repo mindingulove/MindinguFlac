@@ -70,7 +70,7 @@ check("local artist and lyrics implementations packaged", app_has("local_metadat
 check("old SpotiFLAC and Pydantic stand-in removed", not app_has("SpotiFLAC/") and not app_has("pydantic/"))
 check("Mindinguflac backend modules packaged",
       all(app_has(f"{m}.py") for m in
-          ("app", "service_downloader", "backend_torrent", "backend_ytpdl",
+          ("app", "remote_playback", "service_downloader", "backend_torrent", "backend_ytpdl",
            "backend_spotiflac", "music_metadata", "ai_reranker", "torrent_sources",
            "catalog", "db", "config")))
 check("Android runtime package packaged",
@@ -79,7 +79,8 @@ check("Android runtime package packaged",
 check("HTML/CSS/JS interface packaged",
       app_has("android_runtime/static/index.html")
       and app_has("android_runtime/static/app.js")
-      and app_has("android_runtime/static/styles.css"))
+      and app_has("android_runtime/static/styles.css")
+      and app_has("android_runtime/static/remote_playback.js"))
 
 for dist, label in (("yt_dlp", "yt-dlp"), ("requests", "Requests"), ("mutagen", "Mutagen"),
                     ("socks.pyc", "PySocks"), ("httpx", "httpx"), ("Crypto", "pycryptodome"),

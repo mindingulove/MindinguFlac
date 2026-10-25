@@ -346,6 +346,11 @@ class DesktopPairingService:
                     if not secrets.compare_digest(str(peer.get("secret") or ""), secret):
                         self.respond({"error": "Unauthorized paired device"}, 401)
                         return
+                    if self.path.startswith("/remote/"):
+                        import remote_playback
+                        result = remote_playback.paired_request(device_id, "Android phone" if peer.get("name") == "localhost" else peer.get("name"), self.path, body)
+                        self.respond(result)
+                        return
                     if self.path == "/sync":
                         counts = _apply_snapshot(body, device_id)
                         with service.lock:
@@ -471,6 +476,8 @@ class DesktopPairingService:
                 "already_paired": bool(phone_id and phone_id in devices)}
 
     def remove_device(self, device_id: str) -> bool:
+        import remote_playback
+        remote_playback.receiver.disconnect(str(device_id))
         with self.lock:
             peer = self.state["devices"].pop(str(device_id), None)
             found = peer is not None
@@ -543,6 +550,7 @@ class AndroidPairingClient:
                     if item.get("protocol") != PROTOCOL or not item.get("device_id"):
                         continue
                     item["address"] = address[0]
+                    item["seen_at"] = time.time()
                     with self.lock:
                         self.discovered[str(item["device_id"])] = item
                 except socket.timeout:
@@ -569,11 +577,11 @@ class AndroidPairingClient:
             "discovered": devices,
         }
 
-    def _connect(self, device: dict, path: str, payload: dict, secret: str = "") -> dict:
+    def _connect(self, device: dict, path: str, payload: dict, secret: str = "", timeout: float = 60) -> dict:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        conn = http.client.HTTPSConnection(device["address"], int(device["port"]), context=context, timeout=60)
+        conn = http.client.HTTPSConnection(device["address"], int(device["port"]), context=context, timeout=timeout)
         conn.connect()
         cert = conn.sock.getpeercert(binary_form=True)
         fingerprint = hashlib.sha256(cert).hexdigest()
@@ -686,6 +694,24 @@ class AndroidPairingClient:
             self._save()
             self.last_error = ""
         return {"ok": True, "name": pair["name"]}
+
+    def remote_request(self, path: str, body: dict, target_id: str) -> dict:
+        with self.lock:
+            pair = dict(self.state.get("pair") or {})
+            device = dict(self.discovered.get(target_id) or {})
+        if not pair or target_id != pair.get("device_id"):
+            raise ValueError("Pair this phone with the computer in Settings first")
+        if not device:
+            raise TimeoutError("Paired computer is unavailable on this Wi-Fi network")
+        if not secrets.compare_digest(str(pair.get("fingerprint") or ""), str(device.get("fingerprint") or "")):
+            raise ValueError("Paired computer fingerprint changed")
+        result = self._connect(device, path, {**body, "device_id": self.state["phone_id"]}, pair["secret"], timeout=10)
+        if result.get("desauth") or result.get("_status") == 410:
+            with self.lock:
+                self.state["pair"] = None
+                self._save()
+            raise ValueError("Computer removed this device pairing")
+        return {**result, "device_id": target_id, "name": pair.get("name") or device.get("name") or "Computer"}
 
     def _sync_once(self):
         with self.lock:
