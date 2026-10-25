@@ -32,7 +32,7 @@
 - Acknowledge library jobs before metadata lookups, persist resolved identifiers from the worker, and recover accepted downloads after a lost acknowledgement so album queues remain sequential.
 - Show download errors with a visible retry state, retry punctuation-sensitive Monochrome searches without weakening recording matching, and prevent saved album siblings from supplying another track's progress or completion file.
 - Retry a timed-out stream or library-download request once after two seconds, recovering the accepted job first so the retry does not duplicate work.
-- Explain when Monochrome search finds only a live or alternate take and safely skips it.
+- Explain when Monochrome search finds only a live or alternate take and safely skips it; the stream then continues on YouTube instead of failing. Explicit Monochrome downloads still report the miss.
 - Filter playlist recommendations against the saved playlist by recording identity, exclude incomplete artist/album catalog entries, and retain Spotify/ISRC identifiers on playable recommendations.
 - Resolve artist artwork for the Android Your Library artist list using the local metadata backend.
 - Restore desktop music search when file-based logging prevented the embedded Mornye API from starting.
@@ -49,6 +49,6 @@
 
 ## Security and version
 - Upgrade Pillow to 13.0.0, including the bundled native Android decoder.
-- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **25**.
+- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **26**.
 
 Mornye provider downloads require an installed provider extension. Monochrome, YouTube and torrent backends remain independent.

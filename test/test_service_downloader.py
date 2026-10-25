@@ -974,3 +974,43 @@ class DownloadedTrackMatchesRequestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MonochromeStreamFallbackTests(unittest.TestCase):
+    """A Monochrome catalog miss must not leave a stream with nothing to play."""
+
+    def _run(self, mode):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = service_downloader.ServiceDownloadManager.__new__(service_downloader.ServiceDownloadManager)
+            import threading
+            manager._lock = threading.RLock()
+            manager._cancel_flags = set()
+            manager.jobs = {}
+            events = []
+            manager._append_cache_event = lambda job, kind, message: events.append((kind, message))
+            manager._ensure_progress_thread = lambda: None
+            manager._save_jobs = lambda: None
+            manager._output_dir = lambda job: Path(tmp) / job["id"]
+            job = {"id": "j1", "mode": mode, "engine": "monochrome", "service": "monochrome", "quality": "LOSSLESS",
+                   "title": "Our House", "artist": "Madness", "status": "queued", "source_recording": {"title": "x"}}
+            manager.jobs["j1"] = job
+            ran = []
+            miss = RuntimeError("Monochrome official instances failed: https://tracks.monochrome.st: no exact ISRC or title/artist match")
+            fake_mono = SimpleNamespace(run=Mock(side_effect=miss))
+            fake_yt = SimpleNamespace(run=lambda out, j, m: ran.append(dict(j)) or (_ for _ in ()).throw(RuntimeError("stop after YouTube")))
+            with patch.dict(sys.modules, {"backend_monochrome": fake_mono, "backend_ytpdl": fake_yt}), \
+                 patch.object(manager, "_resolve_job_metadata", side_effect=lambda j, p: p, create=True):
+                manager._worker("j1", {"metadata": {}})
+            return job, ran, events
+
+    def test_stream_continues_on_youtube(self):
+        job, ran, events = self._run("stream")
+        self.assertEqual(len(ran), 1, "YouTube takes over the same job")
+        self.assertEqual((ran[0]["engine"], ran[0]["service"], ran[0]["quality"]), ("ytp-dl", "youtube", "best"))
+        self.assertNotIn("source_recording", ran[0])
+        self.assertTrue(any("using YouTube for this track" in message for _, message in events))
+
+    def test_explicit_download_keeps_the_monochrome_error(self):
+        job, ran, events = self._run("download")
+        self.assertEqual(ran, [], "a lossless download never silently becomes YouTube")
+        self.assertIn("no exact ISRC", job.get("error") or "")
