@@ -75,7 +75,7 @@ android {
         applicationId = "com.mindinguflac.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
+        versionCode = 25
         versionName = "1.4"
 
         externalNativeBuild {

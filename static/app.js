@@ -3598,6 +3598,8 @@ function knownTrackDurationSeconds(track = state.currentTrack) {
     track?.duration,
     track?.metadata?.duration,
     track?.length,
+    track?.source_recording?.duration_ms,
+    track?.metadata?.source_recording?.duration_ms,
   ];
   for (const value of candidates) {
     if (typeof value === "number" && Number.isFinite(value) && value > 0) {
@@ -8334,9 +8336,10 @@ function syncNativeAudioUi() {
   if (!state.nativeAudio.active) return;
   const duration = state.nativeAudio.duration || knownTrackDurationSeconds(state.currentTrack);
   const position = state.nativeAudio.position || 0;
+  // The clock keeps moving even while the length is still unknown.
+  $("currentTime").textContent = formatTime(position);
   if (duration > 0) {
     $("seekBar").value = (position / duration) * 1000;
-    $("currentTime").textContent = formatTime(position);
     $("durationTime").textContent = formatTime(duration);
     $("seekBar").style.backgroundSize = `${(position / duration) * 100}% 100%`;
   }

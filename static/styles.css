@@ -5510,6 +5510,13 @@ body.has-remote-playback .player { align-self:start; }
 body.has-remote-playback .details-panel.is-expanded {
   bottom:calc(var(--player-controls-height,96px) + var(--remote-playback-banner-height,30px));
 }
+/* Devices and Queue panels end 88px above the bottom; the banner raises the
+   transport bar, so lift their bottom edge by the same amount. */
+@media (min-width:901px) {
+  body.has-remote-playback .connect-panel {
+    height:calc(100vh - 88px - var(--remote-playback-banner-height,30px));
+  }
+}
 @media (max-width:900px) {
   .album-header-actions { gap:14px; flex-wrap:wrap; }
   .album-secondary-action { font-size:27px; width:34px; }

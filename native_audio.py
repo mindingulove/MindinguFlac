@@ -21,7 +21,9 @@ def _metadata_duration_ms(metadata: dict | None) -> float:
     """Read track length from flat or nested Spotify track metadata."""
     root = metadata if isinstance(metadata, dict) else {}
     sources = [root]
-    for key in ("metadata", "track", "spotify"):
+    # A Monochrome stream's resolved recording carries the length when the
+    # requested track (e.g. one sent by a remote controller) does not.
+    for key in ("metadata", "track", "spotify", "source_recording"):
         nested = root.get(key)
         if isinstance(nested, dict):
             sources.append(nested)

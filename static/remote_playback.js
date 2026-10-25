@@ -311,6 +311,8 @@ window.MindinguflacRemote = (() => {
       $('currentTime').textContent = formatTime(pos);
       $('seekBar').value = duration > 0 ? pos / duration * 1000 : 0;
       $('seekBar').style.backgroundSize = `${duration > 0 ? pos / duration * 100 : 0}% 100%`;
+      // The phone's collapsed player draws its own progress line.
+      setMiniPlayerProgress(duration > 0 ? pos / duration : 0);
     }
     renderRemoteVolume();
     $('btnShuffle')?.classList.toggle('active', !!s.shuffle); $('btnRepeat')?.classList.toggle('active', !!s.repeat);
@@ -533,6 +535,11 @@ window.MindinguflacRemote = (() => {
     seekBar.addEventListener('pointerdown',()=>{if(route)remoteSeekDragging=true;});
     seekBar.addEventListener('touchstart',()=>{if(route)remoteSeekDragging=true;},{passive:true});
     seekBar.addEventListener('pointercancel',()=>{remoteSeekDragging=false;});
+    // A tap or scroll that lands on the bar without moving it fires no change
+    // event; without this the remote clock stayed frozen until the next seek.
+    const endSeekTouch=()=>setTimeout(()=>{remoteSeekDragging=false;},300);
+    seekBar.addEventListener('pointerup',endSeekTouch);
+    seekBar.addEventListener('touchend',endSeekTouch,{passive:true});
     seekBar.oninput=()=>{
       if (!route) return localSeek();
       remoteSeekDragging=true;
