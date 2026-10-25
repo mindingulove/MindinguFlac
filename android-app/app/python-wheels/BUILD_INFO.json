@@ -85,9 +85,9 @@
   },
   "mornye_apk_verification": {
     "variant": "release",
-    "sha256": "c76d08ef0123812e4e4811235c55b9ba6e6015f4e27ae8492757b0cea3d2fe5e",
-    "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment",
-    "device_runtime": "Build 24 release APK passes signature, alignment, ZIP and package inspection. Background keepalive was not device-tested because no Android device was connected during this build.",
+    "sha256": "5f1c08391c3f6931c7fa6bb44bc0cc2d993111049275b46328b2e19a5b4f3311",
+    "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment; APK v2/v3 signed and aligned",
+    "device_runtime": "Build 24 release APK passes signature, alignment, ZIP and package inspection. Background keepalive and remote seek were not device-tested.",
     "versionName": "1.4",
     "versionCode": 24
   },
