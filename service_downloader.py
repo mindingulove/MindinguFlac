@@ -1858,8 +1858,23 @@ class ServiceDownloadManager:
                     self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
                 self._ensure_progress_thread()
                 import backend_monochrome
-                backend_monochrome.run(output_dir, job, self)
-                if job.get("direct_stream") and job.get("mode", "stream") == "stream":
+                try:
+                    backend_monochrome.run(output_dir, job, self)
+                except Exception as exc:
+                    # A stream must still play when Monochrome's catalog lacks
+                    # the recording (or offers only a live/alternate take):
+                    # continue this track on YouTube. An explicit Download keeps
+                    # the error, so a lossless request never turns lossy silently.
+                    if job.get("mode", "stream") != "stream" or str(exc) == "Download cancelled" or job["id"] in self._cancel_flags:
+                        raise
+                    self._append_cache_event(job, "provider", f"{exc}; using YouTube for this track")
+                    with self._lock:
+                        job.update(engine="ytp-dl", service="youtube", quality="best", status="running",
+                                   last_status="Monochrome unavailable for this track; searching YouTube")
+                        job.pop("source_recording", None)
+                    import backend_ytpdl
+                    backend_ytpdl.run(output_dir, job, self)
+                if job.get("engine") == "monochrome" and job.get("direct_stream") and job.get("mode", "stream") == "stream":
                     # Monochrome playback is a direct HTTP byte-range stream.
                     # Do not create a local audio copy unless the user chose
                     # the explicit Download action (mode="download").
