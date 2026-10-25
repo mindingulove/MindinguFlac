@@ -5,6 +5,11 @@ window.MindinguflacRemote = (() => {
   let volumeTarget=null, volumeSending=false, nativeVolumeState=null, volumeHudTimer=null;
   let offlineTab='local', offlineConnection='', offlineCache=null, offlinePending=null;
   let layoutObserver=null, layoutMeasureQueued=false, remoteSeekDragging=false;
+  // Receiver: what the paired phone currently shows from this device.
+  let receiverWanted={lyrics:false,video:false}, receiverSessionId='';
+  // Controller: requests already sent, and the receiver lyrics/clip on screen.
+  let remoteWantSent={lyrics:null,video:null}, remoteLyricsKey='', remoteVideoId='';
+  let snapshotSeen=null, snapshotAt=0;
   const post = (path, body = {}) => api(`/api/remote/${path}`, {method:'POST', body:JSON.stringify(body), timeout:12000});
   const controlling = () => !!route;
   const portable = item => item ? trackIdentitySnapshot(item) : null;
@@ -89,6 +94,8 @@ window.MindinguflacRemote = (() => {
     // The restored resume point only stands in while nothing is loaded; once a
     // stream runs, its own clock is the position the controller must follow.
     const restoredIdle=state.restoredPlaybackPending && !state.nativeAudio.active && audio.paused;
+    const extras=receiverExtras();
+    if (receiving) extras.audible_position=restoredIdle ? Number(state.pendingResumePosition || 0) : audiblePlaybackSeconds() || 0;
     return {track:portable(state.currentTrack), queue:publicTracks(state.queue), queue_index:state.queueIndex,
       position:restoredIdle ? Number(state.pendingResumePosition || 0) : currentPlaybackSeconds() || 0,
       duration:state.nativeAudio.active ? state.nativeAudio.duration || knownTrackDurationSeconds(state.currentTrack) :
@@ -99,7 +106,158 @@ window.MindinguflacRemote = (() => {
       status_mode:state.audioBuffering && state.playerStatusIconMode==='ready'?'buffering':state.playerStatusIconMode || 'ready',
       progress:Math.max(0,Math.min(100,Number(state.playerStatusIconPct)||0)),
       quality_label:state.currentTrack ? qualityLabelForTrack(state.currentTrack) : '',
-      queue_title:state.queueContext?.title || state.queueContext?.name || ''};
+      queue_title:state.queueContext?.title || state.queueContext?.name || '', ...extras};
+  }
+  const receiverWants = kind => !!receiving && !!receiverWanted[kind];
+  // Lyrics and clip state measured here, for the phone that controls this device.
+  function receiverExtras() {
+    const track=state.currentTrack, out={};
+    if (!receiving || !track) return out;
+    if (receiverWanted.lyrics && state.lyrics.trackKey===JSON.stringify(lyricsPayload(track)))
+      out.lyrics={key:state.lyrics.trackKey, raw:state.lyrics.raw || '', synced:state.lyrics.lines.length>0,
+        loading:!!state.lyrics.loading, offset:state.lyrics.autoOffset+state.lyrics.syncOffset,
+        status:state.lyrics.alignmentStatus || ''};
+    if (state.videoFetch.trackKey===trackKey(track)) {
+      const path=currentSideVideoPath(), synced=!!path && state.videoSync.key===videoSyncKey(track,path);
+      out.video={status:state.videoFetch.status || '', youtube_id:state.videoFetch.youtube_id || '',
+        clip_duration:Number(state.videoFetch.clip_duration || 0),
+        offset:synced ? videoSyncOffset() : 0, sync_status:synced ? state.videoSync.status || '' : ''};
+    }
+    return out;
+  }
+  // Keep lyrics, their alignment and the video match current while the phone
+  // shows them, including after track changes and once the stream starts.
+  function ensureReceiverExtras() {
+    const track=state.currentTrack;
+    if (!receiving || !track) return;
+    if (receiverWanted.lyrics) {
+      if (state.lyrics.trackKey!==JSON.stringify(lyricsPayload(track))) loadLyricsForTrack(track).catch(() => {});
+      else if (!state.lyrics.loading && state.lyrics.lines.length &&
+               state.lyrics.alignmentKey!==JSON.stringify({...lyricsAlignmentBody(),output_latency:undefined}))
+        refreshLyricsAlignment().catch(() => {});
+    }
+    if (receiverWanted.video) {
+      if (state.videoFetch.trackKey!==trackKey(track) && !track.offline) fetchVideoForTrack(track).catch(() => {});
+      const path=currentSideVideoPath();
+      if (path && state.videoSync.key!==videoSyncKey(track,path)) refreshVideoSync().catch(() => {});
+    }
+  }
+  // Controller clock: the receiver's last reported time, advanced locally
+  // between polls so lyrics and video move smoothly.
+  function remoteClock(audible) {
+    const s=route?.snapshot || {};
+    let pos=Number(audible && s.audible_position>0 ? s.audible_position : s.position) || 0;
+    if (route?.status==='active' && s.playing && !s.buffering && snapshotAt)
+      pos+=Math.min(2,(performance.now()-snapshotAt)/1000);
+    const duration=Number(s.duration) || 0;
+    return duration>0 ? Math.min(pos,duration) : pos;
+  }
+  // Ask the receiver for lyrics/video only while this phone shows them.
+  function syncRemoteWants() {
+    if (!route || route.status!=='active') return;
+    for (const [kind,want] of [['lyrics',!!state.lyrics.open],['video',!!state.videoMode]]) {
+      if ((remoteWantSent[kind] ?? false)===want) continue;
+      remoteWantSent[kind]=want;
+      post('command',{action:kind,payload:{enabled:want}}).catch(() => {});
+    }
+  }
+  function applyRemoteLyrics() {
+    if (!route || !state.lyrics.open) return;
+    const lyrics=route.snapshot?.lyrics;
+    if (!lyrics || lyrics.loading) {
+      if (!remoteLyricsKey) renderLyricsContent(`Loading lyrics from ${route.name}…`);
+      return;
+    }
+    if (lyrics.key!==remoteLyricsKey) {
+      remoteLyricsKey=lyrics.key;state.lyrics.trackKey=lyrics.key;
+      state.lyrics.raw=lyrics.raw || '';state.lyrics.lines=lyrics.synced ? parseLyrics(lyrics.raw || '') : [];
+      state.lyrics.activeIndex=-1;
+      renderLyricsContent(lyrics.raw ? '' : 'No synced lyrics found');setLyricsSynced(true);
+    }
+    // The receiver's offset already includes its saved manual nudge.
+    state.lyrics.autoOffset=Number(lyrics.offset) || 0;state.lyrics.syncOffset=0;
+    state.lyrics.alignmentStatus=lyrics.status || '';
+    renderLyricsAlignment();updateLyricsPosition(audiblePlaybackSeconds());
+  }
+  async function remoteLoadLyrics(track,{force=false}={}) {
+    if (!track) return;
+    if (force || !remoteLyricsKey) {
+      remoteLyricsKey='';state.lyrics.trackKey='';state.lyrics.lines=[];state.lyrics.raw='';state.lyrics.activeIndex=-1;
+      applyLyricsPalette(track);
+    }
+    syncRemoteWants();applyRemoteLyrics();
+  }
+  const remoteVideoReady=()=>!!remoteVideoId && state.videoFetch.status==='ready' && !!state.videoFetch.path &&
+    state.videoFetch.youtube_id===remoteVideoId;
+  // Download in the background the clip the receiver matched, as soon as it
+  // has one, so switching to video is instant and the receiver offset applies.
+  function ensureRemoteVideo(track) {
+    const video=route?.snapshot?.video;
+    if (!track || !video?.youtube_id || video.status!=='ready' || remoteVideoId===video.youtube_id) return;
+    remoteVideoId=video.youtube_id;state.sideVideoTrackKey=trackKey(track);
+    fetchRemoteClip(track,video.youtube_id).catch(() => {});
+  }
+  async function fetchRemoteClip(track,youtubeId) {
+    const key=trackKey(track), wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    state.videoFetch={trackKey:key,status:'downloading',path:'',youtube_id:youtubeId};remoteVideoButton();
+    const params=new URLSearchParams({artist:track.artist || '',title:track.title || '',album:track.album || '',
+      track_key:key,youtube_id:youtubeId});
+    let retries=0;
+    for (let attempt=0;attempt<120;attempt++) {
+      const data=await api(`/api/video/fetch?${params}`).catch(() => null);
+      if (remoteVideoId!==youtubeId) return;
+      params.delete('force');
+      if (data?.status==='ready' && data.path) {
+        state.videoFetch={trackKey:key,status:'ready',path:data.path,youtube_id:youtubeId,clip_duration:Number(data.clip_duration || 0)};
+        if (state.videoMode) renderSideCover(state.currentTrack);
+        remoteVideoButton();return;
+      }
+      // YouTube refusals are often momentary; a failed job stays cached until forced.
+      if (data?.status==='error' || data?.status==='not_found') {
+        if (retries>=2) { state.videoFetch={...state.videoFetch,status:'error'};remoteVideoButton();return; }
+        retries+=1;params.set('force','1');
+      }
+      await wait(3000);
+    }
+  }
+  function applyRemoteVideoSync() {
+    const remote=route?.snapshot?.video || {}, video=$('sideVideoPlayer');
+    // Android keeps whole videos while a desktop clip can start later; the
+    // length difference is the cut, which shifts this copy's timeline.
+    let cut=0;
+    if (video && video.tagName==='VIDEO' && Number.isFinite(video.duration) && remote.clip_duration>0) {
+      const difference=video.duration-remote.clip_duration;
+      if (difference>0.75) cut=difference;
+    }
+    state.videoSync={...state.videoSync,key:'remote',status:remote.sync_status || '',offset:(Number(remote.offset) || 0)+cut,manual:0};
+  }
+  function remoteFollowVideo() {
+    if (!state.videoMode) return;
+    const video=$('sideVideoPlayer');
+    if (!video || video.tagName!=='VIDEO' || !Number.isFinite(video.duration) || video.duration<=0) return;
+    video.muted=true;applyRemoteVideoSync();
+    const s=route.snapshot || {};
+    if (route.status!=='active' || !s.playing || s.buffering) {
+      if (!video.paused) video.pause();
+      video.playbackRate=1;return;
+    }
+    steerVideoToAudio(video,audiblePlaybackSeconds());
+  }
+  let remoteVideoButtonHtml='';
+  function remoteVideoButton() {
+    const button=$('sideVideoSwitch'), refresh=$('sideVideoRefresh');
+    if (!button) return;
+    const ready=remoteVideoReady();
+    button.hidden=!(route?.snapshot?.video?.youtube_id || state.videoMode);
+    button.classList.toggle('active',!!state.videoMode && ready);
+    const failed=state.videoFetch.status==='error' && state.videoFetch.youtube_id===remoteVideoId;
+    const html=!state.videoMode ? '<i class="bi bi-play-btn"></i><span>Switch to video</span>'
+      : ready ? '<i class="bi bi-music-note-beamed"></i><span>Switch to audio</span>'
+      : failed ? '<i class="bi bi-camera-video-off"></i><span>No video</span>'
+      : '<i class="bi bi-hourglass-split"></i><span>Loading video…</span>';
+    if (html!==remoteVideoButtonHtml || button.innerHTML!==html) { button.innerHTML=html;remoteVideoButtonHtml=html; }
+    if (refresh) refresh.hidden=true;
+    renderVideoSyncControls();
   }
   const offlineConnected=()=>route?.status==='active';
   function offlinePlaylists(playlists) {
@@ -281,6 +439,7 @@ window.MindinguflacRemote = (() => {
   function report(error) { showToast(error.message || String(error), 6000); }
   function renderRemotePlayer() {
     if (!route) return;
+    if (route.snapshot!==snapshotSeen) { snapshotSeen=route.snapshot;snapshotAt=performance.now(); }
     const s = route.snapshot || {}, track = displayTrack(s.track);
     const artChanged=String(state.currentTrack?.artwork_url || '')!==String(track?.artwork_url || '');
     const changed = trackKey(state.currentTrack || {}) !== trackKey(track || {});
@@ -291,7 +450,8 @@ window.MindinguflacRemote = (() => {
       $('playerTitle').innerHTML = track ? albumLinkHtml(track, track.title) : 'Nothing playing';
       $('playerArtist').innerHTML = track ? artistLinkHtml(track) : '';
       bindEntityLinks($('playerTitle').parentElement);
-      state.videoMode = false; state.currentLibraryPath = ''; state.videoFetch = {status:'',path:'',trackKey:''};
+      // Video mode stays on across songs; each song's clip is fetched anew.
+      state.currentLibraryPath = ''; state.videoFetch = {status:'',path:'',trackKey:''}; remoteVideoId=''; remoteLyricsKey='';
       renderSideCover(track || {});
       $('sideTitle').innerHTML = track ? albumLinkHtml(track,track.title) : 'No track selected';
       $('sideMeta').innerHTML = track ? artistLinkHtml(track) : '';
@@ -307,7 +467,7 @@ window.MindinguflacRemote = (() => {
     $('playerMeta').textContent=state.playerStatus;
     const statusMode=route.error || s.error ? 'error' : s.buffering && (!s.status_mode || s.status_mode==='ready') ? 'buffering' : s.status_mode || 'ready';
     setPlayerStatusIcon(statusMode,Number(s.progress)||0);
-    const videoSwitch=$('sideVideoSwitch');if(videoSwitch)videoSwitch.hidden=true;
+    syncRemoteWants();ensureRemoteVideo(track);remoteVideoButton();
     const duration = Number(s.duration || 0), pos = Number(s.position || 0);
     $('durationTime').textContent = formatTime(duration);
     if (!remoteSeekDragging) {
@@ -324,7 +484,8 @@ window.MindinguflacRemote = (() => {
     syncPlayPauseButton(); syncActiveTrackRows(); updateSidebarNextQueue();
     if (!$('queuePanel').hidden) refreshQueuePanel();
     if (changed && state.lyrics.open && track) loadLyricsForTrack(track, {force:true}).catch(() => {});
-    updateLyricsPosition(pos);
+    else applyRemoteLyrics();
+    updateLyricsPosition(audiblePlaybackSeconds());
     if (track) pushAndroidNowPlaying({...track,artwork_url:absoluteUrl(track.artwork_url || ''),position:pos,duration}, route.status==='active' && !!s.playing);
   }
   async function command(action, payload = {}) {
@@ -361,6 +522,7 @@ window.MindinguflacRemote = (() => {
     if (route) await disconnect();
     await quiesceLocal();
     route = {name:device.name || 'Computer',device_id:device.device_id,status:'connecting',snapshot:{},pending:true};
+    remoteWantSent={lyrics:null,video:null};remoteLyricsKey='';remoteVideoId='';
     const current = route; banner(); syncPlayPauseButton();
     try {
       const result = await post('connect',{device_id:device.device_id});
@@ -376,6 +538,8 @@ window.MindinguflacRemote = (() => {
   async function disconnect() {
     const saved = local;
     route = null; local = null; volumeTarget=null; banner();
+    // Lyrics and the clip came from the receiver; this phone reloads its own.
+    remoteLyricsKey='';remoteVideoId='';state.lyrics.trackKey='';state.videoFetch={trackKey:'',status:'',path:''};
     // Clear the controller route first; an unreachable receiver must never
     // trap the user in remote mode. The receiver lease clears its banner.
     post('disconnect').catch(() => {});
@@ -428,6 +592,10 @@ window.MindinguflacRemote = (() => {
         } else { $('seekBar').value=Number(p.position)/Math.max(.001,playerSnapshot().duration)*1000;$('seekBar').oninput(); }
         break;
       case 'volume': setPlayerVolume(p.volume);break;
+      case 'lyrics': receiverWanted.lyrics=!!p.enabled;ensureReceiverExtras();break;
+      case 'video': receiverWanted.video=!!p.enabled;ensureReceiverExtras();break;
+      case 'lyrics_nudge': await updateLyricsOffset(Number(p.delta) || 0);break;
+      case 'video_nudge': await nudgeVideoSync(Number(p.delta) || 0);break;
       case 'shuffle': if (state.isShuffle !== p.enabled) $('btnShuffle').onclick();break;
       case 'repeat': if (state.isRepeat !== p.enabled) $('btnRepeat').onclick();break;
       case 'queue_append': appendTracksToPlaybackQueue(p.tracks);break;
@@ -452,7 +620,11 @@ window.MindinguflacRemote = (() => {
         if (result.route === null) { await disconnect(); return; }
         if (!result.ok || !result.route || !result.session) {
           current.status='disconnected';current.error=result.error || 'Remote session ended';
-        } else { current.status='active';current.snapshot=result.snapshot;current.error=''; }
+        } else {
+          // A new receiver session starts without the lyrics/video requests.
+          if (result.session.id!==current.sessionId) { current.sessionId=result.session.id;remoteWantSent={lyrics:null,video:null}; }
+          current.status='active';current.snapshot=result.snapshot;current.error='';
+        }
         renderRemotePlayer();banner();
       } else {
         const batch=acks;acks=[];
@@ -460,12 +632,14 @@ window.MindinguflacRemote = (() => {
         try { result=await post('local',{snapshot:playerSnapshot(),acks:batch}); }
         catch(error) { acks.unshift(...batch);throw error; }
         receiving=result.session;banner();
+        if ((receiving?.id || '')!==receiverSessionId) { receiverSessionId=receiving?.id || '';receiverWanted={lyrics:false,video:false}; }
         for (const entry of result.commands || []) {
           if (applied.has(entry.id)) continue;
           applied.add(entry.id);if(applied.size>1000)applied.delete(applied.values().next().value);
           try { await applyCommand(entry);acks.push({id:entry.id}); }
           catch(error) { acks.push({id:entry.id,error:error.message}); }
         }
+        ensureReceiverExtras();
       }
     } catch(error) {
       if (!IS_ANDROID) { receiving=null;banner(); }
@@ -512,8 +686,17 @@ window.MindinguflacRemote = (() => {
     syncVolumeBar=wrap('volumeUi',syncVolumeBar,renderRemoteVolume);
     reorderQueueTrack=wrap('reorder',reorderQueueTrack,(from,to)=>send('queue_reorder',{from_index:from,to_index:to}));
     appendTracksToPlaybackQueue=wrap('append',appendTracksToPlaybackQueue,tracks=>send('queue_append',{tracks:publicTracks(tracks)}));
-    currentPlaybackSeconds=wrap('clock',currentPlaybackSeconds,position);
-    audiblePlaybackSeconds=wrap('audibleClock',audiblePlaybackSeconds,position);
+    currentPlaybackSeconds=wrap('clock',currentPlaybackSeconds,()=>remoteClock(false));
+    audiblePlaybackSeconds=wrap('audibleClock',audiblePlaybackSeconds,()=>remoteClock(true));
+    // Lyrics and video come from the receiver, which hears the audio; its
+    // alignment and clip offset replace anything measured on this phone.
+    loadLyricsForTrack=wrap('lyrics',loadLyricsForTrack,remoteLoadLyrics);
+    refreshLyricsAlignment=wrap('lyricsAlign',refreshLyricsAlignment,async()=>applyRemoteLyrics());
+    updateLyricsOffset=wrap('lyricsNudge',updateLyricsOffset,delta=>send('lyrics_nudge',{delta}));
+    refreshVideoSync=wrap('videoSync',refreshVideoSync,async()=>{applyRemoteVideoSync();renderVideoSyncControls();});
+    nudgeVideoSync=wrap('videoNudge',nudgeVideoSync,delta=>send('video_nudge',{delta}));
+    followAudioWithVideo=wrap('followVideo',followAudioWithVideo,remoteFollowVideo);
+    renderSideVideoButton=wrap('videoButton',renderSideVideoButton,remoteVideoButton);
     isPlaybackVisiblyActive=wrap('playing',isPlaybackVisiblyActive,()=>route.status==='active' && !!route.snapshot?.playing);
     playbackTransportBusy=wrap('busy',playbackTransportBusy,()=>route.status!=='active' || !!route.pending || !!route.snapshot?.buffering);
     persistPlaybackSnapshot=wrap('persist',persistPlaybackSnapshot,()=>{});
@@ -523,6 +706,7 @@ window.MindinguflacRemote = (() => {
     prefetchNextTracks=wrap('prefetchNext',prefetchNextTracks,()=>Promise.resolve());
     prefetchNextVideos=wrap('prefetchVideos',prefetchNextVideos,()=>{});
     _triggerVideoFetchForTrack=wrap('videoPrefetch',_triggerVideoFetchForTrack,()=>{});
+    // Only the clip the receiver matched is fetched here (fetchRemoteClip).
     fetchVideoForTrack=wrap('video',fetchVideoForTrack,()=>Promise.resolve());
     startServiceDownload=wrap('download',startServiceDownload,()=>Promise.resolve());
     playFromLibraryPath=wrap('libraryPlay',playFromLibraryPath,()=>Promise.resolve());
@@ -590,9 +774,14 @@ window.MindinguflacRemote = (() => {
       action().catch(report);for(const id of ['trackContextMenu','albumContextMenu','artistContextMenu'])$(id).hidden=true;
     },true);
     await poll();timer=setInterval(poll,750);
+    // Lyrics and video follow the receiver's clock between polls.
+    if (IS_ANDROID) setInterval(()=>{
+      if (route?.status!=='active') return;
+      updateLyricsPosition(audiblePlaybackSeconds());followAudioWithVideo();
+    },250);
     window.addEventListener('pagehide',()=>{
       if(!IS_ANDROID) post('local',{snapshot:playerSnapshot(),acks,closing:true}).catch(()=>{});
     });
   }
-  return {initialize,renderDevices,connect,disconnect,command,isController:controlling,poll,applyCommand,setVolume:setRemoteVolume,adjustVolumeBy,backgroundHeartbeat:()=>{if(offlineConnected())return poll();},offlinePlaylists,offlineView,offlineTabs,bindOfflineTabs,fetchOffline};
+  return {initialize,receiverWants,renderDevices,connect,disconnect,command,isController:controlling,poll,applyCommand,setVolume:setRemoteVolume,adjustVolumeBy,backgroundHeartbeat:()=>{if(offlineConnected())return poll();},offlinePlaylists,offlineView,offlineTabs,bindOfflineTabs,fetchOffline};
 })();

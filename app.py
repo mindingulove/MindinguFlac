@@ -1535,6 +1535,10 @@ def _video_identity(payload: dict) -> dict:
         "musicbrainz_artist_id": _lyrics_field(payload, "musicbrainz_artist_id"),
         "deezer_id": _lyrics_field(payload, "deezer_id"),
         "tidal_id": _lyrics_field(payload, "tidal_id"),
+        # A paired controller asks for the exact clip its receiver matched, so
+        # the receiver's audio-to-video offset applies to the same picture.
+        "youtube_id": (lambda value: value if re.fullmatch(r"[A-Za-z0-9_-]{11}", value) else "")(
+            _lyrics_field(payload, "youtube_id")),
     }
 
 
@@ -1545,7 +1549,9 @@ def _video_cache_key(identity: dict) -> str:
         "spotify_id": identity.get("spotify_id") or "",
         "isrc": identity.get("isrc") or "",
     }
-    if stable["track_key"] or stable["spotify_id"] or stable["isrc"]:
+    if identity.get("youtube_id"):
+        value = {"version": VIDEO_CACHE_VERSION, "youtube_id": identity["youtube_id"]}
+    elif stable["track_key"] or stable["spotify_id"] or stable["isrc"]:
         value = stable
     else:
         value = {
@@ -1984,7 +1990,7 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             override = None
 
         # Try backend_video torrent clip search first (own session, parallel with music downloads)
-        if not override and os.environ.get("MINDINGUFLAC_ANDROID") != "1":
+        if not override and not identity.get("youtube_id") and os.environ.get("MINDINGUFLAC_ANDROID") != "1":
             try:
                 import backend_video
                 _vid_title = f"{identity.get('artist', '')} – {identity.get('title', '')}".strip(" –")
@@ -1999,7 +2005,8 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             except Exception:
                 pass
 
-        lookup = _lookup_youtube_video(identity)
+        lookup = ({"ok": True, "found": True, "webpage_url": f"https://www.youtube.com/watch?v={identity['youtube_id']}"}
+                  if identity.get("youtube_id") else _lookup_youtube_video(identity))
         if not lookup.get("found") or not lookup.get("webpage_url"):
             with _video_fetch_lock:
                 _video_fetch_jobs[key] = "not_found" if lookup.get("ok") else "failed"
@@ -2096,6 +2103,43 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             _video_fetch_jobs[key] = "failed"
 
 
+_video_clip_details_cache: dict = {}
+
+
+def _video_clip_details(video: Path, identity: dict) -> dict:
+    """YouTube id and length of a downloaded clip, for a paired controller.
+
+    The controller downloads the same id itself; Android keeps the whole video
+    while desktop clips may start later, and the length difference is that cut.
+    """
+    try:
+        stat = video.stat()
+    except OSError:
+        return {}
+    cache_id = (str(video), stat.st_mtime_ns, stat.st_size)
+    cached = _video_clip_details_cache.get(cache_id)
+    if cached is not None:
+        return cached
+    youtube_id = identity.get("youtube_id") or ""
+    if not youtube_id:
+        with video_cache_lock:
+            entry = _load_video_cache().get(video.stem) or {}
+        youtube_id = _youtube_video_id(str(entry.get("webpage_url") or ""))
+    if not youtube_id and identity.get("track_key"):
+        try:
+            youtube_id = _youtube_video_id(str((db.get_video_source(identity["track_key"]) or {}).get("youtube_url") or ""))
+        except Exception:
+            youtube_id = ""
+    try:
+        import backend_video
+        duration = float(backend_video._video_duration_s(video) or 0)
+    except Exception:
+        duration = 0.0
+    details = {"youtube_id": youtube_id, "clip_duration": duration}
+    _video_clip_details_cache[cache_id] = details
+    return details
+
+
 def _get_video_fetch(identity: dict, force: bool = False) -> dict:
     if not identity.get("title") or not identity.get("artist"):
         return {"status": "not_found"}
@@ -2111,11 +2155,12 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
             _video_fetch_jobs.pop(key, None)
             _video_fetch_errors.pop(key, None)
     if mp4_path.exists() and mp4_path.stat().st_size > 65536:
-        return {"status": "ready", "path": str(mp4_path)}
+        return {"status": "ready", "path": str(mp4_path), **_video_clip_details(mp4_path, identity)}
     with _video_fetch_lock:
         job_status = _video_fetch_jobs.get(key)
     if job_status == "ready":
-        return {"status": "ready", "path": str(mp4_path)} if mp4_path.exists() else {"status": "not_found"}
+        return ({"status": "ready", "path": str(mp4_path), **_video_clip_details(mp4_path, identity)}
+                if mp4_path.exists() else {"status": "not_found"})
     if job_status == "downloading":
         return {"status": "downloading"}
     if job_status == "failed":

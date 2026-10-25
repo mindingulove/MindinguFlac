@@ -12,13 +12,18 @@ import time
 import uuid
 import urllib.parse
 import ipaddress
+import re
 
 LEASE_SECONDS = 30
 PLAYER_SECONDS = 18
 COMMAND_SECONDS = 7
 MAX_QUEUE = 2000
 _ACTIONS = {'connect', 'play', 'pause', 'next', 'previous', 'select', 'seek',
-            'volume', 'shuffle', 'repeat', 'queue_append', 'queue_remove', 'queue_reorder'}
+            'volume', 'shuffle', 'repeat', 'queue_append', 'queue_remove', 'queue_reorder',
+            'lyrics', 'video', 'lyrics_nudge', 'video_nudge'}
+_SYNC_STATUSES = ('', 'checking', 'pending', 'matched', 'unmatched', 'unsupported', 'unavailable', 'same-file')
+_VIDEO_STATUSES = ('', 'downloading', 'ready', 'not_found', 'error')
+MAX_LYRICS = 64 * 1024
 _TRACK_FIELDS = ('title', 'artist', 'album', 'spotify_id', 'spotify_url', 'isrc',
                  'album_spotify_id', 'album_artist', 'artist_id', 'year')
 
@@ -91,7 +96,35 @@ def snapshot(value):
             'progress': number(value.get('progress') or 0, 0, 100),
             'quality_label': str(value.get('quality_label') or '')[:32],
             'queue_title': str(value.get('queue_title') or '')[:200],
-            'error': str(value.get('error') or '')[:300]}
+            'error': str(value.get('error') or '')[:300],
+            'audible_position': number(value.get('audible_position') or 0),
+            'lyrics': lyrics_state(value.get('lyrics')),
+            'video': video_state(value.get('video'))}
+
+
+def lyrics_state(value):
+    # The receiver's lyrics and its alignment, so the controller shows the same
+    # lines at the timing measured against the audio actually playing.
+    if not isinstance(value, dict):
+        return None
+    raw = str(value.get('raw') or '')
+    return {'key': str(value.get('key') or '')[:2000], 'raw': raw if len(raw) <= MAX_LYRICS else '',
+            'synced': bool(value.get('synced')), 'loading': bool(value.get('loading')),
+            'offset': number(value.get('offset') or 0, -3600, 3600),
+            'status': value.get('status') if value.get('status') in _SYNC_STATUSES else ''}
+
+
+def video_state(value):
+    # Which clip the receiver matched and its audio-to-video offset. Only the
+    # public YouTube id crosses the LAN; the controller fetches the clip itself.
+    if not isinstance(value, dict):
+        return None
+    video_id = str(value.get('youtube_id') or '')
+    return {'youtube_id': video_id if re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id) else '',
+            'status': value.get('status') if value.get('status') in _VIDEO_STATUSES else '',
+            'clip_duration': number(value.get('clip_duration') or 0),
+            'offset': number(value.get('offset') or 0, -3600, 3600),
+            'sync_status': value.get('sync_status') if value.get('sync_status') in _SYNC_STATUSES else ''}
 
 
 def command_payload(action, payload):
@@ -109,7 +142,9 @@ def command_payload(action, payload):
     if action in ('seek', 'volume'):
         key = 'position' if action == 'seek' else 'volume'
         return {key: number(payload.get(key), 0, 86400 if action == 'seek' else 1)}
-    if action in ('shuffle', 'repeat'):
+    if action in ('lyrics_nudge', 'video_nudge'):
+        return {'delta': number(payload.get('delta'), -30, 30)}
+    if action in ('shuffle', 'repeat', 'lyrics', 'video'):
         if not isinstance(payload.get('enabled'), bool):
             raise ValueError('Playback mode must be true or false')
         return {'enabled': payload['enabled']}

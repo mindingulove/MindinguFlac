@@ -5,14 +5,14 @@ function setup(android=true) {
    paused:false,volume:.4,duration:100,currentTime:10,onclick:()=>localCalls.push(id),oninput:()=>localCalls.push(id),
    classList:{toggle:(k,v)=>v?classes.add(k):classes.delete(k),remove:k=>classes.delete(k)},
    children:[],appendChild(child){this.children.push(child);},append(){},replaceChildren(){this.children=[];},setAttribute(k,v){this[k]=v;},querySelector:()=>({className:''}),querySelectorAll:()=>[],
-   pause(){this.paused=true;localCalls.push('pause-local');},removeAttribute(){},load(){},click(){return this.onclick();}};}
+   pause(){this.paused=true;localCalls.push("pause-local");},removeAttribute(){},load(){},addEventListener(){},matches:()=>false,click(){return this.onclick();}};}
  const $=id=>{if(id==='remotePlaybackBanner'&&!elements.has(id))return null;if(!elements.has(id))elements.set(id,element(id));return elements.get(id);};
  const original={title:'Phone song',spotify_id:'phone-song',library_path:'/phone/private.flac'};
  const remote={track:{title:'Mac song',spotify_id:'mac-song'},queue:[{title:'Mac song',spotify_id:'mac-song'}],queue_index:0,
    playing:true,buffering:false,position:40,duration:200,volume:.6,shuffle:false,repeat:false};
  const state={currentTrack:original,queue:[original],originalQueue:[original],queueIndex:0,queueContext:{title:'Local album'},
    nativeAudio:{active:true,playing:true},nativeAudioStart:null,isShuffle:false,isRepeat:false,playbackRequestId:1,activeJobId:'local-stream',
-   videoFetch:{},lyrics:{open:false},prefetchJobs:new Map()};
+   videoFetch:{},videoSync:{},videoMode:false,lyrics:{open:false,lines:[],raw:'',autoOffset:0,syncOffset:0},prefetchJobs:new Map()};
  const context=vm.createContext({URL,URLSearchParams,API_BASE:'',window:{MindinguflacAndroid:{setRemotePlayback:(...args)=>nativeVolumeCalls.push(args)},location:{origin:'http://127.0.0.1:12345'},addEventListener(){}},document:{body:{appendChild(el){elements.set(el.id,el);},classList:{toggle(){}}},
    createElement:()=>element(),querySelector:()=>element(),addEventListener:(...args)=>listeners.push(args)},state,$,IS_ANDROID:android,console,setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,
    renderSidebarPlaylists(){},_renderPlaylistContent(){},renderDetailsSidebar(){},showToast:msg=>messages.push(msg),trackIdentitySnapshot:t=>({...t}),playableQueueItem:t=>!!t?.title,trackKey:t=>t?.spotify_id||t?.title||'',
@@ -24,23 +24,74 @@ function setup(android=true) {
    prefetchOneTrack:async()=>localCalls.push('prefetch'),prefetchNextTracks:async()=>localCalls.push('prefetch-next'),prefetchNextVideos:()=>localCalls.push('prefetch-video'),_triggerVideoFetchForTrack:()=>localCalls.push('trigger-video'),fetchVideoForTrack:async()=>localCalls.push('video'),startServiceDownload:async()=>localCalls.push('download'),playFromLibraryPath:async()=>localCalls.push('library-play'),startNativeAudio:async()=>localCalls.push('native-start'),selectMusicItem:(...args)=>{localCalls.push(['select',...args]);return Promise.resolve();},playQueueOffset:d=>localCalls.push(['offset',d]),
    seekBy:n=>localCalls.push(['seek',n]),changeVolumeBy:n=>localCalls.push(['adjust-volume',n]),syncVolumeBar:()=>localCalls.push('sync-local-volume'),setPlayerVolume:n=>localCalls.push(['volume',n]),reorderQueueTrack:()=>true,
    appendTracksToPlaybackQueue:()=>1,currentPlaybackSeconds:()=>10,audiblePlaybackSeconds:()=>10,isPlaybackVisiblyActive:()=>true,
-   playbackTransportBusy:()=>false,persistPlaybackSnapshot(){},syncPlayPauseButton(){},
+   playbackTransportBusy:()=>false,persistPlaybackSnapshot(){},syncPlayPauseButton(){},performance:{now:()=>context.now||0},
+   refreshLyricsAlignment:async()=>localCalls.push('align-local'),updateLyricsOffset:async d=>localCalls.push(['lyrics-nudge',d]),
+   refreshVideoSync:async()=>localCalls.push('video-sync-local'),nudgeVideoSync:async d=>localCalls.push(['video-nudge',d]),
+   setMiniPlayerProgress(){},followAudioWithVideo(){},steerVideoToAudio:(video,audible)=>localCalls.push(['steer',audible]),renderVideoSyncControls(){},
+   renderLyricsContent(){},renderLyricsAlignment(){},setLyricsSynced(){},applyLyricsPalette(){},
+   parseLyrics:raw=>raw?[{time:1,text:raw}]:[],lyricsPayload:t=>({title:t?.title||''}),lyricsAlignmentBody:()=>({stream_url:'s'}),
+   currentSideVideoPath:()=>state.videoFetch?.status==='ready'?state.videoFetch.path:'',videoSyncKey:(t,p)=>`${t.title}|${p}`,videoSyncOffset:()=>2.5,
    api:async(path,options={})=>{
     const body=options.body?JSON.parse(options.body):{};calls.push({path,body});
     if(path==='/api/remote/connect') { if(context.failConnect)throw Error('No player acknowledgement');return {ok:true,session:{id:'session'},snapshot:{...remote}}; }
     if(path==='/api/remote/offline')return {ok:true,route:{device_id:'mac'},tracks:[{title:'Mac download',spotify_id:'mac-download',album_spotify_id:'a'.repeat(22)}]};
     if(path==='/api/remote/status')return context.failPoll?{ok:false,error:'Disconnected'}:{ok:true,route:{device_id:'mac'},session:{id:'session'},snapshot:{...remote}};
     if(path==='/api/remote/command') {if(body.action==='pause')remote.playing=false;if(body.action==='volume')remote.volume=body.payload.volume;return {ok:true,session:{id:'session'},snapshot:{...remote}};}
+    if(path.startsWith('/api/video/fetch?'))return {status:'ready',path:'/phone/clip.mp4',youtube_id:'abcdefghijk',clip_duration:0};
     if(path.startsWith('/api/music/album_tracks?'))return {artwork_url:'https://art.example/exact-album.jpg'};
     if(path==='/api/music/track_metadata')return {track:{artwork_url:'https://art.example/fallback.jpg'}};
-    if(path==='/api/remote/local')return {ok:true,session:null,commands:[]};
+    if(path==='/api/remote/local'){context.lastSnapshot=body.snapshot;return {ok:true,session:context.receiverSession||null,commands:context.receiverCommands||[]};}
     return {ok:true};
    }});
  vm.runInContext(fs.readFileSync('static/remote_playback.js','utf8'),context);
  return {context,remote,state,elements,calls,localCalls,statusCalls,nativeVolumeCalls,messages,$,api:context.window.MindinguflacRemote};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
+async function lyricsAndVideo() {
+ // Controller: lyrics, their alignment and the clip come from the receiver.
+ const s=setup();await s.api.initialize();await s.api.connect({device_id:'mac',name:'My Mac'});
+ s.remote.audible_position=39;s.context.now=1000;await s.api.poll();
+ s.context.now=1500;assert.ok(Math.abs(s.context.audiblePlaybackSeconds()-39.5)<1e-9,'audible clock advances between polls');
+ s.context.now=9000;assert.equal(s.context.audiblePlaybackSeconds(),41,'extrapolation is capped when polls stall');
+ s.state.lyrics.open=true;s.remote.lyrics={key:'k1',raw:'[00:01.00]Hello',synced:true,loading:false,offset:-0.75,status:'matched'};
+ await s.context.loadLyricsForTrack(s.state.currentTrack,{force:true});await s.api.poll();await tick();
+ assert.deepEqual(s.state.lyrics.lines,[{time:1,text:'[00:01.00]Hello'}]);
+ assert.equal(s.state.lyrics.autoOffset,-0.75);assert.equal(s.state.lyrics.syncOffset,0);assert.equal(s.state.lyrics.alignmentStatus,'matched');
+ assert.ok(s.calls.some(c=>c.path==='/api/remote/command'&&c.body.action==='lyrics'&&c.body.payload.enabled===true));
+ assert.ok(!s.localCalls.includes('align-local'),'the phone never aligns against audio it is not playing');
+ await s.context.updateLyricsOffset(0.25);
+ assert.ok(s.calls.some(c=>c.body.action==='lyrics_nudge'&&c.body.payload.delta===0.25));
+ const fetched=[];s.state.videoMode=true;
+ s.remote.video={youtube_id:'abcdefghijk',status:'ready',clip_duration:200,offset:-3,sync_status:'matched'};
+ await s.api.poll();await tick();await tick();
+ assert.ok(s.calls.some(c=>c.body.action==='video'&&c.body.payload.enabled===true));
+ assert.ok(s.calls.some(c=>c.path.startsWith('/api/video/fetch?')&&c.path.includes('youtube_id=abcdefghijk')),'the phone fetches the receiver clip itself');
+ assert.equal(s.state.videoFetch.status,'ready');assert.equal(s.state.videoFetch.path,'/phone/clip.mp4');
+ const video=s.$('sideVideoPlayer');video.tagName='VIDEO';video.duration=212;video.paused=true;video.play=async()=>{video.paused=false;};
+ s.context.followAudioWithVideo();
+ assert.equal(s.state.videoSync.offset,9,'receiver offset plus the 12 s the desktop clip was cut');
+ assert.equal(video.muted,true);assert.ok(s.localCalls.some(c=>Array.isArray(c)&&c[0]==='steer'));
+ s.remote.playing=false;await s.api.poll();video.paused=false;s.context.followAudioWithVideo();
+ assert.equal(video.paused,true,'video pauses with the receiver');
+ await s.api.disconnect();
+ // Receiver: sends the measured state only to a phone that asked for it.
+ const r=setup(false);await r.api.initialize();
+ r.context.receiverSession={id:'remote-session'};
+ r.state.currentTrack={title:'Mac song',spotify_id:'mac-song'};
+ r.state.lyrics={open:false,lines:[{time:1,text:'x'}],raw:'[00:01.00]x',trackKey:JSON.stringify({title:'Mac song'}),autoOffset:1.5,syncOffset:-0.25,alignmentStatus:'matched',alignmentKey:JSON.stringify({stream_url:'s'})};
+ r.state.videoFetch={trackKey:'mac-song',status:'ready',path:'/v.mp4',youtube_id:'abcdefghijk',clip_duration:200};
+ r.state.videoSync={key:'Mac song|/v.mp4',status:'matched'};
+ r.context.receiverCommands=[{id:'1',action:'lyrics',payload:{enabled:true}},{id:'2',action:'video',payload:{enabled:true}}];
+ await r.api.poll();r.context.receiverCommands=[];await r.api.poll();
+ assert.equal(r.api.receiverWants('lyrics'),true);
+ assert.deepEqual(r.context.lastSnapshot.lyrics,{key:JSON.stringify({title:'Mac song'}),raw:'[00:01.00]x',synced:true,loading:false,offset:1.25,status:'matched'});
+ assert.deepEqual(r.context.lastSnapshot.video,{status:'ready',youtube_id:'abcdefghijk',clip_duration:200,offset:2.5,sync_status:'matched'});
+ assert.equal(r.context.lastSnapshot.audible_position,10);
+ r.context.receiverSession={id:'next-session'};await r.api.poll();
+ assert.equal(r.api.receiverWants('lyrics'),false,'a new controller session starts without requests');
+}
 (async()=>{
+ await lyricsAndVideo();
  const s=setup();await s.api.initialize();await s.api.connect({device_id:'mac',name:'My Mac'});
  assert.ok(s.localCalls.includes('pause-local'));assert.ok(s.localCalls.includes('stop-native'));
  assert.equal(s.state.currentTrack.title,'Mac song');assert.match(s.$('remotePlaybackBanner').hidden.toString(),/false/);
@@ -100,6 +151,7 @@ const tick=()=>new Promise(r=>setImmediate(r));
  assert.ok(receiver.localCalls.some(c=>Array.isArray(c)&&c[0]==='select'&&c[1].title==='Remote song'));
  assert.ok(receiver.calls.some(c=>c.path==='/api/remote/local'));
  receiver.state.restoredPlaybackPending=true;receiver.state.pendingResumePosition=10;
+ receiver.state.nativeAudio.active=false;receiver.$('audioPlayer').paused=true;
  await receiver.api.applyCommand({action:'seek',payload:{position:30}});
  assert.equal(receiver.state.pendingResumePosition,30,'seeking a restored paused track changes its actual resume position');
  console.log('Paired remote transport, phone audio suppression, receiver dispatch, clocks, disconnect cleanup and failed acknowledgement passed');

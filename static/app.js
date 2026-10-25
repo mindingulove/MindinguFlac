@@ -4266,6 +4266,7 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     album: track.album || "",
     track_key: key,
     ...(track.duration_ms ? { duration_ms: String(track.duration_ms) } : {}),
+    ...(track.youtube_id ? { youtube_id: track.youtube_id } : {}),
     ...(force ? { force: "1" } : {}),
   });
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -4275,7 +4276,8 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     try {
       const data = await api(`/api/video/fetch?${params.toString()}`);
       if (state.videoFetch.trackKey !== key) return state.videoFetch;
-      state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "" };
+      state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "",
+        youtube_id: data.youtube_id || track.youtube_id || "", clip_duration: Number(data.clip_duration || 0) };
       if (state.videoFetch.status === "not_found" && state.videoMode && state.sideVideoTrackKey === key) {
         state.videoMode = false;
         state.sideVideoTrackKey = "";
@@ -6087,7 +6089,7 @@ function videoSyncKey(track, videoPath) {
 async function refreshVideoSync() {
   const track = state.currentTrack;
   const videoPath = currentSideVideoPath();
-  if (!state.videoMode || !track || !videoPath) {
+  if (!(state.videoMode || remoteReceiverWants("video")) || !track || !videoPath) {
     renderVideoSyncControls();
     return;
   }
@@ -6176,7 +6178,12 @@ function followAudioWithVideo() {
     video.playbackRate = 1;
     return;
   }
-  const raw = audiblePlaybackSeconds() + videoSyncOffset();
+  steerVideoToAudio(video, audiblePlaybackSeconds());
+}
+
+// Shared by a paired phone, which follows the receiving computer's clock.
+function steerVideoToAudio(video, audible) {
+  const raw = audible + videoSyncOffset();
   if (raw < 0 || raw > video.duration - 0.3) {
     // The song is playing a part the video does not have (e.g. the album
     // intro before the video starts): hold the nearest frame until it does.
@@ -6186,7 +6193,7 @@ function followAudioWithVideo() {
     video.playbackRate = 1;
     return;
   }
-  const target = videoTimeForAudio(audiblePlaybackSeconds(), video);
+  const target = videoTimeForAudio(audible, video);
   const drift = (video.currentTime || 0) - target;
   if (Math.abs(drift) > 1.0) {
     video.currentTime = target;
@@ -6338,8 +6345,14 @@ function renderLyricsAlignment() {
   if (offset) offset.textContent = `${(state.lyrics.autoOffset + state.lyrics.syncOffset).toFixed(2)}s`;
 }
 
+// A paired phone showing this device's lyrics or video needs the alignment
+// measured here, even while this device's own panels are closed.
+function remoteReceiverWants(kind) {
+  return !!window.MindinguflacRemote?.receiverWants?.(kind);
+}
+
 async function refreshLyricsAlignment() {
-  if (!state.lyrics.open || !state.lyrics.lines.length || !state.currentTrack) return;
+  if (!(state.lyrics.open || remoteReceiverWants("lyrics")) || !state.lyrics.lines.length || !state.currentTrack) return;
   const body = lyricsAlignmentBody();
   const key = JSON.stringify({...body, output_latency: undefined});
   if (state.lyrics.alignmentKey !== key) {
