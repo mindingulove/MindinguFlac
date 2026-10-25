@@ -8334,6 +8334,9 @@ function startNativeAudioPolling(requestId) {
       duration: status.duration || 0,
       ended: !!status.ended,
       output_latency: Number(status.output_latency || 0),
+      // When this position was read; a paired controller is sent the
+      // position advanced to the moment it is reported.
+      position_read_at: performance.now(),
     };
     // The worker moves the stream to the default output by itself when the
     // selected device stops accepting audio (Bluetooth dropped). Follow it so

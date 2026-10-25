@@ -95,9 +95,14 @@ window.MindinguflacRemote = (() => {
     // stream runs, its own clock is the position the controller must follow.
     const restoredIdle=state.restoredPlaybackPending && !state.nativeAudio.active && audio.paused;
     const extras=receiverExtras();
-    if (receiving) extras.audible_position=restoredIdle ? Number(state.pendingResumePosition || 0) : audiblePlaybackSeconds() || 0;
+    // The native position is polled every 500 ms; report it advanced to now so
+    // the phone does not start up to half a second behind.
+    const native=state.nativeAudio || {};
+    const sincePoll=!restoredIdle && native.active && native.playing && native.position_read_at
+      ? Math.min(1,Math.max(0,(performance.now()-native.position_read_at)/1000)) : 0;
+    if (receiving) extras.audible_position=restoredIdle ? Number(state.pendingResumePosition || 0) : (audiblePlaybackSeconds() || 0)+sincePoll;
     return {track:portable(state.currentTrack), queue:publicTracks(state.queue), queue_index:state.queueIndex,
-      position:restoredIdle ? Number(state.pendingResumePosition || 0) : currentPlaybackSeconds() || 0,
+      position:restoredIdle ? Number(state.pendingResumePosition || 0) : (currentPlaybackSeconds() || 0)+sincePoll,
       duration:state.nativeAudio.active ? state.nativeAudio.duration || knownTrackDurationSeconds(state.currentTrack) :
         (Number.isFinite(audio.duration) ? audio.duration : knownTrackDurationSeconds(state.currentTrack)) || 0,
       playing:isPlaybackVisiblyActive(), buffering:playbackTransportBusy(), volume:audio.volume,
@@ -143,13 +148,14 @@ window.MindinguflacRemote = (() => {
       if (path && state.videoSync.key!==videoSyncKey(track,path)) refreshVideoSync().catch(() => {});
     }
   }
-  // Controller clock: the receiver's last reported time, advanced locally
-  // between polls so lyrics and video move smoothly.
+  // Controller clock: the receiver's last reported time plus how old that
+  // report already was on arrival (its wait on the receiver and the trip back
+  // over the LAN), advanced locally between polls.
   function remoteClock(audible) {
     const s=route?.snapshot || {};
     let pos=Number(audible && s.audible_position>0 ? s.audible_position : s.position) || 0;
     if (route?.status==='active' && s.playing && !s.buffering && snapshotAt)
-      pos+=Math.min(2,(performance.now()-snapshotAt)/1000);
+      pos+=Math.min(3,Number(route.snapshotAge || 0)+(performance.now()-snapshotAt)/1000);
     const duration=Number(s.duration) || 0;
     return duration>0 ? Math.min(pos,duration) : pos;
   }
@@ -468,6 +474,15 @@ window.MindinguflacRemote = (() => {
     el.appendChild(label);
     el.setAttribute('aria-label',`${label.textContent}. Open Devices`);
   }
+  function renderRemoteSeek() {
+    if (!route || remoteSeekDragging) return;
+    const duration=Number(route.snapshot?.duration || 0), pos=remoteClock(false);
+    $('currentTime').textContent = formatTime(pos);
+    $('seekBar').value = duration > 0 ? pos / duration * 1000 : 0;
+    $('seekBar').style.backgroundSize = `${duration > 0 ? pos / duration * 100 : 0}% 100%`;
+    // The phone's collapsed player draws its own progress line.
+    setMiniPlayerProgress(duration > 0 ? pos / duration : 0);
+  }
   function report(error) { showToast(error.message || String(error), 6000); }
   function renderRemotePlayer() {
     if (!route) return;
@@ -500,15 +515,9 @@ window.MindinguflacRemote = (() => {
     const statusMode=route.error || s.error ? 'error' : s.buffering && (!s.status_mode || s.status_mode==='ready') ? 'buffering' : s.status_mode || 'ready';
     setPlayerStatusIcon(statusMode,Number(s.progress)||0);
     adoptRemoteVideoMode(s);syncRemoteWants();ensureRemoteVideo(track);remoteVideoButton();
-    const duration = Number(s.duration || 0), pos = Number(s.position || 0);
+    const duration = Number(s.duration || 0), pos = remoteClock(false);
     $('durationTime').textContent = formatTime(duration);
-    if (!remoteSeekDragging) {
-      $('currentTime').textContent = formatTime(pos);
-      $('seekBar').value = duration > 0 ? pos / duration * 1000 : 0;
-      $('seekBar').style.backgroundSize = `${duration > 0 ? pos / duration * 100 : 0}% 100%`;
-      // The phone's collapsed player draws its own progress line.
-      setMiniPlayerProgress(duration > 0 ? pos / duration : 0);
-    }
+    renderRemoteSeek();
     renderRemoteVolume();
     $('btnShuffle')?.classList.toggle('active', !!s.shuffle); $('btnRepeat')?.classList.toggle('active', !!s.repeat);
     $('albumShuffle')?.classList.toggle('active', !!s.shuffle);
@@ -528,7 +537,7 @@ window.MindinguflacRemote = (() => {
       const result = await post('command', {action,payload});
       if (current !== route) return;
       if (!result.ok) throw new Error(result.error || 'Remote command failed');
-      current.snapshot = result.snapshot; current.error = ''; renderRemotePlayer();
+      current.snapshot = result.snapshot; current.snapshotAge = Number(result.snapshot_age) || 0; current.error = ''; renderRemotePlayer();
     } catch (error) { current.error = error.message; throw error; }
     finally { current.pending = false; if (route === current) renderRemotePlayer(); }
   }
@@ -560,7 +569,7 @@ window.MindinguflacRemote = (() => {
       const result = await post('connect',{device_id:device.device_id});
       if (route !== current) return;
       if (!result.ok || !result.session) throw new Error(result.error || 'Receiving player did not acknowledge the connection');
-      Object.assign(current,{status:'active',pending:false,snapshot:result.snapshot,error:''});
+      Object.assign(current,{status:'active',pending:false,snapshot:result.snapshot,snapshotAge:Number(result.snapshot_age) || 0,error:''});
       renderRemotePlayer(); banner(); await _refreshConnectPanel();
     } catch (error) {
       if (route === current) { current.status='failed';current.pending=false;current.error=error.message;banner();syncPlayPauseButton(); }
@@ -659,7 +668,7 @@ window.MindinguflacRemote = (() => {
         } else {
           // A new receiver session starts without the lyrics/video requests.
           if (result.session.id!==current.sessionId) { current.sessionId=result.session.id;remoteWantSent={lyrics:null,video:null};remoteVideoMode=null; }
-          current.status='active';current.snapshot=result.snapshot;current.error='';
+          current.status='active';current.snapshot=result.snapshot;current.snapshotAge=Number(result.snapshot_age) || 0;current.error='';
         }
         renderRemotePlayer();banner();
       } else {
@@ -778,7 +787,7 @@ window.MindinguflacRemote = (() => {
       const current=route, duration=Number(current.snapshot?.duration || 0);
       const target=Math.max(0,Math.min(duration,Number(seekBar.value)/1000*duration));
       remoteSeekDragging=false;
-      current.snapshot={...current.snapshot,position:target};
+      current.snapshot={...current.snapshot,position:target,audible_position:target};current.snapshotAge=0;
       $('currentTime').textContent=formatTime(target);
       send('seek',{position:target});
     };
@@ -813,7 +822,7 @@ window.MindinguflacRemote = (() => {
     // Lyrics and video follow the receiver's clock between polls.
     if (IS_ANDROID) setInterval(()=>{
       if (route?.status!=='active') return;
-      updateLyricsPosition(audiblePlaybackSeconds());followAudioWithVideo();
+      renderRemoteSeek();updateLyricsPosition(audiblePlaybackSeconds());followAudioWithVideo();
     },250);
     window.addEventListener('pagehide',()=>{
       if(!IS_ANDROID) post('local',{snapshot:playerSnapshot(),acks,closing:true}).catch(()=>{});

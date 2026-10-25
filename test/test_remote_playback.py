@@ -60,6 +60,25 @@ class ReceiverTests(unittest.TestCase):
         self.assertIsNone(self.r.bridge({'snapshot':{},'closing':True})['session'])
         self.assertFalse(self.r.pending)
 
+    def test_status_reports_snapshot_age_and_controller_adds_the_trip_back(self):
+        rp._lan_exchanges.clear()
+        sid=self.connect()
+        self.now+=0.4
+        self.assertAlmostEqual(self.r.status('phone',sid)['snapshot_age'],0.4)
+        from unittest.mock import Mock
+        client=Mock();client.lock=threading.RLock();client.state={'pair':{'device_id':'mac'}}
+        client.remote_request.return_value={'ok':True,'snapshot':{},'snapshot_age':0.4,'_exchange_seconds':0.06}
+        with patch.object(device_sync,'_android',client),patch.object(rp,'_controller',{'device_id':'mac','session_id':'live'}):
+            result=rp.controller_request('status')
+        self.assertAlmostEqual(result['snapshot_age'],0.43)
+        self.assertAlmostEqual(result['lan_rtt'],0.06)
+        # One slow exchange among steady ones does not move the estimate.
+        with patch.object(device_sync,'_android',client),patch.object(rp,'_controller',{'device_id':'mac','session_id':'live'}):
+            for exchange in (0.06,0.9,0.06):
+                client.remote_request.return_value={'ok':True,'snapshot':{},'snapshot_age':0.4,'_exchange_seconds':exchange}
+                result=rp.controller_request('status')
+        self.assertAlmostEqual(result['lan_rtt'],0.06)
+
     def test_offline_inventory_requires_current_owner_and_removes_device_paths(self):
         sid=self.connect()
         with patch.object(rp,'receiver',self.r),patch.object(rp,'offline_catalog',return_value={'tracks':[{'title':'Downloaded','library_path':'/private/song.flac','artwork_url':'/api/library/artwork?path=/private/song.flac','offline':True,'isrc':'TEST123'}]}) as provider:

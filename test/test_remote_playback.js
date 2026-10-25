@@ -35,7 +35,7 @@ function setup(android=true) {
     const body=options.body?JSON.parse(options.body):{};calls.push({path,body});
     if(path==='/api/remote/connect') { if(context.failConnect)throw Error('No player acknowledgement');return {ok:true,session:{id:'session'},snapshot:{...remote}}; }
     if(path==='/api/remote/offline')return {ok:true,route:{device_id:'mac'},tracks:[{title:'Mac download',spotify_id:'mac-download',album_spotify_id:'a'.repeat(22)}]};
-    if(path==='/api/remote/status')return context.failPoll?{ok:false,error:'Disconnected'}:{ok:true,route:{device_id:'mac'},session:{id:'session'},snapshot:{...remote}};
+    if(path==='/api/remote/status')return context.failPoll?{ok:false,error:'Disconnected'}:{ok:true,route:{device_id:'mac'},session:{id:'session'},snapshot:{...remote},snapshot_age:context.statusAge||0};
     if(path==='/api/remote/command') {if(body.action==='pause')remote.playing=false;if(body.action==='volume')remote.volume=body.payload.volume;return {ok:true,session:{id:'session'},snapshot:{...remote}};}
     if(path.startsWith('/api/video/fetch?'))return {status:'ready',path:'/phone/clip.mp4',youtube_id:'abcdefghijk',clip_duration:0};
     if(path.startsWith('/api/music/album_tracks?'))return {artwork_url:'https://art.example/exact-album.jpg'};
@@ -52,7 +52,12 @@ async function lyricsAndVideo() {
  const s=setup();await s.api.initialize();await s.api.connect({device_id:'mac',name:'My Mac'});
  s.remote.audible_position=39;s.context.now=1000;await s.api.poll();
  s.context.now=1500;assert.ok(Math.abs(s.context.audiblePlaybackSeconds()-39.5)<1e-9,'audible clock advances between polls');
- s.context.now=9000;assert.equal(s.context.audiblePlaybackSeconds(),41,'extrapolation is capped when polls stall');
+ s.context.now=9000;assert.equal(s.context.audiblePlaybackSeconds(),42,'extrapolation is capped when polls stall');
+ // A report that was already 0.6 s old on arrival is advanced by that age.
+ s.context.statusAge=0.6;s.remote.audible_position=50;s.context.now=10000;await s.api.poll();
+ assert.ok(Math.abs(s.context.audiblePlaybackSeconds()-50.6)<1e-9,'arrival age is compensated');
+ s.context.now=10500;assert.ok(Math.abs(s.context.audiblePlaybackSeconds()-51.1)<1e-9);
+ s.context.statusAge=0;
  s.state.lyrics.open=true;s.remote.lyrics={key:'k1',raw:'[00:01.00]Hello',synced:true,loading:false,offset:-0.75,status:'matched'};
  await s.context.loadLyricsForTrack(s.state.currentTrack,{force:true});await s.api.poll();await tick();
  assert.deepEqual(s.state.lyrics.lines,[{time:1,text:'[00:01.00]Hello'}]);

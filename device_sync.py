@@ -592,9 +592,15 @@ class AndroidPairingClient:
                    "X-Mindinguflac-Device": str(payload.get("device_id") or "")}
         if secret:
             headers["X-Mindinguflac-Pair-Secret"] = secret
-        conn.request("POST", path, body=_encode_body(payload), headers=headers)
+        body = _encode_body(payload)
+        # Time only the request/response exchange; the TLS handshake before it
+        # does not delay the reply. Remote playback uses half of this as the
+        # age the reply picked up on its way back.
+        sent_at = time.monotonic()
+        conn.request("POST", path, body=body, headers=headers)
         response = conn.getresponse()
         raw = response.read(MAX_COMPRESSED_BYTES + 1)
+        exchange_seconds = time.monotonic() - sent_at
         status = response.status
         encoding = response.getheader("Content-Encoding", "")
         conn.close()
@@ -602,6 +608,7 @@ class AndroidPairingClient:
         if status not in (200, 410):
             raise RuntimeError(str(result.get("error") or f"Pairing request failed ({status})"))
         result["_status"] = status
+        result["_exchange_seconds"] = exchange_seconds
         return result
 
     @staticmethod
