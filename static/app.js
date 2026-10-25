@@ -1,5 +1,8 @@
 const API_BASE = "";
 const IS_ANDROID = /Mindinguflac-Android/i.test(navigator.userAgent) || !!window.MindinguflacAndroid;
+// Apple WebKit (the macOS app) steps video frame by frame after playbackRate
+// changes, so the side video corrects drift there by seeking instead.
+const VIDEO_RATE_STEERING = !(/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Android/i.test(navigator.userAgent));
 if (IS_ANDROID) document.documentElement.classList.add("is-android");
 const CATALOG_REFRESH_MS = 15 * 60 * 1000;
 const ARTIST_TRACK_PREVIEW_COUNT = 5;
@@ -6175,7 +6178,7 @@ function followAudioWithVideo() {
   if (!video || video.tagName !== "VIDEO" || !Number.isFinite(video.duration) || video.duration <= 0) return;
   if (state.manualPauseRequested || !isPlaybackVisiblyActive()) {
     if (!video.paused) video.pause();
-    video.playbackRate = 1;
+    setVideoRate(video, 1);
     return;
   }
   steerVideoToAudio(video, audiblePlaybackSeconds());
@@ -6190,20 +6193,36 @@ function steerVideoToAudio(video, audible) {
     const hold = raw < 0 ? 0 : Math.max(0, video.duration - 0.25);
     if (!video.paused) video.pause();
     if (Math.abs((video.currentTime || 0) - hold) > 0.3) video.currentTime = hold;
-    video.playbackRate = 1;
+    setVideoRate(video, 1);
     return;
   }
   const target = videoTimeForAudio(audible, video);
   const drift = (video.currentTime || 0) - target;
   if (Math.abs(drift) > 1.0) {
     video.currentTime = target;
-    video.playbackRate = 1;
-  } else if (Math.abs(drift) > 0.08) {
-    video.playbackRate = drift > 0 ? 0.95 : 1.05;
-  } else {
-    video.playbackRate = 1;
+    setVideoRate(video, 1);
+  } else if (!VIDEO_RATE_STEERING) {
+    // One small seek for a settled drift, rarely, instead of rate changes.
+    if (Math.abs(drift) > 0.25 && performance.now() - (video._rateChangedAt || 0) > 3000) {
+      video.currentTime = target;
+      video._rateChangedAt = performance.now();
+    }
+    setVideoRate(video, 1);
+  } else if (video.playbackRate === 1) {
+    // Clock readings jitter by tens of milliseconds, so only start correcting
+    // a clear, settled drift.
+    if (Math.abs(drift) > 0.2 && performance.now() - (video._rateChangedAt || 0) > 1500)
+      setVideoRate(video, drift > 0 ? 0.97 : 1.03);
+  } else if (Math.abs(drift) < 0.05 || (drift > 0) !== (video.playbackRate < 1)) {
+    setVideoRate(video, 1);
   }
   if (video.paused) video.play().catch(() => {});
+}
+
+function setVideoRate(video, rate) {
+  if (video.playbackRate === rate) return;
+  video.playbackRate = rate;
+  video._rateChangedAt = performance.now();
 }
 
 function syncLocalVideoOverlay(position = currentPlaybackSeconds(), forcePlay = false, options = {}) {

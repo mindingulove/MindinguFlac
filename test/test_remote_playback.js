@@ -27,7 +27,7 @@ function setup(android=true) {
    playbackTransportBusy:()=>false,persistPlaybackSnapshot(){},syncPlayPauseButton(){},performance:{now:()=>context.now||0},
    refreshLyricsAlignment:async()=>localCalls.push('align-local'),updateLyricsOffset:async d=>localCalls.push(['lyrics-nudge',d]),
    refreshVideoSync:async()=>localCalls.push('video-sync-local'),nudgeVideoSync:async d=>localCalls.push(['video-nudge',d]),
-   setMiniPlayerProgress(){},followAudioWithVideo(){},steerVideoToAudio:(video,audible)=>localCalls.push(['steer',audible]),renderVideoSyncControls(){},
+   setMiniPlayerProgress(){},switchSideVideoMode:on=>{state.videoMode=on;localCalls.push(['switch-video',on]);},followAudioWithVideo(){},steerVideoToAudio:(video,audible)=>localCalls.push(['steer',audible]),renderVideoSyncControls(){},
    renderLyricsContent(){},renderLyricsAlignment(){},setLyricsSynced(){},applyLyricsPalette(){},
    parseLyrics:raw=>raw?[{time:1,text:raw}]:[],lyricsPayload:t=>({title:t?.title||''}),lyricsAlignmentBody:()=>({stream_url:'s'}),
    currentSideVideoPath:()=>state.videoFetch?.status==='ready'?state.videoFetch.path:'',videoSyncKey:(t,p)=>`${t.title}|${p}`,videoSyncOffset:()=>2.5,
@@ -73,6 +73,10 @@ async function lyricsAndVideo() {
  assert.equal(video.muted,true);assert.ok(s.localCalls.some(c=>Array.isArray(c)&&c[0]==='steer'));
  s.remote.playing=false;await s.api.poll();video.paused=false;s.context.followAudioWithVideo();
  assert.equal(video.paused,true,'video pauses with the receiver');
+ // A switch made on the receiver mirrors here; an unchanged report does not undo a local tap.
+ s.remote.video_mode=false;await s.api.poll();assert.equal(s.state.videoMode,false);
+ s.state.videoMode=true;await s.api.poll();assert.equal(s.state.videoMode,true,'stale receiver mode keeps the local tap');
+ s.remote.video_mode=true;await s.api.poll();s.remote.video_mode=false;await s.api.poll();assert.equal(s.state.videoMode,false);
  await s.api.disconnect();
  // Receiver: sends the measured state only to a phone that asked for it.
  const r=setup(false);await r.api.initialize();
@@ -84,6 +88,8 @@ async function lyricsAndVideo() {
  r.context.receiverCommands=[{id:'1',action:'lyrics',payload:{enabled:true}},{id:'2',action:'video',payload:{enabled:true}}];
  await r.api.poll();r.context.receiverCommands=[];await r.api.poll();
  assert.equal(r.api.receiverWants('lyrics'),true);
+ assert.ok(r.localCalls.some(c=>Array.isArray(c)&&c[0]==='switch-video'&&c[1]===true),'the phone switch mirrors on the receiver');
+ assert.equal(r.context.lastSnapshot.video_mode,true);
  assert.deepEqual(r.context.lastSnapshot.lyrics,{key:JSON.stringify({title:'Mac song'}),raw:'[00:01.00]x',synced:true,loading:false,offset:1.25,status:'matched'});
  assert.deepEqual(r.context.lastSnapshot.video,{status:'ready',youtube_id:'abcdefghijk',clip_duration:200,offset:2.5,sync_status:'matched'});
  assert.equal(r.context.lastSnapshot.audible_position,10);

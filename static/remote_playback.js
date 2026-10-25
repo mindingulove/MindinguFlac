@@ -3,13 +3,13 @@ window.MindinguflacRemote = (() => {
   let route = null, local = null, receiving = null, timer = null, polling = false;
   let initialized = false, acks = [], applied = new Set(), lastError = '';
   let volumeTarget=null, volumeSending=false, nativeVolumeState=null, volumeHudTimer=null;
-  let offlineTab='local', offlineConnection='', offlineCache=null, offlinePending=null;
+  let offlineTab='local', offlineConnection='', offlineCache=null, offlinePending=null, offlineSwipePlaylist=null;
   let layoutObserver=null, layoutMeasureQueued=false, remoteSeekDragging=false;
   // Receiver: what the paired phone currently shows from this device.
   let receiverWanted={lyrics:false,video:false}, receiverSessionId='';
   // Controller: requests already sent, and the receiver lyrics/clip on screen.
   let remoteWantSent={lyrics:null,video:null}, remoteLyricsKey='', remoteVideoId='';
-  let snapshotSeen=null, snapshotAt=0;
+  let snapshotSeen=null, snapshotAt=0, remoteVideoMode=null;
   const post = (path, body = {}) => api(`/api/remote/${path}`, {method:'POST', body:JSON.stringify(body), timeout:12000});
   const controlling = () => !!route;
   const portable = item => item ? trackIdentitySnapshot(item) : null;
@@ -113,6 +113,7 @@ window.MindinguflacRemote = (() => {
   function receiverExtras() {
     const track=state.currentTrack, out={};
     if (!receiving || !track) return out;
+    out.video_mode=!!state.videoMode;
     if (receiverWanted.lyrics && state.lyrics.trackKey===JSON.stringify(lyricsPayload(track)))
       out.lyrics={key:state.lyrics.trackKey, raw:state.lyrics.raw || '', synced:state.lyrics.lines.length>0,
         loading:!!state.lyrics.loading, offset:state.lyrics.autoOffset+state.lyrics.syncOffset,
@@ -151,6 +152,15 @@ window.MindinguflacRemote = (() => {
       pos+=Math.min(2,(performance.now()-snapshotAt)/1000);
     const duration=Number(s.duration) || 0;
     return duration>0 ? Math.min(pos,duration) : pos;
+  }
+  // A switch made on the receiver's screen mirrors here. Only a change counts,
+  // so a tap on this phone is not undone by a snapshot taken before it arrived.
+  function adoptRemoteVideoMode(s) {
+    if (typeof s.video_mode!=='boolean' || s.video_mode===remoteVideoMode) return;
+    remoteVideoMode=s.video_mode;remoteWantSent.video=s.video_mode;
+    if (state.videoMode===s.video_mode) return;
+    state.videoMode=s.video_mode;state.sideVideoTrackKey=s.video_mode ? trackKey(state.currentTrack || {}) : '';
+    renderSideCover(state.currentTrack || {});
   }
   // Ask the receiver for lyrics/video only while this phone shows them.
   function syncRemoteWants() {
@@ -321,14 +331,36 @@ window.MindinguflacRemote = (() => {
     };
     await Promise.all([worker(),worker()]);
   }
+  function showOfflineTab(tab,localPlaylist) {
+    if(tab===offlineTab)return;
+    offlineTab=tab;
+    if(offlineTab==='remote' && (!offlineCache || Date.now()-offlineCache.updated>15000))fetchOffline();
+    _renderPlaylistContent(localPlaylist);
+  }
   function bindOfflineTabs(localPlaylist) {
-    $('pageContent').querySelectorAll('[data-offline-device]').forEach(button=>{
-      button.onclick=()=>{
-        offlineTab=button.dataset.offlineDevice;
-        if(offlineTab==='remote' && (!offlineCache || Date.now()-offlineCache.updated>15000))fetchOffline();
-        _renderPlaylistContent(localPlaylist);
-      };
+    const page=$('pageContent');
+    page.querySelectorAll('[data-offline-device]').forEach(button=>{
+      button.onclick=()=>showOfflineTab(button.dataset.offlineDevice,localPlaylist);
     });
+    offlineSwipePlaylist=localPlaylist;
+    if(page.dataset.offlineSwipe)return;
+    page.dataset.offlineSwipe='true';
+    // Swipe left for the connected device, right for this phone. A swipe
+    // starting inside a horizontal scroller (carousels) belongs to it.
+    let start=null;
+    page.addEventListener('touchstart',event=>{
+      start=null;
+      if(event.touches.length!==1 || !offlineConnected() || !page.querySelector('[data-offline-device]'))return;
+      if(event.target.closest?.('.side-carousel, [data-horizontal-scroll], input[type="range"]'))return;
+      start={x:event.touches[0].clientX,y:event.touches[0].clientY};
+    },{passive:true});
+    page.addEventListener('touchend',event=>{
+      const touch=event.changedTouches[0];
+      if(!start || !touch)return;
+      const dx=touch.clientX-start.x, dy=touch.clientY-start.y;start=null;
+      if(Math.abs(dx)<60 || Math.abs(dx)<Math.abs(dy)*1.5)return;
+      showOfflineTab(dx<0?'remote':'local',offlineSwipePlaylist);
+    },{passive:true});
   }
   function syncOfflineConnection() {
     const key=offlineConnected()?route.device_id:'';
@@ -467,7 +499,7 @@ window.MindinguflacRemote = (() => {
     $('playerMeta').textContent=state.playerStatus;
     const statusMode=route.error || s.error ? 'error' : s.buffering && (!s.status_mode || s.status_mode==='ready') ? 'buffering' : s.status_mode || 'ready';
     setPlayerStatusIcon(statusMode,Number(s.progress)||0);
-    syncRemoteWants();ensureRemoteVideo(track);remoteVideoButton();
+    adoptRemoteVideoMode(s);syncRemoteWants();ensureRemoteVideo(track);remoteVideoButton();
     const duration = Number(s.duration || 0), pos = Number(s.position || 0);
     $('durationTime').textContent = formatTime(duration);
     if (!remoteSeekDragging) {
@@ -522,7 +554,7 @@ window.MindinguflacRemote = (() => {
     if (route) await disconnect();
     await quiesceLocal();
     route = {name:device.name || 'Computer',device_id:device.device_id,status:'connecting',snapshot:{},pending:true};
-    remoteWantSent={lyrics:null,video:null};remoteLyricsKey='';remoteVideoId='';
+    remoteWantSent={lyrics:null,video:null};remoteLyricsKey='';remoteVideoId='';remoteVideoMode=null;
     const current = route; banner(); syncPlayPauseButton();
     try {
       const result = await post('connect',{device_id:device.device_id});
@@ -593,7 +625,11 @@ window.MindinguflacRemote = (() => {
         break;
       case 'volume': setPlayerVolume(p.volume);break;
       case 'lyrics': receiverWanted.lyrics=!!p.enabled;ensureReceiverExtras();break;
-      case 'video': receiverWanted.video=!!p.enabled;ensureReceiverExtras();break;
+      case 'video':
+        receiverWanted.video=!!p.enabled;
+        // The phone's Switch to video/audio mirrors on this screen.
+        if (state.videoMode!==!!p.enabled && state.currentTrack) switchSideVideoMode(!!p.enabled);
+        ensureReceiverExtras();break;
       case 'lyrics_nudge': await updateLyricsOffset(Number(p.delta) || 0);break;
       case 'video_nudge': await nudgeVideoSync(Number(p.delta) || 0);break;
       case 'shuffle': if (state.isShuffle !== p.enabled) $('btnShuffle').onclick();break;
@@ -622,7 +658,7 @@ window.MindinguflacRemote = (() => {
           current.status='disconnected';current.error=result.error || 'Remote session ended';
         } else {
           // A new receiver session starts without the lyrics/video requests.
-          if (result.session.id!==current.sessionId) { current.sessionId=result.session.id;remoteWantSent={lyrics:null,video:null}; }
+          if (result.session.id!==current.sessionId) { current.sessionId=result.session.id;remoteWantSent={lyrics:null,video:null};remoteVideoMode=null; }
           current.status='active';current.snapshot=result.snapshot;current.error='';
         }
         renderRemotePlayer();banner();

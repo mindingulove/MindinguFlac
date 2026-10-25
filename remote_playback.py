@@ -99,7 +99,9 @@ def snapshot(value):
             'error': str(value.get('error') or '')[:300],
             'audible_position': number(value.get('audible_position') or 0),
             'lyrics': lyrics_state(value.get('lyrics')),
-            'video': video_state(value.get('video'))}
+            'video': video_state(value.get('video')),
+            # None until the receiver reports it, so older builds change nothing.
+            'video_mode': bool(value['video_mode']) if isinstance(value.get('video_mode'), bool) else None}
 
 
 def lyrics_state(value):
