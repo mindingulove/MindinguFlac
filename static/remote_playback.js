@@ -86,8 +86,11 @@ window.MindinguflacRemote = (() => {
     if (current?.artwork_url && !localArtwork(state.currentTrack?.artwork_url)) {
       state.currentTrack.artwork_url=current.artwork_url;renderSideCover(state.currentTrack);
     }
+    // The restored resume point only stands in while nothing is loaded; once a
+    // stream runs, its own clock is the position the controller must follow.
+    const restoredIdle=state.restoredPlaybackPending && !state.nativeAudio.active && audio.paused;
     return {track:portable(state.currentTrack), queue:publicTracks(state.queue), queue_index:state.queueIndex,
-      position:state.restoredPlaybackPending ? Number(state.pendingResumePosition || 0) : currentPlaybackSeconds() || 0,
+      position:restoredIdle ? Number(state.pendingResumePosition || 0) : currentPlaybackSeconds() || 0,
       duration:state.nativeAudio.active ? state.nativeAudio.duration || knownTrackDurationSeconds(state.currentTrack) :
         (Number.isFinite(audio.duration) ? audio.duration : knownTrackDurationSeconds(state.currentTrack)) || 0,
       playing:isPlaybackVisiblyActive(), buffering:playbackTransportBusy(), volume:audio.volume,
@@ -395,6 +398,9 @@ window.MindinguflacRemote = (() => {
       case 'connect': break;
       case 'select':
         lastError='';
+        // A remote selection replaces the track restored at launch; leaving the
+        // flag set froze the reported position at 0:00 and swallowed seeks.
+        state.restoredPlaybackPending=false;
         state.pendingResumePosition=0;
         // Acknowledgement means accepted by the actual player. Playback is
         // reported separately, after its resolver/decoder starts producing it.
@@ -415,7 +421,7 @@ window.MindinguflacRemote = (() => {
       case 'next': playQueueOffset(1); break;
       case 'previous': playQueueOffset(-1); break;
       case 'seek':
-        if (state.restoredPlaybackPending) {
+        if (state.restoredPlaybackPending && !state.nativeAudio.active && $('audioPlayer').paused) {
           state.pendingResumePosition = Math.min(playerSnapshot().duration || p.position,p.position);
           $('currentTime').textContent = formatTime(state.pendingResumePosition);
           $('seekBar').value = state.pendingResumePosition/Math.max(.001,playerSnapshot().duration)*1000;
