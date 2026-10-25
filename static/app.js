@@ -856,6 +856,42 @@ function setMobileNavActive(name) {
   });
 }
 
+const mobileArtistArtworkCache = new Map();
+
+function resolveMobileArtistArtwork() {
+  const list = $("mobileLibraryItems");
+  if (!list) return;
+  const buttons = [...list.querySelectorAll("[data-mobile-artist]")].filter(button => {
+    const art = button.querySelector(".mobile-library-art");
+    return art && !art.style.backgroundImage;
+  });
+  let next = 0;
+  const worker = async () => {
+    while (next < buttons.length) {
+      const button = buttons[next++];
+      let artist;
+      try { artist = JSON.parse(button.dataset.mobileArtist || "{}"); } catch (_) { continue; }
+      const name = String(artist.name || artist.artist || "").trim();
+      if (!name) continue;
+      const key = `${name.toLocaleLowerCase()}|${artist.artist_id || ""}`;
+      if (!mobileArtistArtworkCache.has(key)) {
+        mobileArtistArtworkCache.set(key, api("/api/artist/artwork", {
+          method: "POST", timeout: 30000,
+          body: JSON.stringify({ name, artist_id: artist.artist_id || "" }),
+        }).then(result => result.artwork_url || "").catch(() => ""));
+      }
+      const url = await mobileArtistArtworkCache.get(key);
+      if (!url || !button.isConnected) continue;
+      const art = button.querySelector(".mobile-library-art");
+      if (!art) continue;
+      art.style.backgroundImage = `url(${JSON.stringify(url).slice(1, -1)})`;
+      const icon = art.querySelector("i");
+      if (icon) icon.remove();
+    }
+  };
+  Promise.all(Array.from({ length: Math.min(4, buttons.length) }, worker));
+}
+
 function mobileLibraryItemsHtml(playlists) {
   const filter = state.mobileLibraryFilter || "playlists";
   if (filter === "playlists") {
@@ -1058,6 +1094,7 @@ function refreshMobileLibraryList() {
   if (!container) return;
   container.innerHTML = mobileLibraryItemsHtml(state.playlists || []);
   bindMobileLibraryItems();
+  resolveMobileArtistArtwork();
 }
 
 function renderMobileLibraryPage() {
@@ -1081,6 +1118,7 @@ function renderMobileLibraryPage() {
       </div>
     </div>`;
   bindMobileLibraryItems();
+  if (state.mobileLibraryFilter === "artists") resolveMobileArtistArtwork();
   document.querySelectorAll("[data-mobile-library-filter]").forEach(button => {
     button.onclick = () => {
       state.mobileLibraryFilter = button.dataset.mobileLibraryFilter;
@@ -1092,6 +1130,7 @@ function renderMobileLibraryPage() {
       const list = $("mobileLibraryItems");
       if (list) list.innerHTML = mobileLibraryItemsHtml(state.playlists || []);
       bindMobileLibraryItems();
+      if (state.mobileLibraryFilter === "artists") resolveMobileArtistArtwork();
     };
   });
   document.querySelector("[data-mobile-search]")?.addEventListener("click", focusMobileSearch);
@@ -2299,6 +2338,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
   const playbackQueueItems = Array.isArray(queueItems) && queueItems.length ? queueItems : items;
 
   function makeLibraryBtn(idx, status) {
+    if (items[idx].remote_device_id) return `<span class="track-library-btn downloaded" aria-label="Downloaded on connected device" title="Downloaded on connected device"><i class="bi bi-arrow-down-circle-fill"></i></span>`;
     const isDownloaded = !!(status && status.in_library);
     const isBusy = !!(status && status.library_requested);
     const error = !isDownloaded && !isBusy ? libraryDownloadErrors.get(trackKey(items[idx])) : "";
@@ -2405,7 +2445,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
   // Phase 2: single batch request → update download icons in-place.
   const trackIdxs = items.reduce((acc, item, idx) => {
-    if (isTrackItem(item) && !item.offline) acc.push(idx);
+    if (isTrackItem(item) && !item.offline && !item.remote_device_id) acc.push(idx);
     return acc;
   }, []);
   if (!trackIdxs.length) return;
@@ -6777,7 +6817,8 @@ function prefetchNextVideos() {
 }
 
 async function recoverLibraryDownload(payload, requestId, options = {}) {
-  for (let attempt = 0; attempt < 12; attempt++) {
+  const maxAttempts = Math.max(1, Number(options.maxAttempts) || 12);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (options.isCancelled?.()) return null;
     const status = await api("/api/library/status", {method:"POST",body:JSON.stringify(payload),timeout:5000}).catch(() => null);
     if (status?.in_library && (!options.downloadOnly || albumDownloadSatisfied(status))) return {ok:true,action:"saved",...status};
@@ -6786,7 +6827,7 @@ async function recoverLibraryDownload(payload, requestId, options = {}) {
       const job = (data.jobs || []).find(item => item.id === status.active_job_id);
       return {ok:true,action:job?.client_request_id === requestId ? "started" : "queued",job,...status};
     }
-    if (attempt < 11) await new Promise(resolve => setTimeout(resolve,1000));
+    if (attempt + 1 < maxAttempts) await new Promise(resolve => setTimeout(resolve,1000));
   }
   return null;
 }
@@ -6805,17 +6846,28 @@ async function toggleTrackLibrary(track, button, refresh, options = {}) {
   button.innerHTML = progressButtonMarkup({ progress: 0 });
   const payload = options.payload || serviceDownloadPayload(track, "download");
   const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  const sendToggle = () => api("/api/library/toggle", {
+    method:"POST",timeout:30000,
+    body:JSON.stringify({...payload,client_request_id:requestId,...(ensureDownload ? {ensure_download:true} : {})}),
+  });
   try {
     let result;
     try {
-      result = await api("/api/library/toggle", {
-        method:"POST",timeout:30000,
-        body:JSON.stringify({...payload,client_request_id:requestId,...(ensureDownload ? {ensure_download:true} : {})}),
-      });
+      result = await sendToggle();
     } catch (error) {
       if (!ensureDownload || error.code !== "REQUEST_TIMEOUT" && error.name !== "TypeError") throw error;
-      result = await recoverLibraryDownload(payload,requestId,options);
-      if (!result) throw error;
+      result = await recoverLibraryDownload(payload,requestId,{...options,maxAttempts:1});
+      if (!result) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (options.isCancelled?.() || button.dataset.cancelled === "1") return {ok:false,cancelled:true};
+        try {
+          result = await sendToggle();
+        } catch (retryError) {
+          if (retryError.code !== "REQUEST_TIMEOUT" && retryError.name !== "TypeError") throw retryError;
+          result = await recoverLibraryDownload(payload,requestId,{...options,maxAttempts:1});
+          if (!result) throw retryError;
+        }
+      }
     }
     if (result.ok === false) throw new Error(result.error || "Download failed");
     options.onJob?.(result);
@@ -6991,7 +7043,14 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
       const data = await api("/api/service/downloads");
       job = data.jobs.find(j => j.id === existingJobId);
     } else {
-      job = await api("/api/service/download", { method: "POST", body: JSON.stringify(payload) });
+      try {
+        job = await api("/api/service/download", { method: "POST", body: JSON.stringify(payload) });
+      } catch (error) {
+        if (error.code !== "REQUEST_TIMEOUT") throw error;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (requestId !== state.playbackRequestId) return;
+        job = await api("/api/service/download", { method: "POST", body: JSON.stringify(payload) });
+      }
     }
     
     if (requestId !== state.playbackRequestId) return;
@@ -9276,7 +9335,8 @@ async function loadPlaylists() {
       }, 5000);
     }
   try {
-    const playlists = await api("/api/playlists");
+    let playlists = await api("/api/playlists");
+    playlists = window.MindinguflacRemote?.offlinePlaylists(playlists) || playlists;
     if (JSON.stringify(state.playlists) !== JSON.stringify(playlists)) {
       state.playlists = playlists;
       renderSidebarPlaylists();
@@ -9457,6 +9517,8 @@ function renderPlaylistPage(playlist) {
 }
 
 function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
+  const localOffline = pl.id === OFFLINE_PLAYLIST_ID ? pl : null;
+  if (localOffline && window.MindinguflacRemote) pl = window.MindinguflacRemote.offlineView(pl);
   const duration = formatDuration(pl.tracks);
   const playlistOrigin = String(pl.playlist_origin || "").trim().toLowerCase();
   const isAlbumPlaylist = playlistOrigin === "album";
@@ -9501,6 +9563,7 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
         </div>
       </div>
 
+      ${localOffline ? window.MindinguflacRemote?.offlineTabs() || "" : ""}
       <div class="track-list-header" style="margin-top: 24px">
         <div>#</div>
         <div>Title</div>
@@ -9519,6 +9582,7 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
     </div>
   `;
 
+  if (localOffline) window.MindinguflacRemote?.bindOfflineTabs(localOffline);
   if (pl.tracks.length) {
     renderTrackList(
       "playlistTrackList",
@@ -9527,7 +9591,7 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
       playlistPlaybackContext || { kind: "playlist", id: pl.id, name: pl.name, allow_playlist_continuation: false }
     );
   } else {
-    $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">No songs yet — click the status icon while a track is playing to add it.</div>`;
+    $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">${localOffline ? esc(pl.offline_message || "No songs downloaded on this device.") : "No songs yet — click the status icon while a track is playing to add it."}</div>`;
   }
   if (isAlbumPlaylist && heroArtist) {
     const artistBtn = $("playlistHeroArtistLink");

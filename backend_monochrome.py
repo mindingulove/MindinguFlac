@@ -222,6 +222,19 @@ def _select_matching_item(items: list[dict], title: str, artist: str, isrc: str,
     return min(candidates)[2]
 
 
+def _alternate_recording_reason(items: list[dict], title: str, artist: str) -> str:
+    """Explain when search found the song name only as a different take."""
+    base = _split_version(title)[0]
+    alternate = next((item for item in items
+        if artist and _same_artist(artist, _artists(item))
+        and _split_version(item.get("title") or "")[0] == base
+        and _split_version(item.get("title") or "")[1]), None)
+    if not alternate:
+        return ""
+    found = str(alternate.get("title") or "alternate version").strip()
+    return f"only {found} was found; it is a different recording, so it was skipped"
+
+
 # Words that say what kind of version a track is, not which one. Two version
 # labels only describe the same recording when they share a *distinctive*
 # word, typically a remixer or editor name ("Todd Terry").
@@ -589,7 +602,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     match = _select_compilation_album_item(items, title, artist, isrc, duration_ms)
             if match is None:
                 detail = (f"search failed ({'; '.join(search_errors)})" if search_errors
-                          else refused or "no exact ISRC or title/artist match")
+                          else refused or _alternate_recording_reason(items, title, artist)
+                          or "no exact ISRC or title/artist match")
                 failures.append(f"{api_base}: {detail}")
                 continue
 

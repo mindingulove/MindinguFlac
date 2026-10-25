@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 function setup(android=true) {
- const elements=new Map(),calls=[],localCalls=[],statusCalls=[],messages=[],listeners=[];
+ const elements=new Map(),calls=[],localCalls=[],statusCalls=[],nativeVolumeCalls=[],messages=[],listeners=[];
  function element(id='') {const classes=new Set();return {id,hidden:true,style:{},dataset:{},value:0,textContent:'',innerHTML:'',disabled:false,
    paused:false,volume:.4,duration:100,currentTime:10,onclick:()=>localCalls.push(id),oninput:()=>localCalls.push(id),
    classList:{toggle:(k,v)=>v?classes.add(k):classes.delete(k),remove:k=>classes.delete(k)},
@@ -13,21 +13,22 @@ function setup(android=true) {
  const state={currentTrack:original,queue:[original],originalQueue:[original],queueIndex:0,queueContext:{title:'Local album'},
    nativeAudio:{active:true,playing:true},nativeAudioStart:null,isShuffle:false,isRepeat:false,playbackRequestId:1,activeJobId:'local-stream',
    videoFetch:{},lyrics:{open:false},prefetchJobs:new Map()};
- const context=vm.createContext({URL,URLSearchParams,API_BASE:'',window:{location:{origin:'http://127.0.0.1:12345'},addEventListener(){}},document:{body:{appendChild(el){elements.set(el.id,el);},classList:{toggle(){}}},
-   createElement:()=>element(),querySelector:()=>element(),addEventListener:(...args)=>listeners.push(args)},state,$,IS_ANDROID:android,console,setInterval:()=>1,
-   renderDetailsSidebar(){},showToast:msg=>messages.push(msg),trackIdentitySnapshot:t=>({...t}),playableQueueItem:t=>!!t?.title,trackKey:t=>t?.spotify_id||t?.title||'',
+ const context=vm.createContext({URL,URLSearchParams,API_BASE:'',window:{MindinguflacAndroid:{setRemotePlayback:(...args)=>nativeVolumeCalls.push(args)},location:{origin:'http://127.0.0.1:12345'},addEventListener(){}},document:{body:{appendChild(el){elements.set(el.id,el);},classList:{toggle(){}}},
+   createElement:()=>element(),querySelector:()=>element(),addEventListener:(...args)=>listeners.push(args)},state,$,IS_ANDROID:android,console,setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,
+   renderSidebarPlaylists(){},_renderPlaylistContent(){},renderDetailsSidebar(){},showToast:msg=>messages.push(msg),trackIdentitySnapshot:t=>({...t}),playableQueueItem:t=>!!t?.title,trackKey:t=>t?.spotify_id||t?.title||'',
    absoluteUrl:url=>url?new URL(url,'http://127.0.0.1:12345').href:'',esc:s=>s,qualityLabelForTrack:()=> 'HI-RES',setPlayerStatusIcon:(mode,pct)=>statusCalls.push(['status',mode,pct]),renderSideVideoButton(){},openConnectPanel:()=>localCalls.push('open-devices'),formatTime:n=>String(n),knownTrackDurationSeconds:()=>100,bindEntityLinks(){},renderSideCover(){},albumLinkHtml:(t)=>t.title,artistLinkHtml:t=>t.artist||'',
    syncActiveTrackRows(){},updateSidebarNextQueue(){},refreshQueuePanel(){},updateLyricsPosition(){},resetSeekUi(){},
    pushAndroidNowPlaying(){},clearMediaSession(){},loadLyricsForTrack:async()=>{},_refreshConnectPanel:async()=>{},cancelAllPrefetchJobs:()=>localCalls.push('cancel-prefetch'),
    stopNativeAudio:async()=>{state.nativeAudio.active=false;state.nativeAudio.playing=false;localCalls.push('stop-native');},
    prepareSelectedTrackUi:()=>localCalls.push('restore-paused'),
    prefetchOneTrack:async()=>localCalls.push('prefetch'),prefetchNextTracks:async()=>localCalls.push('prefetch-next'),prefetchNextVideos:()=>localCalls.push('prefetch-video'),_triggerVideoFetchForTrack:()=>localCalls.push('trigger-video'),fetchVideoForTrack:async()=>localCalls.push('video'),startServiceDownload:async()=>localCalls.push('download'),playFromLibraryPath:async()=>localCalls.push('library-play'),startNativeAudio:async()=>localCalls.push('native-start'),selectMusicItem:(...args)=>{localCalls.push(['select',...args]);return Promise.resolve();},playQueueOffset:d=>localCalls.push(['offset',d]),
-   seekBy:n=>localCalls.push(['seek',n]),setPlayerVolume:n=>localCalls.push(['volume',n]),reorderQueueTrack:()=>true,
+   seekBy:n=>localCalls.push(['seek',n]),changeVolumeBy:n=>localCalls.push(['adjust-volume',n]),syncVolumeBar:()=>localCalls.push('sync-local-volume'),setPlayerVolume:n=>localCalls.push(['volume',n]),reorderQueueTrack:()=>true,
    appendTracksToPlaybackQueue:()=>1,currentPlaybackSeconds:()=>10,audiblePlaybackSeconds:()=>10,isPlaybackVisiblyActive:()=>true,
    playbackTransportBusy:()=>false,persistPlaybackSnapshot(){},syncPlayPauseButton(){},
    api:async(path,options={})=>{
     const body=options.body?JSON.parse(options.body):{};calls.push({path,body});
     if(path==='/api/remote/connect') { if(context.failConnect)throw Error('No player acknowledgement');return {ok:true,session:{id:'session'},snapshot:{...remote}}; }
+    if(path==='/api/remote/offline')return {ok:true,route:{device_id:'mac'},tracks:[{title:'Mac download',spotify_id:'mac-download',album_spotify_id:'a'.repeat(22)}]};
     if(path==='/api/remote/status')return context.failPoll?{ok:false,error:'Disconnected'}:{ok:true,route:{device_id:'mac'},session:{id:'session'},snapshot:{...remote}};
     if(path==='/api/remote/command') {if(body.action==='pause')remote.playing=false;if(body.action==='volume')remote.volume=body.payload.volume;return {ok:true,session:{id:'session'},snapshot:{...remote}};}
     if(path.startsWith('/api/music/album_tracks?'))return {artwork_url:'https://art.example/exact-album.jpg'};
@@ -36,7 +37,7 @@ function setup(android=true) {
     return {ok:true};
    }});
  vm.runInContext(fs.readFileSync('static/remote_playback.js','utf8'),context);
- return {context,remote,state,elements,calls,localCalls,statusCalls,messages,$,api:context.window.MindinguflacRemote};
+ return {context,remote,state,elements,calls,localCalls,statusCalls,nativeVolumeCalls,messages,$,api:context.window.MindinguflacRemote};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
 (async()=>{
@@ -53,6 +54,7 @@ const tick=()=>new Promise(r=>setImmediate(r));
  const commandCount=s.calls.filter(c=>c.path==='/api/remote/command').length;
  s.$('remotePlaybackBanner').onclick();
  assert.ok(s.localCalls.includes('open-devices'));assert.ok(s.api.isController());
+ assert.equal(typeof s.api.backgroundHeartbeat,'function');
  assert.equal(s.$('remotePlaybackBanner').children.length,1,'banner contains only its clickable label');
  const count=s.localCalls.length;
  for(const name of ['prefetchOneTrack','prefetchNextTracks','prefetchNextVideos','_triggerVideoFetchForTrack','fetchVideoForTrack','startServiceDownload','playFromLibraryPath','startNativeAudio']) await s.context[name]();
@@ -68,12 +70,29 @@ const tick=()=>new Promise(r=>setImmediate(r));
  assert.equal(s.state.currentTrack.artwork_url,'/api/image?url=https%3A%2F%2Fart.example%2Fexact-album.jpg');
  assert.ok(s.calls.some(c=>c.path.includes('album_tracks?spotify_id='+albumId)));
  assert.ok(s.calls.every(c=>!/^\/api\/(service\/start|video\/fetch)/.test(c.path)));
+ const volumeStart=s.calls.length,localStart=s.localCalls.length;
+ const pendingVolume=s.api.setVolume(.4);s.api.adjustVolumeBy(.05);s.api.adjustVolumeBy(.05);await pendingVolume;
+ assert.ok(Math.abs(s.remote.volume-.5)<.0001,'rapid volume keys accumulate against the pending target');
+ assert.equal(s.localCalls.length,localStart,'remote volume never changes local phone audio');
+ assert.deepEqual(s.calls.slice(volumeStart).filter(c=>c.path==='/api/remote/command').map(c=>c.body.payload.volume),[.4,.5]);
+ assert.deepEqual(s.nativeVolumeCalls.at(-1),[true,50]);
+ assert.equal(s.$('remoteVolumeHudDevice').textContent,'My Mac');assert.equal(s.$('remoteVolumeHudPercent').textContent,'50%');assert.equal(s.$('remoteVolumeHudBar').style.width,'50%');
+ const playlists=s.api.offlinePlaylists([]);assert.equal(playlists[0].id,'__offline__');assert.equal(playlists[0].remote_placeholder,true);
+ assert.match(s.api.offlineTabs(),/This phone/);assert.match(s.api.offlineTabs(),/Connected device/);assert.match(s.api.offlineTabs(),/aria-selected=\"true\"/);assert.match(s.api.offlineTabs(),/aria-selected=\"false\"/);
+ const remoteTab={dataset:{offlineDevice:'remote'}};
+ s.$('pageContent').querySelectorAll=()=>[remoteTab];
+ s.api.bindOfflineTabs(playlists[0]);remoteTab.onclick();await s.api.fetchOffline();await tick();
+ const remoteOffline=s.api.offlineView(playlists[0]);assert.equal(remoteOffline.tracks[0].title,'Mac download');
+ assert.equal(remoteOffline.tracks[0].remote_device_id,'mac');assert.equal(remoteOffline.tracks[0].library_path,undefined);
  s.context.failPoll=true;await s.api.poll();
  assert.ok(s.api.isController(),'disconnect does not silently route transport back to local playback');
  const failedCount=s.localCalls.length;await s.$('playPause').onclick();assert.equal(s.localCalls.length,failedCount);
  await s.api.disconnect();assert.equal(s.state.currentTrack.title,'Phone song');assert.equal(s.state.pendingResumePosition,10);
  assert.ok(s.state.restoredPlaybackPending);assert.ok(s.localCalls.includes('restore-paused'));
- assert.equal(s.api.isController(),false);assert.equal(s.$('remotePlaybackBanner').hidden,true);
+ assert.equal(s.api.isController(),false);assert.equal(s.nativeVolumeCalls.at(-1)[0],false);
+ assert.equal(s.api.offlineTabs(),'');assert.equal(s.api.offlinePlaylists(playlists).length,0);
+ const offlineSelectStart=s.localCalls.length;await s.context.selectMusicItem({title:'Remote file',remote_device_id:'mac'});assert.equal(s.localCalls.length,offlineSelectStart,'disconnected remote files cannot start on the phone');
+ await s.context.changeVolumeBy(.1);assert.deepEqual(s.localCalls.at(-1),['adjust-volume',.1],'local volume is restored after selecting This phone');assert.equal(s.$('remotePlaybackBanner').hidden,true);
  s.context.failConnect=true;await assert.rejects(s.api.connect({device_id:'mac',name:'My Mac'}),/acknowledgement/);
  assert.ok(s.api.isController());await s.api.disconnect();
  const receiver=setup(false);await receiver.api.initialize();

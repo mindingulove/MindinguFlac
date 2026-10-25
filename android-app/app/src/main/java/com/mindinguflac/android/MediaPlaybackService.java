@@ -14,10 +14,14 @@ import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
+import android.media.VolumeProvider;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 import android.view.KeyEvent;
 
@@ -26,6 +30,7 @@ import org.json.JSONObject;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -58,8 +63,19 @@ public final class MediaPlaybackService extends Service {
     private static final int NOTIFICATION_ID = 0x4D46;
 
     private final ExecutorService artworkExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService heartbeatExecutor = Executors.newSingleThreadExecutor();
+    private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
+    private final AtomicBoolean heartbeatInFlight = new AtomicBoolean(false);
+    private final Runnable heartbeat = new Runnable() {
+        @Override public void run() {
+            if (!remotePlayback) return;
+            renewRemoteSession();
+            heartbeatHandler.postDelayed(this, 8000);
+        }
+    };
     private MediaSession session;
     private AudioManager audioManager;
+    private PowerManager.WakeLock remoteWakeLock;
     private AudioFocusRequest focusRequest;
     private boolean hasStartedForeground;
 
@@ -72,6 +88,8 @@ public final class MediaPlaybackService extends Service {
     private long durationMs;
     private long positionMs;
     private boolean playing;
+    private boolean remotePlayback;
+    private VolumeProvider remoteVolume;
 
     private String loadedArtworkUrl = "";
     private Bitmap loadedArtwork;
@@ -168,8 +186,37 @@ public final class MediaPlaybackService extends Service {
             durationMs = value.optLong("duration_ms", durationMs);
             positionMs = value.optLong("position_ms", positionMs);
             playing = value.optBoolean("playing", playing);
+            boolean remote = value.optBoolean("remote", remotePlayback);
+            int volume = Math.max(0, Math.min(100, value.optInt("volume", remoteVolume == null ? 100 : remoteVolume.getCurrentVolume())));
+            if (remote && remoteVolume == null) {
+                remoteVolume = new VolumeProvider(VolumeProvider.VOLUME_CONTROL_ABSOLUTE, 100, volume) {
+                    @Override public void onAdjustVolume(int direction) {
+                        if (direction == AudioManager.ADJUST_RAISE) MediaCommandRelay.adjustVolume(0.05f);
+                        else if (direction == AudioManager.ADJUST_LOWER) MediaCommandRelay.adjustVolume(-0.05f);
+                    }
+                    @Override public void onSetVolumeTo(int requested) {
+                        MediaCommandRelay.setVolume(Math.max(0, Math.min(100, requested)) / 100f);
+                    }
+                };
+                session.setPlaybackToRemote(remoteVolume);
+                releaseAudioFocus();
+            } else if (!remote && remoteVolume != null) {
+                session.setPlaybackToLocal(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
+                remoteVolume = null;
+            }
+            remotePlayback = remote;
+            if (remoteVolume != null) remoteVolume.setCurrentVolume(volume);
             apiToken = value.optString("token", apiToken);
             apiOrigin = value.optString("api_origin", apiOrigin);
+            if (remote) {
+                acquireRemoteWakeLock();
+                heartbeatHandler.removeCallbacks(heartbeat);
+                heartbeatHandler.post(heartbeat);
+            } else {
+                heartbeatHandler.removeCallbacks(heartbeat);
+                releaseRemoteWakeLock();
+            }
             String url = value.optString("artwork_url", artworkUrl);
             if (!url.equals(artworkUrl)) {
                 artworkUrl = url;
@@ -178,9 +225,50 @@ public final class MediaPlaybackService extends Service {
         } catch (Exception error) {
             Log.w(TAG, "Ignoring malformed now-playing state: " + error);
         }
-        if (playing) {
+        if (playing && !remotePlayback) {
             holdAudioFocus();
         }
+    }
+
+    /** Refresh the receiver lease without relying on background WebView timers. */
+    private void renewRemoteSession() {
+        final String origin = apiOrigin;
+        final String token = apiToken;
+        if (origin == null || origin.isEmpty() || token == null || token.isEmpty()
+                || !heartbeatInFlight.compareAndSet(false, true)) return;
+        heartbeatExecutor.execute(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL endpoint = new URL(origin + "/api/remote/status");
+                connection = (HttpURLConnection) endpoint.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(7000);
+                connection.setRequestProperty("X-Mindinguflac-Token", token);
+                connection.setRequestProperty("Cache-Control", "no-cache");
+                int status = connection.getResponseCode();
+                if (status != 200) Log.w(TAG, "Remote keepalive returned HTTP " + status);
+            } catch (Exception error) {
+                Log.w(TAG, "Remote keepalive failed: " + error.getClass().getSimpleName());
+            } finally {
+                if (connection != null) connection.disconnect();
+                heartbeatInFlight.set(false);
+            }
+        });
+    }
+
+    private void acquireRemoteWakeLock() {
+        if (remoteWakeLock != null && remoteWakeLock.isHeld()) return;
+        PowerManager power = getSystemService(PowerManager.class);
+        if (power == null) return;
+        remoteWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Mindinguflac:RemoteControl");
+        remoteWakeLock.setReferenceCounted(false);
+        remoteWakeLock.acquire();
+    }
+
+    private void releaseRemoteWakeLock() {
+        if (remoteWakeLock != null && remoteWakeLock.isHeld()) remoteWakeLock.release();
+        remoteWakeLock = null;
     }
 
     private void publish() {
@@ -391,12 +479,15 @@ public final class MediaPlaybackService extends Service {
 
     @Override
     public void onDestroy() {
+        heartbeatHandler.removeCallbacks(heartbeat);
+        releaseRemoteWakeLock();
         releaseAudioFocus();
         if (session != null) {
             session.setActive(false);
             session.release();
         }
         artworkExecutor.shutdownNow();
+        heartbeatExecutor.shutdownNow();
         super.onDestroy();
     }
 

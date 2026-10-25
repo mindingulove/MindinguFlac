@@ -26,6 +26,10 @@ public final class MediaCommandRelay {
         void onMediaNext();
 
         void onMediaStop();
+
+        void onMediaAdjustVolume(float delta);
+
+        void onMediaSetVolume(float volume);
     }
 
     private static volatile Listener listener;
@@ -59,4 +63,14 @@ public final class MediaCommandRelay {
         Listener current = listener;
         if (current != null) current.onMediaStop();
     }
+    static void adjustVolume(float delta) {
+        Listener current = listener;
+        if (current != null) current.onMediaAdjustVolume(delta);
+    }
+
+    static void setVolume(float volume) {
+        Listener current = listener;
+        if (current != null) current.onMediaSetVolume(volume);
+    }
+
 }

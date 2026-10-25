@@ -60,6 +60,16 @@ class ReceiverTests(unittest.TestCase):
         self.assertIsNone(self.r.bridge({'snapshot':{},'closing':True})['session'])
         self.assertFalse(self.r.pending)
 
+    def test_offline_inventory_requires_current_owner_and_removes_device_paths(self):
+        sid=self.connect()
+        with patch.object(rp,'receiver',self.r),patch.object(rp,'offline_catalog',return_value={'tracks':[{'title':'Downloaded','library_path':'/private/song.flac','artwork_url':'/api/library/artwork?path=/private/song.flac','offline':True,'isrc':'TEST123'}]}) as provider:
+            for peer,session in [('other',sid),('phone','stale')]:
+                with self.assertRaises(ValueError):rp.paired_request(peer,'Phone','/remote/offline',{'session_id':session})
+            provider.assert_not_called()
+            result=rp.paired_request('phone','Phone','/remote/offline',{'session_id':sid})
+        self.assertEqual(result['tracks'][0]['isrc'],'TEST123')
+        self.assertNotIn('/private',json.dumps(result));self.assertNotIn('library_path',result['tracks'][0])
+
     def test_timeout_is_not_a_successful_connection(self):
         with patch.object(rp,'COMMAND_SECONDS',.01):
             with self.assertRaises(TimeoutError):self.r.connect('phone','Phone')

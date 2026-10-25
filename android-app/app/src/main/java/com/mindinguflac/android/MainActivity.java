@@ -20,6 +20,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.window.OnBackInvokedDispatcher;
 import android.view.View;
+import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.CookieManager;
@@ -53,6 +54,16 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     private View loadingView;
     private String apiToken;
     private String backendOrigin;
+    private volatile boolean remotePlayback;
+    private final Handler remoteHeartbeatHandler = new Handler(Looper.getMainLooper());
+    private final Runnable remoteHeartbeat = new Runnable() {
+        @Override public void run() {
+            if (!remotePlayback || webView == null) return;
+            webView.evaluateJavascript("(function(){var r=window.MindinguflacRemote;"
+                    + "if(r)r.backgroundHeartbeat();})()", null);
+            remoteHeartbeatHandler.postDelayed(this, 2500);
+        }
+    };
     private String pendingPairingUrl;
     private WifiManager.MulticastLock pairingMulticastLock;
 
@@ -263,6 +274,39 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     }
 
     @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int key = event.getKeyCode();
+        if (remotePlayback && (key == KeyEvent.KEYCODE_VOLUME_UP || key == KeyEvent.KEYCODE_VOLUME_DOWN
+                || key == KeyEvent.KEYCODE_VOLUME_MUTE)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (key == KeyEvent.KEYCODE_VOLUME_MUTE) clickPlayerControl("muteToggle");
+                else onMediaAdjustVolume(key == KeyEvent.KEYCODE_VOLUME_UP ? 0.05f : -0.05f);
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public void onMediaAdjustVolume(float delta) {
+        remoteVolumeScript("adjustVolumeBy", delta);
+    }
+
+    @Override
+    public void onMediaSetVolume(float volume) {
+        remoteVolumeScript("setVolume", volume);
+    }
+
+    private void remoteVolumeScript(String method, float value) {
+        if (!Float.isFinite(value)) return;
+        runOnUiThread(() -> {
+            if (webView == null) return;
+            webView.evaluateJavascript("(function(){var r=window.MindinguflacRemote;"
+                    + "if(r&&r.isController())r." + method + "(" + Float.toString(value) + ");})()", null);
+        });
+    }
+
+    @Override
     public void onMediaPlayPause() {
         clickPlayerControl("playPause");
     }
@@ -391,7 +435,9 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             pairingMulticastLock.release();
             pairingMulticastLock = null;
         }
+        remoteHeartbeatHandler.removeCallbacks(remoteHeartbeat);
         if (isFinishing()) {
+            remotePlayback = false;
             MediaPlaybackService.clear(getApplicationContext());
         }
         if (isFinishing() && Python.isStarted()) {
@@ -608,6 +654,24 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
          * Mirror the page's now-playing state into the media notification.
          * Called whenever the track or the play/pause state changes.
          */
+        @JavascriptInterface
+        public void setRemotePlayback(boolean enabled, int volume) {
+            remotePlayback = enabled;
+            runOnUiThread(() -> {
+                remoteHeartbeatHandler.removeCallbacks(remoteHeartbeat);
+                if (enabled) remoteHeartbeatHandler.post(remoteHeartbeat);
+                setVolumeControlStream(enabled ? AudioManager.USE_DEFAULT_STREAM_TYPE : AudioManager.STREAM_MUSIC);
+                try {
+                    org.json.JSONObject state = new org.json.JSONObject();
+                    state.put("remote", enabled);
+                    state.put("volume", Math.max(0, Math.min(100, volume)));
+                    state.put("token", apiToken == null ? "" : apiToken);
+                    state.put("api_origin", backendOrigin == null ? "" : backendOrigin);
+                    MediaPlaybackService.update(getApplicationContext(), state.toString());
+                } catch (Throwable ignored) {}
+            });
+        }
+
         @JavascriptInterface
         public void updateNowPlaying(String json) {
             try {

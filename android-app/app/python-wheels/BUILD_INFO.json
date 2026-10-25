@@ -84,12 +84,12 @@
     "runtime_verification": "Pending Android device runtime; wheel hash and ELF architecture verified"
   },
   "mornye_apk_verification": {
-    "variant": "debug",
-    "sha256": "e5419df2855ba2aa91cd2e24eb2d73024b5daf16d26d72a3295df0e9ec540b53",
+    "variant": "release",
+    "sha256": "c76d08ef0123812e4e4811235c55b9ba6e6015f4e27ae8492757b0cea3d2fe5e",
     "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment",
-    "device_runtime": "Build 23 installed successfully over the existing app on Nothing A065 (047bac9e); versionName 1.4, versionCode 23 verified. MainActivity launched successfully and process 2329 was running. Remote artwork and share gesture need physical runtime verification; device disconnected from ADB after startup.",
+    "device_runtime": "Build 24 release APK passes signature, alignment, ZIP and package inspection. Background keepalive was not device-tested because no Android device was connected during this build.",
     "versionName": "1.4",
-    "versionCode": 23
+    "versionCode": 24
   },
   "lyrics_audio_alignment": {
     "engine": "whisper.cpp 1.9.5 CPU, cross-attention DTW word timing",

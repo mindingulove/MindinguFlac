@@ -13,8 +13,8 @@ import uuid
 import urllib.parse
 import ipaddress
 
-LEASE_SECONDS = 15
-PLAYER_SECONDS = 6
+LEASE_SECONDS = 30
+PLAYER_SECONDS = 18
 COMMAND_SECONDS = 7
 MAX_QUEUE = 2000
 _ACTIONS = {'connect', 'play', 'pause', 'next', 'previous', 'select', 'seek',
@@ -235,11 +235,22 @@ def local_bridge(body):
     return receiver.bridge(body)
 
 
+def offline_catalog():
+    # Read the same completed-file inventory as this device's Offline playlist.
+    from app import service_downloader
+    from offline_playlist import build_offline_playlist
+    return build_offline_playlist(service_downloader) or {'tracks': []}
+
+
 def paired_request(peer_id, name, path, body):
     if path == '/remote/connect':
         return receiver.connect(peer_id, name)
     if path == '/remote/status':
         return receiver.status(peer_id, body.get('session_id'))
+    if path == '/remote/offline':
+        receiver.status(peer_id, body.get('session_id'))
+        catalog = offline_catalog()
+        return {'ok': True, 'tracks': [track(item) for item in catalog.get('tracks', [])]}
     if path == '/remote/command':
         return receiver.command(peer_id, body.get('session_id'), str(body.get('action') or ''), body.get('payload') or {})
     if path == '/remote/disconnect':
@@ -283,7 +294,7 @@ def controller_request(action, body=None):
         return {'ok': True, 'route': None}
     if not route:
         return {'ok': True, 'route': None}
-    if action == 'status':
+    if action in ('status', 'offline'):
         with client.lock:
             pair = dict(client.state.get('pair') or {})
         if pair.get('device_id') != route['device_id']:
@@ -292,13 +303,13 @@ def controller_request(action, body=None):
                     _controller = None
                     _controller_generation += 1
             return {'ok': True, 'route': None}
-    if action != 'status':
+    if action not in ('status', 'offline'):
         # Project before sending anything over the LAN, including offline
         # tracks selected on the phone. Device-local paths are not portable.
         body = {'action': str(body.get('action') or ''),
                 'payload': command_payload(str(body.get('action') or ''), body.get('payload') or {})}
     try:
-        result = client.remote_request('/remote/status' if action == 'status' else '/remote/command',
+        result = client.remote_request('/remote/' + action if action in ('status', 'offline') else '/remote/command',
                                        {'session_id': route['session_id'], 'action': body.get('action'),
                                         'payload': body.get('payload') or {}}, route['device_id'])
         return {**result, 'route': route}

@@ -4,7 +4,7 @@ A high-performance, private music meta-search and personal streaming platform. M
 
 Built with a Python backend and a Vanilla JS/CSS frontend, it functions as a local web server, a native desktop application for macOS and Windows, and an Android app that embeds the same Python backend on the phone (see [android-app/README.md](android-app/README.md)).
 
-Mindinguflac uses SpotiFLAC `3.9.0` (`a471fdc`) through its extension-first provider API. SpotiFLAC no longer bundles download providers; install the provider extensions you trust under `~/.spotiflac/extensions`. The legacy service selections in Mindinguflac map to their installed extension IDs automatically.
+Mindinguflac 1.4 embeds [Mornye](https://github.com/mornyeapp/Mornye-Python) locally on desktop and Android. It uses the versioned REST API for supported operations and Mornye artist-profile and lyrics functions where available, with local compatibility fallbacks. Provider downloads use installed extensions; Monochrome, YouTube and torrent engines remain independent.
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md).
 

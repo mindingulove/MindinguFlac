@@ -43,6 +43,7 @@ def _canonical_track_signature(item: dict) -> str:
     if not isinstance(item, dict):
         return ""
     artist = _normalize_text(item.get("artist") or item.get("metadata", {}).get("artist") or "")
+    artist = re.split(r"\s*,\s*|\s+&\s+|\s+(?:feat(?:uring)?|ft)\.?\s+|\s+x\s+", artist, maxsplit=1, flags=re.I)[0]
     title = _normalize_text(item.get("title") or item.get("name") or item.get("metadata", {}).get("title") or "")
     title = re.sub(r"\s*[-–—]?\s*(remaster(ed)?|remix|live|radio edit|edit|version|mono|stereo|deluxe|anniversary|expanded edition)(?:\s+\d{4})?\s*$", "", title, flags=re.I).strip()
     title = re.sub(r"\s*\((remaster(ed)?|remix|live|radio edit|edit|version|mono|stereo|deluxe|anniversary|expanded edition)(?:\s+\d{4})?\)\s*$", "", title, flags=re.I).strip()
@@ -69,6 +70,8 @@ def _candidate_to_item(item: dict, source: str = "local_cache") -> dict:
         "source": source,
         "artist_id": item.get("artist_id") or metadata.get("artist_id") or "",
         "spotify_id": item.get("spotify_id") or metadata.get("spotify_id") or "",
+        "spotify_url": item.get("spotify_url") or metadata.get("spotify_url") or "",
+        "isrc": item.get("isrc") or metadata.get("isrc") or "",
     }
     if not candidate["track_key"]:
         candidate["track_key"] = _track_key(candidate)
@@ -175,7 +178,7 @@ def _expand_catalog_items() -> list[dict]:
     cfg = load_config(app_data_dir() / "config.json")
     catalog = discover_catalog(cfg)
     out: list[dict] = []
-    for key in ("personal_tracks", "recent_tracks", "top_tracks", "artists", "albums"):
+    for key in ("personal_tracks", "recent_tracks", "top_tracks", "albums"):
         for item in catalog.get(key, []) or []:
             if not isinstance(item, dict):
                 continue
@@ -183,7 +186,7 @@ def _expand_catalog_items() -> list[dict]:
                 for track in item.get("tracks") or []:
                     if isinstance(track, dict):
                         out.append(_candidate_to_item(track, source="metadata"))
-            else:
+            elif key != "albums" and item.get("type") not in {"artist", "album"}:
                 out.append(_candidate_to_item(item, source="local_cache"))
     for item in db.get_known_tracks(limit=4000):
         if isinstance(item, dict):
@@ -263,7 +266,7 @@ def score_recommendation_candidate(candidate: dict, seed_profile: dict, taste_pr
 def _hard_excluded(candidate: dict, playlist_keys: set[str], playlist_signatures: set[str], queue_keys: set[str], exclude_track_keys: set[str], session_id: str | None) -> bool:
     key = candidate.get("track_key") or _track_key(candidate)
     signature = candidate.get("canonical_key") or _canonical_track_signature(candidate)
-    if not key:
+    if not key or not _normalize_text(candidate.get("title")) or not _normalize_text(candidate.get("artist")):
         return True
     if key in playlist_keys or key in queue_keys or key in exclude_track_keys:
         return True
@@ -391,6 +394,10 @@ def generate_playlist_recommendations(
             "score": float(candidate.get("score") or 0.0),
             "reason": _candidate_reason(candidate, seed_profile),
             "source": candidate.get("source", "local_cache"),
+            "spotify_id": candidate.get("spotify_id") or "",
+            "spotify_url": candidate.get("spotify_url") or "",
+            "isrc": candidate.get("isrc") or "",
+            "artist_id": candidate.get("artist_id") or "",
             "already_in_playlist": False,
             "already_in_queue": False,
         }

@@ -2681,12 +2681,12 @@ class Handler(BaseHTTPRequestHandler):
                 settings_dict["native_now_playing_active"] = bool(_np_update_fn)
                 self.send_json(settings_dict)
                 return
-            if path == "/api/remote/status":
+            if path in ("/api/remote/status", "/api/remote/offline"):
                 if not self.trusted_local_origin():
                     self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
                     return
                 import remote_playback
-                self.send_json(remote_playback.controller_request("status"))
+                self.send_json(remote_playback.controller_request(path.rsplit("/", 1)[-1]))
                 return
             if path == "/api/pairing/status":
                 import device_sync
@@ -3277,6 +3277,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(artist_about(body.get("artist_id"), body.get("name")))
                 except Exception as _e:
                     self.send_json({"error": str(_e), "monthly_listeners": 0, "followers": 0, "biography": "", "avatar": "", "gallery": [], "related_artists": []})
+                return
+            if path == "/api/artist/artwork":
+                from music_metadata import spotify_artist_artwork
+                self.send_json({"artwork_url": spotify_artist_artwork(
+                    str(body.get("name") or "").strip(), str(body.get("artist_id") or "").strip())})
                 return
             if path == "/api/artist/related":
                 from music_metadata import related_artists

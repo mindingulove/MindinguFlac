@@ -2,6 +2,9 @@
 window.MindinguflacRemote = (() => {
   let route = null, local = null, receiving = null, timer = null, polling = false;
   let initialized = false, acks = [], applied = new Set(), lastError = '';
+  let volumeTarget=null, volumeSending=false, nativeVolumeState=null, volumeHudTimer=null;
+  let offlineTab='local', offlineConnection='', offlineCache=null, offlinePending=null;
+  let layoutObserver=null, layoutMeasureQueued=false;
   const post = (path, body = {}) => api(`/api/remote/${path}`, {method:'POST', body:JSON.stringify(body), timeout:12000});
   const controlling = () => !!route;
   const portable = item => item ? trackIdentitySnapshot(item) : null;
@@ -95,7 +98,164 @@ window.MindinguflacRemote = (() => {
       quality_label:state.currentTrack ? qualityLabelForTrack(state.currentTrack) : '',
       queue_title:state.queueContext?.title || state.queueContext?.name || ''};
   }
+  const offlineConnected=()=>route?.status==='active';
+  function offlinePlaylists(playlists) {
+    const result=(playlists || []).filter(pl=>!pl.remote_placeholder);
+    if(offlineConnected() && !result.some(pl=>pl.id==='__offline__'))
+      result.unshift({id:'__offline__',name:'Offline',playlist_origin:'offline',read_only:true,remote_placeholder:true,tracks:[],artwork_urls:[],metadata_fetched:true});
+    return result;
+  }
+  function offlineView(localPlaylist) {
+    if(offlineTab!=='remote' || !offlineConnected())return localPlaylist;
+    const tracks=offlineCache?.device_id===route.device_id ? offlineCache.tracks : [];
+    return {...localPlaylist,tracks,artwork_urls:[...new Set(tracks.map(t=>t.artwork_url).filter(Boolean))].slice(0,4),
+      description:`Downloaded on ${route.name}`,offline_message:offlinePending?'Loading downloaded songs…':offlineCache?.error || 'No songs downloaded on this device.'};
+  }
+  function offlineTabs() {
+    if(!offlineConnected())return '';
+    return `<div class="offline-device-tabs" role="tablist" aria-label="Offline music location"><button type="button" role="tab" data-offline-device="local" aria-selected="${offlineTab==='local'}">This phone</button><button type="button" role="tab" title="${esc(route.name)}" aria-label="${esc(route.name)} (connected device)" data-offline-device="remote" aria-selected="${offlineTab==='remote'}">Connected device</button></div>`;
+  }
+  function redrawOffline() {
+    if(state.activePlaylistId!=='__offline__' || !$('pageContent')?.querySelector('[data-playlist-page="__offline__"]'))return;
+    const playlist=state.playlists.find(pl=>pl.id==='__offline__');
+    if(!playlist)return;
+    const top=$('pageContent').querySelector('.scroll-area')?.scrollTop || 0;
+    _renderPlaylistContent(playlist);
+    const scroll=$('pageContent').querySelector('.scroll-area');if(scroll)scroll.scrollTop=top;
+  }
+  async function fetchOffline() {
+    if(!offlineConnected() || offlinePending)return offlinePending;
+    const current=route;
+    offlinePending=(async()=>{
+      try {
+        const result=await api('/api/remote/offline',{timeout:20000});
+        if(route!==current || !offlineConnected())return;
+        if(!result.ok || !result.route)throw Error(result.error || 'The connected device is unavailable');
+        const tracks=(result.tracks || []).map(item=>({...item,remote_device_id:current.device_id,
+          artwork_url:localArtwork(item.artwork_url) || cachedDisplayArtwork(item)}));
+        offlineCache={device_id:current.device_id,tracks,updated:Date.now()};
+        hydrateOfflineArtwork(current,offlineCache).catch(()=>{});
+      } catch(error) {
+        if(route===current)offlineCache={device_id:current.device_id,tracks:[],updated:Date.now(),error:error.message};
+      } finally {offlinePending=null;redrawOffline();}
+    })();
+    redrawOffline();return offlinePending;
+  }
+  async function hydrateOfflineArtwork(current,cache) {
+    const groups=new Map();
+    for(const track of cache.tracks) {
+      if(track.artwork_url)continue;
+      const key=track.album_context?.spotify_id || track.album_spotify_id || displayKey(track);
+      if(!groups.has(key))groups.set(key,[]);groups.get(key).push(track);
+    }
+    const tasks=[...groups.values()];
+    const worker=async()=>{
+      while(tasks.length && route===current && offlineCache===cache && offlineTab==='remote' && offlineConnected()) {
+        const group=tasks.shift(),track=group[0],key=displayKey(track);
+        let entry=displayCache.get(key);
+        if(!entry){entry={artwork:'',pending:false,retryAt:0};displayCache.set(key,entry);}
+        if(!entry.artwork && !entry.pending && Date.now()>=entry.retryAt){entry.pending=true;await resolveDisplayArtwork(track,key,entry);}
+        if(entry.artwork && offlineCache===cache){group.forEach(t=>t.artwork_url=entry.artwork);redrawOffline();}
+      }
+    };
+    await Promise.all([worker(),worker()]);
+  }
+  function bindOfflineTabs(localPlaylist) {
+    $('pageContent').querySelectorAll('[data-offline-device]').forEach(button=>{
+      button.onclick=()=>{
+        offlineTab=button.dataset.offlineDevice;
+        if(offlineTab==='remote' && (!offlineCache || Date.now()-offlineCache.updated>15000))fetchOffline();
+        _renderPlaylistContent(localPlaylist);
+      };
+    });
+  }
+  function syncOfflineConnection() {
+    const key=offlineConnected()?route.device_id:'';
+    if(key!==offlineConnection) {
+      offlineConnection=key;offlineTab='local';offlineCache=null;
+      state.playlists=offlinePlaylists(state.playlists);
+      renderSidebarPlaylists();
+      if(state.activePlaylistId==='__offline__' && !state.playlists.some(pl=>pl.id==='__offline__')) {
+        state.activePlaylistId=null;replacePage(window.matchMedia('(max-width: 900px)').matches?renderMobileLibraryPage:renderHomePage);
+      } else redrawOffline();
+    }
+    if(key && offlineTab==='remote' && state.activePlaylistId==='__offline__' && (!offlineCache || Date.now()-offlineCache.updated>15000))fetchOffline();
+  }
+  function syncNativeRemoteVolume() {
+    if (!IS_ANDROID || !window.MindinguflacAndroid?.setRemotePlayback) return;
+    const enabled=route?.status==='active';
+    if (!enabled && nativeVolumeState===null) return;
+    const volume=Math.round(Math.max(0,Math.min(1,Number(volumeTarget ?? route?.snapshot?.volume ?? 1)))*100);
+    const key=`${enabled}:${enabled?volume:0}`;
+    if(key===nativeVolumeState)return;
+    nativeVolumeState=key;
+    window.MindinguflacAndroid.setRemotePlayback(enabled,volume);
+  }
+  function updateVolumeHud(volume) {
+    const hud=$('remoteVolumeHud');if(!hud || !route)return;
+    const percent=Math.round(Math.max(0,Math.min(1,volume))*100);
+    $('remoteVolumeHudDevice').textContent=route.name;
+    $('remoteVolumeHudPercent').textContent=`${percent}%`;
+    $('remoteVolumeHudBar').style.width=`${percent}%`;
+    $('remoteVolumeHudIcon').className=percent===0?'bi bi-volume-mute-fill':percent<50?'bi bi-volume-down-fill':'bi bi-volume-up-fill';
+    hud.setAttribute('aria-label',`${route.name} volume ${percent}%`);
+    hud.setAttribute('aria-busy',String(volumeTarget!==null));
+  }
+  function showVolumeHud(volume) {
+    if(!IS_ANDROID || !offlineConnected())return;
+    let hud=$('remoteVolumeHud');
+    if(!hud) {
+      hud=document.createElement('div');hud.id='remoteVolumeHud';hud.className='remote-volume-hud';
+      hud.setAttribute('role','status');hud.setAttribute('aria-live','polite');
+      hud.innerHTML='<i id="remoteVolumeHudIcon" class="bi bi-volume-up-fill"></i><div class="remote-volume-hud-info"><span id="remoteVolumeHudDevice"></span><div class="remote-volume-hud-track"><span id="remoteVolumeHudBar"></span></div></div><strong id="remoteVolumeHudPercent"></strong>';
+      document.body.appendChild(hud);
+    }
+    hud.hidden=false;updateVolumeHud(volume);hud.classList.toggle('visible',true);
+    clearTimeout(volumeHudTimer);volumeHudTimer=setTimeout(()=>hud.classList.toggle('visible',false),1800);
+  }
+  function renderRemoteVolume() {
+    if (!route) return;
+    const volume=Number(volumeTarget ?? route.snapshot?.volume ?? 0);
+    $('volumeBar').value=volume;$('volumeBar').style.backgroundSize=`${volume*100}% 100%`;
+    const icon=$('muteToggle')?.querySelector('i');
+    if(icon)icon.className=volume<=.0001?'bi bi-volume-mute':volume<.5?'bi bi-volume-down':'bi bi-volume-up';
+    updateVolumeHud(volume);syncNativeRemoteVolume();
+  }
+  async function setRemoteVolume(value) {
+    if (!route || !Number.isFinite(Number(value))) return;
+    if (route.status!=='active') {report(new Error('Reconnect the selected device to change its volume'));return;}
+    volumeTarget=Math.max(0,Math.min(1,Number(value)));renderRemoteVolume();showVolumeHud(volumeTarget);
+    if(volumeSending)return;
+    const current=route;volumeSending=true;
+    try {
+      while(route===current && current.status==='active' && volumeTarget!==null) {
+        const target=volumeTarget;
+        await command('volume',{volume:target});
+        if(volumeTarget===target)volumeTarget=null;
+      }
+    } catch(error) {volumeTarget=null;report(error);}
+    finally {volumeSending=false;if(route)renderRemoteVolume();}
+  }
+  const adjustVolumeBy=delta=>setRemoteVolume(Number(volumeTarget ?? route?.snapshot?.volume ?? 0)+Number(delta));
+  function observeRemoteLayout(el) {
+    if (!layoutObserver && typeof ResizeObserver === 'function') {
+      layoutObserver = new ResizeObserver(() => {
+        if (layoutMeasureQueued) return;
+        layoutMeasureQueued = true;
+        requestAnimationFrame(() => {
+          layoutMeasureQueued = false;
+          const banner = $('remotePlaybackBanner'), player = document.querySelector('.player');
+          if (banner && !banner.hidden) document.body.style.setProperty('--remote-playback-banner-height', `${Math.ceil(banner.getBoundingClientRect().height)}px`);
+          if (player) document.body.style.setProperty('--player-controls-height', `${Math.ceil(player.getBoundingClientRect().height)}px`);
+        });
+      });
+    }
+    if (!layoutObserver || !el || el.dataset.remoteLayoutObserved) return;
+    el.dataset.remoteLayoutObserved='true';layoutObserver.observe(el);
+  }
   function banner() {
+    syncNativeRemoteVolume();syncOfflineConnection();
+    if(!offlineConnected())$('remoteVolumeHud')?.classList.toggle('visible',false);
     let el = $('remotePlaybackBanner');
     if (!el) {
       el = document.createElement('div'); el.id = 'remotePlaybackBanner'; el.className = 'remote-playback-banner';
@@ -104,6 +264,8 @@ window.MindinguflacRemote = (() => {
       el.onkeydown=event=>{if(event.key==='Enter' || event.key===' '){event.preventDefault();openConnectPanel();}};
       document.body.appendChild(el);
     }
+    observeRemoteLayout(el);
+    observeRemoteLayout(document.querySelector('.player'));
     el.replaceChildren(); el.hidden = !route && !receiving;
     document.body.classList.toggle('has-remote-playback', !el.hidden);
     if (el.hidden) return;
@@ -147,8 +309,7 @@ window.MindinguflacRemote = (() => {
     $('currentTime').textContent = formatTime(pos); $('durationTime').textContent = formatTime(duration);
     $('seekBar').value = duration > 0 ? pos / duration * 1000 : 0;
     $('seekBar').style.backgroundSize = `${duration > 0 ? pos / duration * 100 : 0}% 100%`;
-    $('volumeBar').value = Number(s.volume || 0);
-    $('volumeBar').style.backgroundSize = `${Number(s.volume || 0) * 100}% 100%`;
+    renderRemoteVolume();
     $('btnShuffle')?.classList.toggle('active', !!s.shuffle); $('btnRepeat')?.classList.toggle('active', !!s.repeat);
     $('albumShuffle')?.classList.toggle('active', !!s.shuffle);
     $('albumShuffle')?.setAttribute('aria-pressed',String(!!s.shuffle));
@@ -206,7 +367,7 @@ window.MindinguflacRemote = (() => {
   }
   async function disconnect() {
     const saved = local;
-    route = null; local = null; banner();
+    route = null; local = null; volumeTarget=null; banner();
     // Clear the controller route first; an unreachable receiver must never
     // trap the user in remote mode. The receiver lease clears its banner.
     post('disconnect').catch(() => {});
@@ -329,12 +490,15 @@ window.MindinguflacRemote = (() => {
     if (initialized) return; initialized=true;
     const localSelect=selectMusicItem;
     selectMusicItem=function(item,mode='stream',tracks=null,context=null) {
+      if(item?.remote_device_id && (!offlineConnected() || route.device_id!==item.remote_device_id)){report(new Error('Reconnect the device that downloaded this song'));return Promise.resolve();}
       if (!route || mode !== 'stream' || !playableQueueItem(item)) return localSelect(item,mode,tracks,context);
       return send('select',{track:portable(item),queue:publicTracks(tracks || state.queue.length && state.queue || [item])});
     };
     playQueueOffset=wrap('next',playQueueOffset,delta => send(delta>0?'next':'previous'));
     seekBy=wrap('seek',seekBy,seconds => send('seek',{position:Math.max(0,position()+seconds)}));
-    setPlayerVolume=wrap('volume',setPlayerVolume,volume => send('volume',{volume}));
+    setPlayerVolume=wrap('volume',setPlayerVolume,setRemoteVolume);
+    changeVolumeBy=wrap('adjustVolume',changeVolumeBy,adjustVolumeBy);
+    syncVolumeBar=wrap('volumeUi',syncVolumeBar,renderRemoteVolume);
     reorderQueueTrack=wrap('reorder',reorderQueueTrack,(from,to)=>send('queue_reorder',{from_index:from,to_index:to}));
     appendTracksToPlaybackQueue=wrap('append',appendTracksToPlaybackQueue,tracks=>send('queue_append',{tracks:publicTracks(tracks)}));
     currentPlaybackSeconds=wrap('clock',currentPlaybackSeconds,position);
@@ -363,7 +527,12 @@ window.MindinguflacRemote = (() => {
     const localPlay=$('playPause').onclick,localSeek=$('seekBar').oninput,localMute=$('muteToggle').onclick;
     $('playPause').onclick=()=>route?send(route.snapshot?.playing?'pause':'play'):localPlay();
     $('seekBar').oninput=()=>route?send('seek',{position:Number($('seekBar').value)/1000*Number(route.snapshot?.duration || 0)}):localSeek();
-    $('muteToggle').onclick=()=>route?send('volume',{volume:route.snapshot?.volume>0?0:1}):localMute();
+    $('muteToggle').onclick=()=>{
+      if(!route)return localMute();
+      const current=Number(volumeTarget ?? route.snapshot?.volume ?? 0);
+      if(current>0){route.preMuteVolume=current;return setRemoteVolume(0);}
+      return setRemoteVolume(route.preMuteVolume || 1);
+    };
     for (const [id,action,key] of [['btnShuffle','shuffle','shuffle'],['btnRepeat','repeat','repeat']]) {
       const el=$(id),handler=el.onclick;el.onclick=()=>route?send(action,{enabled:!route.snapshot?.[key]}):handler();
     }
@@ -388,8 +557,7 @@ window.MindinguflacRemote = (() => {
     await poll();timer=setInterval(poll,750);
     window.addEventListener('pagehide',()=>{
       if(!IS_ANDROID) post('local',{snapshot:playerSnapshot(),acks,closing:true}).catch(()=>{});
-      else if(route)post('disconnect').catch(()=>{});
     });
   }
-  return {initialize,renderDevices,connect,disconnect,command,isController:controlling,poll,applyCommand};
+  return {initialize,renderDevices,connect,disconnect,command,isController:controlling,poll,applyCommand,setVolume:setRemoteVolume,adjustVolumeBy,backgroundHeartbeat:()=>{if(offlineConnected())return poll();},offlinePlaylists,offlineView,offlineTabs,bindOfflineTabs,fetchOffline};
 })();
