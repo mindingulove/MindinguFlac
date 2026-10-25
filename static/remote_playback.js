@@ -4,7 +4,7 @@ window.MindinguflacRemote = (() => {
   let initialized = false, acks = [], applied = new Set(), lastError = '';
   let volumeTarget=null, volumeSending=false, nativeVolumeState=null, volumeHudTimer=null;
   let offlineTab='local', offlineConnection='', offlineCache=null, offlinePending=null;
-  let layoutObserver=null, layoutMeasureQueued=false;
+  let layoutObserver=null, layoutMeasureQueued=false, remoteSeekDragging=false;
   const post = (path, body = {}) => api(`/api/remote/${path}`, {method:'POST', body:JSON.stringify(body), timeout:12000});
   const controlling = () => !!route;
   const portable = item => item ? trackIdentitySnapshot(item) : null;
@@ -306,9 +306,12 @@ window.MindinguflacRemote = (() => {
     setPlayerStatusIcon(statusMode,Number(s.progress)||0);
     const videoSwitch=$('sideVideoSwitch');if(videoSwitch)videoSwitch.hidden=true;
     const duration = Number(s.duration || 0), pos = Number(s.position || 0);
-    $('currentTime').textContent = formatTime(pos); $('durationTime').textContent = formatTime(duration);
-    $('seekBar').value = duration > 0 ? pos / duration * 1000 : 0;
-    $('seekBar').style.backgroundSize = `${duration > 0 ? pos / duration * 100 : 0}% 100%`;
+    $('durationTime').textContent = formatTime(duration);
+    if (!remoteSeekDragging) {
+      $('currentTime').textContent = formatTime(pos);
+      $('seekBar').value = duration > 0 ? pos / duration * 1000 : 0;
+      $('seekBar').style.backgroundSize = `${duration > 0 ? pos / duration * 100 : 0}% 100%`;
+    }
     renderRemoteVolume();
     $('btnShuffle')?.classList.toggle('active', !!s.shuffle); $('btnRepeat')?.classList.toggle('active', !!s.repeat);
     $('albumShuffle')?.classList.toggle('active', !!s.shuffle);
@@ -526,7 +529,26 @@ window.MindinguflacRemote = (() => {
     };
     const localPlay=$('playPause').onclick,localSeek=$('seekBar').oninput,localMute=$('muteToggle').onclick;
     $('playPause').onclick=()=>route?send(route.snapshot?.playing?'pause':'play'):localPlay();
-    $('seekBar').oninput=()=>route?send('seek',{position:Number($('seekBar').value)/1000*Number(route.snapshot?.duration || 0)}):localSeek();
+    const seekBar=$('seekBar');
+    seekBar.addEventListener('pointerdown',()=>{if(route)remoteSeekDragging=true;});
+    seekBar.addEventListener('touchstart',()=>{if(route)remoteSeekDragging=true;},{passive:true});
+    seekBar.addEventListener('pointercancel',()=>{remoteSeekDragging=false;});
+    seekBar.oninput=()=>{
+      if (!route) return localSeek();
+      remoteSeekDragging=true;
+      const duration=Number(route.snapshot?.duration || 0), position=Number(seekBar.value)/1000*duration;
+      $('currentTime').textContent=formatTime(position);
+      seekBar.style.backgroundSize=`${Math.max(0,Math.min(100,Number(seekBar.value)/10))}% 100%`;
+    };
+    seekBar.onchange=()=>{
+      if (!route) return;
+      const current=route, duration=Number(current.snapshot?.duration || 0);
+      const target=Math.max(0,Math.min(duration,Number(seekBar.value)/1000*duration));
+      remoteSeekDragging=false;
+      current.snapshot={...current.snapshot,position:target};
+      $('currentTime').textContent=formatTime(target);
+      send('seek',{position:target});
+    };
     $('muteToggle').onclick=()=>{
       if(!route)return localMute();
       const current=Number(volumeTarget ?? route.snapshot?.volume ?? 0);

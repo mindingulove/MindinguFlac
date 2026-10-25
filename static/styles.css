@@ -5504,6 +5504,12 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   padding:2px 10px; color:inherit; cursor:pointer; }
 body.has-remote-playback { grid-template-rows:minmax(0,1fr) calc(var(--player-controls-height,96px) + var(--remote-playback-banner-height,30px)); }
 body.has-remote-playback .player { align-self:start; }
+/* The expanded now-playing panel is fixed above the 96px transport bar. When
+   a remote-control banner is present, reserve its measured height as well so
+   the panel cannot sit over the bottom edge of the transport controls. */
+body.has-remote-playback .details-panel.is-expanded {
+  bottom:calc(var(--player-controls-height,96px) + var(--remote-playback-banner-height,30px));
+}
 @media (max-width:900px) {
   .album-header-actions { gap:14px; flex-wrap:wrap; }
   .album-secondary-action { font-size:27px; width:34px; }

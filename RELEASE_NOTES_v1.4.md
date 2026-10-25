@@ -17,6 +17,7 @@
 - Route Android hardware volume buttons and media-session volume controls to the selected computer only while connected; restore local phone volume when the remote session ends.
 - Resolve artwork and metadata through each device's own backend and cache during remote playback; keep audio/video playback, downloads and prefetch on the receiving device.
 - Mirror the receiving player's real loading state, progress, quality and queue title on the controller.
+- Keep the remote seek thumb stable while dragging and send one seek when released, so both devices land at the same playback position.
 - Left-align the remote playback banner and open Devices when it is tapped, without an extra local-device button.
 - Reserve the measured banner and player-control heights in the desktop and mobile layouts, including full-screen playback.
 - Allow downward swipes to dismiss Android album share cards.
