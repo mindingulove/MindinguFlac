@@ -1,5 +1,8 @@
 const API_BASE = "";
 const IS_ANDROID = /Mindinguflac-Android/i.test(navigator.userAgent) || !!window.MindinguflacAndroid;
+// Apple WebKit (the macOS app) steps video frame by frame after playbackRate
+// changes, so the side video corrects drift there by seeking instead.
+const VIDEO_RATE_STEERING = !(/AppleWebKit/i.test(navigator.userAgent) && !/Chrome|Chromium|Android/i.test(navigator.userAgent));
 if (IS_ANDROID) document.documentElement.classList.add("is-android");
 const CATALOG_REFRESH_MS = 15 * 60 * 1000;
 const ARTIST_TRACK_PREVIEW_COUNT = 5;
@@ -37,6 +40,9 @@ const state = {
   manualPauseRequested: false,
   currentPlayableReady: false,
   playerStatus: "Choose a track to stream",
+  playerStatusIconMode: "ready",
+  playerStatusIconPct: 0,
+  renderedPlayerStatusIcon: "",
   activeJobPhase: "",
   playbackRequestId: 0,
   listeningSession: null,
@@ -49,6 +55,9 @@ const state = {
   pendingResumePosition: 0,
   restoredPlaybackPending: false,
   nativeAudio: { active: false, playing: false, position: 0, duration: 0, path: "", ended: false },
+  nativeAudioStart: null,
+  nativeAudioStarting: false,
+  nativeAudioPauseAfterStart: false,
   nativeAudioPollTimer: null,
   prefetchedForRequestId: -1,
   preMuteVolume: 1,
@@ -78,6 +87,16 @@ const state = {
   statsPeriod: "month",
   playlistContinuationLoads: new Set(),
   videoMode: false,
+  videoSync: { key: "", status: "", offset: 0, manual: 0, attempts: 0, timer: null },
+  audioBuffering: false,
+  audioHasPlayed: false,
+  directStreamReconnectPending: false,
+  directStreamReconnectTimer: null,
+  directStreamReconnectAttempts: 0,
+  directStreamAttemptPosition: 0,
+  directStreamResumePending: false,
+  directStreamPosition: 0,
+  directStreamNativeFallbackAttempted: false,
   sideVideoTrackKey: "",
   videoFetch: {
     trackKey: "",
@@ -96,7 +115,12 @@ const state = {
     activeIndex: -1,
     programmaticScroll: false,
     lastScrollAt: 0,
-    syncOffset: 0.1,  // seconds to delay lyrics display relative to LRC timestamps
+    syncOffset: 0,  // manual delay, saved per audio source and lyrics
+    autoOffset: 0,
+    alignmentStatus: "",
+    alignmentKey: "",
+    alignmentTimer: null,
+    alignmentAttempts: 0,
   },
 };
 
@@ -161,6 +185,9 @@ const ENGINE_PROVIDERS = {
     { value: "soundcloud",  label: "SoundCloud" },
     { value: "youtube",     label: "YouTube" },
   ],
+  monochrome: [
+    { value: "monochrome", label: "Monochrome (FLAC)" },
+  ],
 };
 
 const ENGINE_QUALITIES = {
@@ -172,6 +199,9 @@ const ENGINE_QUALITIES = {
   torrent: [
     { value: "LOSSLESS", label: "FLAC / Lossless" },
     { value: "MP3",      label: "MP3 / Lossy" },
+  ],
+  monochrome: [
+    { value: "LOSSLESS", label: "FLAC / Lossless" },
   ],
   spotiflac: null,
 };
@@ -206,8 +236,12 @@ function runtimeEngine(engine) {
 // report, so an engine whose runtime is missing from the APK is never offered.
 function androidEngineOptions() {
   const engines = (state.runtime && state.runtime.engines) || {};
-  const order = ["torrent", "ytp-dl", "spotiflac"];
-  const labels = { "torrent": "FLAC / BitTorrent (libtorrent)", "ytp-dl": "YouTube audio" };
+  const order = ["ytp-dl", "monochrome", "torrent", "spotiflac"];
+  const labels = {
+    "torrent": "Torrent (Experimental)",
+    "monochrome": "Monochrome (FLAC)",
+    "ytp-dl": "YouTube Music",
+  };
   return order
     .filter(name => engines[name] && engines[name].available)
     .map(name => ({ value: name, label: labels[name] || engines[name].label || name }));
@@ -220,7 +254,7 @@ function renderAndroidEngineNotes() {
   const list = $("androidEngineNotes");
   if (!row || !list) return;
   const engines = (state.runtime && state.runtime.engines) || {};
-  const notes = ["torrent", "ytp-dl", "spotiflac"]
+  const notes = ["monochrome", "torrent", "ytp-dl", "spotiflac"]
     .filter(name => engines[name] && !engines[name].available)
     .map(name => {
       const entry = engines[name];
@@ -237,6 +271,9 @@ function renderAndroidEngineNotes() {
 }
 
 function updateEngineControls(engine, currentService, currentQuality) {
+  $("torrentPlaybackCandidatesRow")?.classList.toggle("hidden", engine !== "torrent");
+  $("torrentPrefetchCandidatesRow")?.classList.toggle("hidden", engine !== "torrent");
+  $("torrentMetadataTimeoutRow")?.classList.toggle("hidden", engine !== "torrent");
   const serviceRow = $("serviceRow");
   const retriesRow = $("retriesRow");
   const serviceSel = $("downloadService");
@@ -268,8 +305,8 @@ function updateEngineControls(engine, currentService, currentQuality) {
     duckModelRow.style.display = engine === "torrent" || engine === "ytp-dl" ? "" : "none";
   }
 
-  // Show/hide retries row (Tor is SpotiFLAC-only)
-  if (retriesRow) retriesRow.style.display = engine === "spotiflac" ? "" : "none";
+  // Mornye owns provider retries; the former Tor retry setting is obsolete.
+  if (retriesRow) retriesRow.style.display = "none";
 
   // Populate service options
   serviceSel.innerHTML = providers.map(p => `<option value="${p.value}">${p.label}</option>`).join("");
@@ -300,6 +337,7 @@ const STORAGE_KEYS = {
   volume: "streambox.volume",
   dockRecents: "mindinguflac.dockRecents",
   playbackSession: "mindinguflac.playbackSession.v1",
+  albumDownloads: "mindinguflac.albumDownloads.v1",
 };
 
 let _lastPlaybackSnapshotWrite = 0;
@@ -337,12 +375,14 @@ function persistPlaybackSnapshot(force = false) {
   const position = state.nativeAudio.active
     ? Number(state.nativeAudio.position || 0)
     : Number(audio?.currentTime || state.pendingResumePosition || 0);
+  const spotifyDuration = knownTrackDurationSeconds(state.currentTrack);
+  const directMonochrome = isMonochromeDirectStreamUrl(state.currentStreamUrl);
   const duration = state.nativeAudio.active
     ? Number(state.nativeAudio.duration || 0)
-    : Number(audio?.duration || Number(state.currentTrack.duration_ms || 0) / 1000 || 0);
+    : Number((directMonochrome ? spotifyDuration || audio?.duration : audio?.duration || spotifyDuration) || 0);
   const paused = state.nativeAudio.active
     ? (state.manualPauseRequested || !state.nativeAudio.playing)
-    : !audio || audio.paused;
+    : !audio || audio.paused || state.audioBuffering;
   try {
     const snapshot = {
       track: state.currentTrack,
@@ -386,7 +426,9 @@ async function api(path, options = {}) {
     return await resp.json();
   } catch (err) {
     if (controller?.signal.aborted) {
-      throw new Error("The request took too long. Please try again.");
+      const timeoutError = new Error("The request took too long. Please try again.");
+      timeoutError.code = "REQUEST_TIMEOUT";
+      throw timeoutError;
     }
     throw err;
   } finally {
@@ -509,29 +551,54 @@ function artistTarget(item = {}) {
 }
 
 function albumTarget(item = {}) {
-  const album = item.album || item.title || "";
-  const artist = item.artist || item.name || "";
-  const artistId = item.spotify_artist_id || item.artist_id || "";
-  const albumId = item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || (item.metadata && (item.metadata.album_spotify_id || item.metadata.spotify_album_id || item.metadata.spotify_id)) || "";
+  const releaseContext = item.type !== "album" ? (item.album_context || item.metadata?.album_context || {}) : {};
+  // A track's own title is never its album's name: a track without an album
+  // name opens its album through its Spotify id instead (track_spotify_id).
+  const isTrack = item.type === "track" || (item.type !== "album" && !!(item.duration_ms || item.duration || item.length || item.track_number));
+  // "Unknown" / "Unknown Album" are placeholders, not names: searching for
+  // them finds nothing, so treat them as no name and locate the album by id.
+  const placeholder = (value) => /^unknown(\s+album)?$/i.test(String(value || "").trim());
+  const album = releaseContext.album || (placeholder(item.album) ? "" : item.album) || (isTrack || placeholder(item.title) ? "" : item.title) || "";
+  const artist = releaseContext.album_artist || item.album_artist || item.metadata?.album_artist || item.artist || item.name || "";
+  const sameArtist = String(artist).toLocaleLowerCase() === String(item.artist || item.name || "").toLocaleLowerCase();
+  const artistId = item.album_artist_id || (sameArtist ? (item.spotify_artist_id || item.artist_id || "") : "");
+  const metadataAlbumId = item.metadata && (
+    item.metadata.album_spotify_id || item.metadata.spotify_album_id ||
+    (item.type === "album" ? item.metadata.spotify_id : "")
+  );
+  const albumId = releaseContext.spotify_id || item.album_spotify_id || item.spotify_album_id || (item.type === "album" ? item.spotify_id : "") || metadataAlbumId || "";
   return {
     type: "album",
     title: album,
     album,
     artist,
-    artwork_url: item.album_artwork_url || item.artwork_url || "",
+    artwork_url: releaseContext.artwork_url || item.album_artwork_url || item.artwork_url || "",
     artist_artwork_url: item.artist_artwork_url || "",
     artist_id: artistId,
     spotify_artist_id: artistId,
     year: item.year || "",
     musicbrainz_release_id: item.musicbrainz_release_id || item.release_id || (item.metadata && (item.metadata.musicbrainz_release_id || item.metadata.release_id)) || "",
     spotify_id: albumId,
-    spotify_url: item.spotify_url || (item.external_urls && item.external_urls.spotify) || "",
-    external_urls: item.external_urls || {},
+    // Only an album link is an album's URL; a track's spotify_url is the track.
+    spotify_url: /open\.spotify\.com\/album\//.test(item.spotify_url || "") ? item.spotify_url : "",
+    external_urls: item.type === "album" ? (item.external_urls || {}) : {},
+    // Any non-album item is a track here (player-bar tracks often have no
+    // "type" or duration), so its Spotify id locates the exact album.
+    track_spotify_id: item.type === "album" ? "" : (item.track_spotify_id || item.spotify_id || (isTrack ? item.id : "") || ""),
   };
 }
 
+function savedAlbumSpotifyId(playlist = {}) {
+  return playlist.album_spotify_id || playlist.spotify_album_id ||
+    (String(playlist.spotify_url || "").match(/(?:\/album\/|spotify:album:)([A-Za-z0-9]+)/)?.[1] || "");
+}
+
 function spotifyAlbumId(album = {}) {
-  const value = album.spotify_id || album.album_spotify_id || album.spotify_album_id || (album.metadata && (album.metadata.album_spotify_id || album.metadata.spotify_album_id || album.metadata.spotify_id)) || "";
+  const metadataAlbumId = album.metadata && (
+    album.metadata.album_spotify_id || album.metadata.spotify_album_id ||
+    (album.type === "album" ? album.metadata.spotify_id : "")
+  );
+  const value = album.spotify_id || album.album_spotify_id || album.spotify_album_id || metadataAlbumId || "";
   const match = String(value).match(/(?:open\.spotify\.com\/album\/|spotify:album:)([A-Za-z0-9]+)/);
   return match ? match[1] : String(value).trim();
 }
@@ -585,7 +652,7 @@ function artistLinkHtml(item, text = null, className = "") {
 function albumLinkHtml(item, text = null, className = "") {
   const label = text || (item && item.title) || (item && item.name) || "";
   if (!label) return "";
-  return `<button class="inline-entity-link track-title-link ${className}" type="button" title="${esc(label)}" data-open-album='${attrJson(albumTarget(item))}'>${esc(label)}</button>`;
+  return `<button class="inline-entity-link track-title-link ${className}" type="button" title="${esc(label)}" data-open-album='${attrJson(albumTarget(item))}' data-source-track='${attrJson(item)}'>${esc(label)}</button>`;
 }
 
 function openArtistLink(item) {
@@ -612,9 +679,34 @@ function bindEntityLinks(root = document) {
     button.onclick = (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openAlbumLink(JSON.parse(button.dataset.openAlbum || "{}"));
+      const track = JSON.parse(button.dataset.sourceTrack || "{}");
+      const album = JSON.parse(button.dataset.openAlbum || "{}");
+      // Open the album page at once: it finds the exact album from the
+      // track's Spotify id (track_spotify_id) and shows its header while the
+      // songs load. Waiting for full track enrichment first (Spotify, Deezer,
+      // MusicBrainz) made every title click take ~30 s.
+      if (isTrackItem(track) && !album.spotify_id && !album.track_spotify_id && !album.album) {
+        // Nothing to locate the album by: only then enrich the track first.
+        resolveTrackAlbumLink(track, album).catch(error => {
+          console.warn("Could not resolve the track album before opening it:", error);
+          openAlbumLink(album);
+        });
+      } else {
+        openAlbumLink(album);
+      }
     };
   });
+}
+
+async function resolveTrackAlbumLink(track, fallbackAlbum) {
+  const response = await api("/api/music/track_metadata", {
+    method: "POST",
+    body: JSON.stringify({ track }),
+    timeout: 45000,
+  });
+  const enriched = response?.track || {};
+  const albumName = String(enriched.album || enriched.album_title || "").trim();
+  openAlbumLink(albumName ? albumTarget({ ...track, ...enriched, album: albumName }) : fallbackAlbum);
 }
 
 // The collapsed player draws its progress as a gradient stop on .player::before,
@@ -767,14 +859,49 @@ function setMobileNavActive(name) {
   });
 }
 
+const mobileArtistArtworkCache = new Map();
+
+function resolveMobileArtistArtwork() {
+  const list = $("mobileLibraryItems");
+  if (!list) return;
+  const buttons = [...list.querySelectorAll("[data-mobile-artist]")].filter(button => {
+    const art = button.querySelector(".mobile-library-art");
+    return art && !art.style.backgroundImage;
+  });
+  let next = 0;
+  const worker = async () => {
+    while (next < buttons.length) {
+      const button = buttons[next++];
+      let artist;
+      try { artist = JSON.parse(button.dataset.mobileArtist || "{}"); } catch (_) { continue; }
+      const name = String(artist.name || artist.artist || "").trim();
+      if (!name) continue;
+      const key = `${name.toLocaleLowerCase()}|${artist.artist_id || ""}`;
+      if (!mobileArtistArtworkCache.has(key)) {
+        mobileArtistArtworkCache.set(key, api("/api/artist/artwork", {
+          method: "POST", timeout: 30000,
+          body: JSON.stringify({ name, artist_id: artist.artist_id || "" }),
+        }).then(result => result.artwork_url || "").catch(() => ""));
+      }
+      const url = await mobileArtistArtworkCache.get(key);
+      if (!url || !button.isConnected) continue;
+      const art = button.querySelector(".mobile-library-art");
+      if (!art) continue;
+      art.style.backgroundImage = `url(${JSON.stringify(url).slice(1, -1)})`;
+      const icon = art.querySelector("i");
+      if (icon) icon.remove();
+    }
+  };
+  Promise.all(Array.from({ length: Math.min(4, buttons.length) }, worker));
+}
+
 function mobileLibraryItemsHtml(playlists) {
   const filter = state.mobileLibraryFilter || "playlists";
   if (filter === "playlists") {
     if (!playlists.length) return '<div class="mobile-empty-state">Your playlists will appear here.</div>';
     return playlists.map(pl => {
-      const art = pl.artwork_url || (pl.tracks?.[0] || {}).artwork_url || "";
       return `<button class="mobile-library-item" type="button" data-mobile-playlist-id="${esc(pl.id)}">
-        <span class="mobile-library-art" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : '<i class="bi bi-music-note-list"></i>'}</span>
+        ${playlistArtworkHtml(pl, "mobile-library-art")}
         <span><strong>${esc(pl.name)}</strong><small>Playlist · ${pl.tracks?.length || 0} songs</small></span>
       </button>`;
     }).join("");
@@ -806,10 +933,13 @@ function mobileLibraryItemsHtml(playlists) {
         const title = String(track.album || track.album_title || "").trim();
         if (!title) continue;
         const albumArtist = String(track.album_artist || track.metadata?.album_artist || primary).trim();
-        const key = `${title}\u0000${albumArtist}`.normalize("NFKC").toLocaleLowerCase();
-        if (!items.has(key)) items.set(key, { title, album: title, artist: albumArtist, type: "album", artwork_url: track.album_artwork_url || track.artwork_url || "", artist_artwork_url: track.artist_artwork_url || "", spotify_id: track.album_spotify_id || track.spotify_album_id || track.metadata?.album_spotify_id || track.metadata?.spotify_album_id || "", musicbrainz_release_id: track.musicbrainz_release_id || track.release_id || track.metadata?.musicbrainz_release_id || "", year: track.year || "", trackKeys: new Set() });
+        const exactAlbumId = track.album_spotify_id || track.spotify_album_id || track.metadata?.album_spotify_id || track.metadata?.spotify_album_id || "";
+        const key = exactAlbumId ? `spotify:${exactAlbumId}` : `${title}\u0000${albumArtist}`.normalize("NFKC").toLocaleLowerCase();
+        if (!items.has(key)) items.set(key, { title, album: title, artist: albumArtist, type: "album", artwork_url: track.album_artwork_url || track.artwork_url || "", artist_artwork_url: track.artist_artwork_url || "", spotify_id: track.album_spotify_id || track.spotify_album_id || track.metadata?.album_spotify_id || track.metadata?.spotify_album_id || "", musicbrainz_release_id: track.musicbrainz_release_id || track.release_id || track.metadata?.musicbrainz_release_id || "", year: track.year || "", tracks: [], trackKeys: new Set() });
         const entry = items.get(key);
-        entry.trackKeys.add(trackKey(track));
+        const keyForTrack = trackKey(track);
+        if (!entry.trackKeys.has(keyForTrack)) entry.tracks.push(track);
+        entry.trackKeys.add(keyForTrack);
         if (!entry.artwork_url && (track.album_artwork_url || track.artwork_url)) entry.artwork_url = track.album_artwork_url || track.artwork_url;
         if (!entry.year && track.year) entry.year = track.year;
       }
@@ -877,8 +1007,7 @@ function showPlaylistContextMenu(event, playlist) {
   const menu = $("playlistContextMenu");
   $("ctxPlaylistTitle").textContent = playlist.name || "Playlist";
   $("ctxPlaylistSubtitle").textContent = `Playlist · ${playlist.tracks?.length || 0} songs`;
-  const art = playlist.artwork_url || playlist.tracks?.[0]?.artwork_url || "";
-  $("ctxPlaylistArt").style.backgroundImage = art ? `url('${art}')` : "";
+  $("ctxPlaylistArt").outerHTML = playlistArtworkHtml(playlist, "context-menu-header-art", "ctxPlaylistArt");
   const url = playlistShareUrl(playlist);
   const share = $("ctxPlaylistShare");
   share.disabled = !url;
@@ -899,6 +1028,7 @@ function showPlaylistContextMenu(event, playlist) {
       if (error.name !== "AbortError") showToast("Could not share the playlist link.");
     }
   };
+  $("ctxPlaylistDelete").style.display = isReadOnlyPlaylist(playlist) ? "none" : "";
   $("ctxPlaylistDelete").onclick = () => { menu.hidden = true; deletePlaylist(playlist.id); };
   openContextMenu(event, menu);
 }
@@ -907,7 +1037,7 @@ function bindMobileLibraryItems() {
   document.querySelectorAll("[data-mobile-playlist-id]").forEach(button => {
     button.onclick = () => {
       const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
-      if (playlist) pushPage(() => renderPlaylistPage(playlist));
+      if (playlist) openLibraryPlaylist(playlist);
     };
     bindLibraryHold(button, event => {
       const playlist = state.playlists.find(item => item.id === button.dataset.mobilePlaylistId);
@@ -919,9 +1049,44 @@ function bindMobileLibraryItems() {
     bindLibraryHold(button, event => showArtistContextMenu(event, JSON.parse(button.dataset.mobileArtist || "{}")));
   });
   document.querySelectorAll("[data-mobile-album]").forEach(button => {
-    button.onclick = () => pushPage(() => renderAlbumPage(JSON.parse(button.dataset.mobileAlbum || "{}")));
+    button.onclick = () => {
+      const album = JSON.parse(button.dataset.mobileAlbum || "{}");
+      album.saved_playlist_context = { kind: "saved-album", tracks: album.tracks || [] };
+      pushPage(() => renderAlbumPage(album));
+    };
     bindLibraryHold(button, event => showAlbumContextMenu(event, JSON.parse(button.dataset.mobileAlbum || "{}")));
   });
+}
+
+// Album saves are library shortcuts to the canonical album page. Keep custom
+// playlists on their existing playlist page and playback context.
+function openLibraryPlaylist(playlist) {
+  if (inferPlaylistOrigin(playlist) !== "album") {
+    pushPage(() => renderPlaylistPage(playlist));
+    return;
+  }
+  const seed = (playlist.tracks || []).find(track => track && (track.album || track.artist)) || {};
+  const target = albumTarget({
+    ...seed,
+    album_spotify_id: savedAlbumSpotifyId(playlist) || seed.album_spotify_id || seed.spotify_album_id || "",
+    album: seed.album || playlist.name || "",
+    artist: seed.album_artist || playlist.owner || seed.artist || "",
+    artwork_url: playlist.artwork_url || seed.album_artwork_url || seed.artwork_url || "",
+    year: seed.year || playlist.year || "",
+  });
+  state.activePlaylistId = playlist.id;
+  document.querySelectorAll(".sidebar-playlist-item").forEach(item => {
+    item.classList.toggle("active", item.dataset.playlistId === playlist.id);
+  });
+  target.saved_playlist_context = {
+    kind: "playlist",
+    id: playlist.id,
+    name: playlist.name,
+    origin: "album",
+    allow_playlist_continuation: false,
+    tracks: playlist.tracks || [],
+  };
+  pushPage(() => renderAlbumPage(target));
 }
 
 // Repaint Your Library in place when the playlist set changes. The phone never
@@ -932,6 +1097,7 @@ function refreshMobileLibraryList() {
   if (!container) return;
   container.innerHTML = mobileLibraryItemsHtml(state.playlists || []);
   bindMobileLibraryItems();
+  resolveMobileArtistArtwork();
 }
 
 function renderMobileLibraryPage() {
@@ -955,6 +1121,7 @@ function renderMobileLibraryPage() {
       </div>
     </div>`;
   bindMobileLibraryItems();
+  if (state.mobileLibraryFilter === "artists") resolveMobileArtistArtwork();
   document.querySelectorAll("[data-mobile-library-filter]").forEach(button => {
     button.onclick = () => {
       state.mobileLibraryFilter = button.dataset.mobileLibraryFilter;
@@ -966,6 +1133,7 @@ function renderMobileLibraryPage() {
       const list = $("mobileLibraryItems");
       if (list) list.innerHTML = mobileLibraryItemsHtml(state.playlists || []);
       bindMobileLibraryItems();
+      if (state.mobileLibraryFilter === "artists") resolveMobileArtistArtwork();
     };
   });
   document.querySelector("[data-mobile-search]")?.addEventListener("click", focusMobileSearch);
@@ -1058,14 +1226,17 @@ function bindMobileNavigation() {
   });
 }
 
-function setActiveView(id) {
+function setActiveView(id, preservePlaylistId = "") {
   if (id !== "settings") { stopCacheLogPolling(); stopAndroidAdvisorPolling(); }
   if (window.artistEvtSource) {
     window.artistEvtSource.close();
     window.artistEvtSource = null;
   }
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  document.querySelectorAll(".sidebar-playlist-item").forEach(el => el.classList.remove("active"));
+  state.activePlaylistId = preservePlaylistId || null;
+  document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
+    el.classList.toggle("active", !!preservePlaylistId && el.dataset.playlistId === preservePlaylistId);
+  });
   const view = $(id);
   if (view) view.classList.add("active");
 }
@@ -2170,9 +2341,11 @@ function renderTrackList(containerId, items, context = "general", playbackContex
   const playbackQueueItems = Array.isArray(queueItems) && queueItems.length ? queueItems : items;
 
   function makeLibraryBtn(idx, status) {
+    if (items[idx].remote_device_id) return `<span class="track-library-btn downloaded" aria-label="Downloaded on connected device" title="Downloaded on connected device"><i class="bi bi-arrow-down-circle-fill"></i></span>`;
     const isDownloaded = !!(status && status.in_library);
     const isBusy = !!(status && status.library_requested);
-    const label = isDownloaded ? "Remove from library" : (isBusy ? "Cancel library download" : "Add to library");
+    const error = !isDownloaded && !isBusy ? libraryDownloadErrors.get(trackKey(items[idx])) : "";
+    const label = isBusy ? "Cancel library download" : isDownloaded ? "Remove from library" : error ? `Retry download: ${error}` : "Add to library";
     let iconHtml;
     if (!status) {
       iconHtml = `<i class="bi bi-arrow-down-circle"></i>`;
@@ -2181,7 +2354,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
     } else {
       iconHtml = `<i class="bi ${isDownloaded ? "bi-arrow-down-circle-fill downloaded" : "bi-arrow-down-circle"}"></i>`;
     }
-    return `<button class="track-library-btn${isDownloaded ? " downloaded" : ""}${isBusy ? " progress" : ""}" type="button" aria-label="${label}" title="${label}" data-library-action="${idx}" data-active-job-id="${(status && status.active_job_id) || ""}">${iconHtml}</button>`;
+    return `<button class="track-library-btn${isDownloaded ? " downloaded" : ""}${isBusy ? " progress" : ""}${error ? " download-error" : ""}" type="button" aria-label="${esc(label)}" title="${esc(label)}" data-library-action="${idx}" data-active-job-id="${(status && status.active_job_id) || ""}">${iconHtml}</button>`;
   }
 
   // Phase 1: render immediately with placeholder download icons (no network wait).
@@ -2192,7 +2365,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
                      ((item.spotify_id && item.spotify_id === current.spotify_id) ||
                       (item.title === current.title && item.artist === current.artist));
     const typeLabel = { track: "Song", artist: "Artist", album: "Album" }[item.type] || (item.type || "Song");
-    const col6 = isTrack ? makeLibraryBtn(idx, null) : "";
+    const col6 = isTrack ? makeLibraryBtn(idx, item.offline ? { in_library: true } : null) : "";
     const playsValue = trackPlaysValue(item);
 
     let col2 = `<strong>${isTrack ? albumLinkHtml(item, item.title || item.name || item.artist) : esc(item.title || item.name || item.artist)}</strong>`;
@@ -2216,6 +2389,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       col4 = albumLinkHtml(item, item.album || "", "album-link");
     } else if (context === "album") {
       col2 += `<span>${artistLinkHtml(item)}</span>`;
+      col4 = artistLinkHtml(item);
       col3 = `<span class="views-count unavailable">${playsValue ? playsValue.toLocaleString() : "-"}</span>`;
     } else {
       col2 += `<span>${artistLinkHtml(item)}</span>`;
@@ -2224,7 +2398,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
     return `
       <div class="track-row ${isActive ? "active-track" : ""}" data-item-idx="${idx}" data-item-data='${JSON.stringify(item).replace(/'/g, "&apos;")}'>
-        <div class="track-art ${item.type === "artist" ? "round" : ""}" style="background-image: url('${art}')"></div>
+        <div class="track-art ${context === "album" ? "album-track-number" : item.type === "artist" ? "round" : ""}" style="${context === "album" ? "" : `background-image: url('${art}')`}">${context === "album" ? idx + 1 : ""}</div>
         <div class="track-main">${col2}</div>
         <div class="track-center">${col3}</div>
         <div class="track-extra">${col4}</div>
@@ -2274,7 +2448,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
   // Phase 2: single batch request → update download icons in-place.
   const trackIdxs = items.reduce((acc, item, idx) => {
-    if (isTrackItem(item)) acc.push(idx);
+    if (isTrackItem(item) && !item.offline && !item.remote_device_id) acc.push(idx);
     return acc;
   }, []);
   if (!trackIdxs.length) return;
@@ -2294,6 +2468,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
   function applyStatuses(chunkIdxs, statuses) {
     if (!container.isConnected) return;
+    if (context === "album") updateAlbumLibraryStatuses(chunkIdxs.map(index => items[index]), statuses);
     chunkIdxs.forEach((itemIdx, i) => {
       const btn = container.querySelector(`[data-library-action="${itemIdx}"]`);
       if (!btn) return;
@@ -2307,7 +2482,13 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       // button freezes on a static pie and never finalizes to "downloaded".
       if (status.library_requested && !status.in_library) {
         newBtn.dataset.activeJobId = status.active_job_id || "";
-        waitForLibraryToggle(items[itemIdx], status.active_job_id || "", newBtn).catch(() => {});
+        waitForLibraryToggle(items[itemIdx], status.active_job_id || "", newBtn, {
+          onStatus:next => { if (context === "album") updateAlbumLibraryStatuses([items[itemIdx]], [next]); },
+        }).catch(error => {
+          const live = findLiveLibraryButtonForTrack(items[itemIdx]) || newBtn;
+          reportLibraryDownloadError(items[itemIdx], live, error);
+          refreshLibraryButtonState(items[itemIdx], live);
+        });
       }
     });
     bindLibraryButtons();
@@ -2669,21 +2850,348 @@ async function renderArtistPage(artist) {
   es.onerror = (err) => { if ($("artistLoading")) $("artistLoading").remove(); es.close(); };
 }
 
+// Album header controls wrap the existing per-track library action.
+const libraryDownloadErrors = new Map();
+const albumDownloadBatches = new Map();
+let albumDownloadWorker = false;
+let visibleAlbumControls = null;
+let albumQueueRevision = Date.now();
+
+function persistAlbumDownloadQueue(force = false) {
+  try {
+    const batches = [...albumDownloadBatches.values()].filter(batch => ["queued", "running", "error"].includes(batch.status));
+    albumQueueRevision = Math.max(Date.now(), albumQueueRevision + 1);
+    const snapshot = {updated_at:albumQueueRevision, batches};
+    const serialized = JSON.stringify(snapshot);
+    localStorage.setItem(STORAGE_KEYS.albumDownloads, serialized);
+    // Loopback ports change on restart, so localStorage alone cannot retain
+    // a queue across launches. Persist the same bookkeeping on this device.
+    if (force && navigator.sendBeacon) {
+      navigator.sendBeacon(`${API_BASE}/api/library/album_queue`, new Blob([serialized], {type:"application/json"}));
+    } else {
+      api("/api/library/album_queue", {method:"POST", body:serialized}).catch(() => {});
+    }
+  } catch (_) {}
+}
+
+async function restoreAlbumDownloadQueue() {
+  try {
+    const remote = await api("/api/library/album_queue").catch(() => null);
+    let local = null;
+    try { local = JSON.parse(localStorage.getItem(STORAGE_KEYS.albumDownloads) || "null"); } catch (_) {}
+    const snapshot = !remote || Number(local?.updated_at || 0) > Number(remote.updated_at || 0) ? local : remote;
+    const batches = Array.isArray(snapshot) ? snapshot : snapshot?.batches || [];
+    albumQueueRevision = Math.max(albumQueueRevision, Number(snapshot?.updated_at || 0));
+    for (const saved of batches) {
+      if (!saved || typeof saved.key !== "string" || !Array.isArray(saved.items) || !saved.items.length) continue;
+      const items = saved.items.filter(item => isTrackItem(item?.track) && item.payload && typeof item.payload === "object");
+      if (items.length !== saved.items.length) continue;
+      albumDownloadBatches.set(saved.key, {...saved, items, cancelled:false,
+        status:saved.status === "error" ? "error" : "queued",
+        resumedOwnedJobId:saved.ownsActive ? saved.activeJobId : "", ownsActive:false, activeJobId:""});
+    }
+  } catch (_) {}
+  runAlbumDownloadQueue().catch(() => {});
+}
+
+function reportLibraryDownloadError(track, button, error, notify = true) {
+  const key = trackKey(track);
+  const message = error.message || "Download failed";
+  const previous = libraryDownloadErrors.get(key);
+  libraryDownloadErrors.set(key, message);
+  if (button) {
+    button.classList.remove("progress");
+    button.classList.add("download-error");
+    button.title = `Retry download: ${message}`;
+    button.setAttribute("aria-label", button.title);
+    button.innerHTML = '<i class="bi bi-arrow-down-circle"></i>';
+  }
+  if (notify && previous !== message) showToast(`${track.title || "Track"}: ${message}`, 6500);
+}
+
+function albumControlKey(album, tracks) {
+  return String(album.spotify_id || album.album_spotify_id || album.musicbrainz_release_id ||
+    tracks[0]?.album_spotify_id || `${album.artist || ""}|${album.album || album.title || ""}`);
+}
+
+function albumDownloadSatisfied(status) {
+  return !!(status && (status.download_satisfied ?? status.in_library));
+}
+
+function updateAlbumLibraryStatuses(tracks, statuses) {
+  const view = visibleAlbumControls;
+  if (!view) return;
+  tracks.forEach((track, index) => view.statuses.set(trackKey(track), statuses[index] || {}));
+  renderAlbumHeaderControls();
+}
+
+function renderAlbumHeaderControls() {
+  const view = visibleAlbumControls;
+  const button = $("albumDownloadAll");
+  if (!view || !button || button.dataset.albumKey !== view.key) return;
+  const batch = albumDownloadBatches.get(view.key);
+  const busy = batch && ["queued", "running"].includes(batch.status);
+  const saved = view.tracks.filter(track => track.offline || albumDownloadSatisfied(view.statuses.get(trackKey(track)))).length;
+  const remaining = busy ? Math.max(0, batch.total - batch.completed) : Math.max(0, view.tracks.length - saved);
+  button.classList.toggle("progress", !!busy);
+  button.classList.toggle("downloaded", !busy && remaining === 0 && view.tracks.length > 0);
+  const hasFailures = remaining > 0 && !!batch?.failed;
+  button.classList.toggle("download-error", !busy && hasFailures);
+  button.disabled = !view.tracks.length || (!busy && remaining === 0);
+  const label = !view.tracks.length ? "No songs available" : busy ? `Cancel album downloads: ${remaining} tracks remaining`
+    : remaining === 0 ? "Album downloaded" : `Download album for offline listening (${remaining} tracks)`;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.innerHTML = busy
+    ? `<span class="track-progress-ring determinate" style="--pct:${100 * batch.completed / Math.max(1, batch.total)}"><span class="track-progress-core">${remaining}</span></span>`
+    : `<i class="bi ${remaining === 0 ? "bi-arrow-down-circle-fill" : "bi-arrow-down-circle"}"></i>`;
+  const status = $("albumDownloadStatus");
+  if (status) status.textContent = busy ? `${remaining} tracks remaining${batch.failed ? ` · ${batch.failed} failed` : ""}`
+    : remaining === 0 && view.tracks.length ? ""
+    : batch?.status === "cancelled" ? "Album download cancelled"
+    : hasFailures ? `${batch.failed} downloads failed — retry remaining tracks` : "";
+  const play = $("albumPlayAll");
+  if (play) play.disabled = !view.tracks.length;
+}
+
+async function cancelAlbumDownloads(batch) {
+  batch.cancelled = true;
+  batch.status = "cancelled";
+  if (batch.ownsActive && batch.activeJobId) {
+    await api("/api/service/cancel", {method:"DELETE",body:JSON.stringify({job_id:batch.activeJobId})}).catch(() => {});
+  }
+  persistAlbumDownloadQueue();
+  renderAlbumHeaderControls();
+}
+
+async function queueAlbumDownloads(view) {
+  const existing = albumDownloadBatches.get(view.key);
+  if (existing && ["queued", "running"].includes(existing.status)) return cancelAlbumDownloads(existing);
+  // Capture the selected engine/service/quality once; navigation or Settings
+  // changes must not silently change the remainder of an accepted queue.
+  const pending = view.tracks.filter(track => !track.offline && !albumDownloadSatisfied(view.statuses.get(trackKey(track))));
+  const items = pending.map(track => ({track, payload:{...serviceDownloadPayload(track, "download"), ensure_download:true}}));
+  const batch = {key:view.key, name:view.name, items, nextIndex:0, total:view.tracks.length,
+    completed:view.tracks.length - items.length, failed:0,
+    cancelled:false, status:"queued", activeJobId:"", ownsActive:false};
+  albumDownloadBatches.set(view.key, batch);
+  persistAlbumDownloadQueue();
+  renderAlbumHeaderControls();
+  runAlbumDownloadQueue().catch(error => showToast(error.message || "Album download failed", 6000));
+}
+
+async function runAlbumDownloadQueue() {
+  if (albumDownloadWorker) return;
+  albumDownloadWorker = true;
+  try {
+    for (;;) {
+      const batch = [...albumDownloadBatches.values()].find(item => item.status === "queued" && !item.cancelled);
+      if (!batch) break;
+      batch.status = "running";
+      for (let index = batch.nextIndex || 0; index < batch.items.length; index++) {
+        const item = batch.items[index];
+        if (batch.cancelled) break;
+        batch.activeJobId = "";
+        batch.ownsActive = false;
+        const button = document.createElement("button");
+        const result = await toggleTrackLibrary(item.track, button, null, {
+          downloadOnly:true, payload:item.payload, reportErrors:false,
+          isCancelled:() => batch.cancelled,
+          onJob:result => {
+            batch.activeJobId = result.job?.id || result.active_job_id || "";
+            batch.ownsActive = result.action === "started" || batch.activeJobId === batch.resumedOwnedJobId;
+            persistAlbumDownloadQueue();
+            if (batch.cancelled && batch.ownsActive) cancelAlbumDownloads(batch).catch(() => {});
+          },
+          onStatus:status => updateAlbumLibraryStatuses([item.track], [status]),
+        });
+        if (batch.cancelled) break;
+        if (result?.ok) batch.completed += 1;
+        else batch.failed += 1;
+        batch.nextIndex = index + 1;
+        persistAlbumDownloadQueue();
+        renderAlbumHeaderControls();
+      }
+      batch.activeJobId = "";
+      if (!batch.cancelled) {
+        batch.status = batch.failed ? "error" : "finished";
+        showToast(batch.failed ? `${batch.name}: ${batch.failed} tracks could not be downloaded. Retry to continue.`
+          : `${batch.name} is available offline`, batch.failed ? 6000 : 3000);
+      }
+      persistAlbumDownloadQueue();
+      renderAlbumHeaderControls();
+    }
+  } finally {
+    albumDownloadWorker = false;
+  }
+}
+
+function savedAlbumPlaylist(album) {
+  const target = albumTarget(album), url = spotifyAlbumUrl(target);
+  return (state.playlists || []).find(pl => inferPlaylistOrigin(pl) === "album" &&
+    (url ? pl.spotify_url === url || !!target.spotify_id && pl.album_spotify_id === target.spotify_id
+      : pl.name === (target.title || album.album) && pl.tracks?.[0]?.artist === target.artist));
+}
+
+async function saveAlbumToLibrary(album) {
+  const existing = savedAlbumPlaylist(album);
+  if (existing) return existing;
+  const tracks = album.tracks?.length ? album.tracks : await fetchAlbumTracks(album);
+  if (!tracks.length) throw new Error("No songs available to save");
+  const target = albumTarget(album);
+  const playlist = await api("/api/playlists", {method:"POST", body:JSON.stringify({
+    name:target.title || album.album || album.name || "Album", spotify_url:spotifyAlbumUrl(target), origin:"album",
+  })});
+  await api("/api/playlists/tracks/add", {method:"POST",body:JSON.stringify({id:playlist.id,
+    tracks:tracks.map(track => ({...track,kind:"track"}))})});
+  await loadPlaylists();
+  return playlist;
+}
+
+function renderAlbumLibraryControl(album) {
+  const button = $("albumSaveLibrary");
+  if (!button) return;
+  const saved = savedAlbumPlaylist(album);
+  button.classList.toggle("active", !!saved);
+  button.title = saved ? "Remove album from library" : "Add album to library";
+  button.setAttribute("aria-label", button.title);
+  button.innerHTML = `<i class="bi ${saved ? "bi-check-circle-fill" : "bi-plus-circle"}"></i>`;
+}
+
+async function shareAlbumLink(album) {
+  const url = spotifyAlbumUrl(albumTarget(album)) || musicBrainzReleaseUrl(albumTarget(album));
+  if (!url) { showToast("This album has no public link to share."); return; }
+  try {
+    const title = album.album || album.title || "Album";
+    if (window.MindinguflacAndroid?.share) window.MindinguflacAndroid.share(`${title}\n${url}`);
+    else if (navigator.share) await navigator.share({title,url});
+    else { await navigator.clipboard.writeText(url); showToast("Album link copied"); }
+  } catch (error) { if (error.name !== "AbortError") showToast("Could not share the album link."); }
+}
+
+function bindAlbumHeaderControls(album, tracks) {
+  const unique = [...new Map(tracks.filter(playableQueueItem).map(track => [trackKey(track), track])).values()];
+  const key = albumControlKey(album, unique);
+  const view = {key, name:album.album || album.title || "Album", tracks:unique, statuses:new Map()};
+  const headerAlbum = {...album, tracks:unique};
+  view.album = headerAlbum;
+  visibleAlbumControls = view;
+  const download = $("albumDownloadAll");
+  download.dataset.albumKey = key;
+  download.onclick = () => queueAlbumDownloads(view);
+  $("albumPlayAll").onclick = () => {
+    const first = unique[0];
+    if (!first) return;
+    state.pendingResumePosition = 0;
+    selectMusicItem(first, "stream", unique, album.saved_playlist_context || null);
+  };
+  const save = $("albumSaveLibrary");
+  if (save) save.onclick = async () => {
+    save.disabled = true;
+    try {
+      const existing = savedAlbumPlaylist(headerAlbum);
+      if (existing) await deletePlaylist(existing.id);
+      else await saveAlbumToLibrary(headerAlbum);
+      renderAlbumLibraryControl(headerAlbum);
+    } catch (error) { showToast(error.message || "Could not update album library",6000); }
+    finally { save.disabled = false; }
+  };
+  const shuffle = $("albumShuffle");
+  if (shuffle) {
+    shuffle.classList.toggle("active", !!state.isShuffle);
+    shuffle.setAttribute("aria-pressed", String(!!state.isShuffle));
+    shuffle.onclick = async () => {
+      await $("btnShuffle").onclick();
+      shuffle.classList.toggle("active", !!state.isShuffle);
+      shuffle.setAttribute("aria-pressed", String(!!state.isShuffle));
+    };
+  }
+  const share = $("albumShare");
+  if (share) share.onclick = () => shareAlbumLink(headerAlbum);
+  window.MindinguflacAlbums?.bind(headerAlbum, unique, view);
+  renderAlbumLibraryControl(headerAlbum);
+  renderAlbumHeaderControls();
+}
+
 async function renderAlbumPage(album) {
-  setActiveView("home");
+  const savedPlaylistId = album?.saved_playlist_context?.kind === "playlist"
+    ? album.saved_playlist_context.id
+    : "";
+  setActiveView("home", savedPlaylistId);
   const content = $("pageContent");
-  content.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading ${esc(album.title || album.album)}…</span></div>`;
+  // Show the header straight away from what the click already knows (cover,
+  // album, artist); the songs fill in when the backend answers.
+  const headerTitle = album.title || album.album || "";
+  const headerArt = album.artwork_url || album.album_artwork_url || "";
+  content.innerHTML = `
+    <div class="scroll-area album-page-loading">
+      <div class="entity-hero">
+        <div class="album-gallery-wrap">
+          <div class="entity-art album-gallery">
+            ${headerArt ? `<img src="${esc(headerArt)}" alt="${esc(headerTitle)} artwork">` : ""}
+          </div>
+        </div>
+        <div>
+          <span class="eyebrow">Album</span>
+          <h1 id="albumLoadingTitle">${esc(headerTitle || "Loading album…")}</h1>
+          ${album.artist ? `<div class="hero-meta-row"><span class="hero-artist-link">${esc(album.artist)}</span></div>` : ""}
+        </div>
+      </div>
+      <div class="loading"><div class="spinner"></div><span>Loading songs…</span></div>
+    </div>`;
 
   const loadingState = content.firstElementChild;
   try {
-    const artistName = album.artist || "";
-    const albumTitle = album.title || album.album || "";
+    let artistName = album.artist || "";
+    let albumTitle = album.title || album.album || "";
     const releaseId = album.musicbrainz_release_id || "";
-    const spotifyId = album.spotify_id || "";
+    let spotifyId = album.spotify_id || "";
 
-    const params = new URLSearchParams({ artist: artistName, album: albumTitle, release_id: releaseId, spotify_id: spotifyId });
-    const data = await api(`/api/music/album_tracks?${params}&details=0`);
+    // Opened from a track that carries no album name or id (e.g. a queue or
+    // top-tracks entry): ask which album it is first. That small lookup is
+    // answered from the database once known, so the header shows the album
+    // name long before the songs, which are then loaded straight by album id.
+    if (!spotifyId && album.track_spotify_id) {
+      const found = await api(`/api/music/track_album?spotify_id=${encodeURIComponent(album.track_spotify_id)}`).catch(() => null);
+      if (content.firstElementChild !== loadingState) return;
+      if (found?.album_spotify_id) {
+        spotifyId = found.album_spotify_id;
+        albumTitle = found.album || albumTitle;
+        artistName = found.album_artist || found.artist || artistName;
+        const titleEl = $("albumLoadingTitle");
+        if (titleEl && albumTitle) titleEl.textContent = albumTitle;
+      }
+    }
+
+    const params = new URLSearchParams({
+      artist: artistName, album: albumTitle, release_id: releaseId, spotify_id: spotifyId,
+      track_spotify_id: spotifyId ? "" : (album.track_spotify_id || ""),
+    });
+    let data = await api(`/api/music/album_tracks?${params}&details=0`);
     if (content.firstElementChild !== loadingState) return;
+    const savedTracks = album.saved_playlist_context?.tracks || album.tracks || [];
+    const useSavedTracks = Array.isArray(savedTracks) && savedTracks.length > 0;
+    if (useSavedTracks) {
+      data = {
+        ...data,
+        tracks: savedTracks,
+        track_count: savedTracks.length,
+        total_duration: data.total_duration || formatDuration(savedTracks),
+        _extras_complete: true,
+      };
+    }
+    data.tracks = (data.tracks || []).map(track => ({
+      ...track,
+      album_spotify_id: data.spotify_id || spotifyId || track.album_spotify_id || "",
+      album_artist: data.artist || artistName || track.album_artist || "",
+      album: data.album || albumTitle || track.album || "",
+      album_context: (data.spotify_id || spotifyId) ? {
+        spotify_id: data.spotify_id || spotifyId,
+        album: data.album || albumTitle,
+        album_artist: data.artist || artistName,
+        artwork_url: data.artwork_url || headerArt,
+      } : track.album_context,
+    }));
     const artistArtwork = data.artist_artwork_url || album.artist_artwork_url || "";
     const year = data.year || album.year || "";
     const albumMeta = [
@@ -2733,16 +3241,33 @@ async function renderAlbumPage(album) {
           </div>
         </div>
 
-        <div class="track-list-header" style="margin-top: 24px">
+        <div class="album-header-actions" role="group" aria-label="Album actions">
+          <button class="album-play-all" id="albumPlayAll" type="button" aria-label="Play album" title="Play album"><i class="bi bi-play-fill"></i></button>
+          <button class="album-secondary-action" id="albumSaveLibrary" type="button" aria-label="Add album to library" title="Add album to library"><i class="bi bi-plus-circle"></i></button>
+          <button class="album-download-all" id="albumDownloadAll" type="button" aria-label="Download album for offline listening" title="Download album for offline listening"><i class="bi bi-arrow-down-circle"></i></button>
+          <button class="album-secondary-action" id="albumShuffle" type="button" aria-label="Shuffle album" title="Shuffle album" aria-pressed="false"><i class="bi bi-shuffle"></i></button>
+          <button class="album-secondary-action" id="albumShare" type="button" aria-label="Share album" title="Share album"><i class="bi bi-share"></i></button>
+          <button class="album-secondary-action album-more" id="albumMore" type="button" aria-label="More album options" title="More album options" aria-haspopup="menu"><i class="bi bi-three-dots"></i></button>
+          <span class="album-download-status" id="albumDownloadStatus" role="status" aria-live="polite"></span>
+          <div class="album-view-control">
+            <button id="albumViewToggle" type="button" aria-label="View as List" aria-haspopup="menu" aria-expanded="false"><span id="albumViewLabel">List</span><i class="bi bi-list-ul"></i></button>
+            <div id="albumViewMenu" class="album-view-menu" role="menu" aria-label="View as" hidden>
+              <span>View as</span>
+              <button type="button" role="menuitemradio" data-album-view="compact" aria-checked="false"><i class="bi bi-list"></i> Compact<i class="bi bi-check-lg"></i></button>
+              <button type="button" role="menuitemradio" data-album-view="list" aria-checked="true"><i class="bi bi-list-ul"></i> List<i class="bi bi-check-lg"></i></button>
+            </div>
+          </div>
+        </div>
+        <div class="track-list-header album-track-header">
           <div>#</div>
           <div>Title</div>
           <div class="plays-column">Plays</div>
-          <div></div>
+          <div class="album-artist-column">Artist</div>
           <div class="time-column"><i class="bi bi-clock"></i></div>
           <div></div>
         </div>
 
-        <div id="albumTrackList" class="track-list"></div>
+        <div id="albumTrackList" class="track-list album-tracks"></div>
         <dialog class="album-image-modal" id="albumImageModal" aria-label="${esc(data.album)} artwork preview">
           <button class="album-image-modal-close" id="albumImageModalClose" type="button" aria-label="Close enlarged artwork"><i class="bi bi-x-lg"></i></button>
           <button class="album-image-modal-zoom" id="albumImageModalZoom" type="button" aria-label="Toggle zoom view"><i class="bi bi-zoom-in"></i></button>
@@ -2872,9 +3397,10 @@ async function renderAlbumPage(album) {
     };
     $("albumImageModalPrevious").onclick = () => showGalleryImage(galleryIndex - 1);
     $("albumImageModalNext").onclick = () => showGalleryImage(galleryIndex + 1);
-    renderTrackList("albumTrackList", data.tracks || [], "album");
+    bindAlbumHeaderControls({...album, ...data, spotify_id:data.spotify_id || spotifyId, album:data.album || albumTitle, artist:data.artist || artistName}, data.tracks || []);
+    renderTrackList("albumTrackList", data.tracks || [], "album", album.saved_playlist_context || null);
     const trackList = $("albumTrackList");
-    if (data._extras_complete === false) {
+    if (data._extras_complete === false && !useSavedTracks) {
       // Artwork scans and secondary metadata must never delay playable tracks.
       api(`/api/music/album_tracks?${params}`, { timeout: 90000 }).then(details => {
         if ($("albumTrackList") !== trackList) return;
@@ -2943,6 +3469,19 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
 
   
   const requestId = ++state.playbackRequestId;
+  state.rebuffering = false;
+  state.audioBuffering = false;
+  state.audioHasPlayed = false;
+  state.directStreamPosition = 0;
+  state.directStreamReconnectPending = false;
+  state.directStreamReconnectAttempts = 0;
+  state.directStreamResumePending = false;
+  state.directStreamNativeFallbackAttempted = false;
+  if (state.directStreamReconnectTimer) clearTimeout(state.directStreamReconnectTimer);
+  state.directStreamReconnectTimer = null;
+  state.rebufferPosition = 0;
+  state.rebufferAfterBytes = 0;
+  state.lastActiveReadyBytes = 0;
   state.manualPauseRequested = false;
   state.activeJobId = null;
   state.currentTrack = item;
@@ -2993,6 +3532,13 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
     refreshQueuePanel();
   }
 
+  // Offline playback must use the saved file even if the selected provider's
+  // preferred quality is higher than this download's quality.
+  if (item.offline && item.library_path) {
+    await playFromLibraryPath(item.library_path, item, requestId, null, "Playing offline");
+    return;
+  }
+
   try {
     const source = await api("/api/playback/source", { method: "POST", body: JSON.stringify(serviceDownloadPayload(item, "stream")) });
     if (requestId !== state.playbackRequestId) return;
@@ -3035,6 +3581,47 @@ function isActiveJobStreamUrl(url) {
   return !!url && url.includes("/api/library/stream_active_job");
 }
 
+function isMonochromeDirectStreamUrl(url) {
+  return typeof url === "string" && /^https:\/\/tracks\.monochrome\.st\/track\/\d+/.test(url);
+}
+
+// WebView and native playback share one buffered fetch. Sync reads this
+// already playing audio, including when the selected output is the browser.
+function browserAudioStreamUrl(url) {
+  return isMonochromeDirectStreamUrl(url)
+    ? `/api/monochrome/stream?url=${encodeURIComponent(url.split("?")[0])}` : url;
+}
+
+function knownTrackDurationSeconds(track = state.currentTrack) {
+  const candidates = [
+    track?.duration_ms,
+    track?.metadata?.duration_ms,
+    track?.duration?.totalMilliseconds,
+    track?.metadata?.duration?.totalMilliseconds,
+    track?.duration,
+    track?.metadata?.duration,
+    track?.length,
+    track?.source_recording?.duration_ms,
+    track?.metadata?.source_recording?.duration_ms,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value > 1000 ? value / 1000 : value;
+    }
+    if (typeof value === "string") {
+      const clock = value.trim().match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
+      if (clock) {
+        return clock[3]
+          ? Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3])
+          : Number(clock[1]) * 60 + Number(clock[2]);
+      }
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) return numeric > 1000 ? numeric / 1000 : numeric;
+    }
+  }
+  return 0;
+}
+
 function isLibraryStreamUrl(url) {
   if (!url || isActiveJobStreamUrl(url)) return false;
   try {
@@ -3058,7 +3645,7 @@ async function reconnectActiveJobStream(audio, requestId, jobId, position = 0) {
   state.currentStreamUrl = streamUrl;
   state.currentPlayableReady = true;
   state.autoplayWanted = !state.manualPauseRequested;
-  audio.src = streamUrl;
+  audio.src = browserAudioStreamUrl(streamUrl);
   audio.load();
   if (Number.isFinite(position) && position > 0) {
     const applyResume = () => {
@@ -3076,23 +3663,50 @@ function seekAfterMetadata(audio, position) {
   const target = Number(position);
   if (!Number.isFinite(target) || target <= 0) return;
 
+  // A media element may ignore currentTime assignments until metadata or a
+  // seekable range exists. Keep retrying after load instead of removing the
+  // listeners after an early, silently ignored assignment.
+  if (audio._resumeSeekHandler) {
+    for (const eventName of ["loadedmetadata", "durationchange", "progress", "canplay", "seeked"]) {
+      audio.removeEventListener(eventName, audio._resumeSeekHandler);
+    }
+  }
   const apply = () => {
+    if (audio.readyState < 1 && !audio.seekable?.length) return;
     const duration = Number(audio.duration);
-    if (!Number.isFinite(duration) || duration <= 0) return;
+    const seekTarget = Number.isFinite(duration) && duration > 0
+      ? Math.max(0, Math.min(target, Math.max(0, duration - 0.25)))
+      : target;
     try {
-      audio.currentTime = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
-    } catch (e) {}
-    audio.removeEventListener("loadedmetadata", apply);
-    audio.removeEventListener("canplay", apply);
+      if (Math.abs(Number(audio.currentTime || 0) - seekTarget) < 0.5) {
+        cleanup();
+        return;
+      }
+      audio.currentTime = seekTarget;
+      if (audio.seeking || Math.abs(Number(audio.currentTime || 0) - seekTarget) < 0.5) cleanup();
+    } catch (e) {
+      // Some WebKit builds only enable seeking after the next range arrives.
+      // Keep the listeners so a later progress/canplay event gets another try.
+    }
   };
-
-  audio.addEventListener("loadedmetadata", apply);
-  audio.addEventListener("canplay", apply);
+  const cleanup = () => {
+    for (const eventName of ["loadedmetadata", "durationchange", "progress", "canplay", "seeked"]) {
+      audio.removeEventListener(eventName, apply);
+    }
+    audio._resumeSeekHandler = null;
+  };
+  audio._resumeSeekHandler = apply;
+  for (const eventName of ["loadedmetadata", "durationchange", "progress", "canplay", "seeked"]) {
+    audio.addEventListener(eventName, apply);
+  }
   apply();
 }
 
 async function playFromLibraryPath(filePath, track, requestId, jobId, statusText = "Playing from library", startAt = 0) {
   if (requestId !== state.playbackRequestId) return;
+  state.rebuffering = false;
+  state.rebufferAfterBytes = 0;
+  state.rebufferPosition = 0;
   const pendingResume = Number(state.pendingResumePosition || 0);
   if ((!Number.isFinite(startAt) || startAt <= 0) && pendingResume > 0) {
     startAt = pendingResume;
@@ -3131,7 +3745,7 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
   } else {
     await stopNativeAudio();
   }
-  audio.src = streamUrl;
+  audio.src = browserAudioStreamUrl(streamUrl);
   state.currentPlayableReady = true;
   state.autoplayWanted = true;
   
@@ -3151,6 +3765,36 @@ async function resumeBrowserAudioFromStableSource(audio) {
   if (!audio) return;
   console.log("[Player] resumeBrowserAudioFromStableSource, current src:", audio.src);
   state.manualPauseRequested = false;
+  if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+    // Reopen a local range at the saved playhead using the shared buffer.
+    const resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+      ? audio.currentTime : Number(state.directStreamPosition || state.rebufferPosition || 0);
+    state.directStreamAttemptPosition = resumeAt;
+    state.autoplayWanted = true;
+    state.rebuffering = false;
+    state.audioBuffering = true;
+    state.directStreamResumePending = true;
+    syncPlayPauseButton();
+    audio.src = browserAudioStreamUrl(state.currentStreamUrl);
+    audio.load();
+    seekAfterMetadata(audio, resumeAt);
+    tryStartAudio(audio, state.currentTrack, state.playbackRequestId, null);
+    return;
+  }
+  if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
+    // Pausing closes WebKit's current ranged HTTP response. Reopen the active
+    // job stream at the saved playhead so resume continues from that byte range
+    // instead of reusing a dead response (or restarting the track).
+    const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    state.rebuffering = false;
+    state.rebufferAfterBytes = 0;
+    await reconnectActiveJobStream(audio, state.playbackRequestId, state.activeJobId, resumeAt);
+    return;
+  }
+  if (state.rebuffering && isActiveJobStreamUrl(state.currentStreamUrl)) {
+    state.autoplayWanted = true;
+    return;
+  }
   const hasMissingSource = !audio.src || audio.src === window.location.href;
   const shouldUseFinishedFile = state.currentLibraryPath && (
     hasMissingSource ||
@@ -3172,8 +3816,12 @@ async function resumeBrowserAudioFromStableSource(audio) {
   }
 
   state.autoplayWanted = true;
-  audio.play().catch((error) => {
+  prepareBrowserAudioClock(audio).then(() => audio.play()).catch((error) => {
     console.error("[Player] Play failed:", error);
+    if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
+      waitForActiveJobBuffer(audio);
+      return;
+    }
     const key = trackKey(state.currentTrack);
     if (state.currentTrack && error.name !== "NotAllowedError" && error.name !== "AbortError") {
       if (state.lastAutoRetryKey === key) {
@@ -3193,7 +3841,104 @@ async function resumeBrowserAudioFromStableSource(audio) {
 function pauseBrowserAudio(audio) {
   state.manualPauseRequested = true;
   state.autoplayWanted = false;
+  if (isMonochromeDirectStreamUrl(state.currentStreamUrl) && Number.isFinite(audio?.currentTime)) {
+    state.directStreamPosition = audio.currentTime || state.directStreamPosition || 0;
+  }
+  state.directStreamReconnectPending = false;
+  state.directStreamReconnectAttempts = 0;
+  state.directStreamResumePending = false;
+  // A user pause is a stable state, not a buffering condition. WebKit may
+  // emit `waiting` or a late media error after closing the active range.
+  state.audioBuffering = false;
+  if (state.directStreamReconnectTimer) clearTimeout(state.directStreamReconnectTimer);
+  state.directStreamReconnectTimer = null;
   if (audio) audio.pause();
+  if (state.currentTrack) setPlayerStatus("Paused", state.currentTrack);
+  syncPlayPauseButton();
+}
+
+const _monochromePlaybackLogTimes = new Map();
+function logMonochromePlaybackActivity(message, track = state.currentTrack, key = message, cooldownMs = 1000) {
+  const now = Date.now();
+  const dedupeKey = `${trackKey(track || {})}:${key}`;
+  const last = _monochromePlaybackLogTimes.get(dedupeKey) || 0;
+  if (now - last < cooldownMs) return;
+  _monochromePlaybackLogTimes.set(dedupeKey, now);
+  if (_monochromePlaybackLogTimes.size > 100) {
+    for (const [entry, timestamp] of _monochromePlaybackLogTimes) {
+      if (now - timestamp > 60000) _monochromePlaybackLogTimes.delete(entry);
+    }
+  }
+  api("/api/cache/logs", {
+    method: "POST",
+    body: JSON.stringify({ message, title: track?.title || "Monochrome stream" }),
+  }).catch(() => {});
+}
+
+const MAX_MONOCHROME_BROWSER_RECONNECTS = 4;
+
+function reconnectMonochromeAfterBuffer(audio) {
+  if (!audio || state.manualPauseRequested || state.directStreamReconnectPending ||
+      !isMonochromeDirectStreamUrl(state.currentStreamUrl)) return;
+  const requestId = state.playbackRequestId;
+  let resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+    ? audio.currentTime : Number(state.directStreamPosition || state.rebufferPosition || 0);
+  if ((state.directStreamReconnectPending || state.directStreamResumePending) &&
+      resumeAt + 0.75 < Number(state.directStreamAttemptPosition || 0)) {
+    resumeAt = Math.max(resumeAt, Number(state.directStreamAttemptPosition || 0), Number(state.directStreamPosition || 0));
+  }
+  // The browser/WebView <audio> element hides HTTP status, so a Monochrome
+  // 429/403 only looks like a stream that will not come back. Each reconnect
+  // is another request, which keeps a rate limit going; after a few in a row
+  // without audio, start the backend cooldown and play the track from YouTube.
+  // (Attempts reset to 0 whenever audio plays again.)
+  if (state.directStreamReconnectAttempts >= MAX_MONOCHROME_BROWSER_RECONNECTS) {
+    const track = state.currentTrack;
+    state.directStreamReconnectAttempts = 0;
+    api("/api/monochrome/stream_failing", { method: "POST", body: "{}" })
+      .catch(() => null)
+      .then((result) => {
+        if (requestId !== state.playbackRequestId) return;
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        fallbackFromBlockedMonochrome(track, requestId, result?.reason || "Monochrome stream kept failing");
+      });
+    return;
+  }
+  state.directStreamReconnectPending = true;
+  state.directStreamReconnectAttempts += 1;
+  state.directStreamAttemptPosition = resumeAt;
+  state.rebufferPosition = resumeAt;
+  logMonochromePlaybackActivity(
+    `Monochrome stream buffering at ${formatTime(resumeAt)}; retry ${state.directStreamReconnectAttempts} in 5s`,
+    state.currentTrack,
+    `retry-${state.directStreamReconnectAttempts}`,
+  );
+  state.directStreamReconnectTimer = setTimeout(async () => {
+    state.directStreamReconnectTimer = null;
+    if (requestId !== state.playbackRequestId || state.manualPauseRequested ||
+        !isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      state.directStreamReconnectPending = false;
+      return;
+    }
+    // WebKit can leave a stalled range response in a non-paused state forever.
+    // Reopen the Monochrome URL at the saved playhead to request a fresh range.
+    audio.pause();
+    await resumeBrowserAudioFromStableSource(audio).catch((error) => {
+      console.warn("[Player] Monochrome buffer reconnect failed:", error);
+      state.directStreamReconnectPending = false;
+    });
+    if (requestId === state.playbackRequestId && state.directStreamReconnectPending) {
+      state.directStreamReconnectTimer = setTimeout(() => {
+        state.directStreamReconnectTimer = null;
+        if (requestId !== state.playbackRequestId || state.manualPauseRequested ||
+            !state.directStreamReconnectPending) return;
+        state.directStreamReconnectPending = false;
+        reconnectMonochromeAfterBuffer(audio);
+      }, Math.min(30000, 5000 * Math.pow(1.5, Math.min(state.directStreamReconnectAttempts - 1, 8))));
+    }
+  }, 5000);
 }
 
 function syncPlayerStatusTooltip() {
@@ -3227,8 +3972,23 @@ function syncPlayerStatusTooltip() {
 }
 
 function setPlayerStatusIcon(mode, pct) {
+  state.playerStatusIconMode = mode;
+  state.playerStatusIconPct = pct || 0;
+  renderPlayerStatusIcon();
+}
+
+function renderPlayerStatusIcon() {
   const icon = $("playerStatusIcon");
-  icon.className = "player-status " + (mode === "ready" ? "ready" : mode === "error" ? "error" : "downloading");
+  if (!icon) return;
+  // Keep the ready check as the underlying state, but show the established
+  // animated pie while playback is waiting for audio data.
+  const mode = state.audioBuffering && state.playerStatusIconMode === "ready"
+    ? "buffering" : state.playerStatusIconMode;
+  const pct = state.playerStatusIconPct;
+  const renderKey = `${mode}:${mode === "downloading" ? Math.round(pct || 0) : 0}`;
+  if (state.renderedPlayerStatusIcon === renderKey) return;
+  state.renderedPlayerStatusIcon = renderKey;
+  icon.className = "player-status " + (mode === "ready" ? "ready" : mode === "error" ? "error" : mode === "buffering" ? "buffering" : "downloading");
   if (mode === "ready") {
     icon.innerHTML = '<span class="player-status-content"><i class="bi bi-check-circle-fill"></i></span>';
   } else if (mode === "error") {
@@ -3241,6 +4001,7 @@ function setPlayerStatusIcon(mode, pct) {
 }
 
 function updatePlayerPie(pct) {
+  state.playerStatusIconPct = Math.max(0, Math.min(100, Number(pct) || 0));
   const playerStatusIcon = $("playerStatusIcon");
   const pie = playerStatusIcon ? playerStatusIcon.querySelector(".player-pie") : null;
   if (!pie) return;
@@ -3396,9 +4157,14 @@ function prepareSelectedTrackUi(track, status = "Opening stream...") {
   state.currentPlayableReady = false;
   state.activeJobPhase = "";
   state.autoplayWanted = false;
+  // Treat track resolution as busy too. The animated status pie appears as
+  // soon as a new selection starts, so the transport must lock at that point.
+  // Restored paused snapshots remain playable.
+  state.audioBuffering = !/^Paused(?:\b| at\b)/i.test(String(status));
   setPlayerStatusIcon("downloading", 0);
   setPlayerStatus(status, track);
   syncActiveTrackRows();
+  syncPlayPauseButton();
 }
 
 function setPlayerStatus(msg, track, job = null) {
@@ -3440,7 +4206,23 @@ function playerStatusForJob(job, fallback = "Loading...") {
 }
 
 function activeJobHasPlayableAudio(job) {
-  return Number(job?.active_audio_ready_bytes || 0) > 512 * 1024;
+  const ready = Number(job?.active_audio_ready_bytes || 0);
+  const total = Number(job?.active_audio_size || 0);
+  const duration = Number(state.currentTrack?.duration_ms || state.currentTrack?.length || 0) / 1000;
+  const position = Math.max(0, Number(state.rebufferPosition || 0));
+  const target = Math.max(512 * 1024, duration > 0 && total > 0 ? total * (position + 1.5) / duration : 0);
+  const required = total > 0 ? Math.min(total, target) : target;
+  return ready >= required && ready >= Math.min(total || Infinity, Number(state.rebufferAfterBytes || 0));
+}
+
+function waitForActiveJobBuffer(audio) {
+  state.rebufferPosition = Number.isFinite(audio?.currentTime) ? audio.currentTime : 0;
+  state.rebufferAfterBytes = Number(state.lastActiveReadyBytes || 0) + 1024 * 1024;
+  state.rebuffering = true;
+  state.currentPlayableReady = false;
+  state.autoplayWanted = !state.manualPauseRequested;
+  audio?.pause();
+  if (state.currentTrack) setPlayerStatus("Buffering more audio...", state.currentTrack);
 }
 
 function isVideoLibraryPath(path) {
@@ -3472,6 +4254,7 @@ function localMediaStreamUrl(filePath) {
 
 
 async function fetchVideoForTrack(track, { force = false } = {}) {
+  if (track?.offline) return;
   const key = trackKey(track || {});
   if (!track) return state.videoFetch;
   if (!force && state.videoFetch.trackKey === key) {
@@ -3486,6 +4269,7 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     album: track.album || "",
     track_key: key,
     ...(track.duration_ms ? { duration_ms: String(track.duration_ms) } : {}),
+    ...(track.youtube_id ? { youtube_id: track.youtube_id } : {}),
     ...(force ? { force: "1" } : {}),
   });
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -3495,7 +4279,8 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     try {
       const data = await api(`/api/video/fetch?${params.toString()}`);
       if (state.videoFetch.trackKey !== key) return state.videoFetch;
-      state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "" };
+      state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "",
+        youtube_id: data.youtube_id || track.youtube_id || "", clip_duration: Number(data.clip_duration || 0) };
       if (state.videoFetch.status === "not_found" && state.videoMode && state.sideVideoTrackKey === key) {
         state.videoMode = false;
         state.sideVideoTrackKey = "";
@@ -3678,6 +4463,7 @@ function renderSideVideoButton() {
     button.innerHTML = '<i class="bi bi-play-btn"></i><span>Switch to video</span>';
   }
   if (refresh) refresh.hidden = !(state.videoMode && hasUsableVideo);
+  renderVideoSyncControls();
 }
 
 function renderSideCover(track) {
@@ -3704,6 +4490,7 @@ function renderSideCover(track) {
         media.style.backgroundImage = "";
         media.innerHTML = `<video id="sideVideoPlayer" playsinline muted src="${esc(videoSrc)}" data-file-path="${esc(videoFilePath)}"></video>`;
         const video = $("sideVideoPlayer");
+        refreshVideoSync().catch(() => {});
         if (video) {
           video.addEventListener("loadedmetadata", () => {
             syncLocalVideoOverlay(currentTime, false, { allowSeek: true });
@@ -5065,9 +5852,9 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
     artist: track.artist || "",
     album: track.album || "",
     title: track.title || "",
-    quality: IS_ANDROID ? androidQuality : (state.settings.default_quality || "LOSSLESS"),
-    service: IS_ANDROID ? androidService : (state.settings.download_service || "tidal"),
-    engine: IS_ANDROID ? androidEngine : (state.settings.download_engine || "spotiflac"),
+    quality: IS_ANDROID ? androidQuality : (state.settings.default_quality || "best"),
+    service: IS_ANDROID ? androidService : (state.settings.download_service || "youtube"),
+    engine: IS_ANDROID ? androidEngine : (state.settings.download_engine || "ytp-dl"),
     // A bare identity snapshot, not the raw `track` object. The backend only
     // ever reads identity fields out of `track`/`metadata` (see
     // _payload_metadata on the server), never the whole object — but
@@ -5093,11 +5880,17 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
 function trackIdentitySnapshot(track) {
   if (!track || typeof track !== "object") return {};
   return {
+    ...(track.offline && track.library_path ? { offline: true, library_path: track.library_path } : {}),
     type: track.type || "track",
     title: track.title || "",
     artist: track.artist || "",
     artist_id: track.artist_id || "",
     album: track.album || "",
+    album_spotify_id: track.album_spotify_id || "",
+    album_artist: track.album_artist || "",
+    is_compilation: !!track.is_compilation,
+    ...(track.album_context ? {album_context:{spotify_id:track.album_context.spotify_id || "", album:track.album_context.album || "",
+      album_artist:track.album_context.album_artist || "", artwork_url:track.album_context.artwork_url || ""}} : {}),
     year: track.year || "",
     artwork_url: track.artwork_url || "",
     spotify_id: track.spotify_id || "",
@@ -5126,13 +5919,13 @@ function trackKey(item) {
 
 function lyricsPayload(track) {
   const payload = serviceDownloadPayload(track || {}, "stream");
-  const durationMs = track?.duration_ms || track?.metadata?.duration_ms || track?.duration || track?.metadata?.duration || 0;
+  const durationMs = track?.source_recording?.duration_ms || track?.duration_ms || track?.metadata?.duration_ms || track?.duration || track?.metadata?.duration || 0;
   return {
-    artist: payload.artist || "",
-    album: payload.album || "",
-    title: payload.title || "",
-    spotify_id: payload.spotify_id || "",
-    isrc: payload.isrc || "",
+    artist: track?.source_recording?.artist || payload.artist || "",
+    album: track?.source_recording ? (track.source_recording.album || "") : (payload.album || ""),
+    title: track?.source_recording?.title || payload.title || "",
+    spotify_id: track?.source_recording ? (track.source_recording.spotify_id || "") : (payload.spotify_id || ""),
+    isrc: track?.source_recording?.isrc || payload.isrc || "",
     track_key: payload.track_key || "",
     duration_s: durationMs > 1000 ? Math.round(Number(durationMs) / 1000) : Number(durationMs || 0),
   };
@@ -5151,6 +5944,8 @@ function parseLyrics(raw) {
   const text = String(raw || "").trim();
   if (!text) return [];
   const lines = [];
+  const offsetTag = text.match(/\[offset:([+-]?\d+)\]/i);
+  const advance = offsetTag ? Number(offsetTag[1]) / 1000 : 0;
   text.split(/\r?\n/).forEach((line) => {
     const stamps = [...line.matchAll(/\[(\d{1,2}:\d{2}(?:[.:]\d{1,3})?)\]/g)]
       .map(match => parseLrcTimestamp(match[1]))
@@ -5169,7 +5964,7 @@ function parseLyrics(raw) {
       .replace(/<\d{1,2}:\d{2}(?:[.:]\d{1,3})?>/g, "")
       .replace(/\s+/g, " ")
       .trim();
-    times.forEach(time => lines.push({ time, text: content, instrumental: !content }));
+    times.forEach(time => lines.push({ time: time - advance, text: content, instrumental: !content }));
   });
   return lines.sort((a, b) => a.time - b.time);
 }
@@ -5239,29 +6034,217 @@ function currentPlaybackSeconds() {
   return audio && isFinite(audio.currentTime) ? Number(audio.currentTime || 0) : 0;
 }
 
+// Video follows the audio by timestamp: second N of the song is second
+// N + offset of the video. The offset comes from matching the two soundtracks
+// on the backend (video intros, cold opens) plus the user's saved nudge.
+function videoSyncOffset() {
+  return Number(state.videoSync.offset || 0) + Number(state.videoSync.manual || 0);
+}
+
+function videoTimeForAudio(position, video) {
+  const raw = (Number(position) || 0) + videoSyncOffset();
+  return Math.max(0, Math.min(raw, Math.max(0, video.duration - 0.25)));
+}
+
+function currentSideVideoPath() {
+  if (canSwitchToLocalVideo()) return state.currentLibraryPath || "";
+  return state.videoFetch.status === "ready" ? (state.videoFetch.path || "") : "";
+}
+
+function renderVideoSyncControls() {
+  const box = $("sideVideoSync");
+  if (!box) return;
+  const show = !!state.videoMode && !!currentSideVideoPath() && state.videoSync.status !== "same-file";
+  box.hidden = !show;
+  if (!show) return;
+  const total = videoSyncOffset();
+  const signed = `${total >= 0 ? "+" : "−"}${Math.abs(total).toFixed(2).replace(/\.?0+$/, "") || "0"}s`;
+  const label = {
+    matched: `Synced ${signed}`,
+    checking: "Syncing…",
+    pending: "Syncing…",
+  }[state.videoSync.status] || (state.videoSync.manual ? `Offset ${signed}` : "Not matched");
+  $("sideVideoSyncLabel").textContent = label;
+  box.title = state.videoSync.status === "matched"
+    ? "Video lined up to the song by matching their soundtracks. Use − / + to fine-tune."
+    : "Could not match the soundtracks automatically. Use − / + to line the video up.";
+}
+
+// Identity of the recording for the normalized sync tables: Spotify id first,
+// then ISRC; title/artist only identify tracks that have neither.
+function videoSyncTrackFields(track) {
+  return {
+    spotify_id: trackIdentityValue(track, "spotify_id") || "",
+    isrc: trackIdentityValue(track, "isrc") || "",
+    title: track?.title || "",
+    artist: track?.artist || "",
+    duration_ms: Math.round((knownTrackDurationSeconds(track) || 0) * 1000),
+  };
+}
+
+// Ask the backend to match this video against the song's audio. Monochrome
+// audio becomes matchable once enough of the stream has downloaded, so
+// "pending" / "unavailable" answers are retried for a while.
+function videoSyncKey(track, videoPath) {
+  return `${trackKey(track)}|${videoPath}|${trackIdentityValue(track, "isrc")}|${state.currentLibraryPath || state.nativeAudio.stream_url || state.currentStreamUrl || ""}`;
+}
+
+async function refreshVideoSync() {
+  const track = state.currentTrack;
+  const videoPath = currentSideVideoPath();
+  if (!(state.videoMode || remoteReceiverWants("video")) || !track || !videoPath) {
+    renderVideoSyncControls();
+    return;
+  }
+  const key = videoSyncKey(track, videoPath);
+  if (state.videoSync.key !== key) {
+    clearTimeout(state.videoSync.timer);
+    state.videoSync = { key, status: "checking", offset: 0, manual: 0, attempts: 0, timer: null };
+  } else if (state.videoSync.status !== "pending" && state.videoSync.status !== "unavailable") {
+    renderVideoSyncControls();
+    return;
+  }
+  if (canSwitchToLocalVideo()) {
+    // Audio and picture come from the same downloaded file: already in sync.
+    state.videoSync.status = "same-file";
+    renderVideoSyncControls();
+    return;
+  }
+  renderVideoSyncControls();
+  state.videoSync.attempts += 1;
+  // Past the same-file check, the playing file is audio — including the
+  // .webm/.mp4 audio-only downloads from YouTube, which share video extensions.
+  const audioPath = state.currentLibraryPath || "";
+  const result = await api("/api/video/sync", {
+    method: "POST",
+    body: JSON.stringify({
+      ...videoSyncTrackFields(track),
+      video_path: videoPath,
+      audio_path: audioPath,
+      stream_url: state.nativeAudio.stream_url || state.currentStreamUrl || "",
+    }),
+  }).catch(() => null);
+  if (state.videoSync.key !== key) return;
+  if (result) {
+    state.videoSync.status = result.status || "unmatched";
+    state.videoSync.offset = Number(result.offset || 0);
+    state.videoSync.manual = Number(result.manual_offset || 0);
+  } else {
+    state.videoSync.status = "unavailable";
+  }
+  renderVideoSyncControls();
+  syncLocalVideoOverlay(audiblePlaybackSeconds(), false, { allowSeek: true });
+  if ((state.videoSync.status === "pending" || state.videoSync.status === "unavailable") && state.videoSync.attempts < 36) {
+    state.videoSync.timer = setTimeout(() => refreshVideoSync().catch(() => {}), 5000);
+  }
+}
+
+async function nudgeVideoSync(delta) {
+  const track = state.currentTrack;
+  const videoPath = currentSideVideoPath();
+  if (!track || !videoPath) return;
+  state.videoSync.manual = Number(state.videoSync.manual || 0) + delta;
+  renderVideoSyncControls();
+  followAudioWithVideo();
+  const result = await api("/api/video/sync/nudge", {
+    method: "POST",
+    body: JSON.stringify({ ...videoSyncTrackFields(track), video_path: videoPath, audio_path: state.currentLibraryPath || "",
+      stream_url: state.nativeAudio.stream_url || state.currentStreamUrl || "", delta }),
+  }).catch(() => null);
+  if (result?.ok && state.videoSync.key === videoSyncKey(track, videoPath)) {
+    state.videoSync.manual = Number(result.manual_offset || 0);
+    renderVideoSyncControls();
+  }
+}
+
+// What the listener hears now. The native player's position counts PCM handed
+// to the device, which leads the speaker by the output latency (~1s on
+// Bluetooth), so the video would otherwise run ahead.
+function audiblePlaybackSeconds() {
+  if (state.nativeAudio.active) {
+    return Math.max(0, Number(state.nativeAudio.position || 0) - Number(state.nativeAudio.output_latency || 0));
+  }
+  return Math.max(0, currentPlaybackSeconds() - browserOutputLatencySeconds());
+}
+
+// Keep the side video locked to the audio: same play/pause state (including
+// pausing while audio buffers), and drift corrected continuously. Small drift
+// is absorbed by nudging playbackRate so frames are never dropped; only a big
+// jump (seek, stall) re-seeks the video. Runs from audio timeupdate and from
+// the native-audio poll, which has no media events of its own.
+function followAudioWithVideo() {
+  if (!state.videoMode) return;
+  const video = $("sideVideoPlayer");
+  if (!video || video.tagName !== "VIDEO" || !Number.isFinite(video.duration) || video.duration <= 0) return;
+  if (state.manualPauseRequested || !isPlaybackVisiblyActive()) {
+    if (!video.paused) video.pause();
+    setVideoRate(video, 1);
+    return;
+  }
+  steerVideoToAudio(video, audiblePlaybackSeconds());
+}
+
+// Shared by a paired phone, which follows the receiving computer's clock.
+function steerVideoToAudio(video, audible) {
+  // A seek over the local stream can take over a second in WebKit. Seeking
+  // again before it lands (the video does not advance meanwhile, so the drift
+  // keeps growing) restarted it every tick and the video moved frame by frame.
+  if (video.seeking || video.readyState < 3) {
+    if (video.paused) video.play().catch(() => {});
+    return;
+  }
+  const raw = audible + videoSyncOffset();
+  if (raw < 0 || raw > video.duration - 0.3) {
+    // The song is playing a part the video does not have (e.g. the album
+    // intro before the video starts): hold the nearest frame until it does.
+    const hold = raw < 0 ? 0 : Math.max(0, video.duration - 0.25);
+    if (!video.paused) video.pause();
+    if (Math.abs((video.currentTime || 0) - hold) > 0.3) video.currentTime = hold;
+    setVideoRate(video, 1);
+    return;
+  }
+  const target = videoTimeForAudio(audible, video);
+  const drift = (video.currentTime || 0) - target;
+  if (Math.abs(drift) > 1.0) {
+    if (performance.now() - (video._seekedAt || 0) > 2500) {
+      video.currentTime = target;
+      video._seekedAt = performance.now();
+    }
+    setVideoRate(video, 1);
+  } else if (!VIDEO_RATE_STEERING) {
+    // One small seek for a settled drift, rarely, instead of rate changes.
+    if (Math.abs(drift) > 0.25 && performance.now() - (video._rateChangedAt || 0) > 3000) {
+      video.currentTime = target;
+      video._rateChangedAt = performance.now();
+    }
+    setVideoRate(video, 1);
+  } else if (video.playbackRate === 1) {
+    // Clock readings jitter by tens of milliseconds, so only start correcting
+    // a clear, settled drift.
+    if (Math.abs(drift) > 0.2 && performance.now() - (video._rateChangedAt || 0) > 1500)
+      setVideoRate(video, drift > 0 ? 0.97 : 1.03);
+  } else if (Math.abs(drift) < 0.05 || (drift > 0) !== (video.playbackRate < 1)) {
+    setVideoRate(video, 1);
+  }
+  if (video.paused) video.play().catch(() => {});
+}
+
+function setVideoRate(video, rate) {
+  if (video.playbackRate === rate) return;
+  video.playbackRate = rate;
+  video._rateChangedAt = performance.now();
+}
+
 function syncLocalVideoOverlay(position = currentPlaybackSeconds(), forcePlay = false, options = {}) {
   if (!state.videoMode) return;
   if (!canSwitchToLocalVideo() && state.videoFetch.status !== "ready") return;
   const video = $("sideVideoPlayer");
   if (!video || video.tagName !== "VIDEO") return;
-  const audio = $("audioPlayer");
-  const audioDuration = state.nativeAudio.active
-    ? Number(state.nativeAudio.duration || 0)
-    : (audio && Number.isFinite(audio.duration) ? Number(audio.duration || 0) : 0);
   if (options.allowSeek && Number.isFinite(position) && position >= 0 && Number.isFinite(video.duration) && video.duration > 0) {
-    let target;
-    const isYoutube = (state.settings.download_engine || "") === "ytp-dl";
-    if (!isYoutube && audioDuration > 0) {
-      // Only use percentage mapping for deliberate seek/start sync. Doing this
-      // on every timeupdate constantly re-seeks different masters and drops frames.
-      target = (position / audioDuration) * video.duration;
-    } else {
-      // YouTube engine: audio and video are from the same download — sync by seconds.
-      target = position;
-    }
-    target = Math.min(target, Math.max(0, video.duration - 0.25));
-    if (Math.abs((video.currentTime || 0) - target) > 0.4) {
+    const target = videoTimeForAudio(position, video);
+    if (!video.seeking && Math.abs((video.currentTime || 0) - target) > 0.4) {
       video.currentTime = target;
+      video._seekedAt = performance.now();
     }
   }
   if (forcePlay && !state.manualPauseRequested && isPlaybackVisiblyActive()) {
@@ -5275,7 +6258,7 @@ function currentLyricsIndex(position) {
   let lo = 0, hi = lines.length - 1, best = -1;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if (lines[mid].time <= position - state.lyrics.syncOffset) {
+    if (lines[mid].time <= position - state.lyrics.autoOffset - state.lyrics.syncOffset) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -5298,11 +6281,11 @@ function renderLyricsContent(message = "") {
       const text = line.instrumental ? '<i class="bi bi-music-note-beamed"></i>' : esc(line.text);
       return `<div class="lyrics-line${line.instrumental ? " instrumental" : ""}" data-lyrics-index="${index}">${text}</div>`;
     }).join("");
-    updateLyricsPosition(currentPlaybackSeconds(), true);
+    updateLyricsPosition(audiblePlaybackSeconds(), true);
     return;
   }
   if (state.lyrics.raw) {
-    content.innerHTML = `<div class="lyrics-line unsynced">${esc(state.lyrics.raw)}</div>`;
+    content.innerHTML = `<div class="lyrics-empty">Timed lyrics unavailable</div><div class="lyrics-line unsynced">${esc(state.lyrics.raw)}</div>`;
   } else {
     content.innerHTML = '<div class="lyrics-empty">No synced lyrics found</div>';
   }
@@ -5322,11 +6305,11 @@ function scrollActiveLyricsLine(force = false) {
   const line = document.querySelector(`.lyrics-line[data-lyrics-index="${idx}"]`);
   if (!line) return;
   state.lyrics.programmaticScroll = true;
-  line.scrollIntoView({ block: "center", behavior: force ? "smooth" : "smooth" });
+  line.scrollIntoView({ block: "center", behavior: force ? "auto" : "smooth" });
   setTimeout(() => { state.lyrics.programmaticScroll = false; }, 450);
 }
 
-function updateLyricsPosition(position = currentPlaybackSeconds(), forceScroll = false) {
+function updateLyricsPosition(position = audiblePlaybackSeconds(), forceScroll = false) {
   if (!state.lyrics.open || !(state.lyrics.lines || []).length) return;
   const idx = currentLyricsIndex(position);
   if (idx === state.lyrics.activeIndex && !forceScroll) return;
@@ -5339,8 +6322,13 @@ function updateLyricsPosition(position = currentPlaybackSeconds(), forceScroll =
 }
 
 async function loadLyricsForTrack(track, { force = false } = {}) {
-  const key = trackKey(track || {});
+  const key = JSON.stringify(lyricsPayload(track));
   if (!track || (!force && state.lyrics.trackKey === key && (state.lyrics.lines.length || state.lyrics.raw))) return;
+  clearTimeout(state.lyrics.alignmentTimer);
+  state.lyrics.autoOffset = 0;
+  state.lyrics.syncOffset = 0;
+  state.lyrics.alignmentKey = "";
+  state.lyrics.alignmentStatus = "";
   state.lyrics.loading = true;
   state.lyrics.trackKey = key;
   state.lyrics.lines = [];
@@ -5358,10 +6346,67 @@ async function loadLyricsForTrack(track, { force = false } = {}) {
     state.lyrics.lines = data.synced ? parseLyrics(data.lyrics || "") : [];
     renderLyricsContent(data.found ? "" : "No synced lyrics found");
     setLyricsSynced(true);
+    refreshLyricsAlignment().catch(() => {});
   } catch (error) {
     if (state.lyrics.trackKey === key) renderLyricsContent("Lyrics unavailable");
   } finally {
     state.lyrics.loading = false;
+  }
+}
+
+function lyricsAlignmentBody() {
+  return { ...lyricsPayload(state.currentTrack), lyrics: state.lyrics.raw,
+    duration_ms: Math.round((knownTrackDurationSeconds(state.currentTrack) || 0) * 1000),
+    audio_path: state.currentLibraryPath || "",
+    stream_url: state.nativeAudio.stream_url || state.currentStreamUrl || "",
+    output_latency: state.nativeAudio.active ? Number(state.nativeAudio.output_latency || 0) : browserOutputLatencySeconds() };
+}
+
+function renderLyricsAlignment() {
+  const label = $("lyricsAlignmentStatus");
+  const status = state.lyrics.alignmentStatus;
+  if (label) {
+    label.textContent = ({ checking: "Aligning to music…", pending: "Waiting for audio…",
+      matched: "Aligned to music", unmatched: "Provider timing", unsupported: "Provider timing" })[status] || "";
+    label.title = status === "matched" ? "Lyric phrases matched against the playing audio on this device."
+      : "Automatic alignment needs several clear matching vocal phrases. Manual adjustment is available.";
+  }
+  const offset = $("lyricsOffsetLabel");
+  if (offset) offset.textContent = `${(state.lyrics.autoOffset + state.lyrics.syncOffset).toFixed(2)}s`;
+}
+
+// A paired phone showing this device's lyrics or video needs the alignment
+// measured here, even while this device's own panels are closed.
+function remoteReceiverWants(kind) {
+  return !!window.MindinguflacRemote?.receiverWants?.(kind);
+}
+
+async function refreshLyricsAlignment() {
+  if (!(state.lyrics.open || remoteReceiverWants("lyrics")) || !state.lyrics.lines.length || !state.currentTrack) return;
+  const body = lyricsAlignmentBody();
+  const key = JSON.stringify({...body, output_latency: undefined});
+  if (state.lyrics.alignmentKey !== key) {
+    clearTimeout(state.lyrics.alignmentTimer);
+    state.lyrics.alignmentKey = key;
+    state.lyrics.alignmentAttempts = 0;
+    state.lyrics.alignmentStatus = "checking";
+    state.lyrics.autoOffset = 0;
+    state.lyrics.syncOffset = 0;
+  } else if (!["checking", "pending"].includes(state.lyrics.alignmentStatus)) return;
+  state.lyrics.alignmentAttempts += 1;
+  renderLyricsAlignment();
+  const result = await api("/api/lyrics/align", {method:"POST",body:JSON.stringify(body)}).catch(() => null);
+  if (state.lyrics.alignmentKey !== key) return;
+  state.lyrics.alignmentStatus = result?.status || "pending";
+  if (result?.status === "matched") state.lyrics.autoOffset = Number(result.offset || 0);
+  if (result) state.lyrics.syncOffset = Number(result.manual_offset || 0);
+  renderLyricsAlignment();
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
+  if (["checking", "pending"].includes(state.lyrics.alignmentStatus) && state.lyrics.alignmentAttempts < 60) {
+    state.lyrics.alignmentTimer = setTimeout(() => refreshLyricsAlignment().catch(() => {}), 5000);
+  } else if (["checking", "pending"].includes(state.lyrics.alignmentStatus)) {
+    state.lyrics.alignmentStatus = "unmatched";
+    renderLyricsAlignment();
   }
 }
 
@@ -5382,22 +6427,22 @@ function openLyricsPanel() {
   const bg = $("lyricsBg");
   if (bg) bg.hidden = false;
   $("btnLyrics")?.classList.add("active");
-  const label = $("lyricsOffsetLabel");
-  if (label) label.textContent = state.lyrics.syncOffset.toFixed(1) + "s";
+  renderLyricsAlignment();
   if (!state.currentTrack) {
     renderLyricsContent("Play a song to see lyrics");
     return;
   }
   applyLyricsPalette(state.currentTrack);
   setLyricsSynced(true);
-  loadLyricsForTrack(state.currentTrack, { force: false }).catch(() => {});
-  updateLyricsPosition(currentPlaybackSeconds(), true);
+  loadLyricsForTrack(state.currentTrack, { force: false }).then(() => refreshLyricsAlignment()).catch(() => {});
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
 }
 
 function closeLyricsPanel() {
   const panel = $("lyricsPanel");
   if (!panel) return;
   state.lyrics.open = false;
+  clearTimeout(state.lyrics.alignmentTimer);
   panel.hidden = true;
   const bg = $("lyricsBg");
   if (bg) bg.hidden = true;
@@ -5599,6 +6644,23 @@ function playableQueueItem(item) {
   return item && item.type !== "artist" && item.type !== "album";
 }
 
+function prefetchAlbumKey(item) {
+  const meta = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const normalize = (value, isAlbum) => {
+    let text = String(value || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    if (isAlbum) {
+      text = text.replace(/\b\d{1,3}(?:st|nd|rd|th)\b/g, " ")
+        .replace(/\b(?:deluxe|anniversary|remaster(?:ed)?|expanded|edition|special|version)\b/g, " ");
+    } else {
+      text = text.replace(/^the\s+/, "");
+    }
+    return text.match(/[a-z0-9]+/g)?.join(" ") || "";
+  };
+  const album = normalize(item?.album || meta.album, true);
+  const artist = normalize(item?.album_artist || meta.album_artist || item?.artist || meta.artist, false);
+  return album ? `${artist}||${album}` : "";
+}
+
 function getQueueIndex() {
   let idx = state.queueIndex;
   if (idx < 0 && state.currentTrack) {
@@ -5633,7 +6695,15 @@ function upcomingPrefetchTracks(limit = PREFETCH_AHEAD_COUNT) {
     seen.add(key);
     tracks.push(item);
   }
-  return tracks;
+  const currentAlbum = prefetchAlbumKey(state.currentTrack);
+  if (!currentAlbum) return tracks;
+  return tracks.map((track, index) => ({ track, index }))
+    .sort((a, b) => {
+      const aSameAlbum = prefetchAlbumKey(a.track) === currentAlbum;
+      const bSameAlbum = prefetchAlbumKey(b.track) === currentAlbum;
+      return Number(bSameAlbum) - Number(aSameAlbum) || a.index - b.index;
+    })
+    .map(({ track }) => track);
 }
 
 function currentPrefetchWindowKeys() {
@@ -5691,6 +6761,7 @@ function playQueueOffset(delta) {
 }
 
 async function prefetchOneTrack(next, orderKey) {
+  if (next.offline && next.library_path) return;
   const key = trackKey(next);
   if (state.prefetchJobs.has(key)) return;
   try {
@@ -5716,6 +6787,15 @@ async function prefetchOneTrack(next, orderKey) {
   }
 }
 
+function maybePrefetchUpcomingTracks(position) {
+  if (isMonochromeDirectStreamUrl(state.currentStreamUrl) ||
+      (state.nativeAudio.active && isMonochromeDirectStreamUrl(state.nativeAudio.stream_url))) return;
+  if (position < 2 || state.manualPauseRequested || state.prefetchedForRequestId === state.playbackRequestId) return;
+  state.prefetchedForRequestId = state.playbackRequestId;
+  prefetchNextTracks().catch(() => { state.prefetchedForRequestId = -1; });
+  prefetchNextVideos();
+}
+
 async function prefetchNextTracks() {
   if (state.isRepeat) { console.log("[Prefetch] skipped: repeat on"); return; }
   restoreLinearOriginalQueue();
@@ -5725,12 +6805,17 @@ async function prefetchNextTracks() {
   const orderKey = currentQueueOrderKey();
   cancelPrefetchJobs("outside current queue window", new Set(targets.map(trackKey)), orderKey);
   console.log(`[Prefetch] Starting batch of ${targets.length}:`, targets.map(track => track.title).join(", "));
-  await Promise.all(targets.map(track => prefetchOneTrack(track, orderKey)));
+  const currentAlbum = prefetchAlbumKey(state.currentTrack);
+  const sameAlbum = currentAlbum ? targets.filter(track => prefetchAlbumKey(track) === currentAlbum) : [];
+  const otherAlbums = targets.filter(track => !sameAlbum.includes(track));
+  await Promise.all(sameAlbum.map(track => prefetchOneTrack(track, orderKey)));
+  await Promise.all(otherAlbums.map(track => prefetchOneTrack(track, orderKey)));
 }
 
 const _videoPrefetchInflight = new Set();
 
 function _triggerVideoFetchForTrack(track) {
+  if (track?.offline) return;
   const key = trackKey(track);
   if (_videoPrefetchInflight.has(key)) return;
   if (canSwitchToLocalVideo(track)) return;
@@ -5776,35 +6861,83 @@ function prefetchNextVideos() {
   });
 }
 
-async function toggleTrackLibrary(track, button, refresh) {
-  if (!isTrackItem(track)) return;
-  if (button.classList.contains("progress")) {
-    await cancelLibraryDownload(track, button, refresh);
-    return;
+async function recoverLibraryDownload(payload, requestId, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.maxAttempts) || 12);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (options.isCancelled?.()) return null;
+    const status = await api("/api/library/status", {method:"POST",body:JSON.stringify(payload),timeout:5000}).catch(() => null);
+    if (status?.in_library && (!options.downloadOnly || albumDownloadSatisfied(status))) return {ok:true,action:"saved",...status};
+    if (status?.active_job_id) {
+      const data = await api("/api/service/downloads", {timeout:5000}).catch(() => ({jobs:[]}));
+      const job = (data.jobs || []).find(item => item.id === status.active_job_id);
+      return {ok:true,action:job?.client_request_id === requestId ? "started" : "queued",job,...status};
+    }
+    if (attempt + 1 < maxAttempts) await new Promise(resolve => setTimeout(resolve,1000));
   }
+  return null;
+}
+
+async function toggleTrackLibrary(track, button, refresh, options = {}) {
+  if (!isTrackItem(track)) return {ok:false};
+  if (button.classList.contains("progress") && !options.downloadOnly) {
+    await cancelLibraryDownload(track, button, refresh);
+    return {ok:false, cancelled:true};
+  }
+  const ensureDownload = options.downloadOnly || !button.classList.contains("downloaded");
+  libraryDownloadErrors.delete(trackKey(track));
   button.classList.add("progress");
-  button.classList.remove("downloaded");
+  button.classList.remove("downloaded", "download-error");
   button.dataset.cancelled = "";
   button.innerHTML = progressButtonMarkup({ progress: 0 });
+  const payload = options.payload || serviceDownloadPayload(track, "download");
+  const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  const sendToggle = () => api("/api/library/toggle", {
+    method:"POST",timeout:30000,
+    body:JSON.stringify({...payload,client_request_id:requestId,...(ensureDownload ? {ensure_download:true} : {})}),
+  });
   try {
-    const result = await api("/api/library/toggle", {
-      method: "POST",
-      body: JSON.stringify(serviceDownloadPayload(track, "download")),
-    });
+    let result;
+    try {
+      result = await sendToggle();
+    } catch (error) {
+      if (!ensureDownload || error.code !== "REQUEST_TIMEOUT" && error.name !== "TypeError") throw error;
+      result = await recoverLibraryDownload(payload,requestId,{...options,maxAttempts:1});
+      if (!result) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (options.isCancelled?.() || button.dataset.cancelled === "1") return {ok:false,cancelled:true};
+        try {
+          result = await sendToggle();
+        } catch (retryError) {
+          if (retryError.code !== "REQUEST_TIMEOUT" && retryError.name !== "TypeError") throw retryError;
+          result = await recoverLibraryDownload(payload,requestId,{...options,maxAttempts:1});
+          if (!result) throw retryError;
+        }
+      }
+    }
+    if (result.ok === false) throw new Error(result.error || "Download failed");
+    options.onJob?.(result);
     prefetchLyricsForTrack(track);
-    const activeJobId = (result.job && result.job.id) || result.active_job_id || "";
+    const activeJobId = result.job?.id || result.active_job_id || "";
     if (activeJobId) button.dataset.activeJobId = activeJobId;
+    let status = result;
     if (result.action === "started" || result.action === "queued") {
-      await waitForLibraryToggle(track, activeJobId, button);
-    }
+      status = await waitForLibraryToggle(track, activeJobId, button, {...options, payload});
+      if (!status) return {ok:false, cancelled:!!options.isCancelled?.()};
+    } else if (status.in_library) exportLibraryDownloadToPhone(status.library_path);
+    options.onStatus?.(status);
     if (typeof refresh === "function") refresh();
+    loadPlaylists();
+    return {ok:true, ...result, status};
   } catch (error) {
-    if (button.dataset.cancelled !== "1") {
-      button.title = error.message || "Library update failed";
+    if (button.dataset.cancelled !== "1" && !options.isCancelled?.()) {
+      reportLibraryDownloadError(track, findLiveLibraryButtonForTrack(track) || button, error, options.reportErrors !== false);
     }
+    return {ok:false, error:error.message || "Download failed"};
   } finally {
     button.classList.remove("progress");
     button.dataset.activeJobId = "";
+    await refreshLibraryButtonState(track, findLiveLibraryButtonForTrack(track) || button);
+    renderAlbumHeaderControls();
   }
 }
 
@@ -5877,9 +7010,9 @@ function findLiveLibraryButtonForTrack(track) {
   return null;
 }
 
-async function waitForLibraryToggle(track, jobId = "", button = null) {
+async function waitForLibraryToggle(track, jobId = "", button = null, options = {}) {
   for (let attempt = 0; attempt < 900; attempt++) {
-    if (button && button.dataset.cancelled === "1") return null;
+    if (button && button.dataset.cancelled === "1" || options.isCancelled?.()) return null;
     // The button that started this poll may have been replaced by a later
     // render. Re-acquire the current one for this same track by identity
     // before deciding there is nothing left to update — losing a DOM
@@ -5891,20 +7024,21 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       button = findLiveLibraryButtonForTrack(track);
     }
     await new Promise(resolve => setTimeout(resolve, 1000));
-    if (button && button.dataset.cancelled === "1") return null;
+    if (button && button.dataset.cancelled === "1" || options.isCancelled?.()) return null;
     if (button && !button.isConnected) {
       button = findLiveLibraryButtonForTrack(track);
     }
     const status = await api("/api/library/status", {
       method: "POST",
-      body: JSON.stringify(serviceDownloadPayload(track, "download")),
+      body: JSON.stringify(options.payload || serviceDownloadPayload(track, "download")),
     }).catch(() => null);
+    if (status) options.onStatus?.(status);
     if (status && status.active_job_id && button) button.dataset.activeJobId = status.active_job_id;
     if (status && typeof status.progress !== "undefined") {
       updateLibraryProgressButton(button, status);
     }
     if (status && status.active_job_status === "error") throw new Error("Download cancelled");
-    if (status && status.in_library) {
+    if (status && (options.downloadOnly ? albumDownloadSatisfied(status) : status.in_library)) {
       if (button) {
         button.classList.remove("progress");
         button.classList.add("downloaded");
@@ -5933,6 +7067,9 @@ async function waitForLibraryToggle(track, jobId = "", button = null) {
       }
       if (job && job.status === "error") throw new Error(job.error || "Download failed");
       if (job && job.status === "finished") {
+        if (options.downloadOnly && status?.in_library && status.download_satisfied === false) {
+          throw new Error("Saved audio does not meet the requested quality. Choose an available quality and retry.");
+        }
         updateLibraryProgressButton(button, { ...job, progress: 100 });
       } else if (job && typeof job.progress !== "undefined") {
         updateLibraryProgressButton(button, job);
@@ -5951,16 +7088,25 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
       const data = await api("/api/service/downloads");
       job = data.jobs.find(j => j.id === existingJobId);
     } else {
-      job = await api("/api/service/download", { method: "POST", body: JSON.stringify(payload) });
+      try {
+        job = await api("/api/service/download", { method: "POST", body: JSON.stringify(payload) });
+      } catch (error) {
+        if (error.code !== "REQUEST_TIMEOUT") throw error;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        if (requestId !== state.playbackRequestId) return;
+        job = await api("/api/service/download", { method: "POST", body: JSON.stringify(payload) });
+      }
     }
     
     if (requestId !== state.playbackRequestId) return;
     state.activeJobId = job.id;
     
     if (mode === "stream") {
-      if (job.status === "finished" && job.library_path) {
+      if (job.engine === "monochrome" && job.direct_stream && job.resolved_url) {
+        startMonochromeDirectPlayback(job, track, requestId);
+      } else if (job.status === "finished" && job.library_path) {
         await playFromLibraryPath(job.library_path, track, requestId, job.id, "Playing from cache");
-      } else if (isNativeAudioSelected() || state.pendingResumePosition > 0) {
+      } else if (!canStreamActiveJobInBrowser(job) || state.pendingResumePosition > 0) {
         // Skip browser playback for live jobs if native is selected.
         // NSSound doesn't support streaming URLs, so we wait for the file to finish.
         state.currentPlayableReady = false;
@@ -5975,7 +7121,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
         if (activeJobHasPlayableAudio(job)) {
           const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
           state.currentStreamUrl = streamUrl;
-          audio.src = streamUrl;
+          audio.src = browserAudioStreamUrl(streamUrl);
           state.currentPlayableReady = true;
           audio.load();
         } else {
@@ -5989,8 +7135,87 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
     }
     watchServiceDownload(job.id, track, mode, requestId);
   } catch (error) {
+    if (requestId !== state.playbackRequestId) return;
+    state.audioBuffering = false;
+    state.autoplayWanted = false;
+    setPlayerStatusIcon("error");
     setPlayerStatus(error.message || "Download failed", track);
+    syncPlayPauseButton();
   }
+}
+
+function startMonochromeDirectPlayback(job, track, requestId) {
+  if (requestId !== state.playbackRequestId || !job?.resolved_url) return;
+  if (["original_album", "same_recording"].includes(job.recording_match?.kind)) {
+    track = { ...track, requested_isrc: job.recording_match.requested_isrc,
+      isrc: job.recording_match.resolved_isrc, source_isrc: job.recording_match.resolved_isrc,
+      source_album: job.recording_match.source_album || "", duration_ms: job.recording_match.duration_ms };
+    state.currentTrack = track;
+  }
+  if (job.source_recording) {
+    track = { ...track, source_recording: job.source_recording };
+    state.currentTrack = track;
+    // Lyrics follow the actual audio, without changing its saved album link.
+    if (state.lyrics.open) loadLyricsForTrack(track).catch(() => {});
+    else prefetchLyricsForTrack(track);
+  }
+  // Monochrome's direct stream needs no next-track download/prefetch job.
+  // Cancel work queued for a previous track so it cannot compete with or
+  // replace this live stream.
+  cancelAllPrefetchJobs("Monochrome direct stream");
+  const audio = $("audioPlayer");
+  if (!audio) return;
+  const resumeAt = Number(state.pendingResumePosition || 0);
+  state.pendingResumePosition = 0;
+  state.activeJobId = null;
+  state.audioHasPlayed = false;
+  // Keep the play control locked from selection through decode/startup. The
+  // confirmed `playing` event clears this state once audio is actually heard.
+  state.audioBuffering = !state.manualPauseRequested;
+  state.directStreamReconnectPending = false;
+  state.directStreamNativeFallbackAttempted = false;
+  state.currentLibraryPath = "";
+  state.currentStreamUrl = job.resolved_url;
+  state.currentPlayableReady = true;
+  state.activeJobPhase = "";
+  state.autoplayWanted = !state.manualPauseRequested;
+  setPlayerStatusIcon("ready");
+  setPlayerStatus(
+    state.manualPauseRequested ? "Ready — paused" : "Buffering Monochrome stream",
+    track,
+    job,
+  );
+  syncPlayPauseButton();
+  logMonochromePlaybackActivity("Opening Monochrome audio stream", track, "open", 0);
+  // On Android the native player (ExoPlayer) handles Monochrome even on This
+  // phone: it records the start of the track for music-video matching and
+  // seeks without rebuffering. The WebView stays as the fallback.
+  const androidNative = IS_ANDROID && !!window.MindinguflacAndroid && !isNativeAudioSelected();
+  if (isNativeAudioSelected() || androidNative) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    startNativeAudio("", track, requestId, resumeAt, job.resolved_url, androidNative).catch((error) => {
+      if (requestId !== state.playbackRequestId) return;
+      if (androidNative) {
+        logMonochromePlaybackActivity(`Native player unavailable (${error.message || error}); using the WebView`, track, "android-webview-fallback", 0);
+        audio.src = browserAudioStreamUrl(job.resolved_url);
+        audio.load();
+        seekAfterMetadata(audio, resumeAt);
+        if (!state.manualPauseRequested) tryStartAudio(audio, track, requestId, null);
+        return;
+      }
+      state.audioBuffering = false;
+      state.autoplayWanted = false;
+      setPlayerStatus(`Selected audio device unavailable: ${error.message || "native stream failed"}`, track);
+      syncPlayPauseButton();
+    });
+    return;
+  }
+  audio.src = browserAudioStreamUrl(job.resolved_url);
+  audio.load();
+  seekAfterMetadata(audio, resumeAt);
+  if (!state.manualPauseRequested) tryStartAudio(audio, track, requestId, null);
 }
 
 async function watchServiceDownload(jobId, track, mode = "stream", requestId = state.playbackRequestId) {
@@ -6003,11 +7228,14 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
       const data = await api("/api/service/downloads");
       const job = (data.jobs || []).find((item) => item.id === jobId);
       if (!job) return;
+      state.lastActiveReadyBytes = Number(job.active_audio_ready_bytes || 0);
       if (job.status === "error") {
+        state.audioBuffering = false;
         if (job.youtube_login_required) {
           state.activeJobId = null;
           setPlayerStatusIcon("error");
           setPlayerStatus("YouTube login required", track, job);
+          syncPlayPauseButton();
           requestYoutubeLoginAndRetry(job, () => startServiceDownload(track, mode, requestId));
           return;
         }
@@ -6023,10 +7251,15 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         }
         setPlayerStatusIcon("error");
         setPlayerStatus(job.error || "Service download failed", track, job);
+        syncPlayPauseButton();
         return;
       }
       const pct = job.progress ? Math.max(0, Math.min(99, Math.round(job.progress))) : 0;
       if (job.status === "finished") {
+        if (mode === "stream" && job.engine === "monochrome" && job.direct_stream && job.resolved_url) {
+          startMonochromeDirectPlayback(job, track, requestId);
+          return;
+        }
         if (mode === "stream" && job.library_path) {
           state.currentLibraryPath = job.library_path;
           state.currentPlayableReady = true;
@@ -6035,7 +7268,7 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
           }
         }
         setPlayerStatusIcon("ready");
-        setPlayerStatus(mode === "stream" ? "Playing from cache" : "Saved to library", track, job);
+        setPlayerStatus(mode === "stream" ? (state.manualPauseRequested ? "Ready — paused" : "Playing from cache") : "Saved to library", track, job);
         if (!switchedToFinal && mode === "stream" && job.library_path) {
           switchedToFinal = true;
           const audio = $("audioPlayer");
@@ -6050,23 +7283,29 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
                 : (audio && Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
               await playFromLibraryPath(job.library_path, track, requestId, jobId, "Playing from cache", resumeAt);
             } catch (error) {
+              state.audioBuffering = false;
               setPlayerStatusIcon("error");
               setPlayerStatus(error.message || "Native audio failed", track);
+              syncPlayPauseButton();
             }
           }
         }
         state.activeJobId = null;
         return;
       }
-      if (mode === "stream" && !state.currentPlayableReady && activeJobHasPlayableAudio(job) && !isNativeAudioSelected()) {
+      if (mode === "stream" && !state.currentPlayableReady && activeJobHasPlayableAudio(job) && canStreamActiveJobInBrowser(job)) {
         const audio = $("audioPlayer");
+        const resumeAt = Number(state.rebufferPosition || 0);
+        state.rebuffering = false;
+        state.rebufferAfterBytes = 0;
         const streamUrl = `${API_BASE}/api/library/stream_active_job?job_id=${job.id}&t=${Date.now()}`;
         state.currentStreamUrl = streamUrl;
-        audio.src = streamUrl;
+        audio.src = browserAudioStreamUrl(streamUrl);
         state.currentPlayableReady = true;
         if (!state.manualPauseRequested) {
           state.autoplayWanted = true;
           audio.load();
+          seekAfterMetadata(audio, resumeAt);
           tryStartAudio(audio, track, requestId, job.id);
         }
       }
@@ -6081,14 +7320,55 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
 }
 
 function tryStartAudio(audio, track, requestId, jobId) {
-  audio.play().catch((error) => {
+  prepareBrowserAudioClock(audio).then(() => audio.play()).catch((error) => {
     if (requestId !== state.playbackRequestId) return;
     if (error && error.name === "NotAllowedError") {
+      // The Monochrome lookup finishes after WebKit's short-lived click
+      // activation expires. Do not leave the first selected track paused and
+      // waiting for a second click: hand FLAC to the native decoder, which can
+      // start without browser autoplay permission and still uses the selected
+      // app output (or the system default).
+      if (isMonochromeDirectStreamUrl(state.currentStreamUrl) &&
+          navigator.userAgent.includes("Macintosh") && !IS_ANDROID &&
+          !state.directStreamNativeFallbackAttempted && !state.manualPauseRequested) {
+        const fallbackRequestId = state.playbackRequestId;
+        const resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+          ? audio.currentTime : Number(state.directStreamPosition || 0);
+        const streamUrl = state.currentStreamUrl;
+        state.directStreamNativeFallbackAttempted = true;
+        state.audioBuffering = true;
+        state.autoplayWanted = true;
+        logMonochromePlaybackActivity(
+          "Browser autoplay was denied after Monochrome lookup; starting native audio automatically",
+          track,
+          "native-autoplay-fallback",
+          0,
+        );
+        syncPlayPauseButton();
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        startNativeAudio("", track, fallbackRequestId, resumeAt, streamUrl, true).catch((fallbackError) => {
+          if (fallbackRequestId !== state.playbackRequestId) return;
+          state.audioBuffering = false;
+          state.autoplayWanted = false;
+          setPlayerStatus(`Monochrome playback failed: ${fallbackError.message || "native audio unavailable"}`, track);
+          syncPlayPauseButton();
+        });
+        return;
+      }
       state.autoplayWanted = true;
+      state.audioBuffering = false;
+      setPlayerStatusIcon("ready");
       setPlayerStatus("Ready — press play", track);
+      syncPlayPauseButton();
     } else if (error && error.name !== "AbortError") {
       // AbortError means src changed mid-load — keep autoplayWanted so oncanplay retries.
       state.autoplayWanted = false;
+      state.audioBuffering = false;
+      setPlayerStatusIcon("error");
+      setPlayerStatus(error.message || "Playback failed", track);
+      syncPlayPauseButton();
     }
   });
 }
@@ -6159,6 +7439,14 @@ function appendRemainingAsync() {
 }
 
 function suggestionMarkup(item, index) {
+  if (item.type === "query") {
+    return `
+      <button class="suggestion" type="button" data-suggestion="${index}">
+        <div class="suggestion-art"><i class="bi bi-search"></i></div>
+        <div class="suggestion-info"><strong>${esc(item.title || item.query || "")}</strong><div class="suggestion-sub"><span class="pill">Search</span></div></div>
+      </button>
+    `;
+  }
   const art = item.artwork_url || "";
   const name = esc(item.type === "artist" ? item.artist : (item.title || item.artist));
   const typeLabel = { track: "Song", artist: "Artist", album: "Album" }[item.type] || (item.type || "Song");
@@ -6178,6 +7466,10 @@ function suggestionMarkup(item, index) {
 }
 
 function openSuggestionItem(item = {}) {
+  if (item.type === "query") {
+    searchMusic(item.query || item.title || "");
+    return;
+  }
   if (item.type === "artist") {
     pushPage(() => renderArtistPage(artistTarget(item)));
     return;
@@ -6197,7 +7489,7 @@ function bindSuggestionButtons(root = document) {
     button.dataset.bound = "1";
     button.onclick = () => {
       const item = state.suggestionResults[Number(button.dataset.suggestion)];
-      $("searchInput").value = item.title || item.artist || "";
+      $("searchInput").value = item.query || item.title || item.artist || "";
       hideSuggestions();
       openSuggestionItem(item);
     };
@@ -6373,7 +7665,7 @@ async function renderSettings() {
   $("storageSection")?.classList.toggle("hidden", IS_ANDROID);
   $("aiProviderRow")?.classList.toggle("hidden", IS_ANDROID);
 
-  let engine = state.settings.download_engine || (IS_ANDROID ? "ytp-dl" : "spotiflac");
+  let engine = state.settings.download_engine || "ytp-dl";
   if (IS_ANDROID) {
     const options = androidEngineOptions();
     if (options.length) {
@@ -6387,6 +7679,9 @@ async function renderSettings() {
     renderAndroidEngineNotes();
   }
   $("downloadEngine").value = engine;
+  $("torrentPlaybackCandidates").value = state.settings.torrent_playback_candidates ?? 3;
+  $("torrentPrefetchCandidates").value = state.settings.torrent_prefetch_candidates ?? 2;
+  $("torrentMetadataTimeout").value = state.settings.torrent_metadata_timeout_seconds ?? 60;
   updateEngineControls(
     engine,
     state.settings.download_service || (IS_ANDROID && engine === "torrent" ? "all" : "youtube"),
@@ -6769,6 +8064,9 @@ async function saveSettings(e) {
     cache_dir: $("cacheDir").value,
     music_dir: $("musicDir").value,
     download_engine: $("downloadEngine").value,
+    torrent_playback_candidates: Number($("torrentPlaybackCandidates").value),
+    torrent_prefetch_candidates: Number($("torrentPrefetchCandidates").value),
+    torrent_metadata_timeout_seconds: Number($("torrentMetadataTimeout").value),
     ai_provider: IS_ANDROID ? "android" : ($("aiProvider") ? $("aiProvider").value : "duckai"),
     duck_model: $("duckModel") ? $("duckModel").value : "1",
     gemini_model: $("geminiModel") ? $("geminiModel").value : "gemini-1.5-flash",
@@ -6803,36 +8101,92 @@ function isNativeAudioSelected() {
   return typeof _activeSinkId === "string" && _activeSinkId.startsWith("native:") && !!_nativeAudioDeviceUid;
 }
 
+function canStreamActiveJobInBrowser(job) {
+  // Monochrome's growing FLAC is played by WebKit while the native player
+  // waits for a complete local file. Hand off to native output after download.
+  return String(job?.engine || "").toLowerCase() === "monochrome" || !isNativeAudioSelected();
+}
+
 function nativeAudioVolume() {
   const audio = $("audioPlayer");
   return audio ? Number(audio.volume || 0) : storedVolume();
 }
 
 async function stopNativeAudio() {
+  if (state.nativeAudio.active) {
+    const result = await api("/api/native_audio/stop", { method: "POST", body: "{}" });
+    if (result && result.ok === false) {
+      throw new Error(result.error || "Native audio did not stop");
+    }
+  }
   if (state.nativeAudioPollTimer) {
     clearInterval(state.nativeAudioPollTimer);
     state.nativeAudioPollTimer = null;
   }
-  if (state.nativeAudio.active) {
-    await api("/api/native_audio/stop", { method: "POST", body: "{}" }).catch(() => {});
-  }
   state.nativeAudio = { active: false, playing: false, position: 0, duration: 0, path: "", ended: false };
+  state.nativeAudioStarting = false;
+  state.nativeAudioPauseAfterStart = false;
   syncPlayPauseButton();
 }
 
-async function startNativeAudio(filePath, track, requestId, position = 0) {
-  if (!isNativeAudioSelected()) return false;
-  const result = await api("/api/native_audio/play", {
+async function startNativeAudio(filePath, track, requestId, position = 0, streamUrl = "", forceNative = false) {
+  if (!forceNative && !isNativeAudioSelected()) return false;
+  const directStreamUrl = streamUrl && isMonochromeDirectStreamUrl(streamUrl) ? streamUrl : "";
+  // Close the startup window where the UI still thinks the browser owns the
+  // player. A pause click during native initialization must never be applied
+  // to the stale HTMLAudio element while this stream takes over.
+  if (directStreamUrl && requestId === state.playbackRequestId) {
+    state.nativeAudioStarting = true;
+    state.audioBuffering = !state.manualPauseRequested;
+    if (state.audioBuffering) setPlayerStatus("Buffering Monochrome stream", track);
+    syncPlayPauseButton();
+  }
+  const deviceUid = isNativeAudioSelected() ? _nativeAudioDeviceUid : "";
+  const startKey = `${requestId}|${deviceUid}|${directStreamUrl || filePath}`;
+  if (state.nativeAudioStart?.key === startKey) {
+    const pendingResult = await state.nativeAudioStart.promise;
+    if (!pendingResult.ok) throw new Error(pendingResult.error || "Native audio failed");
+    return true;
+  }
+  const startPromise = api("/api/native_audio/play", {
     method: "POST",
     body: JSON.stringify({
       path: filePath,
-      device_uid: _nativeAudioDeviceUid,
+      stream_url: directStreamUrl,
+      device_uid: deviceUid,
+      device_name: isNativeAudioSelected() ? String(state.settings?.preferred_audio_output_name || "") : "",
       volume: nativeAudioVolume(),
       position,
       metadata: track,
     }),
   });
+  state.nativeAudioStart = { key: startKey, promise: startPromise };
+  let result;
+  try {
+    result = await startPromise;
+  } catch (error) {
+    if (requestId === state.playbackRequestId && directStreamUrl) {
+      state.nativeAudioStarting = false;
+      state.audioBuffering = false;
+      syncPlayPauseButton();
+    }
+    throw error;
+  } finally {
+    if (state.nativeAudioStart?.promise === startPromise) {
+      state.nativeAudioStart = null;
+      syncPlayPauseButton();
+    }
+  }
   if (!result.ok) {
+    if (requestId === state.playbackRequestId && directStreamUrl) {
+      state.nativeAudioStarting = false;
+      state.nativeAudioPauseAfterStart = false;
+      state.audioBuffering = false;
+      syncPlayPauseButton();
+    }
+    if (directStreamUrl && result.stream_blocked && fallbackFromBlockedMonochrome(track, requestId, result.error)) {
+      return false;
+    }
     throw new Error(result.error || "Native audio failed");
   }
   state.nativeAudio = {
@@ -6841,12 +8195,47 @@ async function startNativeAudio(filePath, track, requestId, position = 0) {
     position: result.position || 0,
     duration: result.duration || 0,
     path: filePath,
+    stream_url: directStreamUrl,
+    stream_phase: result.stream_phase || "",
+    buffering: !!result.buffering || result.stream_phase === "buffering",
     ended: false,
   };
+  state.nativeAudioStarting = false;
+  if (state.nativeAudioPauseAfterStart && requestId === state.playbackRequestId) {
+    state.nativeAudioPauseAfterStart = false;
+    state.manualPauseRequested = true;
+    state.autoplayWanted = false;
+    const paused = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
+    state.nativeAudio.playing = !!paused.playing;
+    if (Number.isFinite(Number(paused.position))) state.nativeAudio.position = Number(paused.position);
+    state.audioBuffering = false;
+  }
+  state.audioBuffering = !!directStreamUrl && !state.nativeAudio.playing && !state.manualPauseRequested;
+  if (state.audioBuffering) setPlayerStatus("Buffering Monochrome stream", track);
   updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
   syncPlayPauseButton();
   updateMediaSession(track);
   startNativeAudioPolling(requestId);
+  return true;
+}
+
+// Monochrome answers repeated requests with 429 and then 403. Retrying the
+// same URL only extends the block, so the backend starts a cooldown during
+// which new jobs use YTP-DL; restart the current track once through it.
+function fallbackFromBlockedMonochrome(track, requestId, reason = "") {
+  if (!track || requestId !== state.playbackRequestId) return false;
+  if (state.monochromeBlockedFallbackRequestId === requestId) return false;
+  state.monochromeBlockedFallbackRequestId = requestId;
+  const message = reason || "Monochrome refused the stream";
+  logMonochromePlaybackActivity(`${message}; switching this track to YouTube`, track, "blocked-fallback", 0);
+  state.nativeAudio = { ...state.nativeAudio, active: false, playing: false, stream_url: "" };
+  state.currentStreamUrl = "";
+  state.directStreamNativeFallbackAttempted = false;
+  state.audioBuffering = !state.manualPauseRequested;
+  setPlayerStatusIcon("downloading", 0);
+  setPlayerStatus(`${message} — trying YouTube`, track);
+  syncPlayPauseButton();
+  startServiceDownload(track, "stream", requestId);
   return true;
 }
 
@@ -6867,7 +8256,13 @@ async function fallbackToDefaultOutputAndResume(requestId, position) {
   await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
   $("btnConnectDevice").classList.toggle("active", false);
   _refreshConnectPanel().catch(() => {});
-  if (libraryPath && track) {
+  if (track && isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+    const audio = $("audioPlayer");
+    audio.src = browserAudioStreamUrl(state.currentStreamUrl);
+    audio.load();
+    seekAfterMetadata(audio, position);
+    if (!state.manualPauseRequested) tryStartAudio(audio, track, requestId, null);
+  } else if (libraryPath && track) {
     await playFromLibraryPath(
       libraryPath, track, requestId, state.activeJobId,
       "Output disconnected — playing on this computer", position
@@ -6891,7 +8286,13 @@ function ensureOutputDisconnectListener() {
     const devs = await api("/api/audio/devices").catch(() => null);
     if (devs && Array.isArray(devs.devices) &&
         !devs.devices.some(d => d.uid === _nativeAudioDeviceUid)) {
-      await fallbackToDefaultOutputAndResume(state.playbackRequestId, state.nativeAudio.position || 0);
+      if (isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)) {
+        await setAudioOutputDevice("");
+        await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
+        await _refreshConnectPanel().catch(() => {});
+      } else {
+        await fallbackToDefaultOutputAndResume(state.playbackRequestId, state.nativeAudio.position || 0);
+      }
     }
   });
 }
@@ -6907,22 +8308,64 @@ function startNativeAudioPolling(requestId) {
     }
     const status = await api("/api/native_audio/status").catch(() => null);
     if (!status) return;
+    if (status.error) {
+      const failedStreamUrl = state.nativeAudio.stream_url;
+      state.nativeAudio = { ...state.nativeAudio, active: false, playing: false };
+      clearInterval(state.nativeAudioPollTimer);
+      state.nativeAudioPollTimer = null;
+      if ([403, 429].includes(Number(status.stream_http_status)) && isMonochromeDirectStreamUrl(failedStreamUrl) &&
+          fallbackFromBlockedMonochrome(state.currentTrack, requestId, status.error)) {
+        publishNowPlayingState(2);
+        return;
+      }
+      state.audioBuffering = false;
+      state.autoplayWanted = false;
+      if (state.currentTrack) setPlayerStatus(`Audio output stopped: ${status.error}`, state.currentTrack);
+      syncPlayPauseButton();
+      publishNowPlayingState(2);
+      return;
+    }
     state.nativeAudio = {
       ...state.nativeAudio,
       playing: !!status.playing,
+      stream_phase: status.stream_phase || "",
+      buffering: !!status.buffering || status.stream_phase === "buffering",
       position: status.position || 0,
       duration: status.duration || 0,
       ended: !!status.ended,
+      output_latency: Number(status.output_latency || 0),
     };
+    // The worker moves the stream to the default output by itself when the
+    // selected device stops accepting audio (Bluetooth dropped). Follow it so
+    // the device menu and the next switch start from the real route.
+    // (Android's player does the same for files when the chosen output goes.)
+    if ((isMonochromeDirectStreamUrl(state.nativeAudio.stream_url) || IS_ANDROID) && !_outputSwitchesInFlight &&
+        typeof status.device_uid === "string" && status.device_uid !== (_nativeAudioDeviceUid || "")) {
+      _nativeAudioDeviceUid = status.device_uid;
+      _activeSinkId = status.device_uid ? `native:${status.device_uid}` : "";
+      if (status.output_notice && state.currentTrack) setPlayerStatus(status.output_notice, state.currentTrack);
+      _refreshConnectPanel().catch(() => {});
+    }
+    if (status.playing) {
+      const wasBuffering = state.audioBuffering;
+      state.audioBuffering = false;
+      if (isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)) setPlayerStatusIcon("ready");
+      if (wasBuffering && state.currentTrack) {
+        setPlayerStatus(
+          isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)
+            ? "Streaming from Monochrome" : "Playing on selected device",
+          state.currentTrack,
+        );
+      }
+    }
+    else if (state.nativeAudio.stream_url && !state.manualPauseRequested) state.audioBuffering = true;
     updateListeningSessionPosition(state.nativeAudio.position, state.nativeAudio.duration);
     syncNativeAudioUi();
-    updateLyricsPosition(state.nativeAudio.position || 0);
+    followAudioWithVideo();
+    updateLyricsPosition(audiblePlaybackSeconds());
     // Prefetch the next track once playback is underway. The <audio> element's
     // ontimeupdate never fires on the native path, so trigger it here too.
-    if (state.nativeAudio.position >= 2 && state.prefetchedForRequestId !== state.playbackRequestId) {
-      state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTracks().catch(() => {}); prefetchNextVideos();
-    }
+    maybePrefetchUpcomingTracks(state.nativeAudio.position);
     if (status.ended && !state.manualPauseRequested) {
       await finalizeListeningSession("complete", "native_audio_ended").catch(() => {});
       await stopNativeAudio();
@@ -6934,11 +8377,12 @@ function startNativeAudioPolling(requestId) {
 
 function syncNativeAudioUi() {
   if (!state.nativeAudio.active) return;
-  const duration = state.nativeAudio.duration || 0;
+  const duration = state.nativeAudio.duration || knownTrackDurationSeconds(state.currentTrack);
   const position = state.nativeAudio.position || 0;
+  // The clock keeps moving even while the length is still unknown.
+  $("currentTime").textContent = formatTime(position);
   if (duration > 0) {
     $("seekBar").value = (position / duration) * 1000;
-    $("currentTime").textContent = formatTime(position);
     $("durationTime").textContent = formatTime(duration);
     $("seekBar").style.backgroundSize = `${(position / duration) * 100}% 100%`;
   }
@@ -6947,7 +8391,15 @@ function syncNativeAudioUi() {
 }
 
 async function toggleNativeAudioPlayback() {
-  if (!state.nativeAudio.active) return;
+  if (playbackTransportBusy()) return;
+  if (!state.nativeAudio.active) {
+    if (state.nativeAudioStarting) {
+      state.manualPauseRequested = true;
+      state.autoplayWanted = false;
+      state.nativeAudioPauseAfterStart = true;
+    }
+    return;
+  }
 
   // If it already ended, advance to the next track regardless of pause intent.
   if (state.nativeAudio.ended) {
@@ -6962,8 +8414,12 @@ async function toggleNativeAudioPlayback() {
   if (!state.manualPauseRequested) {
     state.manualPauseRequested = true;
     state.autoplayWanted = false;
+    state.audioBuffering = false;
     const status = await api("/api/native_audio/pause", { method: "POST", body: "{}" });
     state.nativeAudio.playing = !!status.playing;
+    if (Number.isFinite(Number(status.position))) state.nativeAudio.position = Number(status.position);
+    if (Number.isFinite(Number(status.duration)) && Number(status.duration) > 0) state.nativeAudio.duration = Number(status.duration);
+    state.audioBuffering = false;
     // If it's still playing after a pause request, it might be out of sync
     if (state.nativeAudio.playing) {
         console.warn("[NativeAudio] Pause request did not stop playback, forcing state update");
@@ -6972,12 +8428,11 @@ async function toggleNativeAudioPlayback() {
     }
     publishNowPlayingState(2);
   } else {
-    if (!state.currentLibraryPath) {
-        console.log("[Player] Native audio has no path to resume, doing nothing.");
-        return;
-    }
     state.manualPauseRequested = false;
+    state.audioBuffering = !!state.nativeAudio.stream_url;
     const status = await api("/api/native_audio/resume", { method: "POST", body: "{}" });
+    if (Number.isFinite(Number(status.position))) state.nativeAudio.position = Number(status.position);
+    if (Number.isFinite(Number(status.duration)) && Number(status.duration) > 0) state.nativeAudio.duration = Number(status.duration);
     if (!status.ok) {
         // If resume failed, maybe it's already playing or needs a hard status check
         const forced = await api("/api/native_audio/status").catch(() => null);
@@ -6989,21 +8444,41 @@ async function toggleNativeAudioPlayback() {
     } else {
         state.nativeAudio.playing = !!status.playing;
     }
+    state.audioBuffering = !!state.nativeAudio.stream_url && !state.nativeAudio.playing;
     publishNowPlayingState(1);
   }
+  syncNativeAudioUi();
   syncPlayPauseButton();
+  followAudioWithVideo();
+}
+
+function playbackTransportBusy() {
+  const native = state.nativeAudio || {};
+  const pendingStart = state.nativeAudioStarting || !!state.nativeAudioStart?.promise;
+  const nativeWaiting = native.active && !native.ended && !state.manualPauseRequested && (
+    native.buffering || ["opening", "buffering", "resolving", "connecting"].includes(native.stream_phase)
+    || (native.stream_url && !native.playing)
+  );
+  return !!(state.audioBuffering || pendingStart || nativeWaiting);
 }
 
 function syncPlayPauseButton() {
   const audio = $("audioPlayer");
   const playPause = $("playPause");
+  const busy = playbackTransportBusy();
   const paused = state.nativeAudio.active
     ? (state.manualPauseRequested || !state.nativeAudio.playing)
-    : !audio || audio.paused;
+    : !audio || audio.paused || state.audioBuffering;
   const icon = playPause?.querySelector("i");
+  if (playPause) {
+    playPause.disabled = busy;
+    playPause.setAttribute("aria-label", busy ? (state.nativeAudioStarting ? "Loading" : "Buffering") : (paused ? "Play" : "Pause"));
+    playPause.setAttribute("aria-busy", busy ? "true" : "false");
+  }
   if (icon) {
     icon.className = paused ? "bi bi-play-fill" : "bi bi-pause-fill";
   }
+  renderPlayerStatusIcon();
   publishDockPlayingState(!paused);
   persistPlaybackSnapshot();
 }
@@ -7108,13 +8583,17 @@ function bindKeyboardControls() {
     if (isTypingTarget(event.target)) return;
     if (event.code === "Space") {
       event.preventDefault();
+      if (playbackTransportBusy()) return;
       if (state.nativeAudio.active) {
         toggleNativeAudioPlayback().catch(() => {});
         return;
       }
-      if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack && $("audioPlayer").paused) {
+      if (isNativeAudioSelected() && state.currentTrack && $("audioPlayer").paused &&
+          (state.currentLibraryPath || isMonochromeDirectStreamUrl(state.currentStreamUrl))) {
         state.manualPauseRequested = false;
-        startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch(() => {});
+        startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId,
+          state.nativeAudio.position || state.directStreamPosition || 0,
+          isMonochromeDirectStreamUrl(state.currentStreamUrl) ? state.currentStreamUrl : "").catch(() => {});
         return;
       }
       const audio = $("audioPlayer");
@@ -7264,7 +8743,9 @@ function updateMediaSession(track) {
   };
 
   const audioElement = $("audioPlayer");
-  pushAndroidNowPlaying(payload, Boolean(audioElement && !audioElement.paused));
+  pushAndroidNowPlaying(payload, state.nativeAudio.active
+    ? Boolean(state.nativeAudio.playing && !state.manualPauseRequested)
+    : Boolean(audioElement && !audioElement.paused && !state.audioBuffering));
 
   if (state.settings?.native_now_playing_active) {
     // If the desktop native helper is active, use it as the primary source.
@@ -7312,7 +8793,17 @@ function bindPlayer() {
   audio.volume = storedVolume();
   syncVolumeBar();
   $("playPause").onclick = () => {
-    if (state.restoredPlaybackPending && state.currentTrack) {
+    if (playbackTransportBusy()) return;
+    // A restored snapshot can finish loading after the stream has already
+    // started. Never interpret the first Pause click as a request to reselect
+    // that active track (which restarts it at 0:00). Consume the pending flag
+    // once the player is actually running; only use the special restore path
+    // when playback is still idle and the media element has no source.
+    if (state.restoredPlaybackPending && !audio.paused) {
+      state.restoredPlaybackPending = false;
+    }
+    if (state.restoredPlaybackPending && state.currentTrack && audio.paused &&
+        (!audio.src || audio.src === window.location.href) && !state.nativeAudio.active) {
       const track = state.currentTrack;
       const position = Number(state.pendingResumePosition || 0);
       state.restoredPlaybackPending = false;
@@ -7330,19 +8821,43 @@ function bindPlayer() {
       });
       return;
     }
+    // WebKit cannot decode Monochrome's FLAC, so its audio element is cleared
+    // when we hand off to the native decoder. If that first native request is
+    // rate-limited or otherwise fails, Play must retry the native stream
+    // instead of treating the empty browser element as an idle player.
+    if (state.directStreamNativeFallbackAttempted && state.currentTrack &&
+        isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      if (state.audioBuffering || state.nativeAudioStarting) return;
+      state.manualPauseRequested = false;
+      state.autoplayWanted = true;
+      state.audioBuffering = true;
+      syncPlayPauseButton();
+      startNativeAudio("", state.currentTrack, state.playbackRequestId,
+        state.nativeAudio.position || state.directStreamPosition || 0,
+        state.currentStreamUrl, true).catch((error) => {
+        state.audioBuffering = false;
+        state.autoplayWanted = false;
+        if (state.currentTrack) setPlayerStatus(`Monochrome playback failed: ${error.message || error}`, state.currentTrack);
+        syncPlayPauseButton();
+      });
+      return;
+    }
     // Only hand a click to native-start when the browser isn't already playing.
     // If a switch to native output didn't actually move playback (no cache file
     // yet, or native start failed), the browser keeps playing while
     // isNativeAudioSelected() is true; without this guard every click re-fires
     // startNativeAudio and the pause button can never stop the browser audio.
-    if (isNativeAudioSelected() && state.currentLibraryPath && state.currentTrack && audio.paused) {
+    if (isNativeAudioSelected() && state.currentTrack && audio.paused &&
+        (state.currentLibraryPath || isMonochromeDirectStreamUrl(state.currentStreamUrl))) {
       state.manualPauseRequested = false;
-      startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId, state.nativeAudio.position || 0).catch((error) => {
+      startNativeAudio(state.currentLibraryPath, state.currentTrack, state.playbackRequestId,
+        state.nativeAudio.position || state.directStreamPosition || 0,
+        isMonochromeDirectStreamUrl(state.currentStreamUrl) ? state.currentStreamUrl : "").catch((error) => {
         if (state.currentTrack) setPlayerStatus(error.message || "Native audio failed", state.currentTrack);
       });
       return;
     }
-    if (audio.paused) {
+    if (audio.paused || state.audioBuffering) {
       const icon = $("playPause")?.querySelector("i");
       const buttonShowsPause = !!icon && icon.classList.contains("bi-pause-fill");
       if (buttonShowsPause && (state.autoplayWanted || audio.currentTime > 0)) {
@@ -7380,7 +8895,7 @@ function bindPlayer() {
       if (!isPlaybackVisiblyActive()) vid.pause();
       else vid.play().catch(() => {});
     }
-    if (audio.paused) {
+    if (audio.paused || state.audioBuffering) {
       if (state.currentTrack) {
         publishNowPlayingState(2);
       } else {
@@ -7391,18 +8906,43 @@ function bindPlayer() {
     }
   };
   audio.onended = async () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
     // A user-paused stream must never auto-advance. A growing-file active-job
     // stream can fire "ended" when playback reaches the current download head;
     // if the user paused, that would wrap a length-1 queue back onto the same
     // track and replay it from the start.
     if (state.manualPauseRequested) return;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const reportedDuration = knownTrackDurationSeconds(state.currentTrack) ||
+        (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0);
+      const endedAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+        ? audio.currentTime : Number(state.directStreamPosition || 0);
+      // WebKit can signal `ended` when a ranged FLAC response stalls or closes,
+      // even though Spotify metadata says the recording is still in progress.
+      // Treat that as a dropped stream and resume at its last known playhead.
+      if (reportedDuration > 0 && endedAt < reportedDuration - 2) {
+        state.directStreamPosition = endedAt;
+        state.rebufferPosition = endedAt;
+        state.audioBuffering = true;
+        const video = $("sideVideoPlayer");
+        if (video && video.tagName === "VIDEO") video.pause();
+        logMonochromePlaybackActivity(
+          `Monochrome stream ended early at ${formatTime(endedAt)} of ${formatTime(reportedDuration)}; reconnecting without advancing`,
+          state.currentTrack,
+          "premature-ended",
+          0,
+        );
+        if (state.currentTrack) setPlayerStatus("Buffering Monochrome stream", state.currentTrack);
+        syncPlayPauseButton();
+        if (!state.directStreamReconnectPending) reconnectMonochromeAfterBuffer(audio);
+        return;
+      }
+    }
     const endedRequestId = state.playbackRequestId;
     const endedJobId = state.activeJobId;
     if (isActiveJobStreamUrl(state.currentStreamUrl) && endedJobId) {
-      const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
       if (await activeJobStillRunning(endedJobId)) {
-        setPlayerStatus("Buffering...", state.currentTrack);
-        await reconnectActiveJobStream(audio, endedRequestId, endedJobId, resumeAt);
+        waitForActiveJobBuffer(audio);
         return;
       }
       if (endedRequestId !== state.playbackRequestId || state.activeJobId !== endedJobId) return;
@@ -7421,26 +8961,50 @@ function bindPlayer() {
     playQueueOffset(1);
   };
   audio.ontimeupdate = () => {
-    if (!audio.duration) return;
-    updateListeningSessionPosition(audio.currentTime, audio.duration);
-    if (state.streamRetryCount) state.streamRetryCount = 0; // playback recovered
-    $("seekBar").value = (audio.currentTime / audio.duration) * 1000;
-    $("currentTime").textContent = formatTime(audio.currentTime);
-    $("durationTime").textContent = formatTime(audio.duration);
-    $("seekBar").style.backgroundSize = `${(audio.currentTime / audio.duration) * 100}% 100%`;
-    setMiniPlayerProgress(audio.currentTime / audio.duration);
-    syncLocalVideoOverlay(audio.currentTime);
-    updateLyricsPosition(audio.currentTime);
-    persistPlaybackSnapshot();
-    // Only prefetch from a stable browser source. Live active-job streams can
-    // still be growing, and starting background downloads against them can
-    // race the stream handoff and trigger an early advance.
-    if (audio.currentTime >= 2 && state.prefetchedForRequestId !== state.playbackRequestId && !isActiveJobStreamUrl(state.currentStreamUrl)) {
-      state.prefetchedForRequestId = state.playbackRequestId;
-      prefetchNextTracks().catch(() => {}); prefetchNextVideos();
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
+    maybePrefetchUpcomingTracks(audio.currentTime || 0);
+    const spotifyDuration = knownTrackDurationSeconds(state.currentTrack);
+    const duration = isMonochromeDirectStreamUrl(state.currentStreamUrl)
+      ? (spotifyDuration || (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0))
+      : (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : spotifyDuration);
+    const position = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const restoringPosition = state.directStreamReconnectPending || state.directStreamResumePending;
+      // WebKit can emit `playing` before the reopened range produces usable
+      // audio. Only clear the retry loop after the playhead actually advances.
+      if (restoringPosition && position + 0.75 < Number(state.directStreamAttemptPosition || 0)) {
+        // Ignore the transient zero timestamp emitted while the new range is
+        // opening; it is not the current playhead and must not replace the
+        // saved position used by a subsequent retry.
+        state.directStreamPosition = Number(state.directStreamAttemptPosition || state.directStreamPosition || 0);
+      } else {
+        state.directStreamPosition = position;
+      }
+      if (restoringPosition && position > Number(state.directStreamAttemptPosition || 0) + 0.75) {
+        state.directStreamReconnectPending = false;
+        state.directStreamReconnectAttempts = 0;
+        state.directStreamResumePending = false;
+        if (state.directStreamReconnectTimer) clearTimeout(state.directStreamReconnectTimer);
+        state.directStreamReconnectTimer = null;
+      }
     }
+    if (duration <= 0) return;
+    updateListeningSessionPosition(position, duration);
+    if (state.streamRetryCount) state.streamRetryCount = 0; // playback recovered
+    $("seekBar").value = (position / duration) * 1000;
+    $("currentTime").textContent = formatTime(position);
+    $("durationTime").textContent = formatTime(duration);
+    $("seekBar").style.backgroundSize = `${(position / duration) * 100}% 100%`;
+    setMiniPlayerProgress(position / duration);
+    followAudioWithVideo();
+    updateLyricsPosition(audiblePlaybackSeconds());
+    if (shouldExposeNowPlaying()) updateMediaSession(state.currentTrack);
+    persistPlaybackSnapshot();
   };
   audio.onseeked = () => {
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl) && Number.isFinite(audio.currentTime)) {
+      state.directStreamPosition = audio.currentTime;
+    }
     syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
   };
   audio.onloadedmetadata = () => {
@@ -7449,35 +9013,82 @@ function bindPlayer() {
     }
     if (audio.duration) {
       updateListeningSessionPosition(audio.currentTime || 0, audio.duration);
-      updateLyricsPosition(audio.currentTime || 0, true);
+      updateLyricsPosition(audiblePlaybackSeconds(), true);
       syncLocalVideoOverlay(audio.currentTime || 0, false, { allowSeek: true });
     }
   };
   audio.oncanplay = () => {
-    if (state.autoplayWanted && !state.manualPauseRequested && audio.paused) {
+    if (state.autoplayWanted && !state.manualPauseRequested && !state.rebuffering && audio.paused) {
       audio.play().catch(() => {});
     }
-    syncLocalVideoOverlay(audio.currentTime || 0, true, { allowSeek: true });
+    // canplay only means data is available; wait for the audio element's
+    // `playing` event before resuming video so both tracks restart together.
+    syncLocalVideoOverlay(audio.currentTime || 0, false, { allowSeek: true });
   };
   audio.onwaiting = () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
+    // Safari/WebKit often reports `waiting` as it tears down a ranged response
+    // on pause. Do not convert the user's pause into a reconnect/buffer loop.
+    if (state.manualPauseRequested) {
+      state.audioBuffering = false;
+      syncPlayPauseButton();
+      return;
+    }
+    state.audioBuffering = true;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const position = Number.isFinite(audio.currentTime) ? audio.currentTime : state.directStreamPosition || 0;
+      logMonochromePlaybackActivity(
+        `Monochrome stream is buffering at ${formatTime(position)}`,
+        state.currentTrack,
+        "waiting",
+        5000,
+      );
+    }
+    const video = $("sideVideoPlayer");
+    if (video && video.tagName === "VIDEO") video.pause();
+    syncPlayPauseButton();
+    if (state.currentTrack && !state.manualPauseRequested) publishNowPlayingState(2);
+    reconnectMonochromeAfterBuffer(audio);
+    if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl) && !state.manualPauseRequested) {
+      waitForActiveJobBuffer(audio);
+    }
     if (state.currentTrack) {
       setPlayerStatus(state.activeJobPhase === "Searching..." ? "Searching..." : "Buffering...", state.currentTrack);
     }
   };
   audio.onplaying = () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
     // Do NOT clear manualPauseRequested here. This event also fires on buffer
     // recovery; clearing the user's pause intent would let other auto-play
     // triggers (onended, onerror, the job watcher) resume a track the user
     // deliberately paused. The intent is cleared only by an explicit play /
     // new-track action.
+    const recoveringMonochrome = isMonochromeDirectStreamUrl(state.currentStreamUrl) &&
+      (state.directStreamReconnectAttempts > 0 || state.directStreamResumePending);
     state.autoplayWanted = false;
+    state.audioBuffering = false;
+    state.audioHasPlayed = true;
+    logMonochromePlaybackActivity(`Measured browser output delay: ${browserOutputLatencySeconds().toFixed(3)}s`, state.currentTrack, "output-clock", 60000);
     state.activeJobPhase = "";
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      setPlayerStatusIcon("ready");
+      logMonochromePlaybackActivity(
+        recoveringMonochrome ? "Monochrome stream recovered; audio playback resumed" : "Monochrome stream audio playback started",
+        state.currentTrack,
+        recoveringMonochrome ? "recovered" : "playing",
+      );
+    }
+    const video = $("sideVideoPlayer");
+    if (video && video.tagName === "VIDEO" && state.videoMode && !state.manualPauseRequested) {
+      video.play().catch(() => {});
+    }
+    syncPlayPauseButton();
     // `playing` is the browser's confirmed transition. Force this update so a
     // newly started desktop/Dock process cannot retain an earlier paused state.
     publishDockPlayingState(true, true);
     if (state.currentTrack) {
         const isCache = isLibraryStreamUrl(state.currentStreamUrl);
-        if (isCache || (state.currentLibraryPath && !isActiveJobStreamUrl(state.currentStreamUrl))) {
+        if (isMonochromeDirectStreamUrl(state.currentStreamUrl) || isCache || (state.currentLibraryPath && !isActiveJobStreamUrl(state.currentStreamUrl))) {
           setPlayerStatusIcon("ready");
         }
         setPlayerStatus(isCache ? "Playing from cache" : "Streaming...", state.currentTrack);
@@ -7485,11 +9096,87 @@ function bindPlayer() {
     }
   };
   audio.onerror = () => {
+    if (state.nativeAudioStarting || state.nativeAudio.active) return;
     const error = audio.error;
     const erroredSrc = audio.currentSrc || audio.src || "";
     // Ignore errors if we don't have a source (common when using native output)
     if (!audio.src || audio.src === window.location.href) return;
+    // WebKit may deliver a late error from the response that was closed by a
+    // pause/reconnect. Do not let that obsolete response start a second search.
+    if (erroredSrc) {
+      try {
+        if (new URL(erroredSrc, window.location.href).href !== new URL(audio.src, window.location.href).href) return;
+      } catch (_) {}
+    }
+    if (state.activeJobId && isActiveJobStreamUrl(state.currentStreamUrl)) {
+      // A growing stream may temporarily run out of data. Keep the download
+      // and its already-tested torrents; reselecting cancels and deletes them.
+      waitForActiveJobBuffer(audio);
+      return;
+    }
     if (state.manualPauseRequested) return;
+    if (isMonochromeDirectStreamUrl(state.currentStreamUrl) && error && [2, 3, 4].includes(error.code)) {
+      if (error.code === 4 && !state.directStreamNativeFallbackAttempted) {
+        state.directStreamNativeFallbackAttempted = true;
+        const resumeAt = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+          ? audio.currentTime : Number(state.directStreamPosition || 0);
+        const streamUrl = state.currentStreamUrl;
+        const fallbackRequestId = state.playbackRequestId;
+        logMonochromePlaybackActivity(
+          "Browser cannot decode Monochrome FLAC; switching to the 30-second native audio buffer",
+          state.currentTrack,
+          "native-fallback",
+          0,
+        );
+        state.directStreamPosition = resumeAt;
+        state.audioBuffering = true;
+        state.autoplayWanted = true;
+        syncPlayPauseButton();
+        const video = $("sideVideoPlayer");
+        if (video && video.tagName === "VIDEO") video.pause();
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        startNativeAudio("", state.currentTrack, fallbackRequestId, resumeAt, streamUrl, true)
+          .then((started) => {
+            if (state.playbackRequestId !== fallbackRequestId) {
+              if (started) stopNativeAudio().catch(() => {});
+              return;
+            }
+            if (!started) return;
+            if (state.currentTrack) setPlayerStatus("Buffering Monochrome stream", state.currentTrack);
+          })
+          .catch((fallbackError) => {
+            state.audioBuffering = false;
+            state.autoplayWanted = false;
+            logMonochromePlaybackActivity(
+              `Native Monochrome playback failed: ${fallbackError.message || fallbackError}`,
+              state.currentTrack,
+              "native-fallback-error",
+              0,
+            );
+            setPlayerStatus(`Monochrome playback failed: ${fallbackError.message || "native audio unavailable"}`, state.currentTrack);
+            syncPlayPauseButton();
+          });
+        return;
+      }
+      logMonochromePlaybackActivity(
+        `Monochrome browser audio error ${error.code}; reconnecting from ${formatTime(state.directStreamPosition || audio.currentTime || 0)}`,
+        state.currentTrack,
+        `media-error-${error.code}`,
+        5000,
+      );
+      state.audioBuffering = true;
+      syncPlayPauseButton();
+      const video = $("sideVideoPlayer");
+      if (video && video.tagName === "VIDEO") video.pause();
+      if (state.currentTrack) {
+        setPlayerStatus("Buffering… reconnecting to Monochrome", state.currentTrack);
+        publishNowPlayingState(2);
+      }
+      reconnectMonochromeAfterBuffer(audio);
+      return;
+    }
     // WebKit can still dispatch an error for a previous active-job URL after
     // the player has already switched to the finalized cache file. Do not let
     // that stale failure repaint a currently selected cache source as failed.
@@ -7533,7 +9220,7 @@ function bindPlayer() {
             if (requestId !== state.playbackRequestId || state.manualPauseRequested) return;
             const url = new URL(state.currentStreamUrl, window.location.origin);
             url.searchParams.set("t", Date.now()); // Bust cache on retry
-            audio.src = url.toString();
+            audio.src = browserAudioStreamUrl(url.toString());
             audio.load();
             audio.currentTime = pos;
             audio.play().catch(() => {});
@@ -7564,15 +9251,25 @@ function bindPlayer() {
         const position = ($("seekBar").value / 1000) * duration;
         state.nativeAudio.position = position;
         api("/api/native_audio/seek", { method: "POST", body: JSON.stringify({ position }) }).catch(() => {});
-        syncLocalVideoOverlay(position, true, { allowSeek: true });
+        // The native stream rebuffers after a seek; hold the video on the new
+        // frame until the poll sees audio playing again.
+        syncLocalVideoOverlay(position, false, { allowSeek: true });
+        const seekVideo = $("sideVideoPlayer");
+        if (seekVideo && seekVideo.tagName === "VIDEO") seekVideo.pause();
         if (shouldExposeNowPlaying()) {
           updateMediaSession(state.currentTrack);
         }
       }
       return;
     }
-    if (audio.duration) {
-      audio.currentTime = ($("seekBar").value / 1000) * audio.duration;
+    const spotifyDuration = knownTrackDurationSeconds(state.currentTrack);
+    const duration = isMonochromeDirectStreamUrl(state.currentStreamUrl)
+      ? (spotifyDuration || (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0))
+      : (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : spotifyDuration);
+    if (duration > 0) {
+      const position = ($("seekBar").value / 1000) * duration;
+      audio.currentTime = position;
+      if (isMonochromeDirectStreamUrl(state.currentStreamUrl)) state.directStreamPosition = position;
       if (shouldExposeNowPlaying()) {
         updateMediaSession(state.currentTrack);
       }
@@ -7609,6 +9306,8 @@ function bindPlayer() {
   if (btnShuffle) {
     btnShuffle.onclick = () => {
       state.isShuffle = !state.isShuffle;
+      $("albumShuffle")?.classList.toggle("active", state.isShuffle);
+      $("albumShuffle")?.setAttribute("aria-pressed", String(state.isShuffle));
       btnShuffle.classList.toggle("active", state.isShuffle);
 
       cancelAllPrefetchJobs("queue order changed");
@@ -7656,10 +9355,50 @@ function formatTime(s) { const m = Math.floor(s / 60); return `${m}:${Math.floor
 // Playlists
 // ---------------------------------------------------------------------------
 
+const OFFLINE_PLAYLIST_ID = "__offline__";
+
+function isReadOnlyPlaylist(playlist) {
+  return !!playlist && (playlist.id === OFFLINE_PLAYLIST_ID || playlist.read_only === true);
+}
+
+function playlistArtworkHtml(playlist, className, id = "") {
+  const idAttr = id ? ` id="${esc(id)}"` : "";
+  if (playlist.id === OFFLINE_PLAYLIST_ID) {
+    const covers = playlist.artwork_urls || [];
+    const tiles = Array.from({ length: 4 }, (_, i) => covers.length
+      ? `<img src="${esc(covers[i % covers.length])}" alt="" loading="lazy">`
+      : '<span><i class="bi bi-music-note-beamed"></i></span>').join("");
+    return `<div${idAttr} class="${className} playlist-art-grid" role="img" aria-label="Offline playlist cover">${tiles}</div>`;
+  }
+  const art = playlist.artwork_url || playlist.tracks?.[0]?.artwork_url || "";
+  return `<div${idAttr} class="${className}" style="${art ? `background-image:url('${esc(art)}')` : ""}">${art ? "" : '<i class="bi bi-music-note-list"></i>'}</div>`;
+}
+
 async function loadPlaylists() {
+    if (!state.playlistSyncRefreshTimer) {
+      state.playlistSyncRefreshTimer = setInterval(() => {
+        if (!document.hidden) loadPlaylists();
+      }, 5000);
+    }
   try {
-    state.playlists = await api("/api/playlists");
-    renderSidebarPlaylists();
+    let playlists = await api("/api/playlists");
+    playlists = window.MindinguflacRemote?.offlinePlaylists(playlists) || playlists;
+    if (JSON.stringify(state.playlists) !== JSON.stringify(playlists)) {
+      state.playlists = playlists;
+      renderSidebarPlaylists();
+      if (visibleAlbumControls?.album) renderAlbumLibraryControl(visibleAlbumControls.album);
+      if (state.activePlaylistId === OFFLINE_PLAYLIST_ID && $("pageContent")?.querySelector('[data-playlist-page="__offline__"]')) {
+        const offline = playlists.find(pl => pl.id === OFFLINE_PLAYLIST_ID);
+        if (offline) {
+          const scrollTop = $("pageContent").querySelector(".scroll-area")?.scrollTop || 0;
+          _renderPlaylistContent(offline, { kind: "playlist", id: offline.id, name: offline.name, origin: "offline", read_only: true, allow_playlist_continuation: false });
+          $("pageContent").querySelector(".scroll-area").scrollTop = scrollTop;
+        } else {
+          state.activePlaylistId = null;
+          replacePage(window.matchMedia("(max-width: 900px)").matches ? renderMobileLibraryPage : renderHomePage);
+        }
+      }
+    }
   } catch (e) {
     console.error("loadPlaylists failed", e);
   }
@@ -7687,21 +9426,18 @@ function renderSidebarPlaylists() {
     return;
   }
   list.innerHTML = state.playlists.map(pl => {
-    const art = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
-    const artStyle = art ? `style="background-image: url('${art}')"` : "";
-    const artIcon = art ? "" : `<i class="bi bi-music-note-list"></i>`;
     const origin = inferPlaylistOrigin(pl);
-    const originLabel = origin === "album" ? "Album" : "Created";
+    const originLabel = origin === "album" ? "Album" : origin === "offline" ? "Downloaded" : "Created";
     const yearLabel = origin === "album" && pl.year ? ` · ${esc(pl.year)}` : "";
     const isActive = state.activePlaylistId === pl.id;
     return `
       <div class="sidebar-playlist-item${isActive ? " active" : ""}" data-playlist-id="${pl.id}">
-        <div class="sidebar-playlist-art" ${artStyle}>${artIcon}</div>
+        ${playlistArtworkHtml(pl, "sidebar-playlist-art")}
         <div class="sidebar-playlist-info">
           <div class="sidebar-playlist-name">${esc(pl.name)}</div>
           <div class="sidebar-playlist-count">${pl.tracks.length} song${pl.tracks.length !== 1 ? "s" : ""}${yearLabel} · ${esc(originLabel)}</div>
         </div>
-        <button class="sidebar-playlist-delete" type="button" data-delete-playlist="${pl.id}" aria-label="Delete playlist" title="Delete playlist"><i class="bi bi-trash3"></i></button>
+        ${isReadOnlyPlaylist(pl) ? "" : `<button class="sidebar-playlist-delete" type="button" data-delete-playlist="${pl.id}" aria-label="Delete playlist" title="Delete playlist"><i class="bi bi-trash3"></i></button>`}
       </div>
     `;
   }).join("");
@@ -7710,7 +9446,7 @@ function renderSidebarPlaylists() {
     el.onclick = (event) => {
       if (event.target.closest("[data-delete-playlist]")) return;
       const pl = state.playlists.find(p => p.id === el.dataset.playlistId);
-      if (pl) pushPage(() => renderPlaylistPage(pl));
+      if (pl) openLibraryPlaylist(pl);
     };
   });
   list.querySelectorAll("[data-delete-playlist]").forEach(btn => {
@@ -7724,7 +9460,7 @@ function renderSidebarPlaylists() {
 
 async function deletePlaylist(id) {
   const playlist = state.playlists.find(item => item.id === id);
-  if (!playlist) return;
+  if (!playlist || isReadOnlyPlaylist(playlist)) return;
   const dialog = $("deletePlaylistDialog");
   if (dialog.open) return;
   $("deletePlaylistMessage").textContent = `Delete “${playlist.name || "this playlist"}” from your library? Your music files will be kept.`;
@@ -7757,6 +9493,11 @@ function formatDuration(tracks) {
 }
 
 function renderPlaylistPage(playlist) {
+  if (playlist.id === OFFLINE_PLAYLIST_ID && !state.playlists.some(pl => pl.id === OFFLINE_PLAYLIST_ID)) {
+    state.activePlaylistId = null;
+    replacePage(window.matchMedia("(max-width: 900px)").matches ? renderMobileLibraryPage : renderHomePage);
+    return;
+  }
   setActiveView("home");
   if (window.matchMedia("(max-width: 900px)").matches) setMobileNavActive("library");
   document.querySelectorAll(".sidebar-playlist-item").forEach(el => {
@@ -7770,6 +9511,7 @@ function renderPlaylistPage(playlist) {
     id: pl.id,
     name: pl.name,
     origin: playlistOrigin,
+    read_only: isReadOnlyPlaylist(pl),
     allow_playlist_continuation: playlistOrigin === "manual",
   };
   _renderPlaylistContent(pl, playlistPlaybackContext);
@@ -7821,12 +9563,12 @@ function renderPlaylistPage(playlist) {
 }
 
 function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
-  const heroArt = pl.artwork_url || (pl.tracks[0] || {}).artwork_url || "";
-  const artStyle = heroArt ? `background-image: url('${heroArt}')` : "";
-  const artIcon = artStyle ? "" : `<i class="bi bi-music-note-list"></i>`;
+  const localOffline = pl.id === OFFLINE_PLAYLIST_ID ? pl : null;
+  if (localOffline && window.MindinguflacRemote) pl = window.MindinguflacRemote.offlineView(pl);
   const duration = formatDuration(pl.tracks);
   const playlistOrigin = String(pl.playlist_origin || "").trim().toLowerCase();
   const isAlbumPlaylist = playlistOrigin === "album";
+  const showRecommendations = !isAlbumPlaylist && !isReadOnlyPlaylist(pl);
   const primaryTrack = (pl.tracks || []).find(track => track && (track.artist || track.album)) || (pl.tracks || [])[0] || {};
   const heroArtist = primaryTrack.artist || pl.owner || "";
   const heroYear = primaryTrack.year || pl.year || "";
@@ -7845,8 +9587,8 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
 
   $("pageContent").innerHTML = `
     <div class="scroll-area">
-      <div class="playlist-hero">
-        <div class="playlist-hero-art" style="${artStyle}">${artIcon}</div>
+      <div class="playlist-hero" data-playlist-page="${esc(pl.id)}">
+        ${playlistArtworkHtml(pl, "playlist-hero-art")}
         <div class="playlist-hero-info">
           <span class="eyebrow">${isAlbumPlaylist ? "Album" : "Playlist"}</span>
           <h1>${esc(pl.name)}</h1>
@@ -7867,6 +9609,7 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
         </div>
       </div>
 
+      ${localOffline ? window.MindinguflacRemote?.offlineTabs() || "" : ""}
       <div class="track-list-header" style="margin-top: 24px">
         <div>#</div>
         <div>Title</div>
@@ -7875,16 +9618,17 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
 
       <div id="playlistTrackList" class="track-list"></div>
 
-      <div class="playlist-recommendations-head" ${isAlbumPlaylist ? 'style="display:none"' : ""}>
+      <div class="playlist-recommendations-head" ${showRecommendations ? "" : 'style="display:none"'}>
         <div>
           <h2>Recommended</h2>
           <p>Based on this playlist and your listening taste</p>
         </div>
       </div>
-      <div id="playlistRecommendations" class="playlist-recommendations" ${isAlbumPlaylist ? 'style="display:none"' : ""}></div>
+      <div id="playlistRecommendations" class="playlist-recommendations" ${showRecommendations ? "" : 'style="display:none"'}></div>
     </div>
   `;
 
+  if (localOffline) window.MindinguflacRemote?.bindOfflineTabs(localOffline);
   if (pl.tracks.length) {
     renderTrackList(
       "playlistTrackList",
@@ -7893,7 +9637,7 @@ function _renderPlaylistContent(pl, playlistPlaybackContext = null) {
       playlistPlaybackContext || { kind: "playlist", id: pl.id, name: pl.name, allow_playlist_continuation: false }
     );
   } else {
-    $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">No songs yet — click the status icon while a track is playing to add it.</div>`;
+    $("playlistTrackList").innerHTML = `<div style="padding: 24px; color: var(--muted); text-align: center;">${localOffline ? esc(pl.offline_message || "No songs downloaded on this device.") : "No songs yet — click the status icon while a track is playing to add it."}</div>`;
   }
   if (isAlbumPlaylist && heroArtist) {
     const artistBtn = $("playlistHeroArtistLink");
@@ -7918,6 +9662,7 @@ function queueTrackKeys() {
 }
 
 function inferPlaylistOrigin(pl = {}) {
+  if (pl.id === OFFLINE_PLAYLIST_ID) return "offline";
   const origin = String(pl.playlist_origin || "").trim().toLowerCase();
   return origin === "album" ? "album" : "manual";
 }
@@ -7946,10 +9691,10 @@ async function hydrateAlbumPlaylistTracks(playlist, playbackContext = null) {
   if (!playlist || inferPlaylistOrigin(playlist) !== "album") return playlist;
   const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
   const seed = tracks.find(track => track && (track.artist || track.album || track.title || track.spotify_id || track.musicbrainz_release_id)) || {};
-  const artistName = seed.artist || playlist.owner || "";
+  const artistName = seed.album_artist || playlist.owner || seed.artist || "";
   const albumTitle = seed.album || playlist.name || "";
   const releaseId = seed.musicbrainz_release_id || "";
-  const spotifyId = seed.album_spotify_id || seed.spotify_album_id || seed.metadata?.album_spotify_id || "";
+  const spotifyId = savedAlbumSpotifyId(playlist) || seed.album_spotify_id || seed.spotify_album_id || seed.metadata?.album_spotify_id || "";
   if (!artistName || !albumTitle) return playlist;
 
   try {
@@ -7958,6 +9703,7 @@ async function hydrateAlbumPlaylistTracks(playlist, playbackContext = null) {
       album: albumTitle,
       release_id: releaseId,
       spotify_id: spotifyId,
+      track_spotify_id: spotifyId ? "" : (seed.spotify_id || ""),
     });
     const data = await api(`/api/music/album_tracks?${params.toString()}&details=0`);
     const hydratedTracks = Array.isArray(data.tracks) ? data.tracks : [];
@@ -8312,7 +10058,7 @@ function openPlaylistPicker(track) {
   function renderPickerList() {
     const body = $("playlistPickerBody");
     const filtered = state.playlists.filter(pl =>
-      !searchVal || pl.name.toLowerCase().includes(searchVal.toLowerCase())
+      !isReadOnlyPlaylist(pl) && (!searchVal || pl.name.toLowerCase().includes(searchVal.toLowerCase()))
     );
 
     const sections = [];
@@ -8426,14 +10172,12 @@ function openCreatePlaylistDialog(trackToAdd = null) {
       });
       state.playlists.unshift(result);
       // If a track was queued to be added, add it now
-      if (trackToAdd) {
-        try {
-          await api("/api/playlists/tracks", {
-            method: "POST",
-            body: JSON.stringify({ playlist_id: result.id, track: trackToAdd, action: "add" }),
-          });
-          state.playlists[0].tracks.push(trackToAdd);
-        } catch (e) {}
+      if (Array.isArray(trackToAdd)) {
+        await api("/api/playlists/tracks/add", {method:"POST",body:JSON.stringify({id:result.id,tracks:trackToAdd})});
+        await loadPlaylists();
+      } else if (trackToAdd) {
+        await api("/api/playlists/tracks", {method:"POST",body:JSON.stringify({playlist_id:result.id,track:trackToAdd,action:"add"})});
+        state.playlists[0].tracks.push(trackToAdd);
       }
       renderSidebarPlaylists();
       dialog.close();
@@ -8490,9 +10234,16 @@ function bindPlaylistDialogs() {
   });
 }
 
-async function restorePlaybackState() {
+// Boot restores last session's track paused. It runs after the saved output
+// is reactivated (up to 10s while Bluetooth reconnects), so the user may have
+// started a song in the meantime; restoring then would swap in the old track
+// and set the pause intent on the new one. `bootRequestId` is the playback
+// request id from before boot's awaits; any newer selection wins.
+async function restorePlaybackState(bootRequestId = state.playbackRequestId) {
+  const userSelectedSinceBoot = () => state.playbackRequestId !== bootRequestId;
   try {
     const status = await api("/api/native_audio/status");
+    if (userSelectedSinceBoot()) return;
     if (status && status.metadata && status.path) {
       const track = status.metadata;
       state.currentTrack = track;
@@ -8526,6 +10277,7 @@ async function restorePlaybackState() {
   }
 
   const saved = await storedPlaybackSnapshot();
+  if (userSelectedSinceBoot()) return;
   if (!saved) {
     publishDockPlayingState(false);
     return;
@@ -8743,6 +10495,7 @@ function bindNowPlayingSwipe() {
 }
 
 async function boot() {
+  const bootRequestId = state.playbackRequestId;
   state.dockRecentItems = storedDockRecentItems();
   bindSearch();
   bindPlayer();
@@ -8777,6 +10530,7 @@ async function boot() {
   } else {
     state.settings = await api("/api/settings").catch(() => ({}));
   }
+  await restoreAlbumDownloadQueue();
   const _audio = $("audioPlayer");
   _audio.volume = storedVolume();
   syncVolumeBar();
@@ -8838,9 +10592,10 @@ async function boot() {
   await restorePreferredAudioOutput().catch(() => {});
   
   // Try to restore playback state before showing home page
-  await restorePlaybackState();
+  await restorePlaybackState(bootRequestId);
   
   replacePage(renderHomePage);
+  await window.MindinguflacRemote?.initialize();
 }
 
 boot().catch(error => {
@@ -8876,20 +10631,56 @@ let _activeSinkId = "";  // "" = default (this computer)
 let _nativeAudioDeviceUid = "";
 let _nativeAudioAvailable = false;
 
-function _ensureAudioContext() {
-  if (_audioCtx) return _audioCtx;
-  _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const audio = $("audioPlayer");
-  _audioSrcNode = _audioCtx.createMediaElementSource(audio);
-  _audioSrcNode.connect(_audioCtx.destination);
+function _ensureAudioContext(route = true) {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (route && !_audioSrcNode) {
+    _audioSrcNode = _audioCtx.createMediaElementSource($("audioPlayer"));
+    _audioSrcNode.connect(_audioCtx.destination);
+  }
   return _audioCtx;
+}
+
+async function prepareBrowserAudioClock(audio) {
+  // The playback buffer is same-origin. Remote previews without CORS must
+  // keep their original route or a MediaElementSource would silence them.
+  try {
+    const Constructor = window.AudioContext || window.webkitAudioContext;
+    if (!Constructor || !audio?.src || new URL(audio.src, window.location.href).origin !== window.location.origin) return;
+    if (!Constructor.prototype.getOutputTimestamp && !("outputLatency" in Constructor.prototype)) return;
+    const canRoute = !(typeof audio.setSinkId === "function" && typeof Constructor.prototype.setSinkId !== "function");
+    const context = _ensureAudioContext(false);
+    if (context.state === "suspended") {
+      await Promise.race([context.resume(), new Promise(resolve => setTimeout(resolve, 200))]);
+    }
+    // Connect only after resume succeeds, preserving ordinary playback if
+    // WebKit denies the context outside a user gesture.
+    if (context.state === "running" && canRoute) _ensureAudioContext(true);
+  } catch (_) {}
+}
+
+function browserOutputLatencySeconds() {
+  const context = _audioCtx;
+  if (!context || context.state !== "running") return 0;
+  if (!_audioSrcNode && _activeSinkId) return 0;
+  try {
+    if (_audioSrcNode && typeof context.getOutputTimestamp === "function") {
+      const stamp = context.getOutputTimestamp();
+      const age = (performance.now() - Number(stamp.performanceTime)) / 1000;
+      if (stamp.contextTime > 0 && stamp.performanceTime > 0 && age >= 0 && age < 2) {
+        const latency = context.currentTime - (stamp.contextTime + age);
+        if (Number.isFinite(latency) && latency >= 0 && latency < 5) return latency;
+      }
+    }
+    const latency = Number(context.outputLatency || 0) + Number(context.baseLatency || 0);
+    return Number.isFinite(latency) && latency >= 0 && latency < 5 ? latency : 0;
+  } catch (_) { return 0; }
 }
 
 function isPlaybackVisiblyActive() {
   const audio = $("audioPlayer");
   return !!(
     (state.nativeAudio && state.nativeAudio.active && state.nativeAudio.playing) ||
-    (audio && !audio.paused)
+    (audio && !audio.paused && !state.audioBuffering)
   );
 }
 
@@ -8922,12 +10713,32 @@ function _findOutputRouteCandidate(preferred, backendDevices, browserOutputs, na
       deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
       nativeUid: nativeAvailable && bd.uid ? bd.uid : "",
     };
+    // Windows UIDs are PortAudio indexes ("sounddevice:5"), which shift when
+    // devices come and go, so a saved index only counts if the name agrees.
+    const nameAgrees = !preferredName || _audioLabelsMatch(candidate.name, preferredName);
+    const uidIsIndex = preferredNativeUid.startsWith("sounddevice:");
     if (
-      (preferredNativeUid && candidate.nativeUid === preferredNativeUid) ||
-      (preferredId && candidate.deviceId === preferredId) ||
-      (preferredName && _audioLabelsMatch(candidate.name, preferredName))
+      (preferredNativeUid && candidate.nativeUid === preferredNativeUid && (!uidIsIndex || nameAgrees)) ||
+      (preferredId && candidate.deviceId === preferredId && (!uidIsIndex || nameAgrees))
     ) {
       return candidate;
+    }
+  }
+  // No exact saved identity: fall back to the device name (also covers names
+  // saved before the device list switched to full WASAPI names).
+  if (preferredName) {
+    for (const bd of (backendDevices || [])) {
+      const label = String(bd.name || "Audio Device");
+      if (!_audioLabelsMatch(label, preferredName)) continue;
+      const match = (browserOutputs || []).find(b =>
+        (b.label && _audioLabelsMatch(b.label, label)) || b.deviceId === bd.uid
+      );
+      const nativeId = bd.uid ? `native:${bd.uid}` : "";
+      return {
+        name: label,
+        deviceId: match ? match.deviceId : (nativeAvailable && nativeId ? nativeId : bd.uid),
+        nativeUid: nativeAvailable && bd.uid ? bd.uid : "",
+      };
     }
   }
 
@@ -8963,7 +10774,7 @@ async function _activatePreferredOutput(preferred, timeoutMs = 8000, persist = t
     const candidate = _findOutputRouteCandidate(preferred, backendDevices, browserOutputs, nativeAvailable);
     if (candidate) {
       const targetId = candidate.nativeUid ? `native:${candidate.nativeUid}` : candidate.deviceId;
-      await setAudioOutputDevice(targetId);
+      await setAudioOutputDevice(targetId, candidate.name);
       if (persist) {
         await _persistPreferredAudioOutput({
           deviceId: targetId,
@@ -9006,9 +10817,87 @@ async function restorePreferredAudioOutput() {
   }
 }
 
-async function setAudioOutputDevice(deviceId) {
+// Output switches run one at a time. Each one tears down and reopens a device
+// (slow on Bluetooth), and overlapping requests used to race each other's
+// rollback, leaving the route on the wrong device. Clicks made while a switch
+// is running collapse to the most recent selection.
+let _outputSwitchChain = Promise.resolve();
+let _outputSwitchSeq = 0;
+let _outputSwitchesInFlight = 0;
+
+function setAudioOutputDevice(deviceId, selectedDeviceName = "") {
+  const seq = ++_outputSwitchSeq;
+  _outputSwitchesInFlight++;
+  const run = _outputSwitchChain.then(() => (
+    seq === _outputSwitchSeq ? _applyAudioOutputDevice(deviceId, selectedDeviceName) : false
+  )).then((switched) => {
+    // Replace the "Switching output…" notice unless the switch already
+    // reported something more specific (an error, buffering, a fallback).
+    if (switched && state.currentTrack && String(state.playerStatus || "").startsWith("Switching output")) {
+      setPlayerStatus(`Playing on ${selectedDeviceName || "This computer"}`, state.currentTrack);
+    }
+    return switched;
+  }).finally(() => { _outputSwitchesInFlight--; });
+  _outputSwitchChain = run.catch(() => false);
+  return run;
+}
+
+async function _applyAudioOutputDevice(deviceId, selectedDeviceName = "") {
+  const nativeTargetUid = typeof deviceId === "string" && deviceId.startsWith("native:")
+    ? deviceId.slice("native:".length) : "";
+  // Preferred-output restoration can finish after a track starts. Reapplying
+  // the same live native route must not tear down and restart that first stream.
+  if (nativeTargetUid && deviceId === _activeSinkId &&
+      nativeTargetUid === _nativeAudioDeviceUid && state.nativeAudio.active) {
+    if (selectedDeviceName && state.settings) {
+      state.settings.preferred_audio_output_name = String(selectedDeviceName);
+    }
+    return true;
+  }
   _activeSinkId = deviceId;
+  if (deviceId && deviceId.startsWith("native:") && selectedDeviceName) {
+    if (!state.settings) state.settings = {};
+    state.settings.preferred_audio_output_name = String(selectedDeviceName);
+  }
   const audio = $("audioPlayer");
+
+  // Keep a healthy Monochrome HTTP/decoder stream alive across output changes.
+  // The native worker swaps only its sounddevice OutputStream and retains its
+  // FFmpeg process, already-decoded PCM queue, playhead, and pause state.
+  const nativeMonochromeUrl = isMonochromeDirectStreamUrl(state.nativeAudio.stream_url)
+    ? state.nativeAudio.stream_url
+    : (isMonochromeDirectStreamUrl(state.currentStreamUrl) ? state.currentStreamUrl : "");
+  if (state.nativeAudio.active && nativeMonochromeUrl) {
+    const previousUid = _nativeAudioDeviceUid;
+    _nativeAudioDeviceUid = nativeTargetUid;
+    const targetName = nativeTargetUid ? String(selectedDeviceName || state.settings?.preferred_audio_output_name || "") : "";
+    const targetLabel = targetName || "This computer";
+    logMonochromePlaybackActivity(`Switching Monochrome output to ${targetLabel}`, state.currentTrack, "output-switch-start", 0);
+    try {
+      const result = await api("/api/native_audio/output", {
+        method: "POST",
+        body: JSON.stringify({ device_uid: nativeTargetUid, device_name: targetName }),
+      });
+      if (!result?.ok) throw new Error(result?.error || "Could not change the audio output");
+      state.nativeAudio.device_uid = nativeTargetUid;
+      if (state.settings) state.settings.preferred_audio_output_name = nativeTargetUid ? targetName : "";
+      logMonochromePlaybackActivity(
+        `Monochrome output switched to ${targetLabel} (route ${result.output_applied_revision ?? result.output_revision ?? "applied"})`,
+        state.currentTrack,
+        "output-switch-applied",
+        0,
+      );
+      syncNativeAudioUi();
+      syncPlayPauseButton();
+      return true;
+    } catch (error) {
+      _nativeAudioDeviceUid = previousUid;
+      _activeSinkId = previousUid ? `native:${previousUid}` : "";
+      logMonochromePlaybackActivity(`Monochrome output switch failed: ${error.message || "output unavailable"}`, state.currentTrack, "output-switch-error", 0);
+      setPlayerStatus(`Could not change audio output: ${error.message || "output unavailable"}`, state.currentTrack);
+      return false;
+    }
+  }
   
   if (deviceId && deviceId.startsWith("native:")) {
     _nativeAudioDeviceUid = deviceId.slice("native:".length);
@@ -9021,6 +10910,32 @@ async function setAudioOutputDevice(deviceId) {
       : (Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
     const shouldKeepPaused = !!state.manualPauseRequested;
     let nativePath = state.currentLibraryPath || "";
+
+    if (!nativePath && state.currentTrack && isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+      const streamUrl = state.currentStreamUrl;
+      try {
+        await startNativeAudio("", state.currentTrack, state.playbackRequestId, resumeAt, streamUrl);
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        if (shouldKeepPaused) {
+          await api("/api/native_audio/pause", { method: "POST", body: "{}" });
+          state.nativeAudio.playing = false;
+        }
+      } catch (error) {
+        // A stream failure is not a device failure: keep the user's choice so
+        // Play retries on it, and never hand FLAC to WebKit (it cannot decode
+        // it, and each attempt is one more request Monochrome may rate-limit).
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        state.directStreamNativeFallbackAttempted = true;
+        state.directStreamPosition = resumeAt;
+        setPlayerStatus(`Could not start Monochrome on the selected device: ${error.message || "audio output unavailable"}`, state.currentTrack);
+      }
+      syncPlayPauseButton();
+      return true;
+    }
 
     if (!nativePath && state.currentTrack) {
       const source = await api("/api/playback/source", {
@@ -9062,7 +10977,7 @@ async function setAudioOutputDevice(deviceId) {
       setPlayerStatus("Native output will start when cache is ready", state.currentTrack);
     }
     syncPlayPauseButton();
-    return;
+    return true;
   }
   _nativeAudioDeviceUid = "";
   // Capture native playback state before stopping it so we can hand playback
@@ -9072,7 +10987,12 @@ async function setAudioOutputDevice(deviceId) {
   const keepPaused = !!state.manualPauseRequested;
   await stopNativeAudio();
 
-  if (typeof audio.setSinkId === "function") {
+  if (_audioCtx && _audioSrcNode && typeof _audioCtx.setSinkId === "function") {
+    try {
+      if (_audioCtx.state === "suspended") await _audioCtx.resume();
+      await _audioCtx.setSinkId(deviceId);
+    } catch (e) { console.warn("AudioContext.setSinkId failed:", e); }
+  } else if (typeof audio.setSinkId === "function") {
     try {
       await audio.setSinkId(deviceId);
     } catch (e) {
@@ -9095,13 +11015,20 @@ async function setAudioOutputDevice(deviceId) {
   // Coming off a native device, the <audio> element has no src (native took
   // over). Resume browser playback from the cached file at the same position.
   // playFromLibraryPath streams the existing file — it never redownloads.
-  if (wasNativeActive && state.currentLibraryPath && state.currentTrack) {
+  if (wasNativeActive && isMonochromeDirectStreamUrl(state.currentStreamUrl) && state.currentTrack) {
+    audio.src = browserAudioStreamUrl(state.currentStreamUrl);
+    audio.load();
+    seekAfterMetadata(audio, nativeResumeAt || state.directStreamPosition || 0);
+    if (!keepPaused) tryStartAudio(audio, state.currentTrack, state.playbackRequestId, null);
+    else pauseBrowserAudio(audio);
+  } else if (wasNativeActive && state.currentLibraryPath && state.currentTrack) {
     await playFromLibraryPath(
       state.currentLibraryPath, state.currentTrack, state.playbackRequestId,
       state.activeJobId, "Playing from cache", nativeResumeAt
     ).catch(() => {});
     if (keepPaused) pauseBrowserAudio(audio);
   }
+  return true;
 }
 
 async function _getOutputDevices() {
@@ -9176,7 +11103,10 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
   list.innerHTML = "";
   _nativeAudioAvailable = !!nativeAvailable;
 
-  const browserOutputs = await _getOutputDevices();
+  // On desktop, native routing owns device selection. Browser enumeration can
+  // prompt for microphone permission just to reveal labels, delaying the first
+  // open of this panel; native device names already come from the backend.
+  const browserOutputs = nativeAvailable ? [] : await _getOutputDevices();
 
   // Section: available output devices.
   const items = [];
@@ -9195,8 +11125,9 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
     const lname = bd.name.toLowerCase();
     
     // Strictly hide built-in speakers from the list so they don't duplicate "This computer"
-    // except for explicitly allowed external ones.
-    if (filterKeywords.some(k => lname.includes(k)) && !lname.includes("airplay") && !lname.includes("edifier")) {
+    // except for explicitly allowed external ones. Android's list never
+    // contains the built-in speaker, and names like "JBL Flip Speaker" are real.
+    if (!IS_ANDROID && filterKeywords.some(k => lname.includes(k)) && !lname.includes("airplay") && !lname.includes("edifier")) {
         continue;
     }
     
@@ -9260,12 +11191,29 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
       </div>
       ${item.deviceId === _activeSinkId ? `<i class="bi bi-check-circle-fill connect-active-check"></i>` : ""}
     `;
+    li.dataset.audioOutput = "true";
     li.onclick = async () => {
+      if (window.MindinguflacRemote?.isController()) await window.MindinguflacRemote.disconnect();
       let targetId = item.deviceId;
+      // "This computer" is already the universal default route. Handle it
+      // before enumerating browser outputs, which can request microphone
+      // permission and delay the first switch away from app-only Bluetooth.
+      if (targetId === "" && isMonochromeDirectStreamUrl(state.currentStreamUrl)) {
+        logMonochromePlaybackActivity("Device menu selected This computer", state.currentTrack, "default-output-selected", 0);
+        if (state.currentTrack) setPlayerStatus(`Switching output to ${item.name}…`, state.currentTrack);
+        const switched = await setAudioOutputDevice("", item.name);
+        if (!switched) { await _refreshConnectPanel(); return; }
+        closeConnectPanel();
+        await _persistPreferredAudioOutput({ deviceId: "", name: "", nativeUid: "", bluetoothAddress: "" });
+        await _refreshConnectPanel();
+        return;
+      }
       if (targetId === "__choose_output__") {
         const selected = await _selectBrowserAudioOutput();
         if (!selected) return;
-        await setAudioOutputDevice(selected.deviceId);
+        const switched = await setAudioOutputDevice(selected.deviceId);
+        if (!switched) { await _refreshConnectPanel(); return; }
+        closeConnectPanel();
         await _persistPreferredAudioOutput({
           deviceId: selected.deviceId,
           name: selected.label || item.name,
@@ -9304,7 +11252,10 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
       } // end else (browser path)
 
       console.log("[Audio] Routing to:", item.name, targetId || "Default");
-      await setAudioOutputDevice(targetId);
+      if (state.currentTrack) setPlayerStatus(`Switching output to ${item.name}…`, state.currentTrack);
+      const switched = await setAudioOutputDevice(targetId, item.name);
+      if (!switched) { await _refreshConnectPanel(); return; }
+      closeConnectPanel();
       await _persistPreferredAudioOutput({
         deviceId: targetId,
         name: item.name,
@@ -9314,6 +11265,26 @@ async function _renderConnectDevices(backendDevices, btState, nativeAvailable = 
       await _refreshConnectPanel();
     };
     list.appendChild(li);
+  }
+
+  await window.MindinguflacRemote?.renderDevices(list);
+
+  // Android owns Bluetooth discovery and pairing; hand that to its settings.
+  // A newly connected device then appears above (the list is read live).
+  if (IS_ANDROID) {
+    if (window.MindinguflacAndroid?.openBluetoothSettings) {
+      const pair = document.createElement("li");
+      pair.className = "connect-device-item";
+      pair.innerHTML = `
+        <div class="connect-device-icon"><i class="bi bi-bluetooth"></i></div>
+        <div class="connect-device-info">
+          <span class="connect-device-name">Pair new device</span>
+          <span class="connect-device-sub">Opens Bluetooth settings</span>
+        </div>`;
+      pair.onclick = () => window.MindinguflacAndroid.openBluetoothSettings();
+      list.appendChild(pair);
+    }
+    return;
   }
 
   // Section: nearby / unpaired Bluetooth devices.
@@ -9733,21 +11704,40 @@ $("btnLyrics").onclick = toggleLyricsPanel;
 $("lyricsBg").onclick = closeLyricsPanel;
 $("lyricsSync").onclick = () => {
   setLyricsSynced(true);
-  updateLyricsPosition(currentPlaybackSeconds(), true);
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
 };
-function updateLyricsOffset(delta) {
+async function updateLyricsOffset(delta) {
   state.lyrics.syncOffset = Math.round((state.lyrics.syncOffset + delta) * 100) / 100;
-  const label = $("lyricsOffsetLabel");
-  if (label) label.textContent = state.lyrics.syncOffset.toFixed(1) + "s";
-  updateLyricsPosition(currentPlaybackSeconds(), true);
+  renderLyricsAlignment();
+  updateLyricsPosition(audiblePlaybackSeconds(), true);
+  if (!state.currentTrack || !state.lyrics.raw) return;
+  const key = state.lyrics.alignmentKey;
+  const result = await api("/api/lyrics/align/nudge", {method:"POST",
+    body:JSON.stringify({...lyricsAlignmentBody(), delta})}).catch(() => null);
+  if (result?.ok && state.lyrics.alignmentKey === key) {
+    state.lyrics.syncOffset = Number(result.manual_offset || 0);
+    renderLyricsAlignment();
+  }
 }
-$("lyricsOffsetDown").onclick = () => updateLyricsOffset(-0.25);
-$("lyricsOffsetUp").onclick = () => updateLyricsOffset(0.25);
-$("lyricsScroll").addEventListener("scroll", () => {
-  if (!state.lyrics.open || state.lyrics.programmaticScroll) return;
+$("lyricsOffsetDown").onclick = () => updateLyricsOffset(-0.25).catch(() => {});
+$("lyricsOffsetUp").onclick = () => updateLyricsOffset(0.25).catch(() => {});
+function pauseLyricsFollowFromInput() {
+  if (!state.lyrics.open) return;
   state.lyrics.lastScrollAt = Date.now();
   setLyricsSynced(false);
-}, { passive: true });
+}
+// A scroll event does not identify its cause. React to user input instead:
+// long smooth animations and overlapping callbacks must keep following.
+$("lyricsScroll").addEventListener("wheel", pauseLyricsFollowFromInput, { passive: true });
+$("lyricsScroll").addEventListener("touchmove", pauseLyricsFollowFromInput, { passive: true });
+$("lyricsScroll").addEventListener("keydown", event => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) pauseLyricsFollowFromInput();
+});
+$("lyricsScroll").addEventListener("pointerdown", event => {
+  const scroll = $("lyricsScroll");
+  if (event.pointerType === "mouse" && event.target === scroll &&
+      event.clientX >= scroll.getBoundingClientRect().left + scroll.clientWidth) pauseLyricsFollowFromInput();
+});
 $("sideVideoSwitch").onclick = () => {
   if (!state.videoMode && state.videoFetch.status === "not_found" && state.currentTrack) {
     state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };
@@ -9757,8 +11747,34 @@ $("sideVideoSwitch").onclick = () => {
   }
   switchSideVideoMode(!state.videoMode);
 };
+// Touchscreens have no hover, so the video controls (which only appear on
+// hover) would be unreachable. A tap reveals them for a few seconds; while they
+// are hidden, a tap that lands on one only reveals it rather than pressing it.
+(function bindTouchVideoControls() {
+  const cover = $("sideCover");
+  if (!cover) return;
+  let hideTimer = null;
+  let revealedAt = 0;
+  cover.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse") return;
+    if (!cover.classList.contains("show-video-controls")) revealedAt = Date.now();
+    cover.classList.add("show-video-controls");
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => cover.classList.remove("show-video-controls"), 4000);
+  });
+  cover.addEventListener("click", (event) => {
+    if (Date.now() - revealedAt < 400 && event.target.closest("button")) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
+})();
+$("sideVideoEarlier").onclick = () => nudgeVideoSync(-0.25).catch(() => {});
+$("sideVideoLater").onclick = () => nudgeVideoSync(0.25).catch(() => {});
 $("sideVideoRefresh").onclick = () => {
   if (!state.currentTrack) return;
+  clearTimeout(state.videoSync.timer);
+  state.videoSync.key = "";
   state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };
   renderSideVideoButton();
   renderSideCover(state.currentTrack);
@@ -10033,7 +12049,10 @@ async function refreshLibraryButtonState(track, button) {
     const busy = !!status.library_requested;
     button.classList.toggle("downloaded", downloaded);
     button.classList.toggle("progress", busy);
-    const label = downloaded ? "Remove from library" : (busy ? "Cancel library download" : "Add to library");
+    const error = !downloaded && !busy ? libraryDownloadErrors.get(trackKey(track)) : "";
+    button.classList.toggle("download-error", !!error);
+    const label = busy ? "Cancel library download" : downloaded ? "Remove from library" : error ? `Retry download: ${error}` : "Add to library";
+    updateAlbumLibraryStatuses([track], [status]);
     button.setAttribute("aria-label", label);
     button.title = label;
     button.innerHTML = busy
@@ -10289,7 +12308,7 @@ function showTrackContextMenu(event, track, contextInfo = {}) {
   // Remove from playlist
   const btnRemoveFromPlaylist = $("ctxRemoveFromPlaylist");
   if (btnRemoveFromPlaylist) {
-    const playlistCtx = contextInfo && contextInfo.kind === "playlist" ? contextInfo : null;
+    const playlistCtx = contextInfo && contextInfo.kind === "playlist" && contextInfo.id !== OFFLINE_PLAYLIST_ID && !contextInfo.read_only ? contextInfo : null;
     btnRemoveFromPlaylist.style.display = playlistCtx ? "flex" : "none";
     if (playlistCtx) {
       btnRemoveFromPlaylist.onclick = async () => {
@@ -10430,6 +12449,7 @@ function showAlbumContextMenu(event, album, contextInfo = {}) {
     }
   }
 
+  window.MindinguflacAlbums?.configureMenu(album);
   openContextMenu(event, menu);
 }
 
@@ -10611,40 +12631,11 @@ $("ctxAlbumCopyMusicBrainz")?.addEventListener("click", () => {
 });
 
 $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
-  if (contextMenuTargetAlbum) {
-    // 1. Fetch tracks if not present
-    let tracks = contextMenuTargetAlbum.tracks || [];
-    if (!tracks.length) {
-      try {
-        tracks = await fetchAlbumTracks(contextMenuTargetAlbum);
-      } catch (e) {
-        console.error("Failed to fetch album tracks:", e);
-      }
-    }
-    if (!tracks.length) {
-        $("albumContextMenu").hidden = true;
-        return;
-    }
-
-    // 2. Create playlist
-    try {
-        const target = albumTarget(contextMenuTargetAlbum);
-        const pl = await api("/api/playlists", {
-          method: "POST",
-          body: JSON.stringify({
-            name: target.title || contextMenuTargetAlbum.name || "New Playlist",
-            spotify_url: spotifyAlbumUrl(target),
-            origin: "album",
-          }),
-        });
-        // 3. Add tracks
-        await api("/api/playlists/tracks/add", { method: "POST", body: JSON.stringify({ id: pl.id, tracks: tracks.map(t => ({ ...t, kind: "track" })) }) });
-        await loadPlaylists();
-    } catch (e) {
-        alert("Failed to add album to playlist: " + e.message);
-    }
-  }
+  const album = contextMenuTargetAlbum;
   $("albumContextMenu").hidden = true;
+  if (!album) return;
+  try { await window.MindinguflacAlbums.albumPlaylistPicker(album); }
+  catch (error) { showToast(error.message || "Could not add album to playlist",6000); }
 });
 
 $("ctxAlbumGoArtist")?.addEventListener("click", () => {
@@ -10655,6 +12646,7 @@ $("ctxAlbumGoArtist")?.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  persistAlbumDownloadQueue(true);
   persistPlaybackSnapshot(true);
   beaconListeningSession("", "beforeunload");
 });

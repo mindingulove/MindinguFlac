@@ -1,9 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
-datas = [('static', 'static')]
+datas = [
+    ("local_metadata/LICENSE", "local_metadata"),
+    ("local_metadata/PROVENANCE.md", "local_metadata"),
+    ('static', 'static'),
+]
 binaries = []
 hiddenimports = [
     'bluetooth_scan',
@@ -12,15 +17,19 @@ hiddenimports = [
     'webview.platforms.mshtml',
     'clr',
     'torrfetch',
-    'libtorrent',
+    'torrent_race', 'desktop_jlibtorrent',
     'torrent_sources',
     'music_metadata',
     'isrc_resolver',
     'discogs_metadata',
     'backend_torrent',
-    'backend_spotiflac',
+    'backend_spotiflac', 'backend_mornye', 'mornye_bridge', 'mornye_runtime',
+    'local_metadata.artist_profile', 'local_metadata.lyrics', 'local_metadata.apple_ttml',
+    'local_metadata.spotify_totp', 'local_metadata.response_cache', 'local_metadata.apple_music_metadata', 'local_metadata.http',
     'backend_tidal_hifi',
     'backend_monochrome',
+    'video_sync',
+    'video_sources',
     'backend_video',
     'vcredist',
     'backend_ytpdl',
@@ -51,8 +60,8 @@ def _collect_package(package_name, include_submodules=False):
 
 
 for _pkg in (
-    'SpotiFLAC',
-    # SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers.
+    'mornye',
+    # Mornye browser-backed session helpers use pydoll.
     'pydoll',
     'torrfetch',
     'yt_dlp',
@@ -70,13 +79,18 @@ hiddenimports += collect_submodules('webview')
 
 _collect_package('bleak')
 
-# libtorrent must be collected, not just hidden-imported: its win_amd64 wheel
-# ships dependent native DLLs (OpenSSL etc.) next to libtorrent.pyd. Without
-# collect_all those DLLs are missing from the bundle and the packaged app fails
-# with "DLL load failed while importing libtorrent: The specified module could
-# not be found."
-for package_name in ('libtorrent', 'PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy', 'imageio_ffmpeg', 'playwright', 'playwright_stealth'):
+for package_name in ('PIL', 'git', 'pythonnet', 'clr_loader', 'sounddevice', 'soundfile', 'numpy', 'imageio_ffmpeg', 'playwright', 'playwright_stealth', 'jpype'):
     _collect_package(package_name)
+
+from desktop_torrent.build_bridge import build_bridge
+from desktop_torrent.build_runtime import build_runtime_archive
+build_bridge()
+_jre = build_runtime_archive()
+datas.extend([
+    (str(Path('desktop_torrent/classes')), 'desktop_torrent/classes'),
+    (str(Path('desktop_torrent/jars')), 'desktop_torrent/jars'),
+    (str(_jre), '.'),
+])
 
 try:
     from playwright.sync_api import sync_playwright
@@ -105,6 +119,16 @@ _ffmpeg = shutil.which('ffmpeg.exe') or shutil.which('ffmpeg')
 if _ffmpeg:
     binaries.append((_ffmpeg, '.'))
 
+# The lyrics aligner ships its verified model and native CPU bridge.
+import subprocess
+subprocess.run([sys.executable, 'scripts/prepare_lyrics_alignment.py', '--build-desktop'], check=True)
+_lyrics_build = Path('build/lyrics-whisper/windows/Release') if sys.platform == 'win32' else Path('build/lyrics-whisper/macos')
+_lyrics_library = _lyrics_build / ('lyrics_whisper.dll' if sys.platform == 'win32' else 'liblyrics_whisper.dylib')
+binaries.append((str(_lyrics_library), '.'))
+datas.append(('assets/lyrics-alignment', 'assets/lyrics-alignment'))
+datas += [(str(Path('native/lyrics_alignment') / name), 'assets/lyrics-alignment') for name in ('assets.json', 'THIRD_PARTY_NOTICES.md')]
+hiddenimports.append('lyrics_alignment')
+
 a = Analysis(
     ['desktop.py'],
     pathex=[],
@@ -114,7 +138,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['AppKit', 'Foundation', 'IOBluetooth', 'objc', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
+    excludes=['SpotiFLAC', 'AppKit', 'Foundation', 'IOBluetooth', 'objc', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
     noarchive=False,
     optimize=0,
 )

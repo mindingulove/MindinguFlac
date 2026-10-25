@@ -36,7 +36,7 @@ for updates; do not commit the keystore or its passwords.
 # Set APK_STORE_PASSWORD and APK_KEY_PASSWORD securely in the environment.
 python3 tools/package_release.py \
   app/build/outputs/apk/release/app-release-unsigned.apk \
-  ../dist/android/Mindinguflac-android-arm64-v1.3.1.apk \
+  ../dist/android/Mindinguflac-android-arm64-v1.4-build24.apk \
   --build-tools "$ANDROID_HOME/build-tools/36.1.0" \
   --keystore /private/path/to/existing.keystore --alias existing-key
 ```
@@ -57,8 +57,9 @@ is missing is shown as unavailable **with the reason**, never silently offered:
 | --- | --- | --- |
 | YouTube audio (`ytp-dl`) | available | `yt-dlp` + `mutagen` are packaged |
 | FLAC / BitTorrent (`torrent`) | available once `libjlibtorrent` loads | native arm64 JNI library is in the APK |
-| SpotiFLAC (`spotiflac`) | **withheld** | SpotiFLAC 3.9.0 imports and its extension manager works, but its download path needs a provider extension: JavaScript extensions require Node.js (not in the APK) and no Python provider extension is bundled |
-| `monochrome`, `qobuz-dlp` | **withheld** | desktop-only runtimes, not packaged |
+| Mornye (`spotiflac`, retained settings ID) | **withheld until a usable extension is installed** | embedded Mornye REST service; no provider extension or Node.js is bundled |
+| `monochrome` | available | official FLAC streams with native Android playback |
+| `qobuz-dlp` | **withheld** | desktop-only runtime |
 
 The engine, service/source and quality the user picks are persisted and survive
 a kill/relaunch. Lossy sources are never labelled FLAC: the YouTube engine's
@@ -211,9 +212,9 @@ Vendored Python source (embedded in the APK rather than installed as a wheel):
 
 | Package | Version | Why it is vendored |
 | --- | --- | --- |
-| SpotiFLAC | 3.9.0, upstream commit `a471fdc` | the wheel would force desktop-only `pywebview` and `pydoll` onto Android |
+| Mornye | 1.0.4, commit `297c780c` | shared vendored source; headless API adapter uses the existing native UI |
 | RapidFuzz | 3.14.6, pure-Python implementation | no Android wheel for the native extension; `RAPIDFUZZ_IMPLEMENTATION=python` forces the Python backend |
-| `pydantic` | compatibility surface, not upstream | Pydantic v2 needs the Rust `pydantic-core`, for which there is no Chaquopy wheel |
+| `pydantic` / `pydantic-core` | 2.13.4 / 2.46.4 | real Pydantic with verified Flet Android arm64 native wheel for the REST service |
 
 Bundled wheels are in `app/python-wheels/` with their SHA-256 sums in
 `app/python-wheels/SHA256SUMS`; verify them with
@@ -271,3 +272,21 @@ Python backend touches is reached reflectively through
 registers its natives by fully-qualified name. Without those keep rules a
 minified release build strips or renames exactly the classes the backend needs,
 and the failure only shows up on the phone.
+
+## Embedded Mornye
+
+Mornye is vendored at a pinned commit under `../vendor/mornye-python` and runs
+inside each app. REST covers track search/resolution and provider jobs; artist
+profiles and lyrics use Mornye's corresponding functions through an adapter.
+Retained local metadata implementations are fallback-only. The APK contains
+real Pydantic plus native arm64 pydantic-core, FastAPI and Uvicorn; the old
+SpotiFLAC source and Pydantic stand-in are no longer packaged. See
+[the integration notes](../docs/MORNYE_MIGRATION.md).
+
+The lyric audio aligner bundles a verified multilingual Whisper base-q5_1 model
+(about 60 MB) and builds a native CPU bridge with NDK 27.3.13750724 and CMake
+3.22.1. Gradle prepares the pinned source/model using
+`scripts/prepare_lyrics_alignment.py`; first builds need network access.
+Recognition stays on the device and reads the playback buffer, with no
+microphone permission. The language is detected from audio. Singing which does
+not yield several clear phrase matches keeps the provider timing.

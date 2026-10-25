@@ -1,0 +1,547 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+import re
+import urllib.parse
+from typing import Any
+
+import httpx
+
+from .http import AsyncHttpClient, async_zarz_rate_limiter
+from .response_cache import get as get_cached_response
+from .response_cache import put as put_cached_response
+from .url_utils import url_host_matches, url_path_contains
+
+logger = logging.getLogger(__name__)
+
+
+class LinkResolver:
+    """Resolves cross-platform links using a Multi-Provider approach (Async-only)."""
+
+    #: The project's cross-platform resolver. It returns the ISRC alongside
+    #: the links and accepts both source URLs and platform/id payloads.
+    RESOLVE_API_URL = "https://api.zarz.moe/v1/resolve"
+    UNITUNE_RESOLVE_API_URL = "https://api.unitune.art/v1-alpha.1/links"
+
+    #: The resolver's platform names, mapped onto the names used by the app.
+    _RESOLVE_PLATFORM_KEYS = {
+        "Spotify": "spotify",
+        "Deezer": "deezer",
+        "Tidal": "tidal",
+        "AppleMusic": "appleMusic",
+        "AmazonMusic": "amazonMusic",
+        "SoundCloud": "soundcloud",
+        "Qobuz": "qobuz",
+        "YouTubeMusic": "youtubeMusic",
+        "YouTube": "youtube",
+    }
+    DEEZER_ISRC_API = "https://api.deezer.com/track/isrc:{}"
+    DEEZER_TRACK_API = "https://api.deezer.com/track/{}"
+    MAX_RETRIES = 3
+    BASE_DELAY_S = 1.0
+    MAX_DELAY_S = 10.0
+
+    def __init__(self, http_client: AsyncHttpClient | None = None) -> None:
+        """Use the supplied HTTP client or create one, and initialize the Deezer cache."""
+        self.http = http_client or AsyncHttpClient(
+            "link-resolver",
+            rate_limiter=async_zarz_rate_limiter,
+        )
+        self._deezer_async_cache: dict[str, str] = {}
+
+    async def _safe_get_json(self, url: str, params: dict | None = None) -> dict:
+        """Robust helper that adds User-Agent and Accept to avoid Varnish/WAF 406 blocking."""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": "https://api.zarz.moe/",
+        }
+        return await self._request_with_retry(
+            lambda: self.http.get_json_async(url, params=params, headers=headers),
+        )
+
+    async def _safe_get_html(self, url: str):
+        """Robust helper that emulates a desktop browser for HTML scraping requests.
+
+        `follow_redirects=True` because for some of these endpoints the
+        redirect *is* the answer. Songstats' ISRC lookup is the clearest
+        case: `songstats.com/<isrc>` is a lookup, not a page, and it answers
+        `301 -> songstats.com/track/<slug>/<title>` where the data actually
+        lives. The shared client is built without a redirect policy
+        (`core/http.py`), so httpx's default of not following applied here,
+        and `_raise_for_status` turns any non-2xx into a `NetworkError` —
+        which is in the retry set. Every songstats lookup therefore cost
+        three identical requests and ~3.6s of backoff before being
+        swallowed, and the fallback it guards had never once returned a
+        link.
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Upgrade-Insecure-Requests": "1",
+            "Referer": "https://songstats.com/",
+        }
+        # Prefer async http client method if available (tests mock get_async).
+        if hasattr(self.http, "get_async"):
+            return await self._request_with_retry(
+                lambda: self.http.get_async(
+                    url,
+                    headers=headers,
+                    follow_redirects=True,
+                ),
+            )
+        # fallback to synchronous get wrapped for retry (kept for real client compatibility)
+        return await self._request_with_retry(
+            lambda: self.http.get(url, headers=headers, follow_redirects=True),
+        )
+
+    async def _request_with_retry(self, request_callable: Any) -> Any:
+        last_error: Exception | None = None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                return await request_callable()
+            except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+                last_error = exc
+                delay = min(self.BASE_DELAY_S * 2 ** (attempt - 1), self.MAX_DELAY_S)
+                delay += random.random() * 0.2
+                logger.debug(
+                    f"[link_resolver] HTTP request failed (attempt {attempt}/{self.MAX_RETRIES}): {exc}. Retrying in {delay:.2f}s",
+                )
+                await asyncio.sleep(delay)
+            except Exception as exc:
+                last_error = exc
+                logger.debug(f"[link_resolver] Non-retryable request error: {exc}")
+                break
+        if last_error is not None:
+            raise last_error
+        msg = "Unexpected error in _request_with_retry"
+        raise RuntimeError(msg)
+
+    def identify_provider(self, url: str) -> str:
+        url = url.lower()
+        if url_host_matches(url, "soundcloud.com"):
+            return "soundcloud"
+        if url_host_matches(url, "spotify.com"):
+            return "spotify"
+        return "unknown"
+
+    def _normalize_amazon_url(self, raw_url: str) -> str:
+        url = raw_url.strip()
+        if not url:
+            return ""
+        if "trackAsin=" in url:
+            parts = url.split("trackAsin=")
+            if len(parts) > 1:
+                track_asin = parts[1].split("&")[0]
+                if track_asin:
+                    return f"https://music.amazon.com/tracks/{track_asin}?musicTerritory=US"
+
+        amazon_album_track = re.search(
+            r"/albums/[A-Z0-9]{10}/(B[0-9A-Z]{9})",
+            url,
+            re.IGNORECASE,
+        )
+        if amazon_album_track:
+            return f"https://music.amazon.com/tracks/{amazon_album_track.group(1)}?musicTerritory=US"
+
+        amazon_track = re.search(r"/tracks/(B[0-9A-Z]{9})", url, re.IGNORECASE)
+        if amazon_track:
+            return f"https://music.amazon.com/tracks/{amazon_track.group(1)}?musicTerritory=US"
+
+        return url
+
+    def _extract_deezer_id(self, raw_url: str) -> str:
+        clean_url = raw_url.strip()
+        if not clean_url:
+            return ""
+        parts = clean_url.split("/track/")
+        if len(parts) < 2:
+            return ""
+        return parts[1].split("?")[0].strip("/ ")
+
+    def _normalize_deezer_url(self, raw_url: str) -> str:
+        track_id = self._extract_deezer_id(raw_url)
+        if track_id:
+            return f"https://www.deezer.com/track/{track_id}"
+        return raw_url.strip()
+
+    def _process_resolve_response(self, data: dict) -> dict[str, str]:
+        """Normalize the resolver response.
+
+        Its values are sometimes a bare URL string and sometimes an object
+        carrying one, so both are accepted rather than assuming either.
+        """
+        if not isinstance(data, dict) or not data.get("success"):
+            return {}
+
+        song_urls = data.get("songUrls")
+        if not isinstance(song_urls, dict):
+            return {}
+
+        links: dict[str, str] = {}
+        for resolve_key, platform in self._RESOLVE_PLATFORM_KEYS.items():
+            raw = song_urls.get(resolve_key)
+            url = ""
+            if isinstance(raw, str):
+                url = raw
+            elif isinstance(raw, dict):
+                url = str(raw.get("url") or raw.get("link") or "")
+            if url:
+                links[platform] = self._normalize_platform_url(platform, url)
+        return links
+
+    def _process_unitune_response(self, data: dict) -> dict[str, str]:
+        platform_keys = {
+            "spotify": "spotify",
+            "deezer": "deezer",
+            "tidal": "tidal",
+            "appleMusic": "appleMusic",
+            "amazonMusic": "amazonMusic",
+            "soundcloud": "soundcloud",
+            "qobuz": "qobuz",
+            "youtubeMusic": "youtubeMusic",
+            "youtube": "youtube",
+        }
+        platform_links = data.get("linksByPlatform") if isinstance(data, dict) else None
+        if not isinstance(platform_links, dict):
+            return {}
+        links: dict[str, str] = {}
+        for source_key, platform in platform_keys.items():
+            raw = platform_links.get(source_key)
+            url = raw if isinstance(raw, str) else ""
+            if isinstance(raw, dict):
+                url = str(raw.get("url") or raw.get("link") or "")
+            if url:
+                links[platform] = self._normalize_platform_url(platform, url)
+        return links
+
+    def _unitune_source_url(self, payload: dict) -> str:
+        source_url = payload.get("url")
+        if isinstance(source_url, str) and source_url.strip():
+            return source_url.strip()
+        if payload.get("type") != "track" or not payload.get("id"):
+            return ""
+        platform_urls = {
+            "spotify": "https://open.spotify.com/track/{}",
+            "deezer": "https://www.deezer.com/track/{}",
+            "tidal": "https://tidal.com/track/{}",
+            "AppleMusic": "https://music.apple.com/song/{}",
+            "appleMusic": "https://music.apple.com/song/{}",
+            "AmazonMusic": "https://music.amazon.com/tracks/{}",
+            "amazonMusic": "https://music.amazon.com/tracks/{}",
+            "YouTubeMusic": "https://music.youtube.com/watch?v={}",
+            "youtubeMusic": "https://music.youtube.com/watch?v={}",
+        }
+        template = platform_urls.get(str(payload.get("platform") or ""))
+        if not template:
+            return ""
+        return template.format(urllib.parse.quote(str(payload["id"]), safe=""))
+
+    async def _resolve_unitune_async(self, payload: dict) -> dict[str, str]:
+        source_url = self._unitune_source_url(payload)
+        if not source_url:
+            return {}
+        try:
+            response = await self.http.get(
+                self.UNITUNE_RESOLVE_API_URL,
+                params={"url": source_url},
+                timeout=20,
+            )
+            return self._process_unitune_response(response.json())
+        except Exception as exc:
+            logger.debug("[link_resolver] UniTune API failed: %s", exc)
+            return {}
+
+    async def _resolve_links_async(self, payload: dict) -> dict[str, str]:
+        """Ask the cross-platform resolver, returning an empty result on error."""
+        try:
+            resp = await self.http.post(self.RESOLVE_API_URL, json=payload, timeout=20)
+            links = self._process_resolve_response(resp.json())
+            if links:
+                return links
+        except Exception as exc:
+            logger.debug("[link_resolver] resolve API failed for %s: %s", payload, exc)
+        return await self._resolve_unitune_async(payload)
+
+    def _normalize_platform_url(self, platform: str, url: str) -> str:
+        url = url.strip()
+        if not url:
+            return ""
+        if platform == "deezer":
+            return self._normalize_deezer_url(url)
+        if platform == "amazonMusic":
+            return self._normalize_amazon_url(url)
+        return url
+
+    def _merge_links(
+        self,
+        final_links: dict[str, str],
+        new_links: dict[str, str],
+    ) -> None:
+        for platform, url in new_links.items():
+            if platform not in final_links and url:
+                final_links[platform] = url
+
+    def _process_songstats_links(self, html: str) -> dict[str, str]:
+        links = {"amazonMusic": "", "tidal": "", "deezer": ""}
+        matches = re.finditer(
+            r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+            html,
+            re.DOTALL | re.IGNORECASE,
+        )
+        for match in matches:
+            try:
+                payload = json.loads(match.group(1).strip())
+            except json.JSONDecodeError:
+                continue
+            self._collect_songstats_links(payload, links)
+        return {k: v for k, v in links.items() if v}
+
+    def _collect_songstats_links(self, data, results: dict[str, str]) -> None:
+        if isinstance(data, dict):
+            same_as = data.get("sameAs")
+            if isinstance(same_as, list):
+                for url in same_as:
+                    if isinstance(url, str):
+                        self._assign_songstats_link(url, results)
+            for val in data.values():
+                self._collect_songstats_links(val, results)
+        elif isinstance(data, list):
+            for item in data:
+                self._collect_songstats_links(item, results)
+
+    def _assign_songstats_link(self, link: str, results: dict[str, str]) -> None:
+        """Takes the track link for each platform, and only the track link.
+
+        A songstats page lists the artist, the album and the track on every
+        platform, and `sameAs` happens to put the artist first. Tidal was the
+        only one asked to be a `/track` URL, so Amazon and Deezer took
+        whichever link matched their host first — the artist — and handed it
+        on as if it were the song. That is worse than finding nothing: the
+        caller has no way to tell a wrong link from a right one, and every
+        provider downstream would go looking for a track at an artist page.
+        """
+        link = link.strip()
+        if not link:
+            return
+        if (
+            url_path_contains(link, "/track")
+            and url_host_matches(link, "tidal.com")
+            and not results.get("tidal")
+        ):
+            results["tidal"] = link
+        elif url_host_matches(link, "music.amazon.com") and not results.get(
+            "amazonMusic"
+        ):
+            # Asking the normaliser rather than matching shapes here: it
+            # already knows the three ways Amazon spells a track
+            # (`/tracks/<asin>`, `/albums/<asin>/<asin>`, `?trackAsin=`) and
+            # rewrites all of them to the first. Anything it cannot turn
+            # into a track URL — an artist, a bare album — is not one.
+            normalized = self._normalize_amazon_url(link)
+            if url_path_contains(normalized, "tracks"):
+                results["amazonMusic"] = normalized
+        elif (
+            url_host_matches(link, "deezer.com")
+            and url_path_contains(link, "track")
+            and not results.get("deezer")
+        ):
+            results["deezer"] = self._normalize_deezer_url(link)
+
+    async def _get_isrc_from_deezer_async(self, deezer_url: str) -> str:
+        track_id = self._extract_deezer_id(deezer_url)
+        if not track_id:
+            return ""
+        try:
+            url = self.DEEZER_TRACK_API.format(track_id)
+            data = await self._safe_get_json(url)
+            isrc = data.get("isrc", "")
+            if isrc:
+                return isrc.upper().strip()
+        except Exception as e:
+            logger.debug(
+                f"[link_resolver] Error during ISRC reverse lookup on Deezer async: {e}",
+            )
+        return ""
+
+    async def _get_deezer_url_by_isrc_async(self, isrc: str) -> str:
+        isrc_clean = isrc.upper().strip()
+        if isrc_clean in self._deezer_async_cache:
+            return self._deezer_async_cache[isrc_clean]
+
+        try:
+            url = self.DEEZER_ISRC_API.format(isrc_clean)
+            data = await self._safe_get_json(url)
+
+            res = ""
+            if data.get("link"):
+                res = self._normalize_deezer_url(data["link"])
+            elif "id" in data and data["id"] > 0:
+                res = f"https://www.deezer.com/track/{data['id']}"
+
+            self._deezer_async_cache[isrc_clean] = res
+            return res
+        except Exception as e:
+            logger.debug(f"[link_resolver] Deezer ISRC lookup async failed: {e}")
+        return ""
+
+    async def _get_resolve_links_by_url_async(self, url: str) -> dict[str, str]:
+        """Resolve a source URL into normalized platform links."""
+        return await self._resolve_links_async({"url": url})
+
+    async def resolve_provider_url_async(
+        self,
+        source_url: str,
+        provider: str,
+    ) -> str:
+        """Return one provider link for a source track URL.
+
+        This is the public Python-only entry point used by the extension
+        bridge.  Extensions still receive their native identifiers; they do
+        not need to know about the cross-catalogue resolver or be modified.
+        """
+        normalized_provider = {
+            "amazon": "amazonMusic",
+            "amazon-music": "amazonMusic",
+            "amazonmusic": "amazonMusic",
+        }.get(provider.strip().lower(), provider.strip())
+        links = await self._get_resolve_links_by_url_async(source_url)
+        return links.get(normalized_provider, "")
+
+    async def _get_resolve_links_by_id_async(
+        self,
+        raw_id: str,
+        platform: str,
+    ) -> dict[str, str]:
+        """Resolve a platform track identifier into normalized platform links."""
+        return await self._resolve_links_async(
+            {"platform": platform, "type": "track", "id": raw_id},
+        )
+
+    async def spotify_url_for_isrc_async(self, isrc: str) -> str:
+        """The Spotify link for a recording, given only its ISRC.
+
+        An identity lookup rather than a search: `core/csv_source.py` uses it
+        for CSV rows that carry an ISRC and no usable title, where guessing
+        from text would risk downloading the wrong recording under the right
+        name.
+        """
+        normalized = (isrc or "").upper().strip()
+        if not normalized:
+            return ""
+
+        # The resolve endpoint takes a URL or a platform/type/id triple, not
+        # an ISRC, so Deezer's ISRC index supplies the URL. That is the same
+        # bridge resolve_all_async() already uses to go from an ISRC to the
+        # rest of the platforms.
+        deezer_url = await self._get_deezer_url_by_isrc_async(normalized)
+        if deezer_url:
+            resolved = await self._resolve_links_async({"url": deezer_url})
+            spotify = resolved.get("spotify", "")
+            if spotify:
+                return spotify
+        return ""
+
+    async def _get_songstats_links_async(self, identifier: str) -> dict[str, str]:
+        try:
+            url = (
+                f"https://songstats.com/{urllib.parse.quote(identifier)}?ref=ISRCFinder"
+            )
+            resp = await self._safe_get_html(url)
+            return self._process_songstats_links(resp.text)
+        except Exception as e:
+            logger.debug(f"[link_resolver] Songstats lookup async failed: {e}")
+        return {}
+
+    async def resolve_all_async(
+        self,
+        track_id: str,
+        isrc: str | None = None,
+    ) -> dict[str, str]:
+        """Return cached or resolved platform links and any discovered ISRC.
+
+        Combine source-ID links with Deezer and Songstats ISRC lookups,
+        using fallback links to fill missing platforms.
+        """
+        cache_key = f"{track_id}|{isrc or ''}"
+        cached = get_cached_response("link-resolver", cache_key, 7 * 24 * 60 * 60)
+        if isinstance(cached, dict):
+            return {str(key): str(value) for key, value in cached.items()}
+
+        platform = "spotify"
+        raw_id = track_id
+
+        if track_id.startswith("apple_"):
+            platform, raw_id = "appleMusic", track_id.replace("apple_", "")
+        elif track_id.startswith("tidal_"):
+            platform, raw_id = "tidal", track_id.replace("tidal_", "")
+        elif track_id.startswith("deezer_"):
+            platform, raw_id = "deezer", track_id.replace("deezer_", "")
+        else:
+            raw_id = track_id.replace("spotify_", "")
+
+        links = {}
+
+        if isrc:
+            deezer_url = await self._get_deezer_url_by_isrc_async(isrc)
+            if deezer_url:
+                links["deezer"] = deezer_url
+                logger.debug(
+                    f"[link_resolver] Found Deezer URL via ISRC async: {deezer_url}",
+                )
+
+        try:
+            # Always resolve the identifier the caller supplied first. When
+            # an ISRC is also present, the Deezer lookup below is only a
+            # completion path: resolving the Deezer reissue first can lose
+            # platforms (Apple/Qobuz/YouTube) or select a different edition.
+            source_links = await self._get_resolve_links_by_id_async(
+                raw_id,
+                platform,
+            )
+            self._merge_links(links, source_links)
+
+            if links.get("deezer") and any(
+                not links.get(key) for key in ("tidal", "amazonMusic", "appleMusic")
+            ):
+                self._merge_links(
+                    links,
+                    await self._get_resolve_links_by_url_async(links["deezer"]),
+                )
+        except Exception as e:
+            logger.debug(f"[link_resolver] source-link lookup failed: {e}")
+
+        if not isrc and links.get("deezer"):
+            isrc = await self._get_isrc_from_deezer_async(links["deezer"])
+            logger.debug(
+                f"[link_resolver] ISRC retrieved via reverse lookup async: {isrc}",
+            )
+
+        if isrc and (
+            not links.get("tidal")
+            or not links.get("amazonMusic")
+            or not links.get("deezer")
+        ):
+            logger.debug("[link_resolver] Triggering fallback resolvers async")
+
+            if not links.get("deezer"):
+                deezer_url = await self._get_deezer_url_by_isrc_async(isrc)
+                if deezer_url:
+                    links["deezer"] = deezer_url
+
+            if not links.get("tidal") or not links.get("amazonMusic"):
+                self._merge_links(links, await self._get_songstats_links_async(isrc))
+
+        if isrc:
+            links["isrc"] = isrc
+
+        if any(links.get(k) for k in ("deezer", "tidal", "amazonMusic", "appleMusic")):
+            put_cached_response("link-resolver", cache_key, links)
+        return links

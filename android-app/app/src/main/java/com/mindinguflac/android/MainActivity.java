@@ -20,6 +20,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.window.OnBackInvokedDispatcher;
 import android.view.View;
+import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.CookieManager;
@@ -52,12 +53,24 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     private WebView webView;
     private View loadingView;
     private String apiToken;
+    private String backendOrigin;
+    private volatile boolean remotePlayback;
+    private final Handler remoteHeartbeatHandler = new Handler(Looper.getMainLooper());
+    private final Runnable remoteHeartbeat = new Runnable() {
+        @Override public void run() {
+            if (!remotePlayback || webView == null) return;
+            webView.evaluateJavascript("(function(){var r=window.MindinguflacRemote;"
+                    + "if(r)r.backgroundHeartbeat();})()", null);
+            remoteHeartbeatHandler.postDelayed(this, 2500);
+        }
+    };
     private String pendingPairingUrl;
     private WifiManager.MulticastLock pairingMulticastLock;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        NativeAudioPlayer.initialize(getApplicationContext());
         // Route the hardware volume keys at the media stream, so they adjust
         // playback even before the first track starts. The page itself always
         // plays at unity gain on Android; the system owns volume.
@@ -225,6 +238,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
                         musicRoot.getAbsolutePath(),
                         apiToken).toInt();
                 String origin = "http://127.0.0.1:" + port;
+                backendOrigin = origin;
                 runOnUiThread(() -> {
                     CookieManager cookies = CookieManager.getInstance();
                     cookies.setCookie(
@@ -260,6 +274,39 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     }
 
     @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int key = event.getKeyCode();
+        if (remotePlayback && (key == KeyEvent.KEYCODE_VOLUME_UP || key == KeyEvent.KEYCODE_VOLUME_DOWN
+                || key == KeyEvent.KEYCODE_VOLUME_MUTE)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (key == KeyEvent.KEYCODE_VOLUME_MUTE) clickPlayerControl("muteToggle");
+                else onMediaAdjustVolume(key == KeyEvent.KEYCODE_VOLUME_UP ? 0.05f : -0.05f);
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public void onMediaAdjustVolume(float delta) {
+        remoteVolumeScript("adjustVolumeBy", delta);
+    }
+
+    @Override
+    public void onMediaSetVolume(float volume) {
+        remoteVolumeScript("setVolume", volume);
+    }
+
+    private void remoteVolumeScript(String method, float value) {
+        if (!Float.isFinite(value)) return;
+        runOnUiThread(() -> {
+            if (webView == null) return;
+            webView.evaluateJavascript("(function(){var r=window.MindinguflacRemote;"
+                    + "if(r&&r.isController())r." + method + "(" + Float.toString(value) + ");})()", null);
+        });
+    }
+
+    @Override
     public void onMediaPlayPause() {
         clickPlayerControl("playPause");
     }
@@ -279,7 +326,9 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         runOnUiThread(() -> {
             if (webView == null) return;
             webView.evaluateJavascript(
-                    "(function(){var a=document.getElementById('audioPlayer');"
+                    "(function(){var r=window.MindinguflacRemote;"
+                    + "if(r&&r.isController()){r.command('pause').catch(function(){});return;}"
+                    + "var a=document.getElementById('audioPlayer');"
                     + "if(a&&!a.paused){var b=document.getElementById('playPause');if(b)b.click();}})()",
                     null);
         });
@@ -386,7 +435,9 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             pairingMulticastLock.release();
             pairingMulticastLock = null;
         }
+        remoteHeartbeatHandler.removeCallbacks(remoteHeartbeat);
         if (isFinishing()) {
+            remotePlayback = false;
             MediaPlaybackService.clear(getApplicationContext());
         }
         if (isFinishing() && Python.isStarted()) {
@@ -508,6 +559,58 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             });
         }
 
+        /** Share only a normalized app-generated album card through a narrow cache provider. */
+        @JavascriptInterface
+        public void shareAlbumCard(String title, String link, String dataUrl) {
+            Uri linkUri = Uri.parse(link == null ? "" : link);
+            boolean publicAlbum = "https".equals(linkUri.getScheme()) &&
+                    (("open.spotify.com".equals(linkUri.getHost()) && linkUri.getPath() != null
+                            && linkUri.getPath().matches("/album/[A-Za-z0-9]+/?"))
+                    || ("musicbrainz.org".equals(linkUri.getHost()) && linkUri.getPath() != null
+                            && linkUri.getPath().matches("/release/[A-Fa-f0-9-]+/?")));
+            if (!publicAlbum || dataUrl == null || !dataUrl.startsWith("data:image/png;base64,")
+                    || dataUrl.length() > 8_000_000) return;
+            startupExecutor.execute(() -> {
+                android.graphics.Bitmap bitmap = null;
+                try {
+                    byte[] bytes = android.util.Base64.decode(dataUrl.substring(22), android.util.Base64.DEFAULT);
+                    android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+                    bounds.inJustDecodeBounds = true;
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+                    if (bounds.outWidth != 720 || bounds.outHeight != 1080) throw new IllegalArgumentException("Invalid album card size");
+                    bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                    if (bitmap == null) throw new IllegalArgumentException("Invalid album card");
+                    File directory = new File(getCacheDir(), "share_cards");
+                    if (!directory.isDirectory() && !directory.mkdirs()) throw new java.io.IOException("Could not create share cache");
+                    File[] previous = directory.listFiles();
+                    if (previous != null) for (File file : previous) {
+                        if (file.lastModified() < System.currentTimeMillis() - 86_400_000L) file.delete();
+                    }
+                    File card = new File(directory, "album-" + UUID.randomUUID() + ".png");
+                    try (java.io.FileOutputStream output = new java.io.FileOutputStream(card)) {
+                        if (!bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output))
+                            throw new java.io.IOException("Could not write album card");
+                    }
+                    Uri image = androidx.core.content.FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".share", card);
+                    runOnUiThread(() -> {
+                        Intent send = new Intent(Intent.ACTION_SEND);
+                        send.setType("image/png");
+                        send.putExtra(Intent.EXTRA_STREAM, image);
+                        send.putExtra(Intent.EXTRA_SUBJECT, title);
+                        send.putExtra(Intent.EXTRA_TEXT, title + "\n" + link);
+                        send.setClipData(android.content.ClipData.newRawUri("Album card", image));
+                        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivity(Intent.createChooser(send, "Share album"));
+                    });
+                } catch (Exception error) {
+                    runOnUiThread(() -> android.widget.Toast.makeText(MainActivity.this,
+                            "Could not prepare the album card. Try Copy link.", android.widget.Toast.LENGTH_LONG).show());
+                } finally {
+                    if (bitmap != null) bitmap.recycle();
+                }
+            });
+        }
+
         @JavascriptInterface
         public void scanDevicePairingQr() {
             runOnUiThread(() -> {
@@ -552,12 +655,31 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
          * Called whenever the track or the play/pause state changes.
          */
         @JavascriptInterface
+        public void setRemotePlayback(boolean enabled, int volume) {
+            remotePlayback = enabled;
+            runOnUiThread(() -> {
+                remoteHeartbeatHandler.removeCallbacks(remoteHeartbeat);
+                if (enabled) remoteHeartbeatHandler.post(remoteHeartbeat);
+                setVolumeControlStream(enabled ? AudioManager.USE_DEFAULT_STREAM_TYPE : AudioManager.STREAM_MUSIC);
+                try {
+                    org.json.JSONObject state = new org.json.JSONObject();
+                    state.put("remote", enabled);
+                    state.put("volume", Math.max(0, Math.min(100, volume)));
+                    state.put("token", apiToken == null ? "" : apiToken);
+                    state.put("api_origin", backendOrigin == null ? "" : backendOrigin);
+                    MediaPlaybackService.update(getApplicationContext(), state.toString());
+                } catch (Throwable ignored) {}
+            });
+        }
+
+        @JavascriptInterface
         public void updateNowPlaying(String json) {
             try {
                 org.json.JSONObject value = new org.json.JSONObject(json);
                 // The artwork is served by the app's own authenticated loopback
                 // API, so the service needs this session's token to fetch it.
                 value.put("token", apiToken == null ? "" : apiToken);
+                value.put("api_origin", backendOrigin == null ? "" : backendOrigin);
                 MediaPlaybackService.update(getApplicationContext(), value.toString());
             } catch (Throwable ignored) {
             }
@@ -592,6 +714,17 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             runOnUiThread(() -> {
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Exception ignored) {
+                }
+            });
+        }
+
+        /** "Pair new device" in the output menu: Android owns Bluetooth pairing. */
+        @JavascriptInterface
+        public void openBluetoothSettings() {
+            runOnUiThread(() -> {
+                try {
+                    startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));
                 } catch (Exception ignored) {
                 }
             });

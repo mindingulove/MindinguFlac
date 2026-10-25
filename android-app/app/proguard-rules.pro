@@ -8,7 +8,6 @@
 # AndroidTorrentEngine (jlibtorrent bridge), NanoAdvisor and LocalGemmaAdvisor
 # are only ever named as strings from Python.
 -keep class com.mindinguflac.android.** { *; }
-
 # jlibtorrent's SWIG layer registers its natives by fully-qualified name, so
 # renaming any of it breaks the JNI lookup against libjlibtorrent.so.
 -keep class com.frostwire.jlibtorrent.** { *; }
@@ -22,3 +21,6 @@
 # treat the dangling references as an error.
 -dontwarn javax.lang.model.**
 -dontwarn autovalue.shaded.**
+
+# Python calls this bridge and its method is bound by JNI name.
+-keep class com.mindinguflac.android.LyricsAlignment { *; }

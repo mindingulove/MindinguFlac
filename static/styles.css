@@ -806,6 +806,8 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
 
 .player-status.ready { color: var(--accent); }
 
+.player-status.buffering { color: var(--accent); cursor: wait; }
+
 .player-status.error { color: #e05; }
 
 .player-pie {
@@ -900,6 +902,12 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   justify-content: center;
   cursor: pointer;
   padding: 0;
+}
+.play-round:disabled {
+  background: #292d35;
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.78;
 }
 
 .progress-row { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 720px; font-size: 11px; color: var(--muted); }
@@ -1311,7 +1319,8 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   opacity: 0;
   transition: opacity 0.2s;
 }
-.details-cover:hover .side-video-switch:not([hidden]) {
+.details-cover:hover .side-video-switch:not([hidden]),
+.details-cover.show-video-controls .side-video-switch:not([hidden]) {
   opacity: 1;
 }
 .side-video-switch:hover {
@@ -1339,11 +1348,57 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   color: #fff;
   font-size: 15px;
   cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.15s;
+  opacity: 0;
+  transition: opacity 0.2s;
 }
-.side-video-refresh:hover { opacity: 1; }
 .side-video-refresh[hidden] { display: none; }
+.side-video-sync {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+  padding: 0 4px;
+  background: rgba(0,0,0,0.55);
+  border-radius: 16px;
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+/* Video controls stay out of the picture until the pointer is over it,
+   like the video/audio switch. */
+.details-cover:hover .side-video-refresh:not([hidden]),
+.details-cover:hover .side-video-sync:not([hidden]),
+.details-cover.show-video-controls .side-video-refresh:not([hidden]),
+.details-cover.show-video-controls .side-video-sync:not([hidden]),
+.side-video-refresh:focus-visible,
+.side-video-sync:focus-within {
+  opacity: 0.85;
+}
+.details-cover .side-video-refresh:not([hidden]):hover,
+.details-cover .side-video-sync:not([hidden]):hover {
+  opacity: 1;
+}
+.side-video-sync[hidden] { display: none; }
+.side-video-sync span { padding: 0 4px; white-space: nowrap; }
+.side-video-sync button {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.side-video-sync button:hover { background: rgba(255,255,255,0.15); }
 .details-rich-content {
   display: grid;
   gap: 16px;
@@ -3400,6 +3455,33 @@ button.primary, button.use-torrent { background: var(--accent); color: #000; bor
   background-position: center;
 }
 
+.sidebar-playlist-art.playlist-art-grid,
+.mobile-library-art.playlist-art-grid,
+.playlist-hero-art.playlist-art-grid,
+.context-menu-header-art.playlist-art-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.playlist-art-grid > img,
+.playlist-art-grid > span {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  object-fit: cover;
+  background: var(--surface-3);
+}
+
+.playlist-art-grid > span:nth-child(2n) { background: var(--surface-2); }
+.playlist-art-grid > span { font-size: 0.5em; }
+
 .sidebar-playlist-info {
   flex: 1;
   min-width: 0;
@@ -4918,6 +5000,13 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
     background: transparent;
     color: #fff;
   }
+  /* The rules above outrank .play-round:disabled; restate the locked look so
+     the phone shows the button is locked while a track loads. */
+  .player-controls .play-round:disabled {
+    background: #292d35;
+    color: var(--muted);
+    opacity: 0.78;
+  }
   .player-controls .progress-row,
   .player-tools { display: none; }
 
@@ -5117,6 +5206,11 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
     border-radius: 50%;
     background: #fff;
     color: #080808;
+  }
+  body.mobile-now-playing .player-controls .play-round:disabled {
+    background: #292d35;
+    color: var(--muted);
+    opacity: 0.78;
   }
   body.mobile-now-playing .player-controls .progress-row {
     display: grid;
@@ -5370,3 +5464,157 @@ dialog::backdrop { background: rgba(0,0,0,0.74); }
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+.lyrics-alignment-status {
+  position: absolute; right: 0; bottom: calc(100% + 6px);
+  padding: 5px 9px; border-radius: 10px; white-space: nowrap;
+  background: rgba(0,0,0,.45); color: rgba(255,255,255,.9); font-size: 12px;
+}
+.lyrics-alignment-status:empty { display: none; }
+
+/* Album controls share the per-song download ring and queue. */
+.album-header-actions { display:flex; align-items:center; gap:24px; padding:24px 0; min-height:100px; }
+.album-play-all { width:64px; height:64px; display:grid; place-items:center; flex-shrink:0;
+  border:0; border-radius:50%; background:var(--accent); color:#101010; font-size:38px; cursor:pointer; }
+.album-play-all:hover { transform:scale(1.04); filter:brightness(1.07); }
+.album-download-all { width:46px; height:46px; display:grid; place-items:center; flex-shrink:0;
+  border:0; border-radius:50%; background:transparent; color:var(--muted); font-size:34px; cursor:pointer; }
+.album-download-all:hover, .album-download-all.downloaded { color:var(--accent); }
+.album-download-all .track-progress-ring { width:40px; height:40px; }
+.album-download-all .track-progress-core { font-size:12px; font-weight:700; }
+.album-download-status { color:var(--muted); font-size:14px; line-height:1.4; }
+.album-header-actions button:disabled { cursor:default; }
+.album-header-actions button:disabled:not(.downloaded) { opacity:.45; }
+.track-library-btn.download-error, .album-download-all.download-error { color:#ff6b81; }
+@media (max-width:900px) {
+  .album-header-actions { min-height:84px; padding:16px 0; gap:18px; }
+  .album-play-all { width:56px; height:56px; font-size:34px; }
+  .album-download-status { font-size:12px; }
+}
+
+.album-secondary-action { width:40px; height:46px; flex-shrink:0; display:grid; place-items:center;
+  border:0; background:transparent; color:var(--muted); font-size:30px; cursor:pointer; }
+.album-secondary-action:hover, .album-secondary-action.active { color:var(--accent); }
+.album-download-status:empty { display:none; }
+.remote-playback-banner { position:fixed; bottom:0; left:0; right:0; z-index:1100; min-height:30px;
+  padding:5px 16px calc(5px + env(safe-area-inset-bottom)); background:var(--accent); color:#09130d;
+  display:flex; align-items:center; justify-content:flex-start; gap:16px; font-size:13px; font-weight:600; cursor:pointer; }
+.remote-playback-banner[hidden] { display:none; }
+.remote-playback-banner button { border:1px solid currentColor; border-radius:16px; background:transparent;
+  padding:2px 10px; color:inherit; cursor:pointer; }
+body.has-remote-playback { grid-template-rows:minmax(0,1fr) calc(var(--player-controls-height,96px) + var(--remote-playback-banner-height,30px)); }
+body.has-remote-playback .player { align-self:start; }
+/* The expanded now-playing panel is fixed above the 96px transport bar. When
+   a remote-control banner is present, reserve its measured height as well so
+   the panel cannot sit over the bottom edge of the transport controls. */
+body.has-remote-playback .details-panel.is-expanded {
+  bottom:calc(var(--player-controls-height,96px) + var(--remote-playback-banner-height,30px));
+}
+/* Devices and Queue panels end 88px above the bottom; the banner raises the
+   transport bar, so lift their bottom edge by the same amount. */
+@media (min-width:901px) {
+  body.has-remote-playback .connect-panel {
+    height:calc(100vh - 88px - var(--remote-playback-banner-height,30px));
+  }
+}
+@media (max-width:900px) {
+  .album-header-actions { gap:14px; flex-wrap:wrap; }
+  .album-secondary-action { font-size:27px; width:34px; }
+  .album-download-status { flex-basis:100%; }
+  .has-remote-playback .mobile-bottom-nav { bottom:34px; }
+  .has-remote-playback .player { bottom:calc(var(--mobile-nav-height) + var(--remote-playback-banner-height,30px) + env(safe-area-inset-bottom)); }
+  .has-remote-playback .shell { padding-bottom:calc(var(--mobile-nav-height) + var(--mobile-player-height) + var(--remote-playback-banner-height,30px) + env(safe-area-inset-bottom)); }
+  body.has-remote-playback.mobile-now-playing .player { bottom:var(--remote-playback-banner-height,30px); }
+}
+
+/* The album toolbar follows each platform's control order, without a cover thumbnail. */
+#albumPlayAll { order:1; }
+#albumShuffle { order:2; }
+#albumSaveLibrary { order:3; }
+#albumDownloadAll { order:4; }
+#albumMore { order:5; }
+#albumDownloadStatus { order:6; }
+#albumShare { display:none; }
+.album-view-control { order:7; margin-left:auto; position:relative; }
+#albumViewToggle { display:flex; align-items:center; gap:10px; padding:8px; border:0; background:transparent; color:var(--muted); cursor:pointer; }
+#albumViewToggle i { font-size:25px; }
+.album-view-menu { position:absolute; top:100%; right:0; min-width:195px; z-index:90; border-radius:6px; padding:6px; background:#282828; box-shadow:0 8px 24px #0008; }
+.album-view-menu[hidden] { display:none; }
+.album-view-menu > span { display:block; color:var(--muted); padding:12px; font-size:12px; font-weight:700; }
+.album-view-menu button { border:0; width:100%; display:flex; align-items:center; gap:12px; padding:13px 12px; color:var(--text); background:transparent; text-align:left; cursor:pointer; border-radius:3px; }
+.album-view-menu button:hover { background:#ffffff15; }
+.album-view-menu button.active { color:var(--accent); }
+.album-view-menu button .bi-check-lg { margin-left:auto; visibility:hidden; }
+.album-view-menu button.active .bi-check-lg { visibility:visible; }
+.album-tracks .track-row, .album-track-header { grid-template-columns:32px minmax(0,1fr) 140px 70px 42px; }
+.album-tracks .album-track-number { width:32px; height:32px; background:none!important; color:var(--muted); display:grid; place-items:center; font-size:14px; border-radius:0; }
+.album-tracks .track-row { min-height:64px; }
+.album-tracks .track-main { grid-column:2; }
+.album-tracks .track-center, .album-track-header .plays-column { grid-column:3; grid-row:1; }
+.album-tracks .track-extra, .album-track-header .album-artist-column { display:none; }
+.album-tracks .track-time, .album-track-header .time-column { grid-column:4; grid-row:1; }
+.album-tracks .track-status-icon { grid-column:5; grid-row:1; }
+@media (min-width:901px) {
+  .album-tracks.album-compact .track-row, .album-track-header.album-compact { grid-template-columns:32px minmax(0,2fr) minmax(0,1fr) 130px 70px 42px; }
+  .album-tracks.album-compact .track-row { min-height:36px; padding-top:4px; padding-bottom:4px; }
+  .album-tracks.album-compact .track-main > span { display:none; }
+  .album-tracks.album-compact .track-library-btn { width:28px; height:28px; min-width:28px; min-height:28px; padding:0; }
+  .album-tracks.album-compact .track-progress-ring { width:26px; height:26px; }
+  .album-tracks.album-compact .track-extra, .album-track-header.album-compact .album-artist-column { display:block; grid-column:3; grid-row:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .album-tracks.album-compact .track-center, .album-track-header.album-compact .plays-column { grid-column:4; }
+  .album-tracks.album-compact .track-time, .album-track-header.album-compact .time-column { grid-column:5; }
+  .album-tracks.album-compact .track-status-icon { grid-column:6; }
+}
+.album-share-dialog { border:0; padding:0; width:min(94vw,500px); max-height:94dvh; border-radius:20px; color:var(--text); background:#202020; }
+.album-share-sheet { padding:18px 24px 22px; position:relative; display:flex; flex-direction:column; align-items:center; gap:20px; }
+.share-sheet-handle { width:40px; height:4px; border-radius:4px; background:#777; }
+.album-share-close { position:absolute; right:16px; top:14px; border:0; background:transparent; color:var(--text); padding:8px; }
+#albumShareCanvas { display:block; height:min(52dvh,490px); width:auto; max-width:100%; border-radius:16px; }
+.album-share-colors { display:flex; justify-content:center; gap:22px; }
+.album-share-colors button { width:42px; height:42px; border:3px solid #555; border-radius:50%; cursor:pointer; }
+.album-share-colors button[aria-pressed="true"] { border-color:white; }
+.album-share-buttons { display:flex; justify-content:space-evenly; width:100%; gap:24px; }
+.album-share-buttons button { border:0; background:transparent; color:var(--text); display:grid; justify-items:center; gap:8px; cursor:pointer; }
+.album-share-buttons button i { display:grid; place-items:center; width:50px; height:50px; background:#ffffff12; border-radius:50%; font-size:26px; }
+#albumShareNotice { margin:0; font-size:13px; color:var(--muted); text-align:center; }
+#albumShareNotice:empty { display:none; }
+.album-embed-dialog { border:0; border-radius:12px; padding:24px; width:min(90vw,620px); background:var(--surface); color:var(--text); }
+.album-embed-dialog textarea { width:100%; min-height:150px; resize:vertical; margin:16px 0; background:var(--bg); color:var(--text); border:1px solid var(--line); padding:12px; }
+.album-embed-actions { display:flex; gap:16px; justify-content:flex-end; }
+@media (max-width:900px) {
+  #albumSaveLibrary { order:1; }
+  #albumDownloadAll { order:2; }
+  #albumShare { display:grid; order:3; }
+  #albumShuffle { order:4; margin-left:auto; }
+  #albumPlayAll { order:5; }
+  #albumDownloadStatus { order:6; }
+  #albumMore, .album-view-control { display:none; }
+  .album-header-actions { flex-wrap:wrap; gap:14px; }
+  .album-tracks .track-row { grid-template-columns:minmax(0,1fr) auto auto!important; }
+  .album-tracks .album-track-number { display:none; }
+  .album-tracks .track-main { grid-column:1; }
+  .album-tracks .track-status-icon { grid-column:2; }
+  .album-tracks .track-actions { grid-column:3; grid-row:1; }
+  .album-share-dialog { width:100%; max-width:none; margin:auto 0 0; border-radius:22px 22px 0 0; padding-bottom:env(safe-area-inset-bottom); }
+}
+
+.remote-playback-banner { padding-left:20px; }
+.remote-playback-banner:focus-visible { outline:2px solid white; outline-offset:-3px; }
+@media (max-width:900px) { .remote-playback-banner { padding-left:16px; } }
+
+.offline-device-tabs { display:flex; flex-wrap:nowrap; align-items:stretch; width:calc(100% - 48px); margin:20px 24px 0; border-bottom:1px solid var(--line); }
+.offline-device-tabs button { flex:1 1 50%; min-width:0; border:0; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:var(--muted); padding:13px 10px 12px; font:inherit; white-space:nowrap; cursor:pointer; }
+.offline-device-tabs button + button { border-left:1px solid var(--line); }
+.offline-device-tabs button[aria-selected="true"] { border-bottom-color:#1ed760; color:#1ed760; font-weight:700; }
+@media(max-width:900px) { .offline-device-tabs { width:calc(100% - 32px); margin:18px 16px 0; } }
+
+.remote-volume-hud { position:fixed; z-index:10020; top:calc(env(safe-area-inset-top) + 20px); left:50%; width:min(86vw,340px); padding:16px 20px; display:flex; align-items:center; gap:16px; border-radius:18px; background:#262a2f; color:#fff; box-shadow:0 8px 30px #0008; opacity:0; transform:translate(-50%,-18px); transition:opacity 180ms ease,transform 180ms ease; pointer-events:none; }
+.remote-volume-hud.visible { opacity:1; transform:translate(-50%,0); }
+.remote-volume-hud[hidden] { display:none; }
+.remote-volume-hud > i { font-size:26px; }
+.remote-volume-hud-info { flex:1; min-width:0; }
+.remote-volume-hud-info > span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; margin-bottom:9px; }
+.remote-volume-hud-track { height:5px; border-radius:3px; background:#ffffff30; overflow:hidden; }
+.remote-volume-hud-track > span { display:block; height:100%; width:0; border-radius:3px; background:#1ed760; transition:width 120ms ease; }
+.remote-volume-hud strong { font-size:16px; min-width:3.5ch; text-align:right; }
+@media (prefers-reduced-motion:reduce) { .remote-volume-hud,.remote-volume-hud-track > span { transition:none; } }

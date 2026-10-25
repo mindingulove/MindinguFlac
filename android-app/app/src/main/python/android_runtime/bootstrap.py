@@ -162,6 +162,8 @@ def start(data_path: str, cache_path: str, music_path: str, token: str) -> int:
     compatibility_dir = Path(__file__).resolve().parent / "compat"
     if str(compatibility_dir) not in sys.path:
         sys.path.append(str(compatibility_dir))
+    import mornye_runtime
+    mornye_runtime.configure()
     _initialize_config(data_dir, cache_dir, music_dir)
 
     import app
@@ -205,3 +207,5 @@ def stop() -> None:
         finally:
             _server = None
     _thread = None
+    import mornye_runtime
+    mornye_runtime.stop()

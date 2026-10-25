@@ -979,6 +979,8 @@ def main() -> None:
                 server.shutdown()
                 server.server_close()
         finally:
+            import mornye_runtime
+            mornye_runtime.stop()
             release_single_instance_lock()
 
 

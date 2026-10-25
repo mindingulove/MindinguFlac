@@ -1,221 +1,717 @@
+"""Monochrome track search and direct lossless streaming provider."""
 from __future__ import annotations
 
-import hashlib
-import json
 import re
+import threading
 import time
-import urllib.parse
 import unicodedata
-import base64
-import random
+import urllib.parse
+import uuid
+from pathlib import Path
 
-_ORIGINS = [
-    "https://monochrome.tf",
-    "https://monochrome.samidy.com",
-    "https://lossless.wtf",
-    "https://if-it-runs-ship-it.lol",
-]
 
-def _get_headers() -> dict:
-    origin = random.choice(_ORIGINS)
+# The older .tf / .wtf instance list is stale. The live monochrome.st client
+# currently falls back to this working catalog API; its current instance-list
+# URL array is empty, so there are no verified official API mirrors to rotate
+# through. Keep the retry loop generic for when the project publishes a live
+# list again, but never guess at stale mirror hosts.
+_INSTANCES = (("https://tracks.monochrome.st", "https://monochrome.st"),)
+_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+               "(KHTML, like Gecko) Version/27.0 Safari/605.1.15")
+
+# Monochrome answers abusive-looking clients with 429 and escalates to 403.
+# Retrying immediately only extends the block, so a rejected stream pauses the
+# engine for a while and new jobs fall back to YTP-DL until it expires.
+_STREAM_BLOCK_SECONDS = {403: 600.0, 429: 120.0}
+_stream_block_lock = threading.Lock()
+_stream_blocked_until = 0.0
+_stream_block_status = 0
+
+
+def note_stream_rejected(http_status: int, retry_after: float | None = None) -> None:
+    """Record a 403/429 from the track endpoint and start the cooldown."""
+    global _stream_blocked_until, _stream_block_status
+    status = int(http_status or 0)
+    if status not in _STREAM_BLOCK_SECONDS:
+        return
+    cooldown = _STREAM_BLOCK_SECONDS[status]
+    if retry_after and retry_after > 0:
+        cooldown = min(1800.0, max(cooldown, float(retry_after)))
+    with _stream_block_lock:
+        until = time.time() + cooldown
+        if until > _stream_blocked_until:
+            _stream_blocked_until = until
+            _stream_block_status = status
+
+
+def note_stream_failing() -> None:
+    """Start the cooldown after repeated stream failures whose cause is unknown.
+
+    A browser/WebView <audio> element never exposes the HTTP status, so a
+    429/403 there only shows up as a stream that keeps failing to reconnect.
+    """
+    global _stream_blocked_until, _stream_block_status
+    with _stream_block_lock:
+        until = time.time() + _STREAM_BLOCK_SECONDS[429]
+        if until > _stream_blocked_until:
+            _stream_blocked_until = until
+            _stream_block_status = -1
+
+
+def stream_block_reason() -> str:
+    """Human-readable reason while Monochrome is cooling down, else ""."""
+    with _stream_block_lock:
+        remaining = _stream_blocked_until - time.time()
+        status = _stream_block_status
+    if remaining <= 0:
+        return ""
+    minutes = max(1, round(remaining / 60))
+    if status == -1:
+        return f"Monochrome streams kept failing (possibly rate limited); retrying it in {minutes} min"
+    label = "403 access denied" if status == 403 else "429 rate limited"
+    return f"Monochrome refused streams (HTTP {label}); retrying it in {minutes} min"
+
+
+def stream_request_headers(site_origin: str = _INSTANCES[0][1]) -> dict[str, str]:
+    """Headers Safari's <audio> element sends for a Monochrome track.
+
+    Mirrors a captured healthy 206 response from the web player: audio
+    destination, no Referer, and a per-playback session id. Connection is
+    omitted because it is illegal in HTTP/2.
+    """
     return {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        "Origin": origin,
-        "Referer": f"{origin}/",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Origin": site_origin,
+        "Sec-Fetch-Dest": "audio",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "User-Agent": _USER_AGENT,
+        "X-Playback-Session-Id": str(uuid.uuid4()).upper(),
     }
+
+
+def _headers(site_origin: str, *, audio: bool = False) -> dict[str, str]:
+    headers = {
+        "Accept": "*/*" if audio else "application/json, */*",
+        "Origin": site_origin,
+        "Referer": f"{site_origin}/",
+        "User-Agent": _USER_AGENT,
+    }
+    if audio:
+        headers.update({
+            "Accept-Encoding": "identity",
+            "Connection": "Keep-Alive",
+            "Sec-Fetch-Dest": "audio",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+        })
+    return headers
+
+
+def _decode_error(path: Path) -> str:
+    """Decode the whole file once; "" if it is intact (or ffmpeg is absent).
+
+    A file can have a valid header and the right size yet be damaged in the
+    middle (bytes spliced in from the wrong offset), which only a full decode
+    reveals. A damaged file must not be saved into the library.
+    """
+    import subprocess
+
+    try:
+        from native_audio import _ffmpeg_exe
+        ffmpeg = _ffmpeg_exe()
+    except Exception:
+        ffmpeg = ""
+    if not ffmpeg:
+        return ""
+    try:
+        result = subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
+                                capture_output=True, timeout=300,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return ""
+    if result.returncode:
+        return (result.stderr.decode("utf-8", "replace").strip().splitlines() or ["decode failed"])[-1][:200]
+    return ""
+
 
 def _norm(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join("-" if unicodedata.category(char) == "Pd" else char for char in text)
     text = text.encode("ascii", "ignore").decode("ascii").casefold()
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
 
-def _item_value(item: dict, key: str) -> str:
-    value = item.get(key)
-    if isinstance(value, dict):
-        return str(value.get("name") or "")
-    return str(value or "")
 
-def _candidate_artist(item: dict) -> str:
-    return _item_value(item, "performer") or _item_value(item, "artist")
+def _artists(item: dict) -> list[str]:
+    values = item.get("artistNames") or item.get("artists") or []
+    if isinstance(values, str):
+        return [values]
+    names = []
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("name")
+        if value:
+            names.append(str(value))
+    for key in ("artist", "performer"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            value = value.get("name")
+        if value:
+            names.append(str(value))
+    return names
 
-def _same_artist(expected: str, actual: str) -> bool:
-    expected_norm = _norm(expected)
-    actual_norm = _norm(actual)
-    return bool(
-        expected_norm
-        and actual_norm
-        and (
-            expected_norm == actual_norm
-            or expected_norm in actual_norm
-            or actual_norm in expected_norm
-        )
-    )
 
-def _select_matching_item(items: list[dict], title: str, artist: str, isrc: str) -> dict | None:
-    isrc_norm = _norm(isrc) if isrc else ""
-    title_norm = _norm(title) if title and title != "Unknown" else ""
-    expected_artist_norm = _norm(artist) if artist and artist != "Unknown" else ""
+def _same_artist(expected: str, actual: list[str]) -> bool:
+    wanted = _norm(expected)
+    return bool(wanted and any(_norm(name) == wanted for name in actual))
 
-    for item in items:
-        item_isrc = _norm(item.get("isrc"))
-        item_title = _norm(item.get("title"))
-        item_artist = _candidate_artist(item)
-        
-        if isrc_norm and item_isrc == isrc_norm:
-            if not expected_artist_norm or _same_artist(artist, item_artist):
-                return item
-        if title_norm and item_title == title_norm:
-            if not expected_artist_norm or _same_artist(artist, item_artist):
-                return item
-        if title_norm and expected_artist_norm:
-            if _same_artist(artist, item_artist) and (title_norm in item_title or item_title in title_norm):
-                return item
-    return None
 
-def _search_items(requests_module, query: str, offset: int = 0) -> list[dict]:
-    # We use multiple sources for search to "fight the captcha"
-    search_urls = [
-        f"https://qobuz.squid.wtf/api/get-music?q={urllib.parse.quote(query)}&offset={offset}",
-        f"https://qobuz.kennyy.com.br/api/get-music?q={urllib.parse.quote(query)}&offset={offset}",
-        f"https://qobuz.squid.wtf/api/search?q={urllib.parse.quote(query)}",
-    ]
-    
-    for url in search_urls:
-        try:
-            resp = requests_module.get(url, headers=_get_headers(), timeout=20)
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, dict) and data.get("success"):
-                    d = data.get("data", {})
-                    if isinstance(d, dict):
-                        if "tracks" in d and "items" in d["tracks"]:
-                            return d["tracks"]["items"]
-                if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
-                    if "data" in data and isinstance(data["data"], dict) and "items" in data["data"]:
-                        return data["data"]["items"]
-                    if "items" in data:
-                        return data["items"]
-                    if "tracks" in data and "items" in data["tracks"]:
-                        return data["tracks"]["items"]
-        except Exception:
-            continue
-    return []
+# A re-issue or remaster of the same recording gets a new ISRC but keeps its
+# length; a live take or re-recording with the same title almost never does.
+# Catalog durations for the same remastered recording can differ by several
+# seconds (for example, Spotify's Dire Straits "So Far Away - Remastered 1996"
+# versus Monochrome's plain-title entry). Keep this narrow enough to reject
+# live/edit versions while allowing provider metadata/trim differences.
+_SAME_RECORDING_DURATION_MS = 8000
+_REMASTER_DURATION_TOLERANCE_MS = 10000
 
-def _extract_qobuz_stream_url(body: bytes) -> str | None:
+
+def _duration_ms(item: dict) -> float:
     try:
-        data = json.loads(body)
-        for key in ["download_url", "url"]:
-            val = data.get(key)
-            if val and str(val).startswith("http"):
-                return str(val)
-        nested = data.get("data", {})
-        if isinstance(nested, dict):
-            for key in ["download_url", "url"]:
-                val = nested.get(key)
-                if val and str(val).startswith("http"):
-                    return str(val)
+        value = float(item.get("duration") or item.get("duration_ms") or item.get("length") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if value > 1000 else value * 1000
+
+
+def _select_matching_item(items: list[dict], title: str, artist: str, isrc: str,
+                          duration_ms: float = 0) -> dict | None:
+    wanted_title = _norm(title)
+    wanted_isrc = _norm(isrc)
+    if wanted_isrc:
+        # Search is text-based on the current API, so use ISRC as a verification
+        # key over the returned rows rather than sending it as the search term.
+        exact_isrc = next((item for item in items if _norm(item.get("isrc")) == wanted_isrc), None)
+        if exact_isrc is not None:
+            return exact_isrc
+    candidates = []
+    for item in items:
+        if artist and not _same_artist(artist, _artists(item)):
+            continue
+        if not wanted_title or not _same_song_title(title, item.get("title") or ""):
+            continue
+        returned_isrc = _norm(item.get("isrc"))
+        gap = abs(_duration_ms(item) - duration_ms) if duration_ms and _duration_ms(item) else None
+        if wanted_isrc and returned_isrc and returned_isrc != wanted_isrc:
+            # Different ISRC: accept only when the length shows it is the same
+            # recording. Distinct catalog ISRCs are normal for remasters too;
+            # their mastered lengths can differ slightly, so allow a wider
+            # gap only when the title matcher confirmed an explicit remaster
+            # label (e.g. Spotify's "So Far Away - Remastered 1996" is 5.76 s
+            # longer than Monochrome's same-title catalog recording).
+            remaster_label = _is_remaster_label(_version_text(title)) or _is_remaster_label(_version_text(item.get("title") or ""))
+            max_gap = _REMASTER_DURATION_TOLERANCE_MS if remaster_label else _SAME_RECORDING_DURATION_MS
+            if gap is None or gap > max_gap:
+                continue
+        candidates.append((gap if gap is not None else float("inf"), len(candidates), item))
+    if not candidates:
+        return None
+    # Closest length first; search order breaks ties.
+    return min(candidates)[2]
+
+
+def _alternate_recording_reason(items: list[dict], title: str, artist: str) -> str:
+    """Explain when search found the song name only as a different take."""
+    base = _split_version(title)[0]
+    alternate = next((item for item in items
+        if artist and _same_artist(artist, _artists(item))
+        and _split_version(item.get("title") or "")[0] == base
+        and _split_version(item.get("title") or "")[1]), None)
+    if not alternate:
+        return ""
+    found = str(alternate.get("title") or "alternate version").strip()
+    return f"only {found} was found; it is a different recording, so it was skipped"
+
+
+# Words that say what kind of version a track is, not which one. Two version
+# labels only describe the same recording when they share a *distinctive*
+# word, typically a remixer or editor name ("Todd Terry").
+_GENERIC_VERSION_WORDS = {
+    "a", "and", "the", "of", "with", "feat", "ft", "featuring", "vs", "x", "s",
+    "mix", "remix", "remixed", "edit", "radio", "club", "version", "original",
+    "remaster", "remastered", "single", "album", "extended", "short", "long",
+    "us", "uk", "mono", "stereo", "inch", "7", "12", "dub", "vocal", "instrumental",
+    "live", "demo", "acoustic", "bonus", "track", "explicit", "clean",
+}
+
+
+def _split_version(title: str) -> tuple[str, set[str]]:
+    """("Missing", {"todd", "terry"}) for "Missing - Todd Terry Remix" or
+    "Missing (Todd Terry club mix, Ben Watt's radio edit)"."""
+    text = str(title or "")
+    match = re.match(r"^(.*?)\s*(?:\s-\s|\(|\[)(.*)$", text)
+    base, version = (match.group(1), match.group(2)) if match else (text, "")
+    if _is_remaster_label(version):
+        return _norm(base), set()  # a remaster is the same recording, not a version
+    words = set(_norm(version).split()) - _GENERIC_VERSION_WORDS - _REMASTER_LABEL_WORDS
+    return _norm(base), {word for word in words if len(word) > 1 and not word.isdigit()}
+
+
+# A remaster label names a new master of the same recording, not a different
+# take, so "So Far Away - Remastered 1996" is the song Monochrome lists as
+# "So Far Away". Only these words (plus years) may appear in such a label.
+_REMASTER_LABEL_WORDS = {"remaster", "remastered", "remasters", "digital", "digitally", "edition",
+                         "anniversary", "deluxe", "expanded", "version", "mono", "stereo", "the", "of"}
+
+
+def _is_remaster_label(version_text: str) -> bool:
+    words = _norm(version_text).split()
+    return any(word.startswith("remaster") for word in words) and all(
+        word.isdigit() or word in _REMASTER_LABEL_WORDS or (word.endswith("th") and word[:-2].isdigit())
+        for word in words)
+
+
+def _version_text(title: str) -> str:
+    match = re.match(r"^(.*?)\s*(?:\s-\s|\(|\[)(.*)$", str(title or ""))
+    return match.group(2) if match else ""
+
+
+def _same_song_title(wanted: str, candidate: str) -> bool:
+    """Exact title, or the same title where the only difference is a remaster
+    label ("X - Remastered 1996" vs "X"). Live takes, edits and remixes stay
+    different songs."""
+    if _norm(wanted) == _norm(candidate):
+        return True
+    wanted_base, _ = _split_version(wanted)
+    candidate_base, _ = _split_version(candidate)
+    if not wanted_base or wanted_base != candidate_base:
+        return False
+    labels = [text for text in (_version_text(wanted), _version_text(candidate)) if text]
+    return bool(labels) and all(_is_remaster_label(text) for text in labels)
+
+
+def _musicbrainz_isrc_title(isrc: str) -> str:
+    try:
+        from music_metadata import get_json
+        data = get_json(f"https://musicbrainz.org/ws/2/isrc/{urllib.parse.quote(isrc)}?fmt=json")
     except Exception:
-        pass
+        return ""
+    recordings = data.get("recordings") or []
+    return str(recordings[0].get("title") or "") if recordings else ""
+
+
+def _musicbrainz_isrc_recordings(isrc: str) -> list[dict]:
+    try:
+        from music_metadata import get_json
+        data = get_json(f"https://musicbrainz.org/ws/2/isrc/{urllib.parse.quote(isrc)}?fmt=json&inc=artist-credits%2Bisrcs")
+        return [row for row in data.get("recordings", []) if isinstance(row, dict)]
+    except Exception:
+        return []
+
+
+def _select_equivalent_recording_item(items: list[dict], title: str, artist: str,
+                                      isrc: str, duration_ms: float) -> dict | None:
+    """Different catalog ISRCs can identify the exact same recording.
+
+    A shared MusicBrainz recording ID, performer and compatible durations is
+    stronger evidence than version-label spelling (7-inch/single/remaster).
+    """
+    if not isrc or not duration_ms:
+        return None
+    base = _split_version(title)[0]
+    requested = {row.get("id"): row for row in _musicbrainz_isrc_recordings(isrc)
+                 if row.get("id") and _split_version(row.get("title", ""))[0] == base
+                 and _same_artist(artist, [credit.get("name") or (credit.get("artist") or {}).get("name")
+                     for credit in row.get("artist-credit", []) if isinstance(credit, dict)])
+                 and _duration_ms(row) and abs(_duration_ms(row) - duration_ms) <= 10000}
+    if not requested:
+        return None
+    for candidate in sorted(items, key=lambda row: abs(_duration_ms(row) - duration_ms)):
+        if (not candidate.get("isrc") or not _same_artist(artist, _artists(candidate))
+                or _split_version(candidate.get("title", ""))[0] != base or not _duration_ms(candidate)):
+            continue
+        for recording in _musicbrainz_isrc_recordings(str(candidate["isrc"])):
+            if (recording.get("id") in requested and _duration_ms(recording)
+                    and abs(_duration_ms(recording) - _duration_ms(candidate)) <= 10000):
+                return {**candidate, "_original_recording_id": recording["id"], "_recording_match_kind": "same_recording"}
     return None
 
-def _fetch_dab(track_id: str, qid: str) -> str | None:
-    from curl_cffi import requests as _requests
-    # Expanded list of mirrors and subdomains
-    endpoints = [
-        ("Kennyy",    "https://qobuz.kennyy.com.br/api/download-music", f"?track_id={track_id}&quality={qid}"),
-        ("Squid US",  "https://us.qobuz.squid.wtf/api/download-music", f"?trackId={track_id}&quality={qid}"),
-        ("Squid FR",  "https://fr.qobuz.squid.wtf/api/download-music", f"?trackId={track_id}&quality={qid}"),
-        ("Squid DE",  "https://de.qobuz.squid.wtf/api/download-music", f"?trackId={track_id}&quality={qid}"),
-        ("Squid",     "https://qobuz.squid.wtf/api/download-music", f"?trackId={track_id}&quality={qid}"),
-        ("DAB Yeet",  "https://dab.yeet.su/api/stream", f"?trackId={track_id}&quality={qid}"),
-        ("DAB Music", "https://dabmusic.xyz/api/stream", f"?trackId={track_id}&quality={qid}"),
-    ]
-    for name, base, params in endpoints:
-        try:
-            url = base + params
-            # chrome120 impersonation is quite strong against CF
-            resp = _requests.get(url, headers=_get_headers(), impersonate="chrome120", timeout=60)
-            if resp.status_code == 200:
-                u = _extract_qobuz_stream_url(resp.content)
-                if u: return u
-        except Exception: continue
+
+def _select_original_album_item(items: list[dict], title: str, artist: str,
+                                isrc: str, duration_ms: float) -> dict | None:
+    """Last resort for an unlabelled compilation edit: verify the studio album
+    recording through MusicBrainz instead of guessing an ISRC or widening the
+    normal exact-version matcher. Explicit remixes/live takes stay distinct.
+    """
+    if not isrc or not duration_ms or _split_version(title)[1]:
+        return None
+    requested = _musicbrainz_isrc_recordings(isrc)
+    if not requested:
+        return None
+    requested = sorted(requested, key=lambda row: abs(_duration_ms(row) - duration_ms) if _duration_ms(row) else float("inf"))
+    official = requested[0]
+    credits = [credit.get("name") or (credit.get("artist") or {}).get("name")
+               for credit in official.get("artist-credit", []) if isinstance(credit, dict)]
+    if not _same_artist(artist, credits) or not _same_song_title(title, official.get("title") or "") or re.search(
+        r"\b(remix|live|edit|extended|acoustic|instrumental|radio)\b",
+        str(official.get("disambiguation") or ""), re.I,
+    ):
+        return None
+    candidates = [row for row in items if
+        _same_song_title(title, row.get("title") or "")
+        and _same_artist(artist, _artists(row)) and row.get("isrc")
+        and _duration_ms(row) and abs(_duration_ms(row) - duration_ms) <= max(15000, duration_ms * 0.08)]
+    candidates.sort(key=lambda row: abs(_duration_ms(row) - duration_ms))
+    checked = set()
+    for candidate in candidates:
+        candidate_isrc = str(candidate["isrc"]).strip().upper()
+        if candidate_isrc in checked:
+            continue
+        checked.add(candidate_isrc)
+        for recording in _musicbrainz_isrc_recordings(candidate_isrc):
+            credits = [credit.get("name") or (credit.get("artist") or {}).get("name")
+                       for credit in recording.get("artist-credit", []) if isinstance(credit, dict)]
+            if (_norm(recording.get("disambiguation")) == "original album version"
+                    and _same_song_title(title, recording.get("title") or "")
+                    and _same_artist(artist, credits)
+                    and _duration_ms(recording)
+                    and abs(_duration_ms(recording) - _duration_ms(candidate)) <= 5000):
+                return {**candidate, "_original_recording_id": recording.get("id", "")}
     return None
+
+
+def _recording_details(recording_id: str) -> dict:
+    try:
+        from music_metadata import get_json
+        return get_json(f"https://musicbrainz.org/ws/2/recording/{urllib.parse.quote(recording_id)}?fmt=json&inc=artist-credits%2Bisrcs%2Bwork-rels%2Breleases%2Brelease-groups")
+    except Exception:
+        return {}
+
+
+def _select_compilation_album_item(items: list[dict], title: str, artist: str,
+                                   isrc: str, duration_ms: float) -> dict | None:
+    """A shortened compilation cut may use the verified studio-album take.
+
+    Require the same performer and musical work, matching provider/recording
+    durations, and a non-compilation studio album release. Never infer this
+    mapping from title similarity or a broad duration window alone.
+    """
+    forbidden = re.compile(r"\b(remix|live|demo|acoustic|instrumental|karaoke|re.?recorded)\b", re.I)
+    if not isrc or not duration_ms or _version_text(title):
+        return None
+
+    def credits(recording):
+        return [row.get("name") or (row.get("artist") or {}).get("name")
+                for row in recording.get("artist-credit", []) if isinstance(row, dict)]
+
+    def works(recording):
+        return {(row.get("work") or {}).get("id") for row in recording.get("relations", [])
+                if row.get("type") == "performance" and (row.get("work") or {}).get("id")}
+
+    source_work_ids = set()
+    requested = sorted(_musicbrainz_isrc_recordings(isrc), key=lambda row: abs(_duration_ms(row) - duration_ms) if _duration_ms(row) else float("inf"))
+    for recording in requested:
+        text = f"{recording.get('title', '')} {recording.get('disambiguation', '')}"
+        if (forbidden.search(text) or _split_version(recording.get("title", ""))[0] != _norm(title)
+                or not _same_artist(artist, credits(recording)) or not recording.get("id")):
+            continue
+        # Confirm the metadata identifies this selected edit, not a conflicting
+        # entry sharing an ISRC. A missing duration cannot establish the edit.
+        if not _duration_ms(recording) or abs(_duration_ms(recording) - duration_ms) > 10000:
+            continue
+        source_work_ids.update(works(_recording_details(recording["id"])))
+    if not source_work_ids:
+        return None
+
+    candidates = [row for row in items if _same_song_title(title, row.get("title", ""))
+                  and _same_artist(artist, _artists(row)) and row.get("isrc") and _duration_ms(row)
+                  and abs(_duration_ms(row) - duration_ms) <= max(120000, duration_ms * 0.5)]
+    candidates.sort(key=lambda row: abs(_duration_ms(row) - duration_ms))
+    checked = set()
+    for candidate in candidates:
+        candidate_isrc = str(candidate["isrc"]).upper()
+        if candidate_isrc in checked:
+            continue
+        checked.add(candidate_isrc)
+        for recording in _musicbrainz_isrc_recordings(candidate_isrc):
+            text = f"{recording.get('title', '')} {recording.get('disambiguation', '')}"
+            if (forbidden.search(text) or re.search(r"\b(edit|short|radio|single)\b", text, re.I)
+                    or not _same_artist(artist, credits(recording))
+                    or not _same_song_title(title, recording.get("title", ""))
+                    or not _duration_ms(recording)
+                    or abs(_duration_ms(recording) - _duration_ms(candidate)) > 5000):
+                continue
+            detail = _recording_details(recording.get("id", ""))
+            if not (works(detail) & source_work_ids):
+                continue
+            albums = [release for release in detail.get("releases", [])
+                      if (release.get("release-group") or {}).get("primary-type") == "Album"
+                      and not set((release.get("release-group") or {}).get("secondary-types", [])) & {"Compilation", "Live", "Remix"}]
+            if albums:
+                return {**candidate, "_original_recording_id": recording["id"], "_source_album": albums[0].get("title", "")}
+    return None
+
+
+def _select_named_version(items: list[dict], title: str, artist: str, isrc: str,
+                          duration_ms: float) -> dict | None:
+    """Spotify sometimes drops a version name: its "Missing" on a compilation is
+    the Todd Terry remix radio edit (ISRC GBAHT9601125), while Monochrome lists
+    "Missing" (the 4:07 original) and "Missing - Todd Terry Remix" (3:56).
+    MusicBrainz names the recording behind the ISRC, so a Monochrome version is
+    accepted only when its label shares a distinctive word with that name and
+    its length agrees; a remix is never picked on length alone.
+    """
+    if not isrc or not duration_ms:
+        return None
+    official = _musicbrainz_isrc_title(isrc)
+    official_base, official_words = _split_version(official)
+    if not official_words or official_base != _split_version(title)[0]:
+        return None
+    best = None
+    for item in items:
+        if artist and not _same_artist(artist, _artists(item)):
+            continue
+        base, words = _split_version(item.get("title") or "")
+        if base != official_base or not (words & official_words):
+            continue
+        gap = abs(_duration_ms(item) - duration_ms) if _duration_ms(item) else None
+        if gap is None or gap > _SAME_RECORDING_DURATION_MS:
+            continue
+        if best is None or gap < best[0]:
+            best = (gap, item)
+    return best[1] if best else None
+
+
+def _resolve_version(items: list[dict], match: dict | None, title: str, artist: str,
+                     isrc: str, duration_ms: float) -> tuple[dict | None, str]:
+    """Final pick when the results include remixes of this song.
+
+    An exact ISRC hit is definitive. Otherwise, if any result is a version of
+    the same title (a remix/edit), ask MusicBrainz what the ISRC really is: an
+    unlabelled Spotify remix must not play as the original. Returns
+    (match, reason-if-refused).
+    """
+    if match is not None and isrc and _norm(match.get("isrc")) == _norm(isrc):
+        return match, ""
+    wanted = _split_version(title)[0]
+    has_version = any(
+        (not artist or _same_artist(artist, _artists(item)))
+        and _split_version(item.get("title") or "")[0] == wanted
+        and _split_version(item.get("title") or "")[1]
+        for item in items
+    )
+    if not has_version and match is not None:
+        return match, ""
+    if not isrc:
+        return match, ""
+    _base, official_words = _split_version(_musicbrainz_isrc_title(isrc))
+    if not official_words:
+        return match, ""  # MusicBrainz names the plain song: keep the original
+    version = _select_named_version(items, title, artist, isrc, duration_ms)
+    if version is not None:
+        return version, ""
+    return None, "the requested version (per MusicBrainz) is not on Monochrome"
+
+
+def _search_items(requests_module, query: str, limit: int = 50, *, api_base: str | None = None,
+                  site_origin: str | None = None) -> list[dict]:
+    api_base = api_base or _INSTANCES[0][0]
+    site_origin = site_origin or _INSTANCES[0][1]
+    response = requests_module.get(
+        f"{api_base}/search/tracks",
+        params={"q": query, "limit": max(1, min(int(limit), 100))},
+        headers=_headers(site_origin),
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    tracks = payload.get("tracks", []) if isinstance(payload, dict) else []
+    return [item for item in tracks if isinstance(item, dict)]
+
 
 def run(output_dir: Path, job: dict, manager) -> None:
-    import requests as _requests
+    import requests
     from service_downloader import is_valid_audio_file
 
-    isrc = job.get("isrc") or (job.get("metadata") or {}).get("isrc") or ""
-    quality_str = str(job.get("quality") or "27")
-    fmt = "mp3" if quality_str == "5" else "flac"
-    ext = ".mp3" if fmt == "mp3" else ".flac"
-    mode = job.get("mode", "stream")
+    if job.get("mode") == "download":
+        blocked = stream_block_reason()
+        if blocked:
+            raise RuntimeError(blocked)
+    title = str(job.get("title") or "Unknown").strip()
+    artist = str(job.get("artist") or "Unknown").strip()
+    metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    isrc = str(job.get("isrc") or metadata.get("isrc") or "").strip()
+    duration_ms = _duration_ms(metadata)
+    # Try the stable recording identifier first. The search endpoint accepts
+    # arbitrary text, so querying ISRC can find a recording even when its title
+    # or artist spelling differs from Spotify's metadata. Fall back to text for
+    # catalogs that do not index ISRCs.
+    queries = []
+    if isrc:
+        queries.append(isrc)
+    text_query = f"{title} {artist}".strip()
+    if text_query and text_query.casefold() not in {query.casefold() for query in queries}:
+        queries.append(text_query)
 
-    title = job.get("title") or "Unknown"
-    artist = job.get("artist") or "Unknown"
-    query = isrc if isrc else f"{title} {artist}"
-
-    if mode == "stream":
-        label = f"ISRC {isrc}" if isrc else f"{title} – {artist}"
-        manager._append_cache_event(job, "trying", f"Looking up {label} via DAB/Squid...")
-
-    selected = None
-    all_returned_items = []
-    
-    items = _search_items(_requests, query, offset=0)
-    all_returned_items.extend(items)
-    selected = _select_matching_item(items, title, artist, isrc)
-    
-    if selected is None and isrc:
-        fallback_items = _search_items(_requests, f"{title} {artist}", offset=0)
-        all_returned_items.extend(fallback_items)
-        selected = _select_matching_item(fallback_items, title, artist, isrc)
-    
-    if selected is None:
-        deep_items = _search_items(_requests, query, offset=10)
-        all_returned_items.extend(deep_items)
-        selected = _select_matching_item(deep_items, title, artist, isrc)
-
-    if not selected:
-        returned_artists = sorted({_candidate_artist(item) for item in all_returned_items if _candidate_artist(item)})
-        details = f"; returned: {', '.join(returned_artists[:5])}" if returned_artists else ""
-        raise RuntimeError(f"DAB/Squid: no matching track for {title!r}{details}")
-
-    # Ensure track_id is a raw string/number as expected by proxies
-    track_id_val = str(selected["id"])
-
-    if mode == "stream":
-        manager._append_cache_event(job, "trying", f"Fetching stream URL for ID {track_id_val}...")
-
-    qid = "27" if quality_str == "27" else "7" if quality_str == "7" else "6"
-    stream_url = _fetch_dab(track_id_val, qid)
-
-    if not stream_url:
-        raise RuntimeError("DAB and Squid proxies failed to provide a stream URL (Captcha required)")
+    if job.get("mode", "stream") == "stream":
+        manager._append_cache_event(job, "trying", f"Searching Monochrome for {title} — {artist}…")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    part_path = output_dir / f"{title} - {artist}{ext}.part"
-    final_path = output_dir / f"{title} - {artist}{ext}"
+    final_path = output_dir / f"{title} - {artist}.flac"
+    part_path = final_path.with_suffix(final_path.suffix + ".part")
+    failures = []
+    stream_url = ""
+    selected = None
+    for api_base, site_origin in _INSTANCES:
+        try:
+            items = []
+            match = None
+            search_errors = []
+            for query in queries:
+                try:
+                    found = _search_items(requests, query, api_base=api_base, site_origin=site_origin)
+                    items.extend(found)
+                    match = _select_matching_item(items, title, artist, isrc, duration_ms)
+                    # Stop early only on a definitive ISRC hit; otherwise run
+                    # the title search too, which is what surfaces remixes the
+                    # version check below must see.
+                    if match is not None and (not isrc or _norm(match.get("isrc")) == _norm(isrc)):
+                        break
+                except Exception as exc:
+                    search_errors.append(f"query {query!r}: {exc}")
+            normalized_query = f"{_norm(title)} {_norm(artist)}".strip()
+            if match is None and normalized_query and normalized_query != text_query.casefold():
+                # Catalog search is occasionally inconsistent around leading
+                # ellipses, quotes and punctuation. Retry a token-only query;
+                # selection still requires the same recording identity.
+                try:
+                    items.extend(_search_items(requests, normalized_query, api_base=api_base, site_origin=site_origin))
+                    match = _select_matching_item(items, title, artist, isrc, duration_ms)
+                except Exception as exc:
+                    search_errors.append(f"normalized query: {exc}")
+            refused = ""
+            if items:
+                match, refused = _resolve_version(items, match, title, artist, isrc, duration_ms)
+                if match is None:
+                    match = _select_equivalent_recording_item(items, title, artist, isrc, duration_ms)
+                if match is None:
+                    match = _select_original_album_item(items, title, artist, isrc, duration_ms)
+                if match is None and (metadata.get("is_compilation") or str(metadata.get("album_artist") or "").casefold() in {"various artists", "various", "vários artistas"}):
+                    match = _select_compilation_album_item(items, title, artist, isrc, duration_ms)
+            if match is None:
+                detail = (f"search failed ({'; '.join(search_errors)})" if search_errors
+                          else refused or _alternate_recording_reason(items, title, artist)
+                          or "no exact ISRC or title/artist match")
+                failures.append(f"{api_base}: {detail}")
+                continue
 
-    with _requests.get(stream_url, headers=_get_headers(), stream=True, timeout=600) as cdn_resp:
-        cdn_resp.raise_for_status()
-        total = int(cdn_resp.headers.get("Content-Length") or 0)
-        downloaded = 0
-        with open(part_path, "wb") as f:
-            for chunk in cdn_resp.iter_content(chunk_size=65536):
-                if job["id"] in manager._cancel_flags:
-                    part_path.unlink(missing_ok=True)
-                    raise RuntimeError("Download cancelled")
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
+            track_id = str(match.get("trackId") or match.get("id") or "").strip()
+            if not track_id.isdigit():
+                failures.append(f"{api_base}: invalid track ID")
+                continue
+            candidate_url = f"{api_base}/track/{urllib.parse.quote(track_id, safe='')}"
+            with manager._lock:
+                job["source_recording"] = {
+                    "title": str(match.get("title") or title), "artist": " / ".join(_artists(match)) or artist,
+                    "isrc": str(match.get("isrc") or isrc), "duration_ms": _duration_ms(match),
+                    "album": str(match.get("_source_album") or ""),
+                    # A compilation Spotify ID does not identify fallback audio.
+                    "spotify_id": "" if match.get("_original_recording_id") else str(metadata.get("spotify_id") or ""),
+                }
+            if match.get("_original_recording_id"):
+                # Keep the requested Spotify edition as provenance while the
+                # actual audio is tagged and timed as the verified album take.
+                resolved_isrc = str(match.get("isrc") or "").upper()
+                with manager._lock:
+                    job["recording_match"] = {"kind": match.get("_recording_match_kind", "original_album"), "requested_isrc": isrc,
+                        "resolved_isrc": resolved_isrc, "requested_duration_ms": duration_ms,
+                        "duration_ms": _duration_ms(match), "source_album": match.get("_source_album", "")}
+                    job["isrc"] = resolved_isrc
+                    job["metadata"] = {**metadata, "requested_isrc": isrc, "isrc": resolved_isrc,
+                        "requested_duration_ms": duration_ms, "duration_ms": _duration_ms(match),
+                        "source_album": match.get("_source_album", ""), "source_isrc": resolved_isrc,
+                        "musicbrainz_recording_id": match["_original_recording_id"]}
+                message = ("Matched the same verified recording under its catalog ISRC" if match.get("_recording_match_kind") == "same_recording"
+                           else "Compilation edition unavailable; using verified original album version")
+                manager._append_cache_event(job, "provider", f"{message} (ISRC {resolved_isrc})")
+            if job.get("mode", "stream") == "stream":
+                manager._append_cache_event(job, "provider",
+                    f"Monochrome matched {match.get('title')} — {' / '.join(_artists(match))} at {site_origin}; streaming directly")
+                with manager._lock:
+                    job["resolved_url"] = candidate_url
+                    job["direct_stream"] = True
+                    job["active_stream_origin"] = site_origin
+                    job["progress"] = 100
+                    job["status"] = "finished"
+                    job["last_status"] = "Streaming directly from Monochrome"
+                return
+
+            # Download through the same shared HTTP/2 fetch the native player
+            # streams from (native_audio._MonochromeFetch). Saving a track that
+            # is already playing reuses its bytes instead of requesting it
+            # again; otherwise it is one request with at most a couple of
+            # resumes, never the retry storm that trips the per-IP rate limit.
+            import shutil
+            import native_audio
+
+            fetch = native_audio._monochrome_fetch(candidate_url, pin=True)
+            try:
+                while True:
+                    if job["id"] in manager._cancel_flags:
+                        raise RuntimeError("Download cancelled")
+                    with fetch.condition:
+                        if not (fetch.done or fetch.error or fetch.cancelled.is_set()):
+                            fetch.condition.wait(timeout=0.5)
+                        size, total, done, error = fetch.size, fetch.total, fetch.done, fetch.error
                     with manager._lock:
-                        job["progress"] = min(95, int(downloaded / total * 95))
+                        job["active_audio_path"] = str(fetch.path)
+                        job["active_audio_size"] = total
+                        job["active_audio_ready_bytes"] = size
+                        if total:
+                            job["progress"] = min(95, int(size * 95 / total))
+                    if error:
+                        raise RuntimeError(error)
+                    if fetch.cancelled.is_set():
+                        raise RuntimeError("download was interrupted")
+                    if done:
+                        break
+                shutil.copyfile(fetch.path, part_path)
+                if not is_valid_audio_file(part_path):
+                    raise RuntimeError("response was not a valid FLAC file")
+                decode_error = _decode_error(part_path)
+                if decode_error:
+                    raise RuntimeError(f"downloaded FLAC is damaged ({decode_error})")
+                part_path.replace(final_path)
+                with manager._lock:
+                    job["active_audio_path"] = str(final_path)
+                    job["active_audio_size"] = final_path.stat().st_size
+                    job["active_audio_ready_bytes"] = final_path.stat().st_size
+                selected = match
+                stream_url = candidate_url
+                break
+            except Exception as exc:
+                part_path.unlink(missing_ok=True)
+                with manager._lock:
+                    if job.get("active_audio_path") in (str(part_path), str(fetch.path)):
+                        job["active_audio_path"] = ""
+                        job["active_audio_ready_bytes"] = 0
+                        job["active_audio_size"] = 0
+                if str(exc) == "Download cancelled":
+                    raise
+                failures.append(f"{api_base}: download failed ({exc})")
+            finally:
+                native_audio._release_monochrome_fetch(fetch)
+        except Exception as exc:
+            if str(exc) == "Download cancelled":
+                raise
+            failures.append(f"{api_base}: {exc}")
+    if selected is None:
+        raise RuntimeError("Monochrome official instances failed: " + "; ".join(failures))
 
-    part_path.rename(final_path)
-    if not is_valid_audio_file(final_path):
-        final_path.unlink(missing_ok=True)
-        raise RuntimeError("Downloaded file is not valid audio")
+    with manager._lock:
+        job["progress"] = 100
+        job["resolved_url"] = stream_url
+        job["last_status"] = "FLAC downloaded from Monochrome"
+    manager._append_cache_event(job, "provider", f"Monochrome download completed: {final_path.name}")

@@ -17,6 +17,7 @@ import urllib.request
 import logging
 import rapidfuzz
 import re
+import contextlib
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,10 +90,60 @@ def format_duration_ms(milliseconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+_musicbrainz_gate = threading.Condition()
+_musicbrainz_last_request = 0.0
+_musicbrainz_priority_waiting = 0
+_musicbrainz_priority = threading.local()
+
+
+@contextlib.contextmanager
+def musicbrainz_priority():
+    """Mark MusicBrainz requests made inside as interactive (someone is
+    waiting on a page). They go ahead of background enrichment in the gate."""
+    previous = getattr(_musicbrainz_priority, "on", False)
+    _musicbrainz_priority.on = True
+    try:
+        yield
+    finally:
+        _musicbrainz_priority.on = previous
+
+
+def musicbrainz_throttle() -> None:
+    """Space every MusicBrainz request in the process at least 1.1 s apart.
+
+    MusicBrainz allows one request per second per client and answers bursts
+    with 503. Metadata enrichment, the music-video lookup and page loads all
+    share this one gate. Background work queues behind it, so an album page
+    would otherwise wait for every queued enrichment request (tens of
+    seconds); requests under musicbrainz_priority() are served first.
+    """
+    global _musicbrainz_last_request, _musicbrainz_priority_waiting
+    priority = getattr(_musicbrainz_priority, "on", False)
+    with _musicbrainz_gate:
+        if priority:
+            _musicbrainz_priority_waiting += 1
+        try:
+            while True:
+                if not priority and _musicbrainz_priority_waiting:
+                    _musicbrainz_gate.wait(0.25)
+                    continue
+                wait = 1.1 - (time.monotonic() - _musicbrainz_last_request)
+                if wait <= 0:
+                    break
+                _musicbrainz_gate.wait(wait)
+            _musicbrainz_last_request = time.monotonic()
+        finally:
+            if priority:
+                _musicbrainz_priority_waiting -= 1
+            _musicbrainz_gate.notify_all()
+
+
 @functools.lru_cache(maxsize=1024)
 def get_json(url: str, timeout: int = 10) -> dict:
-    # Respectful delay for MusicBrainz
-    time.sleep(0.5)
+    if "musicbrainz.org" in url:
+        musicbrainz_throttle()
+    else:
+        time.sleep(0.5)  # Respectful delay for the other metadata services
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -158,7 +209,7 @@ def _get_spotify_client(force_refresh: bool = False):
         if _spotify_client_cache is not None:
             return _spotify_client_cache if _spotify_client_cache is not False else None
         try:
-            from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
+            from mornye_bridge import SpotifyMetadataClient  # type: ignore
             _spotify_client_cache = SpotifyMetadataClient()
             return _spotify_client_cache
         except ImportError as exc:
@@ -238,6 +289,9 @@ def _legacy_track_item(item: object) -> dict:
         normalized = dict(item)
         normalized["name"] = _metadata_text(item.get("name"))
         normalized["id"] = _metadata_text(item.get("id"))
+        normalized["uri"] = _metadata_text(item.get("uri")) or (
+            f"spotify:track:{normalized['id']}" if normalized["id"] else ""
+        )
         normalized["external_urls"] = dict(item.get("external_urls") or {})
         normalized["external_ids"] = dict(item.get("external_ids") or {})
         album = dict(item.get("album") or {})
@@ -261,14 +315,27 @@ def _legacy_track_item(item: object) -> dict:
         return normalized
     artist_names = [name.strip() for name in _metadata_text(getattr(item, "artists", "")).split(",") if name.strip()]
     cover_url = _metadata_text(getattr(item, "cover_url", ""))
+    album_id = _metadata_text(getattr(item, "album_id", ""))
+    album_artist = _metadata_text(getattr(item, "album_artist", ""))
+    artists_data = getattr(item, "artists_data", []) or []
+    artist_ids = {str(row.get("name", "")): row.get("id", "") for row in artists_data if isinstance(row, dict)}
     return {
         "id": _metadata_text(getattr(item, "id", "")),
+        "uri": _metadata_text(getattr(item, "uri", "")) or (
+            f"spotify:track:{_metadata_text(getattr(item, 'id', ''))}"
+            if _metadata_text(getattr(item, "id", "")) else ""
+        ),
         "name": _metadata_text(getattr(item, "title", "")),
-        "artists": [{"name": name} for name in artist_names],
+        "artists": [{"name": name, **({"id": artist_ids.get(name) or getattr(item, "artist_id", "")} if artist_ids.get(name) or (len(artist_names) == 1 and getattr(item, "artist_id", "")) else {})} for name in artist_names],
         "album": {
             "name": _metadata_text(getattr(item, "album", "")),
+            "id": album_id,
+            "release_date": _metadata_text(getattr(item, "release_date", "")),
             "images": [{"url": cover_url}] if cover_url else [],
+            "artists": [{"name": name.strip()} for name in album_artist.split(",") if name.strip()],
         },
+        "track_number": getattr(item, "track_number", 0),
+        "disc_number": getattr(item, "disc_number", 1),
         "duration_ms": getattr(item, "duration_ms", 0) or 0,
         "external_urls": {"spotify": _metadata_text(getattr(item, "external_url", ""))},
         "external_ids": {"isrc": _metadata_text(getattr(item, "isrc", ""))},
@@ -429,8 +496,12 @@ def _spotify_track_playcount(track_id: str, force_refresh: bool = False) -> int:
         try:
             from spotiflac_compat import call_sync_or_async
 
-            track = call_sync_or_async(client, "get_track", "get_track_async", track_id)
-            raw_plays = track.get("plays") if isinstance(track, dict) else getattr(track, "plays", 0)
+            if callable(getattr(client, "get_track_playcount_async", None)):
+                from spotiflac_compat import run_async_blocking
+                raw_plays = run_async_blocking(client.get_track_playcount_async(track_id))
+            else:
+                track = call_sync_or_async(client, "get_track", "get_track_async", track_id)
+                raw_plays = track.get("plays") if isinstance(track, dict) else getattr(track, "plays", 0)
             playcount = _numeric_plays(raw_plays)
         except Exception:
             playcount = 0
@@ -484,12 +555,36 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
             cached = _spotify_search_results_cache.get(key)
             if cached is not None:
                 _spotify_search_results_cache.move_to_end(key)
-                return {name: list(values) for name, values in cached.items()}
+                return {name: (dict(values) if isinstance(values, dict) else list(values)) for name, values in cached.items()}
 
     client = _get_spotify_client(force_refresh=force_refresh)
     if not client:
         return {"tracks": [], "albums": [], "artists": [], "playlists": []}
     results = {}
+    web_client = getattr(client, "web_client", None)
+    payload_builder = getattr(client, "_search_payload", None)
+    if web_client and payload_builder:
+        try:
+            data = web_client.query(payload_builder(query, limit))
+            search_v2 = data.get("data", {}).get("searchV2", {})
+        except Exception:
+            search_v2 = {}
+        if search_v2:
+            normalized = {
+                "tracks": _raw_search_track_items(search_v2),
+                "albums": _raw_search_simple_items(search_v2, "album"),
+                "artists": _raw_search_simple_items(search_v2, "artist"),
+                "playlists": [],
+                "rank": _raw_search_rank(search_v2),
+                "queries": _raw_search_queries(search_v2),
+            }
+            with _spotify_search_results_cache_lock:
+                _spotify_search_results_cache[key] = {name: (dict(values) if isinstance(values, dict) else tuple(values)) for name, values in normalized.items()}
+                _spotify_search_results_cache.move_to_end(key)
+                while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
+                    _spotify_search_results_cache.popitem(last=False)
+            return normalized
+
     try:
         from spotiflac_compat import call_sync_or_async
 
@@ -514,29 +609,6 @@ def _spotify_search_results(query: str, limit: int = 20, force_refresh: bool = F
             return normalized
     except Exception:
         pass
-
-    web_client = getattr(client, "web_client", None)
-    payload_builder = getattr(client, "_search_payload", None)
-    if web_client and payload_builder:
-        try:
-            data = web_client.query(payload_builder(query, limit))
-            search_v2 = data.get("data", {}).get("searchV2", {})
-        except Exception:
-            search_v2 = {}
-        if search_v2:
-            normalized = {
-                "tracks": list(results.get("tracks", []) or []) or _raw_search_track_items(search_v2),
-                "albums": _raw_search_simple_items(client, query, limit, "album"),
-                "artists": _raw_search_simple_items(client, query, limit, "artist"),
-                "playlists": [],
-            }
-            if any(normalized.values()):
-                with _spotify_search_results_cache_lock:
-                    _spotify_search_results_cache[key] = {name: tuple(values) for name, values in normalized.items()}
-                    _spotify_search_results_cache.move_to_end(key)
-                    while len(_spotify_search_results_cache) > _SPOTIFY_SEARCH_RESULTS_CACHE_SIZE:
-                        _spotify_search_results_cache.popitem(last=False)
-            return normalized
 
     normalized = {
         "tracks": list(results.get("tracks", []) or []),
@@ -587,6 +659,28 @@ def _raw_search_track_items(search: dict) -> list[dict]:
     return tracks
 
 
+def _raw_search_rank(search: dict) -> dict[str, int]:
+    """Map Spotify entity IDs to their mixed top-results position."""
+    rank = {}
+    section = search.get("topResultsV2") or {}
+    for index, wrapper in enumerate(section.get("itemsV2", []) or []):
+        item = wrapper.get("item", {})
+        node = item.get("data", {})
+        uri = _metadata_text(node.get("uri"))
+        if uri and not uri.startswith("spotify:search:"):
+            rank[uri.rsplit(":", 1)[-1]] = index
+    return rank
+
+
+def _raw_search_queries(search: dict) -> list[dict]:
+    queries = []
+    for wrapper in (search.get("topResultsV2") or {}).get("itemsV2", []) or []:
+        node = wrapper.get("item", {}).get("data", {})
+        if wrapper.get("item", {}).get("__typename") == "SearchAutoCompleteEntity" and node.get("text"):
+            queries.append({"type": "query", "title": str(node["text"]), "query": str(node["text"]), "spotify_url": str(node.get("uri") or "")})
+    return queries
+
+
 def _best_artist_search_match(artist_name: str, items: list[dict]) -> dict:
     if not items:
         return {}
@@ -609,15 +703,7 @@ def _best_artist_search_match(artist_name: str, items: list[dict]) -> dict:
     return items[0] if items else {}
 
 
-def _raw_search_simple_items(client: object, query: str, limit: int, kind: str) -> list[dict]:
-    web_client = getattr(client, "web_client", None)
-    payload_builder = getattr(client, "_search_payload", None)
-    if not web_client or not payload_builder:
-        return []
-    try:
-        search = web_client.query(payload_builder(query, limit)).get("data", {}).get("searchV2", {})
-    except Exception:
-        return []
+def _raw_search_simple_items(search: dict, kind: str) -> list[dict]:
     section = search.get("albumsV2" if kind == "album" else "artists", {})
     results = []
     for wrapper in section.get("items", []):
@@ -640,10 +726,13 @@ def _raw_search_simple_items(client: object, query: str, limit: int, kind: str) 
                 "external_url": f"https://open.spotify.com/album/{spotify_id}",
             })
         else:
+            cover_url = _best_raw_image((node.get("visualIdentity") or {}).get("squareCoverImage", {}))
+            if not cover_url:
+                cover_url = _best_raw_image((node.get("visuals") or {}).get("avatarImage", {}))
             results.append({
                 "id": spotify_id,
                 "name": node.get("profile", {}).get("name", node.get("name", "")),
-                "cover_url": _best_raw_image((node.get("visualIdentity") or {}).get("squareCoverImage", {})),
+                "cover_url": cover_url,
                 "external_url": f"https://open.spotify.com/artist/{spotify_id}",
             })
     return results
@@ -766,6 +855,25 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
             "artists": {"items": [_legacy_simple_item(item, "artist") for item in artists]},
         }
 
+    track_match = re.fullmatch(r"tracks/([^/]+)", endpoint)
+    if track_match and (
+        hasattr(client, "get_track") or hasattr(client, "get_track_async")
+    ):
+        track = call_sync_or_async(
+            client, "get_track", "get_track_async", track_match.group(1)
+        )
+        normalized = _legacy_track_item(track)
+        return {
+            "id": normalized.get("id", track_match.group(1)),
+            "uri": normalized.get("uri", ""),
+            "name": normalized.get("name", ""),
+            "artists": normalized.get("artists", []),
+            "album": normalized.get("album", {}),
+            "duration_ms": normalized.get("duration_ms", 0),
+            "external_urls": normalized.get("external_urls", {}),
+            "external_ids": normalized.get("external_ids", {}),
+        }
+
     playlist_match = re.fullmatch(r"playlists/([^/]+)/tracks", endpoint)
     if playlist_match:
         playlist_result = call_sync_or_async(
@@ -781,11 +889,16 @@ def _public_client_get(client: object, endpoint: str, params: dict) -> dict:
             client, "get_album_tracks", "get_album_tracks_async", album_match.group(1)
         )
         cover_url = info.get("cover_url", "")
+        album_artists = info.get("artist") or info.get("artists") or (getattr(tracks[0], "album_artist", "") if tracks else "")
+        if isinstance(album_artists, str):
+            album_artists = [name.strip() for name in album_artists.split(",") if name.strip()]
+        if not album_artists and tracks:
+            album_artists = _track_artist_names(tracks[0])
         return {
             "id": album_match.group(1),
             "name": info.get("name", ""),
             "release_date": info.get("release_date", ""),
-            "artists": [{"name": name} for name in _track_artist_names(tracks[0])] if tracks else [],
+            "artists": [{"name": name} if isinstance(name, str) else name for name in (album_artists or [])],
             "images": [{"url": cover_url}] if cover_url else [],
             "tracks": {"items": [_legacy_track_item(item) for item in tracks]},
         }
@@ -1200,17 +1313,30 @@ def get_alternative_albums_hierarchical(artist: str, title: str) -> list[str]:
         return get_alternative_albums(artist, title)
 
 
+def _spotify_track_id(value: object) -> str:
+    """Extract a Spotify track ID from an ID, URI, or canonical web URL."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(?:spotify:track:|/track/)([A-Za-z0-9]+)", text)
+    if match:
+        return match.group(1)
+    return text if re.fullmatch(r"[A-Za-z0-9]{22}", text) else ""
+
+
 def enrich_track_identifiers(track: dict) -> dict:
     if not isinstance(track, dict) or track.get("type", "track") != "track":
         return dict(track or {})
 
     import db
-    track_key = f"{str(track.get('artist') or '').strip().lower()}||{str(track.get('title') or '').strip().lower()}"
+    supplied_id = _spotify_track_id(track.get("spotify_id") or track.get("spotify_uri") or track.get("spotify_url"))
+    track_key = (f"spotify_track:{supplied_id}" if supplied_id else
+                 f"{str(track.get('artist') or '').strip().lower()}||{str(track.get('title') or '').strip().lower()}")
     cached = db.get_track_metadata(track_key)
     enriched = dict(track)
     if cached:
         # Merge cached IDs into current track
-        for key in ["spotify_id", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"]:
+        for key in ["spotify_id", "spotify_uri", "spotify_url", "isrc", "musicbrainz_recording_id", "musicbrainz_release_id", "deezer_id", "tidal_id", "amazon_id", "apple_music_id"]:
             if cached.get(key) and not enriched.get(key):
                 enriched[key] = cached[key]
 
@@ -1221,15 +1347,32 @@ def enrich_track_identifiers(track: dict) -> dict:
         ).items():
             if value and not enriched.get(key):
                 enriched[key] = value
-    spotify_id = enriched.get("spotify_id", "")
+    spotify_id = _spotify_track_id(
+        enriched.get("spotify_id") or enriched.get("spotify_uri") or enriched.get("uri")
+        or enriched.get("spotify_url") or enriched.get("url")
+    )
+    if spotify_id:
+        enriched["spotify_id"] = spotify_id
+        enriched["spotify_uri"] = f"spotify:track:{spotify_id}"
+        enriched["spotify_url"] = f"https://open.spotify.com/track/{spotify_id}"
     if spotify_id:
         for key, value in spotify_track_metadata(spotify_id).items():
-            if not value:
+            if not value and key != "is_compilation":
                 continue
-            if key in {"title", "artist", "artist_id", "album", "duration_ms", "isrc", "artwork_url", "spotify_url"}:
+            if key in {"title", "artist", "artist_id", "album", "album_artist", "is_compilation", "album_spotify_id", "year", "duration_ms", "isrc", "artwork_url", "spotify_url", "spotify_uri"}:
                 enriched[key] = value
             elif not enriched.get(key):
                 enriched[key] = value
+    context = track.get("album_context") if isinstance(track.get("album_context"), dict) else {}
+    if re.fullmatch(r"[A-Za-z0-9]{22}", str(context.get("spotify_id") or "")):
+        # A track ID may be reused/relinked across deluxe and original
+        # releases. The explicit album page remains the navigation context.
+        enriched["catalog_album_spotify_id"] = enriched.get("album_spotify_id", "")
+        enriched["album_spotify_id"] = context["spotify_id"]
+        for key in ("album", "album_artist", "artwork_url"):
+            if context.get(key):
+                enriched[key] = context[key]
+        enriched["is_compilation"] = str(enriched.get("album_artist") or "").casefold() in {"various artists", "various", "vários artistas"}
     spotify_url = enriched.get("spotify_url", "") or (
         f"https://open.spotify.com/track/{spotify_id}" if spotify_id else ""
     )
@@ -1306,8 +1449,17 @@ def enrich_track_identifiers(track: dict) -> dict:
 
     # Final result!
     import db
-    track_key = f"{str(enriched.get('artist') or '').strip().lower()}||{str(enriched.get('title') or '').strip().lower()}"
+    resolved_id = _spotify_track_id(enriched.get("spotify_id") or enriched.get("spotify_uri") or enriched.get("spotify_url"))
+    track_key = (f"spotify_track:{resolved_id}" if resolved_id else
+                 f"{str(enriched.get('artist') or '').strip().lower()}||{str(enriched.get('title') or '').strip().lower()}")
     db.save_track_metadata(track_key, enriched)
+    db.resolve_track_identity(
+        spotify_id=str(enriched.get("spotify_id") or enriched.get("id") or ""),
+        isrc=str(enriched.get("isrc") or ""),
+        title=str(enriched.get("title") or enriched.get("name") or ""),
+        artist=str(enriched.get("artist") or ""),
+        duration_ms=duration_ms,
+    )
 
     return enriched
 
@@ -1327,8 +1479,11 @@ def spotify_search_track(artist: str, title: str) -> dict:
         return {
             "spotify_url": (item.get("external_urls") or {}).get("spotify", ""),
             "spotify_id": item.get("id", ""),
+            "spotify_uri": item.get("uri", "") or (f"spotify:track:{item['id']}" if item.get("id") else ""),
             "artist_id": artist_id,
             "album": (item.get("album") or {}).get("name", ""),
+            "album_spotify_id": (item.get("album") or {}).get("id", ""),
+            "year": str((item.get("album") or {}).get("release_date", ""))[:4],
             "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
             "isrc": ext_ids.get("isrc", ""),
             "ean": ext_ids.get("ean", ""),
@@ -1384,6 +1539,7 @@ def _spotify_embed_track_metadata(spotify_id: str) -> dict:
     return {
         "spotify_url": f"https://open.spotify.com/track/{spotify_id}",
         "spotify_id": entity.get("id", spotify_id),
+        "spotify_uri": entity.get("uri", "") or f"spotify:track:{entity.get('id', spotify_id)}",
         "title": entity.get("title") or entity.get("name", ""),
         "artist": artist_names,
         "artist_id": artist_id,
@@ -1393,6 +1549,34 @@ def _spotify_embed_track_metadata(spotify_id: str) -> dict:
 
 
 @functools.lru_cache(maxsize=2048)
+def spotify_album_for_track(track_spotify_id: str) -> dict:
+    """{album_spotify_id, album, artist} for a Spotify track, cached in SQLite.
+
+    Opening "the album of this track" is a frequent action; one lookup per
+    track ever, then it is answered from the database.
+    """
+    track_spotify_id = str(track_spotify_id or "").strip()
+    if not track_spotify_id:
+        return {}
+    import db
+    cache_key = f"spotify_track_album:v2:{track_spotify_id}"
+    cached = db.get_track_metadata(cache_key)
+    if cached and cached.get("album_spotify_id"):
+        return cached
+    meta = spotify_track_metadata(track_spotify_id)
+    if not meta.get("album_spotify_id"):
+        # The API can briefly refuse (rate limit); its embed-page fallback has
+        # no album at all. One retry before giving up on the exact album.
+        time.sleep(1.0)
+        meta = spotify_track_metadata(track_spotify_id) or meta
+    found = {"album_spotify_id": meta.get("album_spotify_id", ""), "album": meta.get("album", ""),
+             "artist": meta.get("album_artist") or meta.get("artist", ""),
+             "album_artist": meta.get("album_artist", ""), "track_spotify_id": track_spotify_id}
+    if found["album_spotify_id"]:
+        db.save_track_metadata(cache_key, found)
+    return found
+
+
 def spotify_track_metadata(spotify_id: str) -> dict:
     spotify_id = str(spotify_id or "").strip()
     if not spotify_id:
@@ -1414,10 +1598,15 @@ def spotify_track_metadata(spotify_id: str) -> dict:
     return {
         "spotify_url": (item.get("external_urls") or {}).get("spotify", "") or f"https://open.spotify.com/track/{spotify_id}",
         "spotify_id": item.get("id", spotify_id),
+        "spotify_uri": item.get("uri", "") or f"spotify:track:{item.get('id', spotify_id)}",
         "title": item.get("name", ""),
         "artist": artist_names,
         "artist_id": artist_id,
         "album": (item.get("album") or {}).get("name", ""),
+        "album_spotify_id": (item.get("album") or {}).get("id", ""),
+        "album_artist": ", ".join(a.get("name", "") for a in (item.get("album") or {}).get("artists", []) if isinstance(a, dict)),
+        "is_compilation": any(str(a.get("name", "")).casefold() in {"various artists", "various", "vários artistas"} for a in (item.get("album") or {}).get("artists", []) if isinstance(a, dict)),
+        "year": str((item.get("album") or {}).get("release_date", ""))[:4],
         "artwork_url": proxy_artwork_url(images[0]["url"]) if images else "",
         "duration_ms": item.get("duration_ms", 0),
         "isrc": ext_ids.get("isrc", ""),
@@ -1847,7 +2036,11 @@ class SpotifyIndexer(BaseMusicIndexer):
                 "title": legacy_track.get("name", "Unknown"),
                 "artist": artist_name,
                 "artist_id": artist_id,
-                "album": (legacy_track.get("album") or {}).get("name", "Unknown"),
+                # Never invent "Unknown" as an album name: opening it searched
+                # for an album literally called "Unknown" (0 tracks). Keep the
+                # album's own id instead, which opens the exact album.
+                "album": (legacy_track.get("album") or {}).get("name", ""),
+                "album_spotify_id": (legacy_track.get("album") or {}).get("id", ""),
                 "artwork_url": proxy_artwork_url(cover) if cover else "",
                 "spotify_url": (legacy_track.get("external_urls") or {}).get("spotify", ""),
                 "spotify_id": legacy_track.get("id", ""),
@@ -1889,6 +2082,11 @@ class SpotifyIndexer(BaseMusicIndexer):
                 "plays": 0,
             })
 
+        rank = results.get("rank") or {}
+        for item in items:
+            item_id = str(item.get("spotify_id") or "")
+            item["_spotify_rank"] = rank.get(item_id, 100000)
+        items.sort(key=lambda item: item.get("_spotify_rank", 100000))
         return items
 
     def top_tracks(self, limit: int = 20) -> list[dict]:
@@ -2004,8 +2202,13 @@ def search_music(config: AppConfig, query: str) -> list[dict]:
         except Exception as exc:
             logger.exception(
                 "Music indexer %s failed for %r: %s", type(idx).__name__, query, exc)
-    results.sort(key=lambda x: x.get("_relevance", (0, 0, 0, 0)), reverse=True)
-    for r in results: r.pop("_relevance", None)
+    if any("_spotify_rank" in result for result in results):
+        results.sort(key=lambda result: result.get("_spotify_rank", 100000))
+    else:
+        results.sort(key=lambda x: x.get("_relevance", (0, 0, 0, 0)), reverse=True)
+    for r in results:
+        r.pop("_relevance", None)
+        r.pop("_spotify_rank", None)
     cached_results = tuple(results)
     if cached_results:
         with _search_music_cache_lock:
@@ -2014,6 +2217,89 @@ def search_music(config: AppConfig, query: str) -> list[dict]:
             while len(_search_music_cache) > _SEARCH_MUSIC_CACHE_SIZE:
                 _search_music_cache.popitem(last=False)
     return [dict(r) for r in cached_results]
+
+
+def search_music_suggestions(config: AppConfig, query: str) -> list[dict]:
+    """Return typeahead results without letting an exact generic album title win.
+
+    Spotify returns tracks, albums, and artists in separate ranked groups. The
+    full search view uses a blended relevance score, but for a short, one-word
+    typeahead that score can put albums literally named "John" above artists
+    such as John Lennon. Keep each result group's Spotify order and prioritize
+    entity type for one-word queries; use fuzzy relevance for multi-word input.
+    """
+    query = str(query or "").strip()
+    if not query:
+        return []
+    raw_results = _spotify_search_results(query, limit=20)
+    query_items = [dict(item) for item in raw_results.get("queries", [])]
+    items = []
+    seen = set()
+    for indexer in build_music_indexers(None):
+        try:
+            for item in indexer.search(query):
+                spotify_id = str(item.get("spotify_id") or "").strip()
+                dedupe_key = spotify_id or "||".join((
+                    str(item.get("type") or ""),
+                    norm_name(item.get("title") or ""),
+                    norm_name(item.get("artist") or ""),
+                ))
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                items.append(dict(item))
+        except Exception as exc:
+            logger.exception("Music suggestion indexer %s failed for %r: %s", type(indexer).__name__, query, exc)
+
+    words = re.findall(r"[a-z0-9]+", query.casefold())
+    if len(words) == 1:
+        # For a single token, artist names are the most useful completions.
+        # Preserve Spotify's rank within each type rather than inventing a
+        # popularity score (artist popularity is not present in search data).
+        kind_priority = {"artist": 2, "track": 1, "album": 0}
+        ranked = sorted(
+            items,
+            key=lambda item: kind_priority.get(str(item.get("type") or ""), 0),
+            reverse=True,
+        )
+        for item in ranked:
+            item.pop("_spotify_rank", None)
+        return query_items + ranked
+
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            _suggestion_match_score(query, item),
+            {"artist": 2, "track": 1, "album": 0}.get(str(item.get("type") or ""), 0),
+        ),
+        reverse=True,
+    )
+    for item in ranked:
+        item.pop("_spotify_rank", None)
+    return query_items + ranked
+
+
+def _suggestion_match_score(query: str, result: dict) -> int:
+    kind = str(result.get("type") or "track")
+    wanted = norm_name(str(query or ""))
+    artist = norm_name(str(result.get("artist") or ""))
+    title = norm_name(str(result.get("title") or ""))
+    if not wanted:
+        return 0
+    if kind == "artist":
+        score = int(rapidfuzz.fuzz.WRatio(str(query or ""), str(result.get("title") or result.get("artist") or "")))
+        if artist == wanted:
+            score += 2000
+        elif wanted in artist:
+            score += 250
+        return score
+
+    score = int(rapidfuzz.fuzz.WRatio(str(query or ""), str(result.get("title") or "")))
+    if title == wanted:
+        score += 1000
+    if artist == wanted or wanted in artist:
+        score += 900
+    return score
 
 
 def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:
@@ -2152,9 +2438,23 @@ def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
 
 def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "", spotify_id: str = "", *, include_extras: bool = True) -> dict:
     import db
+    extras_version = 2
     album_key = f"{str(artist or '').strip().lower()}||{str(album or '').strip().lower()}"
     cached = db.get_album_metadata(album_key)
-    if cached:
+    cached_tracks = list(cached.get("tracks") or []) if cached else []
+    cached_spotify_id = str((cached or {}).get("spotify_id") or "").strip()
+    cached_release_id = str((cached or {}).get("release_id") or "").strip()
+    requested_spotify_id = str(spotify_id or "").strip()
+    requested_release_id = str(release_id or "").strip()
+    cache_identity_conflict = bool(
+        (requested_spotify_id and cached_spotify_id and cached_spotify_id != requested_spotify_id)
+        or (requested_release_id and cached_release_id and cached_release_id != requested_release_id)
+    )
+    cache_missing_requested_identity = bool(
+        (requested_spotify_id and not cached_spotify_id)
+        or (requested_release_id and not cached_release_id)
+    )
+    if cached and cached_tracks and not cache_identity_conflict and not cache_missing_requested_identity:
         cached_year = release_year(str(cached.get("year") or "")) or next(
             (release_year(str(track.get("year") or track.get("release_date") or ""))
              for track in cached.get("tracks", [])
@@ -2163,7 +2463,13 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         if cached_year and cached.get("year") != cached_year:
             cached = {**cached, "year": cached_year}
             db.save_album_metadata(album_key, cached)
-        cached = {**cached, "_extras_complete": cached.get("_extras_complete", bool(cached_year))}
+        # Older album rows may be marked complete even though they predate the
+        # Discogs gallery fields. Force one enrichment pass so saved albums and
+        # search-opened albums use the same metadata payload.
+        cached = {
+            **cached,
+            "_extras_complete": bool(cached.get("_extras_complete")) and cached.get("_extras_version") == extras_version,
+        }
         if not include_extras or cached["_extras_complete"]:
             return cached
         cached = {**cached, "spotify_id": cached.get("spotify_id") or spotify_id,
@@ -2171,6 +2477,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         return _enrich_album_metadata(config, cached, album_key)
 
     tracks, art, yr, total_ms = [], "", "", 0
+    album_name, albumartist = album, artist
     release_genres = []
     if spotify_id:
         try:
@@ -2185,6 +2492,12 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                     tracks.append({
                         "type": "track", "title": t["name"], "artist": track_artist,
                         "album": album_name, "year": yr, "track_number": t.get("track_number"),
+                        "album_spotify_id": spotify_id, "album_artist": albumartist,
+                        "is_compilation": albumartist.casefold() in {"various artists", "various", "vários artistas"},
+                        "isrc": (t.get("external_ids") or {}).get("isrc", ""),
+                        "spotify_uri": t.get("uri") or f"spotify:track:{t['id']}",
+                        "spotify_url": (t.get("external_urls") or {}).get("spotify") or f"https://open.spotify.com/track/{t['id']}",
+                        "duration_ms": t.get("duration_ms", 0),
                         "duration": format_duration_ms(t.get("duration_ms", 0)),
                         "artwork_url": art, "spotify_id": t["id"], "source": "Spotify",
                         "length": t.get("duration_ms", 0), "plays": _numeric_plays(t.get("plays", 0)),
@@ -2216,7 +2529,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
                     })
         except Exception: pass
 
-    if not tracks:
+    if not tracks and not requested_spotify_id and not requested_release_id:
         try:
             # Fallback search if ID fetch failed or wasn't provided
             search_q = f'artist:"{artist}" album:"{album}"'
@@ -2227,7 +2540,7 @@ def album_tracks(config: AppConfig, artist: str, album: str, release_id: str = "
         except Exception: pass
 
     result = {
-        "artist": artist, "album": album, "year": yr, "track_count": len(tracks),
+        "artist": albumartist, "album": album_name, "year": yr, "track_count": len(tracks),
         "total_duration": format_duration_ms(total_ms), "artwork_url": art,
         "artist_artwork_url": "", "tracks": tracks,
         "gallery_images": ([{"url": art, "full_url": art, "source": "Spotify",
@@ -2312,7 +2625,7 @@ def _enrich_album_metadata(config: AppConfig, base: dict, album_key: str) -> dic
         artist_artwork_url=spotify_artist_artwork(artist),
         discogs_release_url=discogs_release.get("release_url", ""),
         genres=release_genres, genre=release_genres[0] if release_genres else "",
-        _extras_complete=True,
+        _extras_complete=True, _extras_version=2,
     )
     if tracks:
         db.save_album_metadata(album_key, result)
@@ -3125,14 +3438,30 @@ def spotify_album_playcounts(album_id: str) -> dict[str, int]:
 
 
 def _load_artist_about(artist_id: str) -> dict:
-    # Use SpotiFLAC's SpotifyWebClient — it handles TOTP via the community secrets
-    # repo and adds the required Client-Token header. The old approach of extracting
-    # the TOTP secret from Spotify's JS bundle (let eU=[{secret:...}]) no longer
-    # works because Spotify removed that inline format.
+    # Mornye owns core profile fields. The existing parser below supplies
+    # gallery, related artists and city data its SDK response does not expose.
     sf_client = _get_spotify_client()
+    primary = {}
+    if sf_client:
+        try:
+            from spotiflac_compat import call_sync_or_async
+            profile_result = call_sync_or_async(sf_client, "get_artist_profile", "get_artist_profile_async", artist_id)
+            profile_fields = profile_result.get("profile") or {}
+            profile_stats = profile_result.get("stats") or {}
+            primary = {
+                "name": profile_fields.get("name"),
+                "biography": profile_fields.get("biography"),
+                "monthly_listeners": profile_stats.get("listeners"),
+                "followers": profile_stats.get("followers"),
+                "global_chart_position": profile_stats.get("rank"),
+                "avatar": profile_result.get("avatar"),
+            }
+            primary = {key: value for key, value in primary.items() if value and value != "Unknown"}
+        except Exception:
+            pass
     web_client = getattr(sf_client, "web_client", None) if sf_client else None
     if not web_client:
-        return {}
+        return primary
 
     # Try to pull the live queryArtistOverview hash from Spotify's JS bundle so we
     # always use the current persisted-query document (which includes relatedContent).
@@ -3155,7 +3484,7 @@ def _load_artist_about(artist_id: str) -> dict:
         response = web_client.query(body)
     except Exception as e:
         print(f"[SpotifyWeb] queryArtistOverview failed for {artist_id}: {e}")
-        return {}
+        return primary
     data = response.get("data", {})
     artist = data.get("artistUnion") or data.get("artist") or {}
     stats = artist.get("stats") or {}
@@ -3218,6 +3547,7 @@ def _load_artist_about(artist_id: str) -> dict:
         "hero_image": _pick_feature_image(),
         "verified": bool(profile.get("verified")),
         "related_artists": related_artists,
+        **primary,
     }
 
 

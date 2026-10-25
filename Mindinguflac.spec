@@ -7,7 +7,11 @@ from pathlib import Path
 # Ensure project root is in path for analysis
 sys.path.insert(0, os.path.abspath('.'))
 
-datas = [('static', 'static')]
+datas = [
+    ("local_metadata/LICENSE", "local_metadata"),
+    ("local_metadata/PROVENANCE.md", "local_metadata"),
+    ('static', 'static'),
+]
 binaries = []
 hiddenimports = [
     'bluetooth_scan', 
@@ -16,20 +20,25 @@ hiddenimports = [
     'CoreAudio', 
     'UserNotifications',
     'torrfetch', 
-    'libtorrent', 
     'torrent_sources',
+    'torrent_race', 'desktop_jlibtorrent',
     'music_metadata',
     'isrc_resolver',
     'discogs_metadata',
     'backend_torrent',
     'backend_video',
-    'backend_spotiflac',
+    'backend_spotiflac', 'backend_mornye', 'mornye_bridge', 'mornye_runtime',
+    'local_metadata.artist_profile', 'local_metadata.lyrics', 'local_metadata.apple_ttml',
+    'local_metadata.spotify_totp', 'local_metadata.response_cache', 'local_metadata.apple_music_metadata', 'local_metadata.http',
     'backend_tidal_hifi',
     'backend_monochrome',
+    'video_sync',
+    'video_sources',
     'backend_ytpdl',
     'catalog',
     'service_downloader',
-    'device_sync',
+    'device_sync', 'remote_playback',
+    'playlist_sync',
     'ai_reranker',
     'duck_proxy',
     'codex_proxy',
@@ -39,15 +48,15 @@ hiddenimports = [
     'db'
 ]
 hiddenimports += collect_submodules('qrcode')
-# SpotiFLAC — all imports now use 'SpotiFLAC.*' (updated from old 'backend.*' API).
+# Embedded Mornye REST service and narrowly scoped metadata adapters.
 try:
-    tmp_ret = collect_all('SpotiFLAC')
+    tmp_ret = collect_all('mornye')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-    hiddenimports += collect_submodules('SpotiFLAC')
+    hiddenimports += collect_submodules('mornye')
 except Exception:
     pass
 
-# SpotiFLAC 3.9.0 imports pydoll in its browser-backed session helpers.
+# Mornye browser-backed session helpers use pydoll.
 try:
     tmp_ret = collect_all('pydoll')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -108,11 +117,21 @@ try:
 except Exception:
     pass
 
-# libtorrent ships as a compiled extension — collect_all ensures its .so and
-# any data files are bundled alongside the hiddenimport entry.
+# Desktop and Android use the same jlibtorrent 2.0.12.9 engine and Python race.
+from desktop_torrent.build_bridge import build_bridge
+from desktop_torrent.build_runtime import build_runtime_archive
+
+build_bridge()
+_jre = build_runtime_archive()
+datas.extend([
+    (str(Path('desktop_torrent/classes')), 'desktop_torrent/classes'),
+    (str(Path('desktop_torrent/jars')), 'desktop_torrent/jars'),
+    (str(_jre), '.'),
+])
 try:
-    tmp_ret = collect_all('libtorrent')
+    tmp_ret = collect_all('jpype')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('jpype')
 except Exception:
     pass
 
@@ -121,6 +140,17 @@ except Exception:
 # the frozen app.
 try:
     tmp_ret = collect_all('imageio_ffmpeg')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+except Exception:
+    pass
+
+# Native direct-to-device streaming decodes Monochrome's HTTP response to PCM
+# and sends it to the selected CoreAudio output without writing a track file.
+try:
+    tmp_ret = collect_all('sounddevice')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    hiddenimports += collect_submodules('sounddevice')
+    tmp_ret = collect_all('numpy')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 except Exception:
     pass
@@ -155,14 +185,6 @@ datas = [
     for src, dest in datas
     if Path(src).name not in {'.endpoints_cache.txt', 'endpoints_cache.txt'}
 ]
-try:
-    import SpotiFLAC.core as _spotiflac_endpoints
-
-    _seed = Path(_spotiflac_endpoints._CACHE_FILE)
-    if _seed.is_file():
-        datas.append((str(_seed), 'spotiflac_cache'))
-except Exception:
-    pass
 
 
 helper = Path('build/macos/MindinguflacNowPlayingHelper')
@@ -175,6 +197,16 @@ if _ffmpeg:
     binaries.append((_ffmpeg, '.'))
 
 
+# The lyrics aligner ships its verified model and native CPU bridge.
+import subprocess
+subprocess.run([sys.executable, 'scripts/prepare_lyrics_alignment.py', '--build-desktop'], check=True)
+_lyrics_build = Path('build/lyrics-whisper/windows/Release') if sys.platform == 'win32' else Path('build/lyrics-whisper/macos')
+_lyrics_library = _lyrics_build / ('lyrics_whisper.dll' if sys.platform == 'win32' else 'liblyrics_whisper.dylib')
+binaries.append((str(_lyrics_library), '.'))
+datas.append(('assets/lyrics-alignment', 'assets/lyrics-alignment'))
+datas += [(str(Path('native/lyrics_alignment') / name), 'assets/lyrics-alignment') for name in ('assets.json', 'THIRD_PARTY_NOTICES.md')]
+hiddenimports.append('lyrics_alignment')
+
 a = Analysis(
     ['desktop.py'],
     pathex=[],
@@ -183,8 +215,8 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['runtime_hook_spotiflac_cache.py'],
-    excludes=['MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
+    runtime_hooks=['runtime_hook_mornye.py'],
+    excludes=['SpotiFLAC', 'MediaLibrary', 'Photos', 'Contacts', 'EventKit', 'CoreLocation'],
     noarchive=False,
     optimize=0,
 )
@@ -223,8 +255,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.3.1',
-        'CFBundleVersion': '1.3.1',
+        'CFBundleShortVersionString': '1.4',
+        'CFBundleVersion': '1.4',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -29,6 +30,30 @@ _desktop: "DesktopPairingService | None" = None
 _android: "AndroidPairingClient | None" = None
 _settings_revision_lock = threading.RLock()
 _settings_revision_value: float | None = None
+
+
+# Sync messages carry the full playlist store, recent rows and listening
+# statistics; a desktop with a few thousand plays already exceeds 10 MB of
+# JSON. They are gzip-compressed (about 10x smaller) and the limits apply to
+# both the compressed body and the decoded JSON, so a bad message cannot
+# exhaust memory. Uncompressed bodies from older versions are still accepted.
+MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
+MAX_DECODED_BYTES = 256 * 1024 * 1024
+
+
+def _encode_body(payload: dict) -> bytes:
+    return zlib.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), 6, wbits=31)  # gzip
+
+
+def _decode_body(raw: bytes, content_encoding: str) -> dict:
+    if len(raw) > MAX_COMPRESSED_BYTES:
+        raise ValueError("Sync message too large")
+    if str(content_encoding or "").strip().lower() == "gzip":
+        inflater = zlib.decompressobj(wbits=31)
+        raw = inflater.decompress(raw, MAX_DECODED_BYTES)
+        if inflater.unconsumed_tail:
+            raise ValueError("Sync message too large when decompressed")
+    return json.loads(raw.decode("utf-8") or "{}")
 
 
 def _state_dir() -> Path:
@@ -93,6 +118,10 @@ def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: 
     import app
     import db
     import service_downloader
+    import playlist_sync
+
+    with app.playlists_lock:
+        playlists = playlist_sync.export(app.PLAYLISTS_PATH)
 
     settings = {key: getattr(app.app_config, key) for key in SHARED_SETTINGS}
     settings_revision = _settings_revision()
@@ -123,6 +152,7 @@ def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: 
         "settings_revision": settings_revision,
         "settings_revision_mode": 1,
         "recent": jobs[:1000],
+        "playlists": playlists,
         "statistics": db.sync_export(statistics_since),
         "desktop_cursor": float(desktop_cursor or 0),
         "sent_at": time.time(),
@@ -134,6 +164,7 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
     import app
     import db
     import service_downloader
+    import playlist_sync
 
     if int(snapshot.get("schema") or 0) != PROTOCOL:
         raise ValueError("Unsupported sync protocol")
@@ -196,7 +227,11 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
                 app.save_config(app.CONFIG_PATH, updated)
                 app.service_downloader.update_config(updated)
             _save_settings_revision(incoming_revision)
-    return {"events": imported_events, "recent": imported_recent}
+    imported_playlists = 0
+    if "playlists" in snapshot:
+        with app.playlists_lock:
+            imported_playlists = playlist_sync.merge(app.PLAYLISTS_PATH, snapshot["playlists"])
+    return {"events": imported_events, "recent": imported_recent, "playlists": imported_playlists}
 
 
 def _ensure_certificate(state_dir: Path) -> tuple[Path, Path, str]:
@@ -268,17 +303,26 @@ class DesktopPairingService:
                 pass
 
             def respond(self, payload: dict, status: int = 200):
-                data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                compress = "gzip" in str(self.headers.get("Accept-Encoding") or "").lower()
+                data = _encode_body(payload) if compress else json.dumps(payload, separators=(",", ":")).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
+                if compress:
+                    self.send_header("Content-Encoding", "gzip")
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
 
             def read_body(self):
-                size = min(int(self.headers.get("Content-Length", "0") or 0), 8 * 1024 * 1024)
-                return json.loads(self.rfile.read(size).decode("utf-8")) if size else {}
+                size = int(self.headers.get("Content-Length", "0") or 0)
+                if size > MAX_COMPRESSED_BYTES:
+                    raise ValueError("Sync message too large")
+                if not size:
+                    return {}
+                # Never truncate: a cut-off body is broken JSON, which made
+                # every sync fail once the history grew past the old 8 MB cap.
+                return _decode_body(self.rfile.read(size), self.headers.get("Content-Encoding", ""))
 
             def do_POST(self):
                 try:
@@ -301,6 +345,11 @@ class DesktopPairingService:
                         return
                     if not secrets.compare_digest(str(peer.get("secret") or ""), secret):
                         self.respond({"error": "Unauthorized paired device"}, 401)
+                        return
+                    if self.path.startswith("/remote/"):
+                        import remote_playback
+                        result = remote_playback.paired_request(device_id, "Android phone" if peer.get("name") == "localhost" else peer.get("name"), self.path, body)
+                        self.respond(result)
                         return
                     if self.path == "/sync":
                         counts = _apply_snapshot(body, device_id)
@@ -427,6 +476,8 @@ class DesktopPairingService:
                 "already_paired": bool(phone_id and phone_id in devices)}
 
     def remove_device(self, device_id: str) -> bool:
+        import remote_playback
+        remote_playback.receiver.disconnect(str(device_id))
         with self.lock:
             peer = self.state["devices"].pop(str(device_id), None)
             found = peer is not None
@@ -499,6 +550,7 @@ class AndroidPairingClient:
                     if item.get("protocol") != PROTOCOL or not item.get("device_id"):
                         continue
                     item["address"] = address[0]
+                    item["seen_at"] = time.time()
                     with self.lock:
                         self.discovered[str(item["device_id"])] = item
                 except socket.timeout:
@@ -525,26 +577,28 @@ class AndroidPairingClient:
             "discovered": devices,
         }
 
-    def _connect(self, device: dict, path: str, payload: dict, secret: str = "") -> dict:
+    def _connect(self, device: dict, path: str, payload: dict, secret: str = "", timeout: float = 60) -> dict:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        conn = http.client.HTTPSConnection(device["address"], int(device["port"]), context=context, timeout=5)
+        conn = http.client.HTTPSConnection(device["address"], int(device["port"]), context=context, timeout=timeout)
         conn.connect()
         cert = conn.sock.getpeercert(binary_form=True)
         fingerprint = hashlib.sha256(cert).hexdigest()
         if not secrets.compare_digest(fingerprint, str(device["fingerprint"])):
             conn.close()
             raise ValueError("Desktop certificate fingerprint does not match the scanned QR")
-        headers = {"Content-Type": "application/json", "X-Mindinguflac-Device": str(payload.get("device_id") or "")}
+        headers = {"Content-Type": "application/json", "Content-Encoding": "gzip", "Accept-Encoding": "gzip",
+                   "X-Mindinguflac-Device": str(payload.get("device_id") or "")}
         if secret:
             headers["X-Mindinguflac-Pair-Secret"] = secret
-        conn.request("POST", path, body=json.dumps(payload).encode("utf-8"), headers=headers)
+        conn.request("POST", path, body=_encode_body(payload), headers=headers)
         response = conn.getresponse()
-        raw = response.read(8 * 1024 * 1024)
+        raw = response.read(MAX_COMPRESSED_BYTES + 1)
         status = response.status
+        encoding = response.getheader("Content-Encoding", "")
         conn.close()
-        result = json.loads(raw.decode("utf-8") or "{}")
+        result = _decode_body(raw, encoding)
         if status not in (200, 410):
             raise RuntimeError(str(result.get("error") or f"Pairing request failed ({status})"))
         result["_status"] = status
@@ -640,6 +694,24 @@ class AndroidPairingClient:
             self._save()
             self.last_error = ""
         return {"ok": True, "name": pair["name"]}
+
+    def remote_request(self, path: str, body: dict, target_id: str) -> dict:
+        with self.lock:
+            pair = dict(self.state.get("pair") or {})
+            device = dict(self.discovered.get(target_id) or {})
+        if not pair or target_id != pair.get("device_id"):
+            raise ValueError("Pair this phone with the computer in Settings first")
+        if not device:
+            raise TimeoutError("Paired computer is unavailable on this Wi-Fi network")
+        if not secrets.compare_digest(str(pair.get("fingerprint") or ""), str(device.get("fingerprint") or "")):
+            raise ValueError("Paired computer fingerprint changed")
+        result = self._connect(device, path, {**body, "device_id": self.state["phone_id"]}, pair["secret"], timeout=10)
+        if result.get("desauth") or result.get("_status") == 410:
+            with self.lock:
+                self.state["pair"] = None
+                self._save()
+            raise ValueError("Computer removed this device pairing")
+        return {**result, "device_id": target_id, "name": pair.get("name") or device.get("name") or "Computer"}
 
     def _sync_once(self):
         with self.lock:

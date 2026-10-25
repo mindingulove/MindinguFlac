@@ -23,7 +23,20 @@ def _spotify_isrc(spotify_id: str) -> str:
     if not spotify_id:
         return ""
     try:
-        from music_metadata import _sp
+        from music_metadata import _get_spotify_client, _sp
+
+        # Android's public Spotify client does not expose the Web API
+        # ``tracks`` endpoint through _sp. It does have the authenticated
+        # native metadata reader, which returns the ISRC from Spotify's track
+        # protobuf and is also used by the bundled SpotiFLAC track fetcher.
+        client = _get_spotify_client()
+        web_client = getattr(client, "web_client", None)
+        get_native_isrc = getattr(web_client, "get_isrc_from_metadata", None)
+        if callable(get_native_isrc):
+            isrc = str(get_native_isrc(spotify_id) or "").strip().upper()
+            if isrc:
+                return isrc
+
         data = _sp("tracks", ids=spotify_id)
         tracks = data.get("tracks") or []
         if tracks and isinstance(tracks, list):

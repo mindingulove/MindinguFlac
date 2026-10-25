@@ -15,3 +15,12 @@ cffi==2.0.0
 cryptography==50.0.2
 Pillow==13.0.0
 pycryptodome==3.21.0
+# Soundtrack matching for music videos (video_sync.py); audio is decoded by
+# Android's MediaCodec (NativeAudioPlayer.decodeMono), so no ffmpeg is needed.
+numpy==1.26.2
+
+# Embedded Mornye versioned REST service (real Pydantic native validation).
+pydantic==2.13.4
+pydantic-core==2.46.4
+fastapi==0.141.1
+uvicorn==0.53.0

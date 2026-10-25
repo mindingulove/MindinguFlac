@@ -29,7 +29,6 @@
     "socksio-1.0.0-py3-none-any.whl": "95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3",
     "tqdm-4.70.1-py3-none-any.whl": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73",
     "tenacity-9.2.1-py3-none-any.whl": "9e56f17539296baab7beabb08b92f6ee3d7be92d8be72d763360677c2ad6580e",
-    "pillow-13.0.0-0-cp312-cp312-android_24_arm64_v8a.whl": "4c589e97df98a2a8261b90ccaf5018a7e7d3dece90f51a83ee47017b05205cb1",
     "cryptography-50.0.2-1-cp312-cp312-android_24_arm64_v8a.whl": "7540968f2de99a54a50e5d39637270c344c4d96592dfad38abb4178c94618d3b",
     "h11-0.16.0-py3-none-any.whl": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
     "mutagen-1.48.1-py3-none-any.whl": "4f077fe87d3fc7fba259aa63d8c026b18382ca6a42ef37c61e16f1b1b5b82fe7",
@@ -46,8 +45,23 @@
     "charset_normalizer-3.5.2-py3-none-any.whl": "b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685",
     "packaging-26.2-py3-none-any.whl": "40dbb2ada16cb327933e5993df5d9039c0f80f26c5c729200d854075cc1d80bf",
     "typing_extensions-4.16.0-py3-none-any.whl": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
-    "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+    "certifi-2026.7.22-py3-none-any.whl": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+    "numpy-1.26.2-0-cp312-cp312-android_21_arm64_v8a.whl": "d144088be25177f118c4a91ee88c7b4c37e38209f7c05c9b496b21480d95cc75",
+    "chaquopy_libcxx-180000-0-py3-none-android_24_arm64_v8a.whl": "811547210b01eefb0fb850fd35bd27b53a00a76b9466b8c03e049b7e8175004b",
+    "chaquopy_openblas-0.2.20-5-py3-none-android_21_arm64_v8a.whl": "1e8e67a4f9e2fcde384890678bafbf7ffefe7b2cb4887e5c2996ba7607f4324c",
+    "chaquopy_libgfortran-4.9-0-py3-none-android_21_arm64_v8a.whl": "0b4caed1147f2a19707d4ba730afea57f7b8f2d8c046d8a48cf49377741c4604",
+    "pillow-13.0.0-0-cp312-cp312-android_24_arm64_v8a.whl": "4c589e97df98a2a8261b90ccaf5018a7e7d3dece90f51a83ee47017b05205cb1",
+    "pydantic_core-2.46.4-1-cp312-cp312-android_24_arm64_v8a.whl": "29deff6bd5e8c1f6d6c82b0fda705be11f892ecf1308b33c6c7c088ba9a5002a",
+    "click-8.5.0-py3-none-any.whl": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+    "annotated_doc-0.0.5-py3-none-any.whl": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+    "fastapi-0.141.1-py3-none-any.whl": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+    "typing_inspection-0.4.4-py3-none-any.whl": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+    "starlette-1.6.0-py3-none-any.whl": "a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c",
+    "uvicorn-0.53.0-py3-none-any.whl": "e8dca71ec86dce5f04e333f0d56cdedf942446e6643b9cea1af0d6d3a02cb03e",
+    "pydantic-2.13.4-py3-none-any.whl": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
+    "annotated_types-0.8.0-py3-none-any.whl": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
   },
+  "numpy_source": "Chaquopy package index https://chaquo.com/pypi-13.1/ (numpy 1.26.2 + chaquopy-libcxx/openblas/libgfortran); used by video_sync.py soundtrack matching",
   "pillow_source": {
     "version": "13.0.0",
     "sha256": "cdcd1ba258178f7356d74170c9a81ba4eab6a5d55748bc402a5a2a6fe6be3510",
@@ -62,5 +76,26 @@
     "variant": "debug",
     "sha256": "f09ac6914b9dc029e31f67d71aae60b16746740aa562f088c7da1b5be434e61d",
     "checks": "tools/inspect_apk.py: all APK checks passed, including installed Pillow 13.0.0 metadata and PIL/_imaging.so"
+  },
+  "pydantic_core_source": {
+    "version": "2.46.4",
+    "url": "https://pypi.flet.dev/-/ver_aixZY/pydantic_core-2.46.4-1-cp312-cp312-android_24_arm64_v8a.whl",
+    "sha256": "29deff6bd5e8c1f6d6c82b0fda705be11f892ecf1308b33c6c7c088ba9a5002a",
+    "runtime_verification": "Pending Android device runtime; wheel hash and ELF architecture verified"
+  },
+  "mornye_apk_verification": {
+    "variant": "release",
+    "sha256": "5f1c08391c3f6931c7fa6bb44bc0cc2d993111049275b46328b2e19a5b4f3311",
+    "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment; APK v2/v3 signed and aligned",
+    "device_runtime": "Build 24 release APK passes signature, alignment, ZIP and package inspection. Background keepalive and remote seek were not device-tested.",
+    "versionName": "1.4",
+    "versionCode": 24
+  },
+  "lyrics_audio_alignment": {
+    "engine": "whisper.cpp 1.9.5 CPU, cross-attention DTW word timing",
+    "model": "Whisper base-q5_1 multilingual",
+    "model_sha256": "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
+    "native_checks": "ARM64 JNI symbol and 16 KiB LOAD alignment verified",
+    "runtime": "Android native execution untested: no connected device"
   }
 }

@@ -8,6 +8,33 @@ from config import AppConfig
 
 
 class AlbumLoadingTests(unittest.TestCase):
+    def test_compilation_keeps_album_artist_and_exact_identity_on_every_track(self):
+        self.spotify.return_value = {
+            'name': 'Hits Of The 90s', 'artists': [{'name': 'Various Artists'}],
+            'tracks': {'items': [{'id': 'one-of-us', 'name': 'One Of Us', 'artists': [{'name': 'Joan Osborne'}],
+                'duration_ms': 256320, 'external_ids': {'isrc': 'USPR39507368'}}]},
+        }
+        result = metadata.album_tracks(AppConfig(), 'Joan Osborne', 'Hits Of The 90s', spotify_id='compilation', include_extras=False)
+        self.assertEqual(result['artist'], 'Various Artists')
+        self.assertEqual(result['spotify_id'], 'compilation')
+        self.assertEqual(result['tracks'][0]['artist'], 'Joan Osborne')
+        self.assertEqual(result['tracks'][0]['album_artist'], 'Various Artists')
+        self.assertEqual(result['tracks'][0]['album_spotify_id'], 'compilation')
+        self.assertEqual(result['tracks'][0]['isrc'], 'USPR39507368')
+
+    def test_exact_album_failure_cannot_open_another_release_by_name(self):
+        self.spotify.return_value = {}
+        result = metadata.album_tracks(AppConfig(), 'Artist', 'Album', spotify_id='selected-album', include_extras=False)
+        self.assertEqual(result['tracks'], [])
+        self.spotify.assert_called_once_with('albums/selected-album', market='US')
+
+    def test_album_adapter_uses_album_artist_instead_of_first_track_singer(self):
+        from types import SimpleNamespace
+        client = SimpleNamespace(get_album_tracks=lambda _: ({'name': 'Hits', 'artist': 'Various Artists'}, [
+            SimpleNamespace(id='track', title='Song', artists='Joan Osborne', album_artist='Various Artists')]))
+        album = metadata._public_client_get(client, 'albums/compilation', {})
+        self.assertEqual(album['artists'], [{'name': 'Various Artists'}])
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

@@ -45,15 +45,19 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from catalog import discover_catalog
 from config import AppConfig, app_data_dir, default_cache_dir, default_music_dir, load_config, save_config
 import db
-from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, release_year, search_music, search_relevance, track_credits
+from music_metadata import album_metadata, album_tracks, artist_page, artist_tour, build_music_indexers, enrich_albums_batch, enrich_artwork_batch, enrich_track_identifiers, release_year, search_music, search_music_suggestions, search_relevance, track_credits
 from playlist_recommender import generate_one_replacement_recommendation, generate_playlist_recommendations, get_playlist_track_keys, record_recommendation_feedback
 from native_audio import native_audio
 from service_downloader import ServiceDownloadManager, is_download_audio_candidate, is_valid_audio_file
+from offline_playlist import OFFLINE_PLAYLIST_ID, build_offline_playlist, read_artwork
 
 
 def _list_audio_output_devices() -> list[dict]:
     """Return audio output devices as [{name, uid}]. macOS uses CoreAudio; Windows uses WMI."""
     import sys
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        from native_audio import android_output_devices
+        return android_output_devices()
     if sys.platform == "win32":
         return _list_audio_output_devices_windows()
     if sys.platform != "darwin":
@@ -150,6 +154,49 @@ def _list_audio_output_devices() -> list[dict]:
         return []
 
 
+_windows_endpoint_cache: dict = {"at": 0.0, "names": None}
+
+
+def _windows_live_render_endpoints() -> list[str] | None:
+    """Names of the playback endpoints Windows has connected right now.
+
+    Read from the PnP AudioEndpoint list, which updates as devices come and
+    go. Render endpoints have "{0.0.0.00000000}" in their device ID (capture
+    ones use "{0.0.1.00000000}"). Returns None if the query fails, so callers
+    keep the PortAudio list unchanged. Cached briefly: PowerShell is slow.
+    """
+    import subprocess, json as _json
+
+    now = time.monotonic()
+    if now - _windows_endpoint_cache["at"] < 5.0:
+        return _windows_endpoint_cache["names"]
+    script = r"""
+try {
+    Get-CimInstance Win32_PnPEntity -Filter "PNPClass='AudioEndpoint'" -ErrorAction Stop |
+        Where-Object { $_.Status -eq 'OK' -and $_.DeviceID -like '*{0.0.0.00000000}*' } |
+        ForEach-Object { $_.Name } | ConvertTo-Json -Compress
+} catch { 'null' }
+"""
+    names = None
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=8, startupinfo=startupinfo,
+        )
+        parsed = _json.loads(result.stdout.strip() or "null")
+        if isinstance(parsed, str):
+            parsed = [parsed]
+        if isinstance(parsed, list):
+            names = [str(name).strip() for name in parsed if str(name or "").strip()]
+    except Exception:
+        names = None
+    _windows_endpoint_cache.update(at=now, names=names)
+    return names
+
+
 def _list_audio_output_devices_windows() -> list[dict]:
     import subprocess, json as _json
     devices: list[dict] = []
@@ -170,6 +217,25 @@ def _list_audio_output_devices_windows() -> list[dict]:
             name = str(info.get("name") or f"Output {index}")
             hostapi = sd.query_hostapis(info.get("hostapi", 0)).get("name", "")
             devices.append({"name": name, "uid": f"sounddevice:{index}", "driver": hostapi})
+        # PortAudio lists every output once per host API (MME, DirectSound,
+        # WASAPI, WDM-KS), and MME truncates names to 31 characters. Show each
+        # device once, by its full WASAPI name; the native player opens WASAPI
+        # with resampling, so any track rate works on any device.
+        wasapi = [device for device in devices if "wasapi" in str(device["driver"]).lower()]
+        if wasapi:
+            devices = wasapi
+        # PortAudio's list is a snapshot from launch: a Bluetooth speaker that
+        # connected later is missing, and one that disconnected is still there.
+        # Windows' endpoint list is live, so use it to drop gone devices and add
+        # new ones. New devices get an "endpoint:<name>" UID; the native player
+        # re-enumerates PortAudio by name when it opens them.
+        live = _windows_live_render_endpoints()
+        if live is not None and wasapi:
+            live_keys = {name.casefold() for name in live}
+            devices = [device for device in devices if device["name"].casefold() in live_keys]
+            known = {device["name"].casefold() for device in devices}
+            devices += [{"name": name, "uid": f"endpoint:{name}", "driver": "Windows WASAPI"}
+                        for name in live if name.casefold() not in known]
     except Exception:
         devices = []
     if devices:
@@ -208,6 +274,8 @@ CONFIG_PATH = DATA / "config.json"
 PLAYLISTS_PATH = DATA / "playlists.json"
 DOCK_RECENTS_PATH = DATA / "dock_recents.json"
 PLAYBACK_SESSION_PATH = DATA / "playback_session.json"
+ALBUM_DOWNLOAD_QUEUE_PATH = DATA / "album_download_queue.json"
+album_download_queue_lock = threading.Lock()
 LYRICS_DIR = DATA / "lyrics"
 VIDEO_CACHE_PATH = DATA / "video_cache.json"
 VIDEO_FILES_DIR = DATA / "video_files"
@@ -262,7 +330,7 @@ def runtime_capability_report(refresh: bool = False) -> dict:
         "android": False,
         "dependencies": {"runtimes": {}, "missing": [], "ok": True},
         "engines": {},
-        "available_engines": ["spotiflac", "ytp-dl", "torrent", "monochrome"],
+        "available_engines": ["monochrome", "spotiflac", "ytp-dl", "torrent"],
         "storage_root": str(DATA),
     }
 
@@ -311,6 +379,56 @@ def _sanitize_runtime_config(config: AppConfig) -> AppConfig:
 
 app_config = _sanitize_runtime_config(load_config(CONFIG_PATH))
 service_downloader = ServiceDownloadManager(app_config)
+_native_stream_log_lock = threading.Lock()
+_native_stream_log_state: dict[int, dict] = {}
+
+
+def _log_native_stream_status(status: dict) -> None:
+    """Mirror native Monochrome stream milestones into the visible cache log."""
+    if not status.get("stream_id"):
+        return
+    stream_id = int(status["stream_id"])
+    phase = str(status.get("stream_phase") or "buffering")
+    buffered = float(status.get("buffered_seconds") or 0.0)
+    elapsed = float(status.get("stream_elapsed_seconds") or 0.0)
+    prebuffer_target = float(status.get("prebuffer_target_seconds") or 30.0)
+    metadata = status.get("metadata") or {}
+    title = str(metadata.get("title") or metadata.get("name") or "Monochrome stream")
+    error = str(status.get("error") or "")
+    with _native_stream_log_lock:
+        previous = _native_stream_log_state.get(stream_id, {})
+        message = ""
+        if phase != previous.get("phase"):
+            if phase == "buffering":
+                message = "Opening Monochrome audio stream; prebuffering before playback"
+            elif phase == "playing":
+                message = "Monochrome stream buffer ready; audio playback started"
+            elif phase == "paused":
+                message = "Monochrome stream paused"
+            elif phase == "ended":
+                message = "Monochrome stream ended"
+            elif phase == "error":
+                message = error if error.startswith("Monochrome") else f"Monochrome stream failed: {error or 'unknown audio error'}"
+        elif phase == "buffering" and elapsed - float(previous.get("logged_at") or 0) >= 5:
+            message = (f"Still buffering Monochrome stream after {elapsed:.0f}s; "
+                       f"{buffered:.1f}s of decoded audio ready ({prebuffer_target:.0f}s needed to start)")
+        if message:
+            service_downloader.append_cache_event("stream", message, title=title)
+            _native_stream_log_state[stream_id] = {
+                "phase": phase,
+                "logged_at": elapsed,
+                "buffered_seconds": buffered,
+            }
+        elif phase == "buffering" and buffered >= float(previous.get("buffered_seconds") or 0) + 1.0:
+            service_downloader.append_cache_event(
+                "stream", f"Monochrome prebuffer: {buffered:.1f}s of decoded audio ready",
+                title=title,
+            )
+            _native_stream_log_state[stream_id] = {
+                "phase": phase,
+                "logged_at": elapsed,
+                "buffered_seconds": buffered,
+            }
 
 
 playlists_lock = threading.Lock()
@@ -455,7 +573,11 @@ def load_playlists() -> list[dict]:
 
 
 def save_playlists(data: list[dict]) -> None:
-    PLAYLISTS_PATH.write_text(json.dumps(data, indent=2), "utf-8")
+    import playlist_sync
+    playlist_sync.record_changes(PLAYLISTS_PATH, load_playlists(), data)
+    temp = PLAYLISTS_PATH.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(data, indent=2), "utf-8")
+    temp.replace(PLAYLISTS_PATH)
 
 
 def valid_playback_session(value: object) -> dict:
@@ -544,11 +666,13 @@ def _refresh_album_playlist_metadata(playlist: dict) -> bool:
         ),
         {},
     )
-    artist = str(seed.get("artist") or playlist.get("owner") or "").strip()
+    artist = str(seed.get("album_artist") or playlist.get("owner") or seed.get("artist") or "").strip()
     album = str(seed.get("album") or playlist.get("name") or "").strip()
     release_id = str(seed.get("musicbrainz_release_id") or "").strip()
     spotify_id = str(
-        seed.get("album_spotify_id")
+        playlist.get("album_spotify_id")
+        or (re.search(r"/album/([A-Za-z0-9]+)", playlist.get("spotify_url") or "").group(1) if re.search(r"/album/([A-Za-z0-9]+)", playlist.get("spotify_url") or "") else "")
+        or seed.get("album_spotify_id")
         or seed.get("spotify_album_id")
         or (seed.get("metadata") or {}).get("album_spotify_id")
         or ""
@@ -594,6 +718,46 @@ def _refresh_album_playlist_metadata(playlist: dict) -> bool:
     return True
 
 
+def _persist_album_playlist_track_metadata(playlist: dict) -> None:
+    """Keep album-cache track records in sync with identifiers resolved on save."""
+    if str(playlist.get("playlist_origin") or "").strip().lower() != "album":
+        return
+    tracks = [dict(track) for track in (playlist.get("tracks") or []) if isinstance(track, dict)]
+    seed = next((track for track in tracks if track.get("artist") or track.get("album")), {})
+    artist = str(seed.get("album_artist") or playlist.get("owner") or seed.get("artist") or "").strip()
+    album = str(seed.get("album") or playlist.get("name") or "").strip()
+    if not artist or not album or not tracks:
+        return
+
+    import db
+    album_key = f"{artist.lower()}||{album.lower()}"
+    cached = db.get_album_metadata(album_key) or {}
+    cached_tracks = {
+        _track_match_key(track): track
+        for track in (cached.get("tracks") or [])
+        if isinstance(track, dict)
+    }
+    persisted_tracks = [
+        merge_nonempty_track_metadata(cached_tracks.get(_track_match_key(track), {}), track)
+        for track in tracks
+    ]
+    db.save_album_metadata(album_key, {
+        **cached,
+        "artist": cached.get("artist") or artist,
+        "album": cached.get("album") or album,
+        "track_count": len(persisted_tracks),
+        "tracks": persisted_tracks,
+    })
+    for track in persisted_tracks:
+        db.resolve_track_identity(
+            spotify_id=str(track.get("spotify_id") or track.get("id") or ""),
+            isrc=str(track.get("isrc") or ""),
+            title=str(track.get("title") or track.get("name") or ""),
+            artist=str(track.get("artist") or artist),
+            duration_ms=int(track.get("duration_ms") or 0),
+        )
+
+
 def start_album_playlist_backfill(playlist_id: str) -> None:
     playlist_id = str(playlist_id or "").strip()
     if not playlist_id:
@@ -630,6 +794,12 @@ def start_album_playlist_backfill(playlist_id: str) -> None:
                     if value not in ("", None):
                         current[key] = value
                 save_playlists(data)
+                persisted_album_playlist = json.loads(json.dumps(current))
+            _persist_album_playlist_track_metadata(persisted_album_playlist)
+            # A saved album's track list is also a source for persistent
+            # recording identifiers. Resolve ISRCs after the lightweight
+            # album refresh, outside the playlist lock.
+            start_playlist_identifier_enrichment(playlist_id)
         finally:
             with album_playlist_backfill_lock:
                 album_playlist_backfill_in_progress.discard(playlist_id)
@@ -638,9 +808,13 @@ def start_album_playlist_backfill(playlist_id: str) -> None:
 
 
 def enrich_and_persist_track(track: dict) -> dict:
-    enriched = enrich_track_identifiers(track)
+    return persist_enriched_track(enrich_track_identifiers(track))
+
+
+def persist_enriched_track(enriched: dict) -> dict:
     spotify_id = enriched.get("spotify_id", "")
     changed = False
+    album_playlists_to_persist = []
     with playlists_lock:
         data = load_playlists()
         for playlist in data:
@@ -659,7 +833,19 @@ def enrich_and_persist_track(track: dict) -> dict:
                     changed = True
         if changed:
             save_playlists(data)
+            album_playlists_to_persist = [
+                json.loads(json.dumps(playlist))
+                for playlist in data
+                if str(playlist.get("playlist_origin") or "").strip().lower() == "album"
+                and any(_track_match_key(saved) == _track_match_key(enriched) for saved in playlist.get("tracks") or [])
+            ]
+    for playlist in album_playlists_to_persist:
+        _persist_album_playlist_track_metadata(playlist)
     return enriched
+
+
+# Download jobs resolve identifiers in their worker, then persist them here.
+service_downloader.on_track_metadata = persist_enriched_track
 
 
 def backfill_playlist_isrcs(playlist_id: str = "", max_workers: int = 8) -> dict:
@@ -793,6 +979,10 @@ def enrich_download_payload(body: dict) -> dict:
     track = body.get("track") if isinstance(body.get("track"), dict) else {}
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else track
     source = {**metadata, **track}
+    if source.get("offline") and source.get("library_path"):
+        local_path = Path(source["library_path"]).resolve()
+        if local_path.is_relative_to(Path(app_config.music_dir).resolve()) and local_path.is_file():
+            return {**body, "track": source, "metadata": source}
     track_key = str(source.get("track_key") or body.get("track_key") or "").strip()
     if track_key:
         prefix, sep, value = track_key.partition(":")
@@ -806,8 +996,50 @@ def enrich_download_payload(body: dict) -> dict:
         "track": enriched,
         "metadata": enriched,
         "spotify_id": enriched.get("spotify_id", body.get("spotify_id", "")),
+        "spotify_uri": enriched.get("spotify_uri", body.get("spotify_uri", "")),
         "isrc": enriched.get("isrc", body.get("isrc", "")),
     }
+
+
+def load_album_download_queue() -> dict:
+    with album_download_queue_lock:
+        try:
+            value = json.loads(ALBUM_DOWNLOAD_QUEUE_PATH.read_text("utf-8"))
+            if not isinstance(value, dict) or not isinstance(value.get("batches"), list):
+                return {"updated_at": 0, "batches": []}
+            return {"updated_at": int(value.get("updated_at") or 0), "batches": value["batches"]}
+        except (OSError, ValueError):
+            return {"updated_at": 0, "batches": []}
+
+
+def save_album_download_queue(body: dict) -> bool:
+    if not isinstance(body, dict) or not isinstance(body.get("batches"), list):
+        return False
+    try:
+        updated_at = int(body.get("updated_at") or 0)
+        if updated_at <= 0 or len(json.dumps(body)) > 4_000_000:
+            return False
+        for batch in body["batches"]:
+            if not isinstance(batch, dict) or not isinstance(batch.get("key"), str) or not isinstance(batch.get("items"), list):
+                return False
+    except (ValueError, TypeError, OverflowError):
+        return False
+    with album_download_queue_lock:
+        try:
+            existing = json.loads(ALBUM_DOWNLOAD_QUEUE_PATH.read_text("utf-8"))
+        except (OSError, ValueError):
+            existing = {}
+        try:
+            existing_revision = int(existing.get("updated_at") or 0)
+        except (ValueError, TypeError, AttributeError):
+            existing_revision = 0
+        if existing_revision > updated_at:
+            return True
+        ALBUM_DOWNLOAD_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = ALBUM_DOWNLOAD_QUEUE_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"updated_at": updated_at, "batches": body["batches"]}), "utf-8")
+        temporary.replace(ALBUM_DOWNLOAD_QUEUE_PATH)
+    return True
 
 
 def dock_recent_item_key(entry: dict) -> str:
@@ -875,7 +1107,7 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
     album_m = re.search(r"(?:album/|spotify:album:)([A-Za-z0-9]+)", spotify_url)
     
     try:
-        from SpotiFLAC.core.spotify_metadata import SpotifyMetadataClient  # type: ignore
+        from mornye_bridge import SpotifyMetadataClient  # type: ignore
         from spotiflac_compat import call_sync_or_async
         client = SpotifyMetadataClient()
         pl_year = ""
@@ -924,6 +1156,9 @@ def _spotify_import_playlist(spotify_url: str) -> dict:
                 "artist": get_val(track, "artists") or get_val(track, "artist"),
                 "artist_id": get_val(track, "artist_id"),
                 "album": get_val(track, "album"),
+                "album_spotify_id": get_val(track, "album_id") or (album_m.group(1) if album_m else ""),
+                "album_artist": get_val(track, "album_artist") or (pl_owner if album_m else ""),
+                "is_compilation": str(get_val(track, "album_artist") or "").casefold() in {"various artists", "various", "vários artistas"},
                 "year": get_val(track, "year") or (pl_year if album_m else ""),
                 "artwork_url": get_val(track, "cover_url") or get_val(track, "artwork_url"),
                 "spotify_id": t_id,
@@ -1160,6 +1395,7 @@ def _lyrics_identity(payload: dict) -> dict:
 
 def _lyrics_cache_key(identity: dict) -> str:
     preferred = {
+        "version": 2,
         "spotify_id": identity.get("spotify_id") or "",
         "isrc": identity.get("isrc") or "",
         "title": (identity.get("title") or "").casefold(),
@@ -1211,6 +1447,25 @@ def _write_cached_lyrics(identity: dict, lyrics: str, provider: str) -> None:
     }, indent=2), encoding="utf-8")
 
 
+async def _fetch_timed_lyrics(identity: dict) -> tuple[str, str]:
+    """Use Mornye's provider functions, preferring timed over plain answers."""
+    from local_metadata.lyrics import fetch_lyrics_async
+    kwargs = dict(track_name=identity.get("title") or "", artist_name=identity.get("artist") or "",
+                  album_name=identity.get("album") or "", duration_s=int(identity.get("duration_s") or 0),
+                  track_id=identity.get("spotify_id") or "", isrc=identity.get("isrc") or "")
+    results = await asyncio.gather(*(fetch_lyrics_async(**kwargs, providers=[provider])
+        for provider in ("spotify", "apple", "musixmatch", "lrclib", "amazon")), return_exceptions=True)
+    plain = ("", "")
+    for result in results:
+        if isinstance(result, BaseException) or not result or not result[0]:
+            continue
+        if _lyrics_is_synced(result[0]):
+            return result
+        if not plain[0]:
+            plain = result
+    return plain
+
+
 def _fetch_lyrics(identity: dict) -> dict:
     cached = _read_cached_lyrics(identity)
     if cached:
@@ -1218,16 +1473,7 @@ def _fetch_lyrics(identity: dict) -> dict:
     if not identity.get("title") or not identity.get("artist"):
         return {"ok": False, "found": False, "error": "Missing title or artist", "identity": identity}
     try:
-        from SpotiFLAC.core.lyrics import fetch_lyrics_async
-        lyrics, provider = asyncio.run(fetch_lyrics_async(
-            track_name=identity.get("title") or "",
-            artist_name=identity.get("artist") or "",
-            album_name=identity.get("album") or "",
-            duration_s=int(identity.get("duration_s") or 0),
-            track_id=identity.get("spotify_id") or "",
-            isrc=identity.get("isrc") or "",
-            providers=["spotify", "apple", "musixmatch", "lrclib", "amazon"],
-        ))
+        lyrics, provider = asyncio.run(_fetch_timed_lyrics(identity))
         if lyrics and lyrics.strip():
             _write_cached_lyrics(identity, lyrics.strip(), provider or "")
             return {
@@ -1289,6 +1535,10 @@ def _video_identity(payload: dict) -> dict:
         "musicbrainz_artist_id": _lyrics_field(payload, "musicbrainz_artist_id"),
         "deezer_id": _lyrics_field(payload, "deezer_id"),
         "tidal_id": _lyrics_field(payload, "tidal_id"),
+        # A paired controller asks for the exact clip its receiver matched, so
+        # the receiver's audio-to-video offset applies to the same picture.
+        "youtube_id": (lambda value: value if re.fullmatch(r"[A-Za-z0-9_-]{11}", value) else "")(
+            _lyrics_field(payload, "youtube_id")),
     }
 
 
@@ -1299,7 +1549,9 @@ def _video_cache_key(identity: dict) -> str:
         "spotify_id": identity.get("spotify_id") or "",
         "isrc": identity.get("isrc") or "",
     }
-    if stable["track_key"] or stable["spotify_id"] or stable["isrc"]:
+    if identity.get("youtube_id"):
+        value = {"version": VIDEO_CACHE_VERSION, "youtube_id": identity["youtube_id"]}
+    elif stable["track_key"] or stable["spotify_id"] or stable["isrc"]:
         value = stable
     else:
         value = {
@@ -1488,6 +1740,41 @@ def _lookup_youtube_video(identity: dict) -> dict:
             "video_start_offset": max(0, int(override.get("start_offset_s") or 0)),
             "identity": identity,
         }
+        with video_cache_lock:
+            cache = _load_video_cache()
+            cache[key] = {k: v for k, v in result.items() if k != "identity"}
+            _save_video_cache(cache)
+        return result
+
+    # Curated sources (MusicBrainz music-video links, Wikidata, Odesli) name
+    # the official clip directly; only search YouTube when none of them does.
+    try:
+        import video_sources
+        curated = video_sources.curated_music_video(
+            identity, odesli_api_key=str(getattr(app_config, "odesli_api_key", "") or ""))
+    except Exception as exc:
+        print(f"[VideoLookup] curated sources failed: {exc}")
+        curated = None
+    if curated:
+        url = curated["webpage_url"]
+        video_id = curated["video_id"]
+        result = {
+            "ok": True,
+            "found": True,
+            "source": curated["source"],
+            "title": curated.get("title") or "",
+            "uploader": "",
+            "duration": curated.get("duration") or 0,
+            "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+            "webpage_url": url,
+            "embed_url": _youtube_embed_url(url, video_id),
+            "score": 950,
+            "video_start_offset": _music_video_start_offset(
+                {"id": video_id, "webpage_url": url, "title": curated.get("title") or "",
+                 "duration": curated.get("duration") or 0}, identity),
+            "identity": identity,
+        }
+        print(f"[VideoLookup] {identity.get('artist')} - {identity.get('title')}: {curated['source']} -> {url}")
         with video_cache_lock:
             cache = _load_video_cache()
             cache[key] = {k: v for k, v in result.items() if k != "identity"}
@@ -1703,7 +1990,7 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             override = None
 
         # Try backend_video torrent clip search first (own session, parallel with music downloads)
-        if not override and os.environ.get("MINDINGUFLAC_ANDROID") != "1":
+        if not override and not identity.get("youtube_id") and os.environ.get("MINDINGUFLAC_ANDROID") != "1":
             try:
                 import backend_video
                 _vid_title = f"{identity.get('artist', '')} – {identity.get('title', '')}".strip(" –")
@@ -1718,7 +2005,8 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             except Exception:
                 pass
 
-        lookup = _lookup_youtube_video(identity)
+        lookup = ({"ok": True, "found": True, "webpage_url": f"https://www.youtube.com/watch?v={identity['youtube_id']}"}
+                  if identity.get("youtube_id") else _lookup_youtube_video(identity))
         if not lookup.get("found") or not lookup.get("webpage_url"):
             with _video_fetch_lock:
                 _video_fetch_jobs[key] = "not_found" if lookup.get("ok") else "failed"
@@ -1815,6 +2103,43 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
             _video_fetch_jobs[key] = "failed"
 
 
+_video_clip_details_cache: dict = {}
+
+
+def _video_clip_details(video: Path, identity: dict) -> dict:
+    """YouTube id and length of a downloaded clip, for a paired controller.
+
+    The controller downloads the same id itself; Android keeps the whole video
+    while desktop clips may start later, and the length difference is that cut.
+    """
+    try:
+        stat = video.stat()
+    except OSError:
+        return {}
+    cache_id = (str(video), stat.st_mtime_ns, stat.st_size)
+    cached = _video_clip_details_cache.get(cache_id)
+    if cached is not None:
+        return cached
+    youtube_id = identity.get("youtube_id") or ""
+    if not youtube_id:
+        with video_cache_lock:
+            entry = _load_video_cache().get(video.stem) or {}
+        youtube_id = _youtube_video_id(str(entry.get("webpage_url") or ""))
+    if not youtube_id and identity.get("track_key"):
+        try:
+            youtube_id = _youtube_video_id(str((db.get_video_source(identity["track_key"]) or {}).get("youtube_url") or ""))
+        except Exception:
+            youtube_id = ""
+    try:
+        import backend_video
+        duration = float(backend_video._video_duration_s(video) or 0)
+    except Exception:
+        duration = 0.0
+    details = {"youtube_id": youtube_id, "clip_duration": duration}
+    _video_clip_details_cache[cache_id] = details
+    return details
+
+
 def _get_video_fetch(identity: dict, force: bool = False) -> dict:
     if not identity.get("title") or not identity.get("artist"):
         return {"status": "not_found"}
@@ -1830,11 +2155,12 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
             _video_fetch_jobs.pop(key, None)
             _video_fetch_errors.pop(key, None)
     if mp4_path.exists() and mp4_path.stat().st_size > 65536:
-        return {"status": "ready", "path": str(mp4_path)}
+        return {"status": "ready", "path": str(mp4_path), **_video_clip_details(mp4_path, identity)}
     with _video_fetch_lock:
         job_status = _video_fetch_jobs.get(key)
     if job_status == "ready":
-        return {"status": "ready", "path": str(mp4_path)} if mp4_path.exists() else {"status": "not_found"}
+        return ({"status": "ready", "path": str(mp4_path), **_video_clip_details(mp4_path, identity)}
+                if mp4_path.exists() else {"status": "not_found"})
     if job_status == "downloading":
         return {"status": "downloading"}
     if job_status == "failed":
@@ -1845,6 +2171,200 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
         _video_fetch_jobs[key] = "downloading"
     threading.Thread(target=_download_youtube_video_bg, args=(identity, key), daemon=True).start()
     return {"status": "downloading"}
+
+
+def _video_clip_identity(video: Path) -> tuple[str, str]:
+    """(source, external_id) naming the clip itself, not its local file.
+
+    Downloaded clips are stored as <video cache key>.mp4, and that cache entry
+    records which YouTube video it is, so an offset survives re-downloads.
+    Clips without a YouTube id (e.g. Spotify/Votify) are named by content.
+    """
+    with video_cache_lock:
+        entry = _load_video_cache().get(video.stem) or {}
+    youtube_id = _youtube_video_id(str(entry.get("webpage_url") or ""))
+    if youtube_id:
+        return "youtube", youtube_id
+    digest = hashlib.sha1()
+    with video.open("rb") as handle:
+        digest.update(handle.read(1024 * 1024))
+    return "file", f"{digest.hexdigest()}:{video.stat().st_size}"
+
+
+def _video_sync_ids(body: dict) -> tuple[int, int] | None:
+    """(track_id, clip_id) for the sync tables, or None if either is unknown."""
+    video = Path(str(body.get("video_path") or ""))
+    if not video.is_file():
+        return None
+    try:
+        duration_ms = int(float(body.get("duration_ms") or 0)) or None
+    except (TypeError, ValueError):
+        duration_ms = None
+    track_id = db.resolve_track_identity(
+        spotify_id=str(body.get("spotify_id") or ""), isrc=str(body.get("isrc") or ""),
+        title=str(body.get("title") or ""), artist=str(body.get("artist") or ""), duration_ms=duration_ms)
+    if track_id is None:
+        return None
+    return track_id, db.resolve_video_clip(*_video_clip_identity(video))
+
+
+def _monochrome_stream_url(value: str) -> str:
+    """Only official catalog track URLs can enter the local streaming proxy."""
+    import backend_monochrome
+    parsed = urlparse(str(value or ""))
+    allowed = {urlparse(base).netloc for base, _ in backend_monochrome._INSTANCES}
+    if parsed.scheme == "https" and parsed.netloc in allowed and re.fullmatch(r"/track/[0-9]+", parsed.path):
+        return f"https://{parsed.netloc}{parsed.path}"
+    return ""
+
+
+def _video_sync_audio_key(body: dict) -> str:
+    source = _monochrome_stream_url(body.get("stream_url", ""))
+    if not source:
+        audio = Path(str(body.get("audio_path") or ""))
+        if audio.is_file():
+            stat = audio.stat()
+            source = f"{audio.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+    identity = f"sync-v2|{body.get('isrc', '')}|{body.get('duration_ms', '')}|{source}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _video_sync_audio_path(body: dict) -> Path | None:
+    """The song's audio as a local file, without starting any new download."""
+    import video_sync
+
+    audio = Path(str(body.get("audio_path") or ""))
+    if audio.is_file() and audio.suffix.lower() in video_sync.MEDIA_SUFFIXES:
+        return audio
+    stream_url = _monochrome_stream_url(body.get("stream_url", ""))
+    if stream_url:
+        import native_audio as native_audio_module
+
+        # A Monochrome track playing natively is already being downloaded to
+        # a local file; reuse it. Never fetch the track again just for sync.
+        with native_audio_module._monochrome_fetch_lock:
+            fetch = native_audio_module._monochrome_fetches.get(stream_url)
+        if fetch is not None and fetch.size > 0 and fetch.path.is_file():
+            return fetch.path
+        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+            # ExoPlayer streams Monochrome itself; it records the start of the
+            # track to its cache while playing (NativeAudioPlayer.streamHeadPath).
+            try:
+                from java import jclass  # type: ignore
+                head = str(jclass("com.mindinguflac.android.NativeAudioPlayer").streamHeadPath(stream_url) or "")
+            except Exception:
+                head = ""
+            if head and Path(head).is_file():
+                return Path(head)
+    return None
+
+
+def _video_sync(body: dict) -> dict:
+    ids = _video_sync_ids(body)
+    if ids is None:
+        return {"ok": False, "status": "unavailable", "offset": 0.0, "manual_offset": 0.0}
+    audio_key = _video_sync_audio_key(body)
+    try:
+        import video_sync  # needs numpy, plus ffmpeg (desktop) or MediaCodec (Android)
+        supported = video_sync.decoder_available()
+    except Exception:
+        supported = False
+    if not supported:
+        # Matching is impossible here; the manual nudge still works.
+        cached = db.get_track_clip_sync(*ids, audio_key=audio_key) or {}
+        return {"ok": True, "status": "unsupported", "offset": 0.0,
+                "manual_offset": float(cached.get("manual_offset") or 0.0)}
+    cached = db.get_track_clip_sync(*ids, audio_key=audio_key)
+    manual = float((cached or {}).get("manual_offset") or 0.0)
+    if cached and cached.get("offset") is not None:
+        return {"ok": True, "status": "matched" if cached["matched"] else "unmatched",
+                "offset": float(cached["offset"]) if cached["matched"] else 0.0,
+                "confidence": cached.get("confidence"), "manual_offset": manual}
+    audio = _video_sync_audio_path(body)
+    if audio is None:
+        return {"ok": True, "status": "unavailable", "offset": 0.0, "manual_offset": manual}
+    import video_sync
+
+    try:
+        result = video_sync.compute_offset(audio, body["video_path"])
+    except Exception as exc:
+        print(f"[VideoSync] match failed: {exc}")
+        # Partial encoded frames are normal while a stream is growing.
+        status = "pending" if _monochrome_stream_url(body.get("stream_url", "")) else "error"
+        return {"ok": status == "pending", "status": status, "error": str(exc), "offset": 0.0, "manual_offset": manual}
+    # A growing prefix can be too short to contain the common section. Do
+    # not persist an early negative and prevent later buffered audio matching.
+    streaming = bool(_monochrome_stream_url(body.get("stream_url", "")))
+    if result.get("pending") or (streaming and not result.get("matched")
+            and float(result.get("audio_seconds") or 0) < video_sync.AUDIO_SECONDS - 1):
+        return {"ok": True, "status": "pending", "offset": 0.0, "manual_offset": manual}
+    matched = bool(result.get("matched"))
+    db.save_track_clip_sync(*ids, float(result.get("offset") or 0.0), matched, result.get("confidence"), audio_key=audio_key)
+    print(f"[VideoSync] track {ids[0]} / clip {ids[1]}: {result}")
+    return {"ok": True, "status": "matched" if matched else "unmatched",
+            "offset": float(result["offset"]) if matched else 0.0,
+            "confidence": result.get("confidence"), "manual_offset": manual}
+
+
+_lyrics_alignment_lock = threading.Lock()
+_lyrics_alignment_slot = threading.BoundedSemaphore(1)
+_lyrics_alignment_jobs: dict[str, dict] = {}
+
+
+def _lyrics_alignment_key(body: dict) -> str:
+    text = str(body.get("lyrics") or "")[:65536]
+    identity = f"lyrics-v3|{_video_sync_audio_key(body)}|{hashlib.sha256(text.encode()).hexdigest()}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _align_lyrics(body: dict) -> dict:
+    import lyrics_alignment
+    text = str(body.get("lyrics") or "")
+    if not text or len(text) > 65536 or len(lyrics_alignment.parse_lines(text)) < 4:
+        return {"ok": True, "status": "untimed", "offset": 0.0, "manual_offset": 0.0}
+    key = _lyrics_alignment_key(body)
+    saved = db.get_lyrics_audio_alignment(key)
+    base = {"ok": True, "key": key, "offset": 0.0, "scale": 1.0, "manual_offset": saved["manual_offset"]}
+    if saved["result"] is not None:
+        return {**base, **saved["result"]}
+    if not lyrics_alignment.available():
+        return {**base, "status": "unsupported"}
+    audio = _video_sync_audio_path(body)
+    if audio is None:
+        return {**base, "status": "pending"}
+    with _lyrics_alignment_lock:
+        if key in _lyrics_alignment_jobs:
+            return {**base, **_lyrics_alignment_jobs[key]}
+        if not _lyrics_alignment_slot.acquire(blocking=False):
+            return {**base, "status": "pending"}
+        _lyrics_alignment_jobs[key] = {"status": "checking"}
+
+    def worker():
+        try:
+            print(f"[LyricsAlign] measured output delay {float(body.get('output_latency') or 0):.3f}s")
+            result = lyrics_alignment.compute_alignment(audio, text)
+            growing = bool(_monochrome_stream_url(body.get("stream_url", "")))
+            pending = result.get("pending") or (growing and not result.get("matched")
+                and float(result.get("audio_seconds") or 0) < lyrics_alignment.AUDIO_SECONDS - 1)
+            if pending:
+                with _lyrics_alignment_lock:
+                    _lyrics_alignment_jobs.pop(key, None)
+                return
+            result["status"] = "matched" if result.get("matched") else "unmatched"
+            db.save_lyrics_audio_alignment(key, result)
+            with _lyrics_alignment_lock:
+                _lyrics_alignment_jobs[key] = result
+                while len(_lyrics_alignment_jobs) > 64:
+                    _lyrics_alignment_jobs.pop(next(iter(_lyrics_alignment_jobs)))
+        except Exception as exc:
+            print(f"[LyricsAlign] {exc}")
+            with _lyrics_alignment_lock:
+                _lyrics_alignment_jobs.pop(key, None)
+        finally:
+            _lyrics_alignment_slot.release()
+
+    threading.Thread(target=worker, daemon=True, name="lyrics-audio-align").start()
+    return {**base, "status": "checking"}
 
 
 def safe_static_path(request_path: str) -> Path | None:
@@ -1929,7 +2449,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.3.1"
+    server_version = "SpotiFLACStreamer/1.4"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -2023,6 +2543,28 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            if path == "/api/monochrome/stream":
+                url = _monochrome_stream_url(query.get("url", [""])[0])
+                if not url:
+                    self.send_error_json("Invalid Monochrome track URL", HTTPStatus.BAD_REQUEST)
+                    return
+                import native_audio as audio_module
+                fetch = audio_module._monochrome_fetch(url, pin=True)
+                try:
+                    deadline = time.monotonic() + 30
+                    with fetch.condition:
+                        while not (fetch.total and fetch.size) and not (fetch.done or fetch.error or fetch.cancelled.is_set()):
+                            wait = deadline - time.monotonic()
+                            if wait <= 0:
+                                break
+                            fetch.condition.wait(min(wait, 1))
+                    if not fetch.size or not (fetch.total or fetch.done):
+                        self.send_error_json(fetch.error or "Stream is not ready", HTTPStatus.BAD_GATEWAY)
+                        return
+                    self.stream_local_path(fetch.path, is_active_job=True, stream_fetch=fetch)
+                finally:
+                    audio_module._release_monochrome_fetch(fetch)
+                return
             if path == "/api/health":
                 self.send_json({
                     "ok": True,
@@ -2070,7 +2612,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/music/suggest":
                 term = query.get("q", [""])[0].strip()
-                self.send_json({"results": search_music(app_config, term) if term else []})
+                self.send_json({"results": search_music_suggestions(app_config, term) if term else []})
                 return
             if path == "/api/music/suggest/stream":
                 term = query.get("q", [""])[0].strip()
@@ -2112,13 +2654,47 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"SSE error: {e}")
                 return
+            if path == "/api/music/track_album":
+                # Which album a Spotify track is on: lets the album page show
+                # its name before the songs load. Cached in SQLite.
+                from music_metadata import spotify_album_for_track
+                self.send_json(spotify_album_for_track(query.get("spotify_id", [""])[0].strip()))
+                return
             if path == "/api/music/album_tracks":
                 artist = query.get("artist", [""])[0].strip()
                 album = query.get("album", [""])[0].strip()
                 release_id = query.get("release_id", [""])[0].strip()
                 spotify_id = query.get("spotify_id", [""])[0].strip()
+                track_spotify_id = query.get("track_spotify_id", [""])[0].strip()
                 include_extras = query.get("details", ["1"])[0] != "0"
-                self.send_json(album_tracks(app_config, artist, album, release_id, spotify_id, include_extras=include_extras))
+                if album.casefold() in ("unknown", "unknown album"):
+                    album = ""  # a placeholder, not an album name to search for
+                album_started = time.monotonic()
+                album_route = "album id" if spotify_id else ("track id" if track_spotify_id else ("MusicBrainz release" if release_id else "album name search"))
+                if track_spotify_id and not spotify_id:
+                    # Opened from a track that does not carry its album id:
+                    # the track itself names its exact album, so never guess
+                    # by album name (slow, and wrong or empty for decorated
+                    # titles like "Brothers In Arms (Remastered 1996)").
+                    from music_metadata import spotify_album_for_track
+                    found = spotify_album_for_track(track_spotify_id)
+                    spotify_id = found.get("album_spotify_id", "") or spotify_id
+                    album = found.get("album") or album
+                    artist = found.get("album_artist") or found.get("artist") or artist
+                    if not spotify_id:
+                        self.send_error_json("Could not resolve this track's album. Please try again.", HTTPStatus.BAD_GATEWAY)
+                        return
+                from music_metadata import musicbrainz_priority
+                with musicbrainz_priority():  # a person is waiting on this page
+                    album_data = album_tracks(app_config, artist, album, release_id, spotify_id, include_extras=include_extras)
+                album_seconds = time.monotonic() - album_started
+                if album_seconds > 3 and include_extras is False:
+                    # Visible in the app's log: says which lookup was slow, so a
+                    # slow album page can be traced to its cause.
+                    service_downloader.append_cache_event(
+                        "album", f"Album page took {album_seconds:.1f}s (found by {album_route}; "
+                                 f"{len(album_data.get('tracks') or [])} tracks)", title=album or artist or "Album")
+                self.send_json(album_data)
                 return
             if path == "/api/test/hypebot/concerts":
                 import hypebot_tour
@@ -2150,9 +2726,22 @@ class Handler(BaseHTTPRequestHandler):
                 settings_dict["native_now_playing_active"] = bool(_np_update_fn)
                 self.send_json(settings_dict)
                 return
+            if path in ("/api/remote/status", "/api/remote/offline"):
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                import remote_playback
+                self.send_json(remote_playback.controller_request(path.rsplit("/", 1)[-1]))
+                return
             if path == "/api/pairing/status":
                 import device_sync
                 self.send_json(device_sync.status())
+                return
+            if path == "/api/library/album_queue":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                self.send_json(load_album_download_queue())
                 return
             if path == "/api/playback/session":
                 if not self.trusted_local_origin():
@@ -2210,6 +2799,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/playlists":
                 with playlists_lock:
                     playlists = load_playlists()
+                offline = build_offline_playlist(service_downloader)
+                if offline:
+                    playlists.insert(0, offline)
                 for playlist in playlists:
                     if str(playlist.get("playlist_origin") or "").strip().lower() == "album":
                         tracks = list(playlist.get("tracks") or [])
@@ -2369,7 +2961,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
                 return
             if path == "/api/native_audio/status":
-                self.send_json(native_audio.status())
+                status = native_audio.status()
+                _log_native_stream_status(status)
+                self.send_json(status)
                 return
             if path == "/api/bluetooth/state":
                 import bluetooth_scan
@@ -2399,6 +2993,19 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 audio_only = query.get("audio", [""])[0] == "1"
                 self.stream_local_path(file_path, audio_hint=audio_only)
+                return
+            if path == "/api/library/artwork":
+                artwork = read_artwork(Path(query.get("path", [""])[0]), app_config.music_dir)
+                if not artwork:
+                    self.send_error_json("Artwork not found", HTTPStatus.NOT_FOUND)
+                    return
+                data, mime = artwork
+                self.send_response(200)
+                self.send_header("Content-Type", mime if mime in {"image/jpeg", "image/png", "image/webp", "image/gif"} else "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                self.wfile.write(data)
                 return
             if path == "/api/library/stream_active_job":
                 job_id = query.get("job_id", [""])[0].strip()
@@ -2450,7 +3057,11 @@ class Handler(BaseHTTPRequestHandler):
                     file_complete = active_audio_size > 0 and active_audio_ready >= active_audio_size
                 except (OSError, TypeError, ValueError):
                     file_complete = False
-                self.stream_local_path(candidate, is_active_job=not is_finished and not file_complete, audio_hint=True)
+                self.stream_local_path(
+                    candidate, is_active_job=not is_finished and not file_complete,
+                    audio_hint=True,
+                    active_job_id=(job_id if not is_finished and str(job.get("active_audio_path") or "") == str(candidate) else ""),
+                )
                 return
 
             if path == "/api/tidal_proxy":
@@ -2496,8 +3107,33 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = read_body(self)
         try:
+            if path.startswith("/api/playlists") and (
+                body.get("id") == OFFLINE_PLAYLIST_ID
+                or body.get("playlist_id") == OFFLINE_PLAYLIST_ID
+                or path.startswith(f"/api/playlists/{OFFLINE_PLAYLIST_ID}/")
+            ):
+                self.send_error_json("The Offline playlist is managed automatically", HTTPStatus.FORBIDDEN)
+                return
+            if path == "/api/cache/logs":
+                message = str(body.get("message") or "").strip()
+                title = str(body.get("title") or "").strip()[:160]
+                if not message or len(message) > 500:
+                    self.send_error_json("A log message of 1–500 characters is required", HTTPStatus.BAD_REQUEST)
+                    return
+                service_downloader.append_cache_event("stream", message, title=title)
+                self.send_json({"ok": True})
+                return
             if path == "/api/dock/recent":
                 set_dock_recent_items(body.get("entries") or [])
+                self.send_json({"ok": True})
+                return
+            if path == "/api/library/album_queue":
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                if not save_album_download_queue(body):
+                    self.send_error_json("Invalid album download queue", HTTPStatus.BAD_REQUEST)
+                    return
                 self.send_json({"ok": True})
                 return
             if path == "/api/playback/session":
@@ -2687,6 +3323,11 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as _e:
                     self.send_json({"error": str(_e), "monthly_listeners": 0, "followers": 0, "biography": "", "avatar": "", "gallery": [], "related_artists": []})
                 return
+            if path == "/api/artist/artwork":
+                from music_metadata import spotify_artist_artwork
+                self.send_json({"artwork_url": spotify_artist_artwork(
+                    str(body.get("name") or "").strip(), str(body.get("artist_id") or "").strip())})
+                return
             if path == "/api/artist/related":
                 from music_metadata import related_artists
                 self.send_json(related_artists(body.get("artist_id", ""), body.get("name", ""), limit=int(body.get("limit") or 8)))
@@ -2726,6 +3367,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/track/credits":
                 self.send_json(track_credits(body.get("track") or body))
+                return
+            if path == "/api/music/track_metadata":
+                track = body.get("track") if isinstance(body.get("track"), dict) else body
+                self.send_json({"track": enrich_track_identifiers(dict(track or {}))})
                 return
             if path == "/api/music/enrich":
                 import queue as _queue
@@ -2803,6 +3448,23 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error_json("Missing ID or tracks", HTTPStatus.BAD_REQUEST)
                     return
                 with playlists_lock:
+                    playlist_exists = any(
+                        playlist.get("id") == playlist_id
+                        for playlist in load_playlists()
+                    )
+                if not playlist_exists:
+                    self.send_error_json("Playlist not found", HTTPStatus.NOT_FOUND)
+                    return
+                # Resolve each song before saving it. This also writes the
+                # resulting identifiers (including ISRC) to db.tracks, and
+                # keeping network lookups outside playlists_lock lets other
+                # playlist requests continue while providers respond.
+                enriched_tracks = [
+                    enrich_track_identifiers(dict(track))
+                    for track in tracks_to_add
+                    if isinstance(track, dict)
+                ]
+                with playlists_lock:
                     data = load_playlists()
                     pl = next((p for p in data if p["id"] == playlist_id), None)
                     if not pl:
@@ -2813,8 +3475,7 @@ class Handler(BaseHTTPRequestHandler):
                     added_count = 0
                     changed_existing = False
                     added_tracks: list[dict] = []
-                    for t in tracks_to_add:
-                        enriched = enrich_track_identifiers(dict(t))
+                    for enriched in enriched_tracks:
                         key = _track_match_key(enriched)
                         existing = next((saved for saved in pl.get("tracks", []) if _track_match_key(saved) == key), None)
                         if existing:
@@ -2834,12 +3495,14 @@ class Handler(BaseHTTPRequestHandler):
                         _refresh_album_playlist_metadata(pl)
                     if added_count > 0 or changed_existing or str(pl.get("playlist_origin") or "").strip().lower() == "album":
                         save_playlists(data)
+                    saved_playlist = json.loads(json.dumps(pl))
+                _persist_album_playlist_track_metadata(saved_playlist)
                 if added_count > 0:
                     origin = str(pl.get("playlist_origin") or "").strip().lower()
                     if origin in {"manual", "album"}:
                         for enriched in added_tracks:
                             _seed_saved_track_taste(enriched, origin)
-                if added_count > 0:
+                if added_count > 0 or str(pl.get("playlist_origin") or "").strip().lower() == "album":
                     start_playlist_identifier_enrichment(playlist_id)
                 
                 self.send_json({"ok": True, "added": added_count})
@@ -2856,6 +3519,15 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     print(f"[Device sync] Could not update shared-settings revision: {exc}")
                 self.send_json({"ok": True})
+                return
+            if path in ("/api/remote/local", "/api/remote/connect", "/api/remote/command", "/api/remote/disconnect"):
+                if not self.trusted_local_origin():
+                    self.send_error_json("Untrusted request origin", HTTPStatus.FORBIDDEN)
+                    return
+                import remote_playback
+                result = (remote_playback.local_bridge(body) if path.endswith("/local") else
+                          remote_playback.controller_request(path.rsplit("/", 1)[-1], body))
+                self.send_json(result)
                 return
             if path == "/api/pairing/invitation":
                 import device_sync
@@ -2892,6 +3564,7 @@ class Handler(BaseHTTPRequestHandler):
                     "followers": imported.get("followers", 0),
                     "year": imported.get("year", ""),
                     "spotify_url": spotify_url,
+                    "album_spotify_id": (re.search(r"/album/([A-Za-z0-9]+)", spotify_url).group(1) if re.search(r"/album/([A-Za-z0-9]+)", spotify_url) else ""),
                     "playlist_origin": origin,
                     "tracks": imported["tracks"],
                     "metadata_fetched": bool(spotify_url and imported["tracks"] and (origin != "album" or imported.get("year"))),
@@ -2997,7 +3670,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(service_downloader.library_status_batch(body.get("tracks", [])))
                 return
             if path == "/api/library/toggle":
-                self.send_json(service_downloader.toggle_library(enrich_download_payload(body)))
+                self.send_json(service_downloader.toggle_library({**body, "_defer_metadata": True}))
                 return
             if path == "/api/playback/source":
                 self.send_json(service_downloader.playback_source(enrich_download_payload(body)))
@@ -3005,13 +3678,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/native_audio/play":
                 raw_volume = body.get("volume", 1)
                 raw_position = body.get("position", 0)
-                self.send_json(native_audio.play(
-                    body.get("path", ""),
-                    body.get("device_uid", ""),
-                    float(1 if raw_volume is None else raw_volume),
-                    float(0 if raw_position is None else raw_position),
-                    body.get("metadata"),
-                ))
+                volume = float(1 if raw_volume is None else raw_volume)
+                position = float(0 if raw_position is None else raw_position)
+                stream_url = body.get("stream_url", "")
+                if stream_url:
+                    result = native_audio.play_stream(
+                        stream_url, body.get("device_uid", ""), body.get("device_name", ""),
+                        volume, position, body.get("metadata"),
+                    )
+                    if result.get("ok"):
+                        _log_native_stream_status(result)
+                    self.send_json(result)
+                else:
+                    self.send_json(native_audio.play(
+                        body.get("path", ""), body.get("device_uid", ""), volume,
+                        position, body.get("metadata"), device_name=body.get("device_name", ""),
+                    ))
                 return
             if path == "/api/native_audio/pause":
                 self.send_json(native_audio.pause())
@@ -3021,6 +3703,44 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/native_audio/stop":
                 self.send_json(native_audio.stop())
+                return
+            if path == "/api/monochrome/stream_failing":
+                import backend_monochrome
+
+                backend_monochrome.note_stream_failing()
+                self.send_json({"ok": True, "reason": backend_monochrome.stream_block_reason()})
+                return
+            if path == "/api/lyrics/align":
+                self.send_json(_align_lyrics(body))
+                return
+            if path == "/api/lyrics/align/nudge":
+                if not body.get("lyrics") or len(str(body["lyrics"])) > 65536:
+                    self.send_error_json("Missing timed lyrics", HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    delta = max(-5.0, min(5.0, float(body.get("delta") or 0)))
+                except (ValueError, TypeError):
+                    delta = 0.0
+                self.send_json({"ok": True, "manual_offset": db.nudge_lyrics_audio_alignment(_lyrics_alignment_key(body), delta)})
+                return
+            if path == "/api/video/sync":
+                self.send_json(_video_sync(body))
+                return
+            if path == "/api/video/sync/nudge":
+                ids = _video_sync_ids(body)
+                if ids is None:
+                    self.send_error_json("Missing track or video", HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    delta = max(-5.0, min(5.0, float(body.get("delta") or 0)))
+                except (TypeError, ValueError):
+                    delta = 0.0
+                self.send_json({"ok": True, "manual_offset": db.nudge_track_clip_sync(*ids, delta, audio_key=_video_sync_audio_key(body))})
+                return
+            if path == "/api/native_audio/output":
+                self.send_json(native_audio.set_stream_output(
+                    body.get("device_uid", ""), body.get("device_name", ""),
+                ))
                 return
             if path == "/api/native_audio/seek":
                 raw_position = body.get("position", 0)
@@ -3048,6 +3768,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/playlists":
                 body = read_body(self)
                 playlist_id = body.get("id", "")
+                if playlist_id == OFFLINE_PLAYLIST_ID:
+                    self.send_error_json("The Offline playlist is managed automatically", HTTPStatus.FORBIDDEN)
+                    return
                 with playlists_lock:
                     data = load_playlists()
                     data = [p for p in data if p["id"] != playlist_id]
@@ -3116,9 +3839,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def stream_local_path(self, path: Path, is_active_job: bool = False, audio_hint: bool = False) -> None:
+    def stream_local_path(self, path: Path, is_active_job: bool = False, audio_hint: bool = False, active_job_id: str = "", stream_fetch=None) -> None:
         try:
-            size = path.stat().st_size
+            size = (stream_fetch.total or stream_fetch.size) if stream_fetch is not None else path.stat().st_size
+            if is_active_job and active_job_id:
+                stream_job = service_downloader.get_job(active_job_id) or {}
+                size = int(stream_job.get("active_audio_size") or size)
             if is_active_job:
                 mime = _sniff_audio_mime(path)
             else:
@@ -3127,7 +3853,7 @@ class Handler(BaseHTTPRequestHandler):
             if audio_hint and mime == "video/mp4":
                 mime = "audio/mp4"
 
-            if is_active_job and _candidate_is_streamable(path):
+            if is_active_job and not active_job_id and stream_fetch is None and _candidate_is_streamable(path):
                 self.send_response(200)
                 self.send_cors_headers()
                 self.send_header("Content-Type", mime)
@@ -3203,13 +3929,41 @@ class Handler(BaseHTTPRequestHandler):
             if status == 206:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
-            with path.open("rb") as f:
+            with path.open("rb", buffering=0 if stream_fetch is not None or (is_active_job and active_job_id) else -1) as f:
                 f.seek(start)
                 remaining = content_length
+                idle_since = time.monotonic()
                 while remaining > 0:
-                    chunk = f.read(min(256 * 1024, remaining))
+                    readable = remaining
+                    if stream_fetch is not None:
+                        with stream_fetch.condition:
+                            readable = min(remaining, max(0, stream_fetch.size - f.tell()))
+                            if readable <= 0:
+                                if (stream_fetch.done or stream_fetch.error or stream_fetch.cancelled.is_set()
+                                        or time.monotonic() - idle_since > 120):
+                                    self.close_connection = True
+                                    return
+                                stream_fetch.condition.wait(0.5)
+                                continue
+                    if is_active_job and active_job_id:
+                        current_job = service_downloader.get_job(active_job_id)
+                        if not current_job or current_job.get("status") == "error":
+                            return
+                        if current_job.get("status") != "finished":
+                            if str(current_job.get("active_audio_path") or "") != str(path):
+                                return
+                            # A torrent file may be preallocated to its final
+                            # size. Never send sparse holes as decoded audio.
+                            readable = min(remaining, max(0, int(current_job.get("active_audio_ready_bytes") or 0) - f.tell()))
+                            if readable <= 0:
+                                if time.monotonic() - idle_since > 120:
+                                    return
+                                time.sleep(0.25)
+                                continue
+                    chunk = f.read(min(256 * 1024, readable))
                     if not chunk:
                         break
+                    idle_since = time.monotonic()
                     remaining -= len(chunk)
                     try:
                         self.wfile.write(chunk)
@@ -3245,6 +3999,8 @@ def create_server(host: str = "0.0.0.0", port: int = 8888) -> ThreadingHTTPServe
 
 
 def _shutdown_browser_workers() -> None:
+    import mornye_runtime
+    mornye_runtime.stop()
     for mod_name, fn_name in (("duck_proxy", "shutdown"), ("gemini_proxy", "shutdown")):
         try:
             module = __import__(mod_name)

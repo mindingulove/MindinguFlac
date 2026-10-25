@@ -59,17 +59,18 @@ req_tops = sorted({n.split("/")[0] for n in reqs.namelist()})
 def app_has(prefix):
     return any(n == prefix or n.startswith(prefix) for n in app_names)
 
-check("SpotiFLAC 3.9.0 source packaged",
-      app_has("SpotiFLAC/__init__.py") and app_has("SpotiFLAC/core/spotify_metadata.py"),
-      f"{sum(1 for n in app_names if n.startswith('SpotiFLAC/'))} SpotiFLAC files")
+check("Mornye 1.0.4 source packaged",
+      app_has("mornye/__init__.py") and app_has("mornye/core/spotify_metadata.py"),
+      f"{sum(1 for n in app_names if n.startswith('mornye/'))} Mornye files")
 check("RapidFuzz packaged (full source distribution, not the shim)",
       app_has("rapidfuzz/__init__.py") and app_has("rapidfuzz/process.py")
       and app_has("rapidfuzz/distance/Levenshtein.py"),
       f"{sum(1 for n in app_names if n.startswith('rapidfuzz/'))} rapidfuzz files")
-check("pure-Python pydantic stand-in packaged", app_has("pydantic/__init__.py"))
+check("local artist and lyrics implementations packaged", app_has("local_metadata/artist_profile.py") and app_has("local_metadata/lyrics.py"))
+check("old SpotiFLAC and Pydantic stand-in removed", not app_has("SpotiFLAC/") and not app_has("pydantic/"))
 check("Mindinguflac backend modules packaged",
       all(app_has(f"{m}.py") for m in
-          ("app", "service_downloader", "backend_torrent", "backend_ytpdl",
+          ("app", "remote_playback", "service_downloader", "backend_torrent", "backend_ytpdl",
            "backend_spotiflac", "music_metadata", "ai_reranker", "torrent_sources",
            "catalog", "db", "config")))
 check("Android runtime package packaged",
@@ -78,13 +79,15 @@ check("Android runtime package packaged",
 check("HTML/CSS/JS interface packaged",
       app_has("android_runtime/static/index.html")
       and app_has("android_runtime/static/app.js")
-      and app_has("android_runtime/static/styles.css"))
+      and app_has("android_runtime/static/styles.css")
+      and app_has("android_runtime/static/remote_playback.js")
+      and app_has("android_runtime/static/album_controls.js"))
 
 for dist, label in (("yt_dlp", "yt-dlp"), ("requests", "Requests"), ("mutagen", "Mutagen"),
                     ("socks.pyc", "PySocks"), ("httpx", "httpx"), ("Crypto", "pycryptodome"),
                     ("cryptography", "cryptography"), ("PIL", "Pillow"),
                     ("aiofiles", "aiofiles"), ("tenacity", "tenacity"), ("tqdm", "tqdm"),
-                    ("packaging", "packaging"), ("dotenv", "python-dotenv"),
+                    ("packaging", "packaging"), ("dotenv", "python-dotenv"), ("pydantic", "Pydantic"), ("pydantic_core", "native Pydantic core"), ("fastapi", "FastAPI"), ("uvicorn", "Uvicorn"),
                     ("urllib3", "urllib3"), ("certifi", "certifi")):
     check(f"{label} wheel installed into the APK", dist in req_tops)
 
@@ -103,7 +106,7 @@ check("patched Pillow 13.0.0 installed into the APK",
 forbidden = {
     "playwright": "Playwright",
     "pydoll": "pydoll",
-    "webview": "pywebview",
+
     "libtorrent.cpython": "desktop libtorrent CPython wheel",
 }
 for needle, label in forbidden.items():

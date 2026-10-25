@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+
+from .cross_loop_lock import CrossLoopLock
+from .paths import cache_path
+
+logger = logging.getLogger(__name__)
+
+#: Called from the GUI's shared loop and from each batch's own asyncio.run().
+_io_lock = CrossLoopLock()
+_SESSION_FILE = cache_path("session.json")
+_MAX_HISTORY = 20
+
+
+def _read_file_sync() -> dict:
+    """Sync helper run in the thread pool for reading from disk."""
+    if _SESSION_FILE.exists():
+        return json.loads(_SESSION_FILE.read_text(encoding="utf-8"))
+    return {"last_folder": "", "url_history": []}
+
+
+def _write_file_sync(data: dict) -> None:
+    """Sync helper run in the thread pool for writing to disk."""
+    _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _SESSION_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+async def _load_async() -> dict:
+    async with _io_lock:
+        try:
+            # Delegate disk read and JSON parsing to a worker thread
+            return await asyncio.to_thread(_read_file_sync)
+        except Exception as exc:
+            logger.debug("[session] Read error: %s", exc)
+    return {"last_folder": "", "url_history": []}
+
+
+async def _save_async(data: dict) -> None:
+    async with _io_lock:
+        try:
+            # Delegate disk write and JSON dump to a worker thread
+            await asyncio.to_thread(_write_file_sync, data)
+        except Exception as exc:
+            logger.debug("[session] Write error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Output folder
+# ---------------------------------------------------------------------------
+
+
+async def get_last_folder_async() -> str:
+    """Returns the last used output folder, or an empty string."""
+    data = await _load_async()
+    return data.get("last_folder", "")
+
+
+async def set_last_folder_async(folder: str) -> None:
+    """Stores the last used output folder."""
+    if not folder:
+        return
+    data = await _load_async()
+    data["last_folder"] = folder
+    await _save_async(data)
+
+
+# ---------------------------------------------------------------------------
+# URL history
+# ---------------------------------------------------------------------------
+
+
+async def get_url_history_async() -> list[dict]:
+    """Returns the URL history ordered from most recent to oldest.
+    Each entry is: {"url": str, "label": str, "cover": str, "track_count": int,
+                   "url_type": str, "artist": str, "at": int (unix timestamp)}.
+    """
+    data = await _load_async()
+    return data.get("url_history", [])
+
+
+def _normalize_history_url(url: str) -> str:
+    """Normalizes URLs saved in history (fast string-based operation, remains sync).
+    - spotify:track:ID -> https://open.spotify.com/track/ID
+    - open.spotify.com/... -> https://open.spotify.com/...
+    - leaves http(s) unchanged.
+    """
+    if not url:
+        return ""
+    s = str(url).strip()
+    try:
+        if s.startswith("spotify:"):
+            parts = s.split(":")
+            if len(parts) >= 3:
+                typ = parts[1]
+                id_part = ":".join(parts[2:])
+                return f"https://open.spotify.com/{typ}/{id_part}"
+        if s.startswith(("http://", "https://")):
+            return s
+        if s.startswith(("open.spotify.com", "play.spotify.com")):
+            return f"https://{s}"
+        return s
+    except Exception:
+        return s
+
+
+async def add_url_to_history_async(
+    url: str,
+    label: str = "",
+    cover: str = "",
+    track_count: int = 0,
+    url_type: str = "",
+    artist: str = "",
+) -> None:
+    """Adds a URL to history (or moves it to the top if already present)."""
+    if not url:
+        return
+    nurl = _normalize_history_url(url)
+    data = await _load_async()
+
+    # Remove any occurrences of the same normalized URL
+    history = [h for h in data.get("url_history", []) if h.get("url") != nurl]
+    history.insert(
+        0,
+        {
+            "url": nurl,
+            "label": label or nurl[:65],
+            "cover": cover or "",
+            "track_count": track_count,
+            "url_type": url_type,
+            "artist": artist,
+            "at": int(time.time()),
+        },
+    )
+
+    data["url_history"] = history[:_MAX_HISTORY]
+    await _save_async(data)
+
+
+async def clear_url_history_async() -> None:
+    """Clears the URL history completely."""
+    data = await _load_async()
+    data["url_history"] = []
+    await _save_async(data)
+
+
+async def remove_url_from_history_async(url: str) -> None:
+    """Removes a single URL from history."""
+    if not url:
+        return
+    nurl = _normalize_history_url(url)
+    data = await _load_async()
+
+    history = [h for h in data.get("url_history", []) if h.get("url") != nurl]
+    data["url_history"] = history
+    await _save_async(data)
