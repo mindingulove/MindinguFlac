@@ -100,3 +100,28 @@ class AlbumQueuePersistenceTests(unittest.TestCase):
         with patch.object(backend_monochrome,'stream_block_reason',return_value='Temporary provider cooldown'):
             self.assertEqual(m._requested_engine({'mode':'download'})[0],'monochrome')
             self.assertEqual(m._requested_engine({'mode':'stream'})[0],'ytp-dl')
+
+class DownloadAcceptanceTests(unittest.TestCase):
+    def test_job_is_acknowledged_before_slow_metadata_and_identifiers_are_still_persisted(self):
+        import time
+        entered=threading.Event();release=threading.Event();finished=threading.Event()
+        manager=object.__new__(sd.ServiceDownloadManager)
+        manager.config=SimpleNamespace(download_engine='monochrome',download_service='monochrome',default_quality='LOSSLESS')
+        manager.jobs={};manager._lock=threading.Lock();manager._start_lock=threading.Lock();manager._cancel_flags=set()
+        manager.on_track_metadata=Mock()
+        def enrich(payload,engine,metadata,**options):
+            self.assertTrue(options['force']);entered.set();release.wait(2)
+            return {**metadata,'isrc':'USAA12345678','spotify_id':'track-id'}
+        def worker(job_id,payload):
+            manager._resolve_job_metadata(manager.jobs[job_id],payload);finished.set()
+        manager._worker=worker
+        with patch.object(sd,'_enrich_download_metadata_for_search',side_effect=enrich):
+            started=time.monotonic()
+            job=manager.start_job({'title':'Song','artist':'Artist','mode':'download','engine':'monochrome',
+                                   '_defer_metadata':True,'client_request_id':'request-id','track':{'title':'Song','artist':'Artist','genre':'Rock'}})
+            self.assertLess(time.monotonic()-started,.5)
+            self.assertTrue(entered.wait(1));self.assertFalse(finished.is_set())
+            self.assertEqual(job['client_request_id'],'request-id')
+            release.set();self.assertTrue(finished.wait(2))
+        self.assertEqual(manager.jobs[job['id']]['isrc'],'USAA12345678')
+        self.assertEqual(manager.on_track_metadata.call_args.args[0]['isrc'],'USAA12345678')

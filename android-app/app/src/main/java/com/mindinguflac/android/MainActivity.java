@@ -511,6 +511,58 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             });
         }
 
+        /** Share only a normalized app-generated album card through a narrow cache provider. */
+        @JavascriptInterface
+        public void shareAlbumCard(String title, String link, String dataUrl) {
+            Uri linkUri = Uri.parse(link == null ? "" : link);
+            boolean publicAlbum = "https".equals(linkUri.getScheme()) &&
+                    (("open.spotify.com".equals(linkUri.getHost()) && linkUri.getPath() != null
+                            && linkUri.getPath().matches("/album/[A-Za-z0-9]+/?"))
+                    || ("musicbrainz.org".equals(linkUri.getHost()) && linkUri.getPath() != null
+                            && linkUri.getPath().matches("/release/[A-Fa-f0-9-]+/?")));
+            if (!publicAlbum || dataUrl == null || !dataUrl.startsWith("data:image/png;base64,")
+                    || dataUrl.length() > 8_000_000) return;
+            startupExecutor.execute(() -> {
+                android.graphics.Bitmap bitmap = null;
+                try {
+                    byte[] bytes = android.util.Base64.decode(dataUrl.substring(22), android.util.Base64.DEFAULT);
+                    android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+                    bounds.inJustDecodeBounds = true;
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+                    if (bounds.outWidth != 720 || bounds.outHeight != 1080) throw new IllegalArgumentException("Invalid album card size");
+                    bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                    if (bitmap == null) throw new IllegalArgumentException("Invalid album card");
+                    File directory = new File(getCacheDir(), "share_cards");
+                    if (!directory.isDirectory() && !directory.mkdirs()) throw new java.io.IOException("Could not create share cache");
+                    File[] previous = directory.listFiles();
+                    if (previous != null) for (File file : previous) {
+                        if (file.lastModified() < System.currentTimeMillis() - 86_400_000L) file.delete();
+                    }
+                    File card = new File(directory, "album-" + UUID.randomUUID() + ".png");
+                    try (java.io.FileOutputStream output = new java.io.FileOutputStream(card)) {
+                        if (!bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output))
+                            throw new java.io.IOException("Could not write album card");
+                    }
+                    Uri image = androidx.core.content.FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".share", card);
+                    runOnUiThread(() -> {
+                        Intent send = new Intent(Intent.ACTION_SEND);
+                        send.setType("image/png");
+                        send.putExtra(Intent.EXTRA_STREAM, image);
+                        send.putExtra(Intent.EXTRA_SUBJECT, title);
+                        send.putExtra(Intent.EXTRA_TEXT, title + "\n" + link);
+                        send.setClipData(android.content.ClipData.newRawUri("Album card", image));
+                        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivity(Intent.createChooser(send, "Share album"));
+                    });
+                } catch (Exception error) {
+                    runOnUiThread(() -> android.widget.Toast.makeText(MainActivity.this,
+                            "Could not prepare the album card. Try Copy link.", android.widget.Toast.LENGTH_LONG).show());
+                } finally {
+                    if (bitmap != null) bitmap.recycle();
+                }
+            });
+        }
+
         @JavascriptInterface
         public void scanDevicePairingQr() {
             runOnUiThread(() -> {

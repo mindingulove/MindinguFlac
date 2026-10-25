@@ -80,7 +80,8 @@ check("HTML/CSS/JS interface packaged",
       app_has("android_runtime/static/index.html")
       and app_has("android_runtime/static/app.js")
       and app_has("android_runtime/static/styles.css")
-      and app_has("android_runtime/static/remote_playback.js"))
+      and app_has("android_runtime/static/remote_playback.js")
+      and app_has("android_runtime/static/album_controls.js"))
 
 for dist, label in (("yt_dlp", "yt-dlp"), ("requests", "Requests"), ("mutagen", "Mutagen"),
                     ("socks.pyc", "PySocks"), ("httpx", "httpx"), ("Crypto", "pycryptodome"),

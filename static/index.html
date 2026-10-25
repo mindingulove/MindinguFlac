@@ -555,16 +555,20 @@
       </div>
     </div>
     <div class="context-menu-separator"></div>
+    <button id="ctxAlbumSaveLibrary" class="context-menu-item"><i class="bi bi-plus-circle"></i> Add to Your Library</button>
     <button id="ctxAlbumAddQueue" class="context-menu-item"><i class="bi bi-music-note-list" style="color:var(--muted);"></i> Add to queue</button>
+    <button id="ctxAlbumRadio" class="context-menu-item"><i class="bi bi-broadcast"></i> Go to artist radio</button>
+    <div class="context-menu-separator"></div>
     <button id="ctxAlbumAddPlaylist" class="context-menu-item"><i class="bi bi-plus-circle" style="color:var(--muted);"></i> Add to playlist</button>
-    <button id="ctxAlbumGoArtist" class="context-menu-item"><i class="bi bi-person" style="color:var(--muted);"></i> Go to artist</button>
+    <button id="ctxAlbumDownload" class="context-menu-item"><i class="bi bi-arrow-down-circle"></i> Download</button>
     <button id="ctxAlbumRemoveFromStats" class="context-menu-item" style="display:none"><i class="bi bi-graph-down" style="color:var(--muted);"></i> Remove from statistics</button>
     <div class="context-menu-separator"></div>
     <div class="context-menu-item has-submenu" id="ctxAlbumShareMenuItem">
       <i class="bi bi-share" style="color:var(--muted);"></i> Share
       <i class="bi bi-caret-right-fill context-submenu-icon"></i>
       <div class="context-submenu" id="ctxAlbumShareSubmenu">
-        <button id="ctxAlbumCopySpotify" class="context-menu-item"><i class="bi bi-spotify" style="color:var(--muted);"></i> Copy Spotify URL</button>
+        <button id="ctxAlbumCopySpotify" class="context-menu-item"><i class="bi bi-spotify" style="color:var(--muted);"></i> Copy link to album</button>
+        <button id="ctxAlbumEmbed" class="context-menu-item"><i class="bi bi-code-square"></i> Embed album</button>
         <button id="ctxAlbumCopyMusicBrainz" class="context-menu-item"><i class="bi bi-globe" style="color:var(--muted);"></i> Copy MusicBrainz URL</button>
       </div>
     </div>
@@ -639,6 +643,7 @@
   <script src="assets/vendor/tippy/tippy-bundle.umd.min.js"></script>
   <script src="assets/vendor/contextmenu/contextmenu.min.js"></script>
   <script src="remote_playback.js"></script>
+  <script src="album_controls.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

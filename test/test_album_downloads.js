@@ -7,19 +7,20 @@ function button(){const classes=new Set();return {dataset:{},isConnected:false,i
 function setup(stored='[]',remote=null){
  const elements=new Map(),calls=[],waits=[],messages=[],saved=new Map([['queue',stored]]),selected=[];
  const state={playlists:[],settings:{download_engine:'monochrome',default_quality:'LOSSLESS'},pendingResumePosition:50};
- const context=vm.createContext({console,state,Map,Set,JSON,Date,STORAGE_KEYS:{albumDownloads:'queue'},
+ const context=vm.createContext({console,state,Map,Set,JSON,Date,window:{},STORAGE_KEYS:{albumDownloads:'queue'},
   $:id=>{if(!elements.has(id))elements.set(id,button());return elements.get(id);},
   localStorage:{setItem:(k,v)=>saved.set(k,v),getItem:k=>saved.get(k)},document:{createElement:()=>button()},
   albumTarget:a=>({...a,title:a.album||a.title}),spotifyAlbumUrl:a=>a.spotify_id?`https://open.spotify.com/album/${a.spotify_id}`:'',inferPlaylistOrigin:p=>p.playlist_origin,
   isTrackItem:t=>!!t?.title,playableQueueItem:t=>!!t?.title,trackKey:t=>t.spotify_id||t.title,
   serviceDownloadPayload:t=>({title:t.title,engine:state.settings.download_engine,quality:state.settings.default_quality}),
-  api:async(path,options)=>{if(path==='/api/library/album_queue') { let snapshot=[];try { snapshot=JSON.parse(saved.get('queue')||'[]'); } catch (_) {} return options?{ok:true}:(remote || (Array.isArray(snapshot)?{updated_at:0,batches:snapshot}:snapshot)); } const body=JSON.parse(options.body);calls.push({path,body});return path==='/api/service/cancel'?{ok:true}:{ok:true,action:context.joinExisting?'queued':'started',job:{id:body.title,mode:'download'}};},
+  api:async(path,options)=>{if(path==='/api/library/album_queue') { let snapshot=[];try { snapshot=JSON.parse(saved.get('queue')||'[]'); } catch (_) {} return options?{ok:true}:(remote || (Array.isArray(snapshot)?{updated_at:0,batches:snapshot}:snapshot)); } const body=options?.body?JSON.parse(options.body):{};calls.push({path,body});if(path==='/api/library/toggle' && context.timeoutOnce){context.timeoutOnce=false;context.requestId=body.client_request_id;const error=new Error('Timeout');error.code='REQUEST_TIMEOUT';throw error;}if(path==='/api/library/status')return {active_job_id:'recovered',in_library:false};if(path==='/api/service/downloads')return {jobs:[{id:'recovered',client_request_id:context.requestId}]};return path==='/api/service/cancel'?{ok:true}:{ok:true,action:context.joinExisting?'queued':'started',job:{id:body.title,mode:'download'}};},
   waitForLibraryToggle:(track,id,btn,options)=>new Promise((resolve,reject)=>waits.push({track,options,resolve,reject})),
   showToast:msg=>messages.push(msg),progressButtonMarkup:()=>'',prefetchLyricsForTrack:()=>{},loadPlaylists:()=>{},
   refreshLibraryButtonState:async()=>{},findLiveLibraryButtonForTrack:()=>null,
   selectMusicItem:(...args)=>selected.push(args),
  });
  vm.runInContext(section('// Album header controls wrap','async function renderAlbumPage('),context);
+ vm.runInContext(section('async function recoverLibraryDownload(', 'async function toggleTrackLibrary('),context);
  vm.runInContext(section('async function toggleTrackLibrary(', 'async function cancelLibraryDownload('),context);
  return {context,state,elements,calls,waits,messages,saved,selected};
 }
@@ -72,5 +73,13 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  await joined.elements.get('albumDownloadAll').onclick();
  assert.ok(!joined.calls.some(call=>call.path==='/api/service/cancel'),'album cancellation leaves an existing job alone');
  joined.waits[0].resolve(null);await tick();
+ const recovered=setup();recovered.context.timeoutOnce=true;
+ recovered.context.bindAlbumHeaderControls({spotify_id:'timeout',album:'Recovered'},[{title:'Slow metadata'}]);
+ await recovered.elements.get('albumDownloadAll').onclick();await tick();await tick();
+ assert.equal(recovered.calls.filter(c=>c.path==='/api/library/toggle').length,1,'a lost acknowledgement must not resubmit the download');
+ assert.equal(recovered.waits.length,1,'recover and keep waiting for the accepted job');
+ assert.equal(recovered.elements.get('albumDownloadStatus').textContent,'1 tracks remaining');
+ recovered.waits[0].resolve({in_library:true,download_satisfied:true});await tick();await tick();
+ assert.equal(recovered.elements.get('albumDownloadStatus').textContent,'');
  console.log('Album play/order, serial existing download action, saved-track skip, engine snapshot, remaining-track pie, failures, cancellation and reload resume passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

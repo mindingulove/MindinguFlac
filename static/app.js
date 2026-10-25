@@ -423,7 +423,9 @@ async function api(path, options = {}) {
     return await resp.json();
   } catch (err) {
     if (controller?.signal.aborted) {
-      throw new Error("The request took too long. Please try again.");
+      const timeoutError = new Error("The request took too long. Please try again.");
+      timeoutError.code = "REQUEST_TIMEOUT";
+      throw timeoutError;
     }
     throw err;
   } finally {
@@ -2344,6 +2346,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
       col4 = albumLinkHtml(item, item.album || "", "album-link");
     } else if (context === "album") {
       col2 += `<span>${artistLinkHtml(item)}</span>`;
+      col4 = artistLinkHtml(item);
       col3 = `<span class="views-count unavailable">${playsValue ? playsValue.toLocaleString() : "-"}</span>`;
     } else {
       col2 += `<span>${artistLinkHtml(item)}</span>`;
@@ -2352,7 +2355,7 @@ function renderTrackList(containerId, items, context = "general", playbackContex
 
     return `
       <div class="track-row ${isActive ? "active-track" : ""}" data-item-idx="${idx}" data-item-data='${JSON.stringify(item).replace(/'/g, "&apos;")}'>
-        <div class="track-art ${item.type === "artist" ? "round" : ""}" style="background-image: url('${art}')"></div>
+        <div class="track-art ${context === "album" ? "album-track-number" : item.type === "artist" ? "round" : ""}" style="${context === "album" ? "" : `background-image: url('${art}')`}">${context === "album" ? idx + 1 : ""}</div>
         <div class="track-main">${col2}</div>
         <div class="track-center">${col3}</div>
         <div class="track-extra">${col4}</div>
@@ -3017,7 +3020,7 @@ async function shareAlbumLink(album) {
   if (!url) { showToast("This album has no public link to share."); return; }
   try {
     const title = album.album || album.title || "Album";
-    if (window.MindinguflacAndroid?.sharePlaylistLink) window.MindinguflacAndroid.sharePlaylistLink(title,url);
+    if (window.MindinguflacAndroid?.share) window.MindinguflacAndroid.share(`${title}\n${url}`);
     else if (navigator.share) await navigator.share({title,url});
     else { await navigator.clipboard.writeText(url); showToast("Album link copied"); }
   } catch (error) { if (error.name !== "AbortError") showToast("Could not share the album link."); }
@@ -3062,6 +3065,7 @@ function bindAlbumHeaderControls(album, tracks) {
   }
   const share = $("albumShare");
   if (share) share.onclick = () => shareAlbumLink(headerAlbum);
+  window.MindinguflacAlbums?.bind(headerAlbum, unique, view);
   renderAlbumLibraryControl(headerAlbum);
   renderAlbumHeaderControls();
 }
@@ -3200,18 +3204,27 @@ async function renderAlbumPage(album) {
           <button class="album-download-all" id="albumDownloadAll" type="button" aria-label="Download album for offline listening" title="Download album for offline listening"><i class="bi bi-arrow-down-circle"></i></button>
           <button class="album-secondary-action" id="albumShuffle" type="button" aria-label="Shuffle album" title="Shuffle album" aria-pressed="false"><i class="bi bi-shuffle"></i></button>
           <button class="album-secondary-action" id="albumShare" type="button" aria-label="Share album" title="Share album"><i class="bi bi-share"></i></button>
+          <button class="album-secondary-action album-more" id="albumMore" type="button" aria-label="More album options" title="More album options" aria-haspopup="menu"><i class="bi bi-three-dots"></i></button>
           <span class="album-download-status" id="albumDownloadStatus" role="status" aria-live="polite"></span>
+          <div class="album-view-control">
+            <button id="albumViewToggle" type="button" aria-label="View as List" aria-haspopup="menu" aria-expanded="false"><span id="albumViewLabel">List</span><i class="bi bi-list-ul"></i></button>
+            <div id="albumViewMenu" class="album-view-menu" role="menu" aria-label="View as" hidden>
+              <span>View as</span>
+              <button type="button" role="menuitemradio" data-album-view="compact" aria-checked="false"><i class="bi bi-list"></i> Compact<i class="bi bi-check-lg"></i></button>
+              <button type="button" role="menuitemradio" data-album-view="list" aria-checked="true"><i class="bi bi-list-ul"></i> List<i class="bi bi-check-lg"></i></button>
+            </div>
+          </div>
         </div>
-        <div class="track-list-header">
+        <div class="track-list-header album-track-header">
           <div>#</div>
           <div>Title</div>
           <div class="plays-column">Plays</div>
-          <div></div>
+          <div class="album-artist-column">Artist</div>
           <div class="time-column"><i class="bi bi-clock"></i></div>
           <div></div>
         </div>
 
-        <div id="albumTrackList" class="track-list"></div>
+        <div id="albumTrackList" class="track-list album-tracks"></div>
         <dialog class="album-image-modal" id="albumImageModal" aria-label="${esc(data.album)} artwork preview">
           <button class="album-image-modal-close" id="albumImageModalClose" type="button" aria-label="Close enlarged artwork"><i class="bi bi-x-lg"></i></button>
           <button class="album-image-modal-zoom" id="albumImageModalZoom" type="button" aria-label="Toggle zoom view"><i class="bi bi-zoom-in"></i></button>
@@ -6762,22 +6775,47 @@ function prefetchNextVideos() {
   });
 }
 
+async function recoverLibraryDownload(payload, requestId, options = {}) {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    if (options.isCancelled?.()) return null;
+    const status = await api("/api/library/status", {method:"POST",body:JSON.stringify(payload),timeout:5000}).catch(() => null);
+    if (status?.in_library && (!options.downloadOnly || albumDownloadSatisfied(status))) return {ok:true,action:"saved",...status};
+    if (status?.active_job_id) {
+      const data = await api("/api/service/downloads", {timeout:5000}).catch(() => ({jobs:[]}));
+      const job = (data.jobs || []).find(item => item.id === status.active_job_id);
+      return {ok:true,action:job?.client_request_id === requestId ? "started" : "queued",job,...status};
+    }
+    if (attempt < 11) await new Promise(resolve => setTimeout(resolve,1000));
+  }
+  return null;
+}
+
 async function toggleTrackLibrary(track, button, refresh, options = {}) {
   if (!isTrackItem(track)) return {ok:false};
   if (button.classList.contains("progress") && !options.downloadOnly) {
     await cancelLibraryDownload(track, button, refresh);
     return {ok:false, cancelled:true};
   }
+  const ensureDownload = options.downloadOnly || !button.classList.contains("downloaded");
   libraryDownloadErrors.delete(trackKey(track));
   button.classList.add("progress");
   button.classList.remove("downloaded", "download-error");
   button.dataset.cancelled = "";
   button.innerHTML = progressButtonMarkup({ progress: 0 });
   const payload = options.payload || serviceDownloadPayload(track, "download");
+  const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   try {
-    const result = await api("/api/library/toggle", {
-      method: "POST", body: JSON.stringify({...payload, ...(options.downloadOnly ? {ensure_download:true} : {})}),
-    });
+    let result;
+    try {
+      result = await api("/api/library/toggle", {
+        method:"POST",timeout:30000,
+        body:JSON.stringify({...payload,client_request_id:requestId,...(ensureDownload ? {ensure_download:true} : {})}),
+      });
+    } catch (error) {
+      if (!ensureDownload || error.code !== "REQUEST_TIMEOUT" && error.name !== "TypeError") throw error;
+      result = await recoverLibraryDownload(payload,requestId,options);
+      if (!result) throw error;
+    }
     if (result.ok === false) throw new Error(result.error || "Download failed");
     options.onJob?.(result);
     prefetchLyricsForTrack(track);
@@ -10023,14 +10061,12 @@ function openCreatePlaylistDialog(trackToAdd = null) {
       });
       state.playlists.unshift(result);
       // If a track was queued to be added, add it now
-      if (trackToAdd) {
-        try {
-          await api("/api/playlists/tracks", {
-            method: "POST",
-            body: JSON.stringify({ playlist_id: result.id, track: trackToAdd, action: "add" }),
-          });
-          state.playlists[0].tracks.push(trackToAdd);
-        } catch (e) {}
+      if (Array.isArray(trackToAdd)) {
+        await api("/api/playlists/tracks/add", {method:"POST",body:JSON.stringify({id:result.id,tracks:trackToAdd})});
+        await loadPlaylists();
+      } else if (trackToAdd) {
+        await api("/api/playlists/tracks", {method:"POST",body:JSON.stringify({playlist_id:result.id,track:trackToAdd,action:"add"})});
+        state.playlists[0].tracks.push(trackToAdd);
       }
       renderSidebarPlaylists();
       dialog.close();
@@ -12302,6 +12338,7 @@ function showAlbumContextMenu(event, album, contextInfo = {}) {
     }
   }
 
+  window.MindinguflacAlbums?.configureMenu(album);
   openContextMenu(event, menu);
 }
 
@@ -12486,8 +12523,8 @@ $("ctxAlbumAddPlaylist")?.addEventListener("click", async () => {
   const album = contextMenuTargetAlbum;
   $("albumContextMenu").hidden = true;
   if (!album) return;
-  try { await saveAlbumToLibrary(album); }
-  catch (error) { showToast(error.message || "Could not save album", 6000); }
+  try { await window.MindinguflacAlbums.albumPlaylistPicker(album); }
+  catch (error) { showToast(error.message || "Could not add album to playlist",6000); }
 });
 
 $("ctxAlbumGoArtist")?.addEventListener("click", () => {

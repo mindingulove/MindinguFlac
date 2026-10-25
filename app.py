@@ -808,7 +808,10 @@ def start_album_playlist_backfill(playlist_id: str) -> None:
 
 
 def enrich_and_persist_track(track: dict) -> dict:
-    enriched = enrich_track_identifiers(track)
+    return persist_enriched_track(enrich_track_identifiers(track))
+
+
+def persist_enriched_track(enriched: dict) -> dict:
     spotify_id = enriched.get("spotify_id", "")
     changed = False
     album_playlists_to_persist = []
@@ -839,6 +842,10 @@ def enrich_and_persist_track(track: dict) -> dict:
     for playlist in album_playlists_to_persist:
         _persist_album_playlist_track_metadata(playlist)
     return enriched
+
+
+# Download jobs resolve identifiers in their worker, then persist them here.
+service_downloader.on_track_metadata = persist_enriched_track
 
 
 def backfill_playlist_isrcs(playlist_id: str = "", max_workers: int = 8) -> dict:
@@ -3613,7 +3620,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(service_downloader.library_status_batch(body.get("tracks", [])))
                 return
             if path == "/api/library/toggle":
-                self.send_json(service_downloader.toggle_library(enrich_download_payload(body)))
+                self.send_json(service_downloader.toggle_library({**body, "_defer_metadata": True}))
                 return
             if path == "/api/playback/source":
                 self.send_json(service_downloader.playback_source(enrich_download_payload(body)))

@@ -156,6 +156,7 @@ tasks.configureEach {
 }
 
 dependencies {
+    implementation("androidx.core:core:1.13.1")
     // jlibtorrent is the real native torrent engine used by the Android FLAC
     // backend. Only the Java/SWIG bindings go on the classpath; the arm64 JNI
     // library is repacked into jniLibs by extractJlibtorrentNative above, so

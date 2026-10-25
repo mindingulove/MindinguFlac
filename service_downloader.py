@@ -487,12 +487,12 @@ def _has_genre_metadata(metadata: dict) -> bool:
     return False
 
 
-def _enrich_download_metadata_for_search(payload: dict, engine: str, metadata: dict) -> dict:
-    if engine not in {"ytp-dl", "torrent", "monochrome"}:
+def _enrich_download_metadata_for_search(payload: dict, engine: str, metadata: dict, *, force: bool = False) -> dict:
+    if not force and engine not in {"ytp-dl", "torrent", "monochrome"}:
         return metadata
     # Monochrome can search by ISRC, so run identifier enrichment even when
     # genre tags are already present. Other engines retain the old fast path.
-    if engine != "monochrome" and _has_genre_metadata(metadata):
+    if not force and engine != "monochrome" and _has_genre_metadata(metadata):
         return metadata
     try:
         from music_metadata import enrich_track_identifiers
@@ -644,6 +644,7 @@ JOBS_PATH = jobs_path()
 class ServiceDownloadManager:
     def __init__(self, config):
         self.config = config
+        self.on_track_metadata = None
         self.jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._start_lock = threading.Lock()
@@ -1705,7 +1706,8 @@ class ServiceDownloadManager:
 
         requested_engine = str(payload.get("engine") or getattr(self.config, "download_engine", "") or "").lower()
         engine, service, _requested_quality = self._requested_engine(payload)
-        metadata = _enrich_download_metadata_for_search(payload, engine, metadata)
+        if not payload.get("_defer_metadata"):
+            metadata = _enrich_download_metadata_for_search(payload, engine, metadata)
         # Only the engine is pinned onto the payload: the clamp above may have
         # changed it, and every downstream reader must agree with the job the
         # payload will produce. ``quality`` is deliberately left untouched —
@@ -1743,6 +1745,7 @@ class ServiceDownloadManager:
         job = {
             "id": job_id,
             "track_key": track_key,
+            "client_request_id": str(payload.get("client_request_id") or "")[:100],
             "artist": clean_part(payload.get("artist") or metadata.get("artist") or "Unknown Artist"),
             "album": clean_part(payload.get("album") or metadata.get("album") or "Unknown Album"),
             "title": clean_part(payload.get("title") or metadata.get("title") or "Unknown Track"),
@@ -1787,6 +1790,27 @@ class ServiceDownloadManager:
             self._save_jobs()
         return self._public_job(job) if job else None
 
+    def _resolve_job_metadata(self, job: dict, payload: dict) -> dict:
+        if not payload.get("_defer_metadata"):
+            return payload
+        with self._lock:
+            job["last_status"] = "Resolving track metadata"
+        metadata = _enrich_download_metadata_for_search(payload, job.get("engine", ""), job.get("metadata") or {}, force=True)
+        if job["id"] in self._cancel_flags:
+            raise RuntimeError("Download cancelled")
+        with self._lock:
+            job["metadata"] = metadata
+            for key in IDENTIFIER_FIELDS:
+                if metadata.get(key):
+                    job[key] = metadata[key]
+        callback = getattr(self, "on_track_metadata", None)
+        if callback:
+            try:
+                callback(metadata)
+            except Exception as exc:
+                logging.getLogger("service_downloader").warning("Could not persist resolved track metadata: %s", exc)
+        return {**payload, "metadata": metadata, "track": metadata}
+
     def _worker(self, job_id: str, payload: dict) -> None:
         with self._lock:
             job = self.jobs.get(job_id)
@@ -1794,6 +1818,7 @@ class ServiceDownloadManager:
             return
 
         try:
+            payload = self._resolve_job_metadata(job, payload)
             track = payload.get("track") if isinstance(payload.get("track"), dict) else {}
             metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
             merged = {**metadata, **track}
