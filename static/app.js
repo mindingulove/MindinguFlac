@@ -6186,6 +6186,13 @@ function followAudioWithVideo() {
 
 // Shared by a paired phone, which follows the receiving computer's clock.
 function steerVideoToAudio(video, audible) {
+  // A seek over the local stream can take over a second in WebKit. Seeking
+  // again before it lands (the video does not advance meanwhile, so the drift
+  // keeps growing) restarted it every tick and the video moved frame by frame.
+  if (video.seeking || video.readyState < 3) {
+    if (video.paused) video.play().catch(() => {});
+    return;
+  }
   const raw = audible + videoSyncOffset();
   if (raw < 0 || raw > video.duration - 0.3) {
     // The song is playing a part the video does not have (e.g. the album
@@ -6199,7 +6206,10 @@ function steerVideoToAudio(video, audible) {
   const target = videoTimeForAudio(audible, video);
   const drift = (video.currentTime || 0) - target;
   if (Math.abs(drift) > 1.0) {
-    video.currentTime = target;
+    if (performance.now() - (video._seekedAt || 0) > 2500) {
+      video.currentTime = target;
+      video._seekedAt = performance.now();
+    }
     setVideoRate(video, 1);
   } else if (!VIDEO_RATE_STEERING) {
     // One small seek for a settled drift, rarely, instead of rate changes.
@@ -6232,8 +6242,9 @@ function syncLocalVideoOverlay(position = currentPlaybackSeconds(), forcePlay = 
   if (!video || video.tagName !== "VIDEO") return;
   if (options.allowSeek && Number.isFinite(position) && position >= 0 && Number.isFinite(video.duration) && video.duration > 0) {
     const target = videoTimeForAudio(position, video);
-    if (Math.abs((video.currentTime || 0) - target) > 0.4) {
+    if (!video.seeking && Math.abs((video.currentTime || 0) - target) > 0.4) {
       video.currentTime = target;
+      video._seekedAt = performance.now();
     }
   }
   if (forcePlay && !state.manualPauseRequested && isPlaybackVisiblyActive()) {

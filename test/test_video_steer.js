@@ -6,7 +6,7 @@ const grab=name=>source.slice(source.indexOf(`function ${name}(`),source.indexOf
 let now=0;
 const context=vm.createContext({performance:{now:()=>now},Math,videoSyncOffset:()=>0,VIDEO_RATE_STEERING:true});
 vm.runInContext(['videoTimeForAudio','steerVideoToAudio','setVideoRate'].map(grab).join('\n'),context);
-const video={duration:300,currentTime:50,playbackRate:1,paused:false,play:async()=>{}};
+const video={duration:300,currentTime:50,playbackRate:1,paused:false,seeking:false,readyState:4,play:async()=>{}};
 let changes=0;const rate=video.playbackRate;
 Object.defineProperty(video,'playbackRate',{get(){return this._r ?? 1;},set(v){this._r=v;changes++;}});
 for(let i=0;i<40;i++){now+=500;video.currentTime=50+i*0.5;context.steerVideoToAudio(video,50+i*0.5+(i%2?0.12:-0.12));}
@@ -23,4 +23,10 @@ for(let i=0;i<10;i++){now+=500;video.currentTime=150+i*0.5;context.steerVideoToA
 assert.equal(changes,0,'WebKit rate stays at 1');assert.equal(video.currentTime,154.5,'jitter causes no seeks');
 now+=500;video.currentTime=160;context.steerVideoToAudio(video,160.5);assert.equal(video.currentTime,160.5);assert.equal(changes,0);
 now+=500;video.currentTime=161;context.steerVideoToAudio(video,161.5);assert.equal(video.currentTime,161,'seeks are rate-limited');
+// A slow seek over the local stream is never restarted before it lands.
+context.VIDEO_RATE_STEERING=true;now+=5000;video.currentTime=10;context.steerVideoToAudio(video,200);assert.equal(video.currentTime,200);
+video.seeking=true;video.currentTime=200;now+=500;context.steerVideoToAudio(video,201.5);assert.equal(video.currentTime,200,'no seek while one is in flight');
+video.seeking=false;video.readyState=1;now+=500;context.steerVideoToAudio(video,202);assert.equal(video.currentTime,200,'no seek without data');
+video.readyState=4;now+=500;context.steerVideoToAudio(video,202.5);assert.equal(video.currentTime,200,'large seeks are rate-limited');
+now+=2000;context.steerVideoToAudio(video,205);assert.equal(video.currentTime,205);
 console.log('Video steering ignores clock jitter, corrects settled drift gently and seeks large jumps');
