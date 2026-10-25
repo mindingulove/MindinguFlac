@@ -87,7 +87,7 @@
     "variant": "debug",
     "sha256": "e5419df2855ba2aa91cd2e24eb2d73024b5daf16d26d72a3295df0e9ec540b53",
     "checks": "tools/inspect_apk.py passed; source and shared UI match; pydantic-core ELF AArch64, 16 KiB LOAD alignment",
-    "device_runtime": "Build 23 built and inspected; physical installation pending because phone is disconnected from ADB. Build 22 was installed and launched successfully before disconnect.",
+    "device_runtime": "Build 23 installed successfully over the existing app on Nothing A065 (047bac9e); versionName 1.4, versionCode 23 verified. MainActivity launched successfully and process 2329 was running. Remote artwork and share gesture need physical runtime verification; device disconnected from ADB after startup.",
     "versionName": "1.4",
     "versionCode": 23
   },
