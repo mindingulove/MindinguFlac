@@ -6,21 +6,102 @@ window.MindinguflacRemote = (() => {
   const controlling = () => !!route;
   const portable = item => item ? trackIdentitySnapshot(item) : null;
   const publicTracks = tracks => (tracks || []).filter(playableQueueItem).map(portable);
+  const displayCache = new Map();
+  const displayKey = track => `${trackKey(track || {})}|${track?.album_context?.spotify_id || track?.album_spotify_id || track?.album || ''}`;
+  function localArtwork(value) {
+    if (!value) return '';
+    try {
+      const parsed = new URL(String(value),window.location.origin);
+      if (parsed.pathname === '/api/image') {
+        const source = parsed.searchParams.get('url');
+        return source && /^https?:\/\//i.test(source) ? `${API_BASE}/api/image?url=${encodeURIComponent(source)}` : '';
+      }
+      if (String(value).startsWith('/api/')) return `${API_BASE}${value}`;
+      if (parsed.origin === window.location.origin) return parsed.href;
+      if (['localhost','127.0.0.1','::1','[::1]'].includes(parsed.hostname)) return '';
+      return /^https?:$/.test(parsed.protocol) ? `${API_BASE}/api/image?url=${encodeURIComponent(parsed.href)}` : '';
+    } catch (_) { return ''; }
+  }
+  function cachedDisplayArtwork(track) {
+    const albumId=track.album_context?.spotify_id || track.album_spotify_id;
+    for (const playlist of state.playlists || []) for (const saved of playlist.tracks || []) {
+      if (trackKey(saved)!==trackKey(track)) continue;
+      const savedAlbum=saved.album_context?.spotify_id || saved.album_spotify_id || playlist.album_spotify_id;
+      if (albumId && albumId!==savedAlbum) continue;
+      const art=localArtwork(saved.artwork_url || playlist.artwork_url);
+      if (art) return art;
+    }
+    return '';
+  }
+  async function resolveDisplayArtwork(track,key,entry) {
+    try {
+      let albumId=track.album_context?.spotify_id || track.album_spotify_id;
+      if (!albumId && /^[A-Za-z0-9]{22}$/.test(track.spotify_id || '')) {
+        const result=await api(`/api/music/track_album?spotify_id=${encodeURIComponent(track.spotify_id)}`,{timeout:20000}).catch(()=>({}));
+        albumId=result.album_spotify_id || result.spotify_id;
+        entry.artwork=localArtwork(result.artwork_url);
+      }
+      if (!entry.artwork && /^[A-Za-z0-9]{22}$/.test(albumId || '')) {
+        const query=new URLSearchParams({spotify_id:albumId,artist:track.album_artist || track.artist || '',album:track.album || '',details:'0'});
+        const result=await api(`/api/music/album_tracks?${query}`,{timeout:30000}).catch(()=>({}));
+        entry.artwork=localArtwork(result.artwork_url || result.tracks?.find(t=>t.artwork_url)?.artwork_url);
+      }
+      if (!entry.artwork) {
+        const result=await api('/api/music/track_metadata',{method:'POST',body:JSON.stringify({track:portable(track)}),timeout:30000});
+        entry.artwork=localArtwork(result.track?.artwork_url);
+      }
+    } catch (_) {} finally {
+      entry.pending=false;entry.retryAt=Date.now()+30000;
+      if (entry.artwork && route && displayKey(route.snapshot?.track)===key) renderRemotePlayer();
+      if (entry.artwork && !route && displayKey(state.currentTrack)===key && !localArtwork(state.currentTrack.artwork_url)) {
+        state.currentTrack.artwork_url=entry.artwork;renderSideCover(state.currentTrack);
+      }
+    }
+  }
+  function displayTrack(track) {
+    if (!track) return null;
+    const key=displayKey(track);
+    let entry=displayCache.get(key);
+    const supplied=localArtwork(track.artwork_url) || cachedDisplayArtwork(track);
+    if (supplied) return {...track,artwork_url:supplied};
+    // This path always belongs to this device, never to its remote peer.
+    if (!route && state.currentLibraryPath && trackKey(track)===trackKey(state.currentTrack))
+      return {...track,artwork_url:`${API_BASE}/api/library/artwork?path=${encodeURIComponent(state.currentLibraryPath)}`};
+    if (!entry) {
+      entry={artwork:'',pending:false,retryAt:0};displayCache.set(key,entry);
+      if(displayCache.size>200)displayCache.delete(displayCache.keys().next().value);
+    }
+    if (!entry.artwork && !entry.pending && Date.now()>=entry.retryAt) {
+      entry.pending=true;resolveDisplayArtwork(track,key,entry);
+    }
+    return {...track,artwork_url:entry.artwork || ''};
+  }
   const position = () => route ? Number(route.snapshot?.position || 0) : currentPlaybackSeconds();
   function playerSnapshot() {
     const audio = $('audioPlayer');
+    const current=displayTrack(state.currentTrack);
+    if (current?.artwork_url && !localArtwork(state.currentTrack?.artwork_url)) {
+      state.currentTrack.artwork_url=current.artwork_url;renderSideCover(state.currentTrack);
+    }
     return {track:portable(state.currentTrack), queue:publicTracks(state.queue), queue_index:state.queueIndex,
       position:state.restoredPlaybackPending ? Number(state.pendingResumePosition || 0) : currentPlaybackSeconds() || 0,
       duration:state.nativeAudio.active ? state.nativeAudio.duration || knownTrackDurationSeconds(state.currentTrack) :
         (Number.isFinite(audio.duration) ? audio.duration : knownTrackDurationSeconds(state.currentTrack)) || 0,
       playing:isPlaybackVisiblyActive(), buffering:playbackTransportBusy(), volume:audio.volume,
-      shuffle:state.isShuffle, repeat:state.isRepeat, error:lastError};
+      shuffle:state.isShuffle, repeat:state.isRepeat, error:lastError,
+      status:$('playerMeta')?.textContent || state.playerStatus || '',
+      status_mode:state.audioBuffering && state.playerStatusIconMode==='ready'?'buffering':state.playerStatusIconMode || 'ready',
+      progress:Math.max(0,Math.min(100,Number(state.playerStatusIconPct)||0)),
+      quality_label:state.currentTrack ? qualityLabelForTrack(state.currentTrack) : '',
+      queue_title:state.queueContext?.title || state.queueContext?.name || ''};
   }
   function banner() {
     let el = $('remotePlaybackBanner');
     if (!el) {
       el = document.createElement('div'); el.id = 'remotePlaybackBanner'; el.className = 'remote-playback-banner';
-      el.setAttribute('role','status'); el.setAttribute('aria-live','polite');
+      el.setAttribute('role','button'); el.tabIndex=0; el.setAttribute('aria-live','polite');
+      el.onclick=()=>openConnectPanel();
+      el.onkeydown=event=>{if(event.key==='Enter' || event.key===' '){event.preventDefault();openConnectPanel();}};
       document.body.appendChild(el);
     }
     el.replaceChildren(); el.hidden = !route && !receiving;
@@ -30,18 +111,16 @@ window.MindinguflacRemote = (() => {
     label.textContent = route ? `${route.status === 'connecting' ? 'Connecting to' : 'Listening on'} ${route.name}${route.status === 'disconnected' ? ' · Disconnected' : ''}${route.status === 'failed' ? ' · Connection failed' : ''}`
       : `Controlled by ${receiving.controller_name}`;
     el.appendChild(label);
-    if (route) {
-      const exit = document.createElement('button'); exit.type = 'button'; exit.textContent = 'This device';
-      exit.onclick = () => disconnect().catch(report); el.appendChild(exit);
-    }
+    el.setAttribute('aria-label',`${label.textContent}. Open Devices`);
   }
   function report(error) { showToast(error.message || String(error), 6000); }
   function renderRemotePlayer() {
     if (!route) return;
-    const s = route.snapshot || {}, track = s.track;
+    const s = route.snapshot || {}, track = displayTrack(s.track);
+    const artChanged=String(state.currentTrack?.artwork_url || '')!==String(track?.artwork_url || '');
     const changed = trackKey(state.currentTrack || {}) !== trackKey(track || {});
     state.currentTrack = track || null; state.queue = s.queue || []; state.originalQueue = [...state.queue];
-    state.queueIndex = Number.isInteger(s.queue_index) ? s.queue_index : -1; state.queueContext = null;
+    state.queueIndex = Number.isInteger(s.queue_index) ? s.queue_index : -1; state.queueContext = s.queue_title ? {title:s.queue_title} : null;
     state.isShuffle = !!s.shuffle; state.isRepeat = !!s.repeat;
     if (changed) {
       $('playerTitle').innerHTML = track ? albumLinkHtml(track, track.title) : 'Nothing playing';
@@ -54,10 +133,16 @@ window.MindinguflacRemote = (() => {
       bindEntityLinks(document.querySelector('.details-head'));
       const requestId = ++state.sidebarRequestId;
       state.sidebarTrackKey = track ? trackKey(track) : '';
-      if (track) renderDetailsSidebar(track,null,requestId,'');
+      if (track) renderDetailsSidebar(track,null,requestId,s.quality_label || '');
       else $('sideRichContent').replaceChildren();
     }
-    $('playerMeta').textContent = route.error || (s.buffering ? 'Buffering on receiving device' : s.playing ? 'Playing' : 'Paused');
+    if (artChanged && !changed) renderSideCover(track || {});
+    $('sideMeta').innerHTML=(track ? artistLinkHtml(track) : '')+(s.quality_label ? `<span class="quality-pill">${esc(s.quality_label)}</span>` : '');
+    state.playerStatus=route.error || s.status || (s.buffering ? 'Buffering on receiving device' : s.playing ? 'Playing' : 'Paused');
+    $('playerMeta').textContent=state.playerStatus;
+    const statusMode=route.error || s.error ? 'error' : s.buffering && (!s.status_mode || s.status_mode==='ready') ? 'buffering' : s.status_mode || 'ready';
+    setPlayerStatusIcon(statusMode,Number(s.progress)||0);
+    const videoSwitch=$('sideVideoSwitch');if(videoSwitch)videoSwitch.hidden=true;
     const duration = Number(s.duration || 0), pos = Number(s.position || 0);
     $('currentTime').textContent = formatTime(pos); $('durationTime').textContent = formatTime(duration);
     $('seekBar').value = duration > 0 ? pos / duration * 1000 : 0;
@@ -71,7 +156,7 @@ window.MindinguflacRemote = (() => {
     if (!$('queuePanel').hidden) refreshQueuePanel();
     if (changed && state.lyrics.open && track) loadLyricsForTrack(track, {force:true}).catch(() => {});
     updateLyricsPosition(pos);
-    if (track) pushAndroidNowPlaying({...track,position:pos,duration}, route.status==='active' && !!s.playing);
+    if (track) pushAndroidNowPlaying({...track,artwork_url:absoluteUrl(track.artwork_url || ''),position:pos,duration}, route.status==='active' && !!s.playing);
   }
   async function command(action, payload = {}) {
     if (!route || route.status !== 'active') throw new Error('Select the paired computer again to reconnect');
@@ -134,6 +219,8 @@ window.MindinguflacRemote = (() => {
       if (saved.track) prepareSelectedTrackUi(saved.track,`Paused at ${formatTime(saved.position)}`);
       else { $('playerTitle').textContent='Nothing playing';$('playerArtist').textContent='';$('playerMeta').textContent='';resetSeekUi();renderSideCover({});clearMediaSession(); }
     }
+    setPlayerStatusIcon('ready');
+    renderSideVideoButton();
     syncPlayPauseButton(); if (!$('connectPanel').hidden) await _refreshConnectPanel();
   }
   async function applyCommand(entry) {
@@ -255,11 +342,21 @@ window.MindinguflacRemote = (() => {
     isPlaybackVisiblyActive=wrap('playing',isPlaybackVisiblyActive,()=>route.status==='active' && !!route.snapshot?.playing);
     playbackTransportBusy=wrap('busy',playbackTransportBusy,()=>route.status!=='active' || !!route.pending || !!route.snapshot?.buffering);
     persistPlaybackSnapshot=wrap('persist',persistPlaybackSnapshot,()=>{});
+    // Remote control must never start a local stream, audio/video download or
+    // stale prefetch timer. Metadata lookup above remains available locally.
+    prefetchOneTrack=wrap('prefetch',prefetchOneTrack,()=>Promise.resolve());
+    prefetchNextTracks=wrap('prefetchNext',prefetchNextTracks,()=>Promise.resolve());
+    prefetchNextVideos=wrap('prefetchVideos',prefetchNextVideos,()=>{});
+    _triggerVideoFetchForTrack=wrap('videoPrefetch',_triggerVideoFetchForTrack,()=>{});
+    fetchVideoForTrack=wrap('video',fetchVideoForTrack,()=>Promise.resolve());
+    startServiceDownload=wrap('download',startServiceDownload,()=>Promise.resolve());
+    playFromLibraryPath=wrap('libraryPlay',playFromLibraryPath,()=>Promise.resolve());
+    startNativeAudio=wrap('nativeStart',startNativeAudio,()=>Promise.resolve(false));
     const localSync=syncPlayPauseButton;
     syncPlayPauseButton=function() {
       if (!route) return localSync();
       const busy=playbackTransportBusy(),button=$('playPause');button.disabled=busy;
-      button.setAttribute('aria-label',busy?'Connecting':route.snapshot?.playing?'Pause':'Play');
+      button.setAttribute('aria-label',busy?(route.status!=='active'?'Connecting':route.snapshot?.status_mode==='downloading'?'Loading':'Buffering'):route.snapshot?.playing?'Pause':'Play');
       button.setAttribute('aria-busy',String(busy));
       button.querySelector('i').className=route.snapshot?.playing?'bi bi-pause-fill':'bi bi-play-fill';
     };

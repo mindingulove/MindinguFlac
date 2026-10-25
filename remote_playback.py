@@ -10,6 +10,8 @@ import secrets
 import threading
 import time
 import uuid
+import urllib.parse
+import ipaddress
 
 LEASE_SECONDS = 15
 PLAYER_SECONDS = 6
@@ -31,13 +33,33 @@ def number(value, minimum=0, maximum=86400):
     return value
 
 
+def portable_artwork(value):
+    artwork = str(value or '')
+    if len(artwork) > 8192:
+        return ''
+    parsed = urllib.parse.urlparse(artwork)
+    if parsed.path == '/api/image':
+        artwork = (urllib.parse.parse_qs(parsed.query).get('url') or [''])[0]
+        parsed = urllib.parse.urlparse(artwork)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
+        return ''
+    if parsed.hostname == 'localhost' or parsed.hostname.endswith(('.localhost', '.local')):
+        return ''
+    try:
+        if not ipaddress.ip_address(parsed.hostname).is_global:
+            return ''
+    except ValueError:
+        pass
+    return artwork[:4096]
+
+
 def track(value):
     if not isinstance(value, dict) or not value.get('title'):
         raise ValueError('A song title is required')
     result = {key: str(value.get(key) or '')[:1000] for key in _TRACK_FIELDS}
     result.update(type='track', duration_ms=number(value.get('duration_ms') or 0, 0, 86400000))
-    artwork = str(value.get('artwork_url') or '')
-    if artwork.startswith(('https://', 'http://')) and len(artwork) <= 4096:
+    artwork = portable_artwork(value.get('artwork_url'))
+    if artwork:
         result['artwork_url'] = artwork
     result['is_compilation'] = bool(value.get('is_compilation'))
     context = value.get('album_context')
@@ -64,6 +86,11 @@ def snapshot(value):
             'volume': number(value.get('volume') or 0, 0, 1),
             'playing': bool(value.get('playing')), 'buffering': bool(value.get('buffering')),
             'shuffle': bool(value.get('shuffle')), 'repeat': bool(value.get('repeat')),
+            'status': str(value.get('status') or '')[:500],
+            'status_mode': value.get('status_mode') if value.get('status_mode') in ('ready', 'downloading', 'buffering', 'error') else 'ready',
+            'progress': number(value.get('progress') or 0, 0, 100),
+            'quality_label': str(value.get('quality_label') or '')[:32],
+            'queue_title': str(value.get('queue_title') or '')[:200],
             'error': str(value.get('error') or '')[:300]}
 
 

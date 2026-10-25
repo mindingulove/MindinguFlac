@@ -52,6 +52,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     private WebView webView;
     private View loadingView;
     private String apiToken;
+    private String backendOrigin;
     private String pendingPairingUrl;
     private WifiManager.MulticastLock pairingMulticastLock;
 
@@ -226,6 +227,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
                         musicRoot.getAbsolutePath(),
                         apiToken).toInt();
                 String origin = "http://127.0.0.1:" + port;
+                backendOrigin = origin;
                 runOnUiThread(() -> {
                     CookieManager cookies = CookieManager.getInstance();
                     cookies.setCookie(
@@ -613,6 +615,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
                 // The artwork is served by the app's own authenticated loopback
                 // API, so the service needs this session's token to fetch it.
                 value.put("token", apiToken == null ? "" : apiToken);
+                value.put("api_origin", backendOrigin == null ? "" : backendOrigin);
                 MediaPlaybackService.update(getApplicationContext(), value.toString());
             } catch (Throwable ignored) {
             }

@@ -65,6 +65,16 @@ class ReceiverTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):self.r.connect('phone','Phone')
         self.assertIsNone(self.r.session);self.assertFalse(self.r.pending)
 
+    def test_artwork_is_portable_and_status_mirrors_receiver(self):
+        from urllib.parse import quote
+        public='https://i.scdn.co/image/album-cover'
+        for prefix in ('', 'http://127.0.0.1:55900', 'http://192.168.1.2:55900'):
+            self.assertEqual(rp.track({'title':'Song','artwork_url':prefix+'/api/image?url='+quote(public,safe='')})['artwork_url'],public)
+        for art in ('/api/library/artwork?path=/private/song.flac','file:///private/image.png','http://localhost:55900/art','http://127.0.0.2/art','http://192.168.1.2/art','http://mac.local/art','http://[::1]/art','https://user:password@example.com/art','data:image/png;base64,pixels'):
+            self.assertNotIn('artwork_url',rp.track({'title':'Song','artwork_url':art}))
+        result=rp.snapshot({'track':{'title':'Song'},'status':'Fetching audio','status_mode':'downloading','progress':37,'quality_label':'HI-RES','queue_title':'Exact deluxe edition'})
+        self.assertEqual((result['status'],result['status_mode'],result['progress'],result['quality_label'],result['queue_title']),('Fetching audio','downloading',37,'HI-RES','Exact deluxe edition'))
+
     def test_metadata_projection_never_transmits_local_paths_or_executes_arbitrary_commands(self):
         t=rp.track({'title':'Song','library_path':'/private/file.flac','offline':True,
                     'stream_url':'file:///private/file','metadata':{'secret':'hidden'},'album_context':{'spotify_id':'exact','path':'secret'}})

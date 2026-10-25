@@ -38,3 +38,19 @@ const api=context.window.MindinguflacAlbums,album={spotify_id:'ExactDeluxeReleas
  assert.ok(operations.some(o=>o[0]==='fillText' && o[1].includes('Mindinguflac')));
  console.log('Desktop List/Compact persistence, overflow reuse, exact album sharing, queue action and share-card dimensions/content passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
+
+// The share dialog uses the same tested downward-dismiss gesture as other panels.
+const appSource=fs.readFileSync('static/app.js','utf8');
+const swipeSource=appSource.slice(appSource.indexOf('function attachPanelSwipeClose('),appSource.indexOf('function attachQueueTabSwipe('));
+const touchHandlers={},timeouts=[];let dismissed=0;
+const swipePanel={dataset:{},style:{},scrollTop:0,addEventListener:(name,handler)=>touchHandlers[name]=handler};
+const swipeContext=vm.createContext({setTimeout:fn=>timeouts.push(fn)});vm.runInContext(swipeSource,swipeContext);
+swipeContext.attachPanelSwipeClose(swipePanel,swipePanel,()=>dismissed++);
+const touch=y=>({touches:[{clientY:y}],target:{closest:()=>null},preventDefault(){}});
+touchHandlers.touchstart(touch(100));touchHandlers.touchmove(touch(145));touchHandlers.touchend();
+assert.equal(dismissed,0);assert.equal(swipePanel.style.transform,'');
+touchHandlers.touchstart(touch(100));touchHandlers.touchmove(touch(215));touchHandlers.touchend();timeouts.shift()();
+assert.equal(dismissed,1);assert.equal(swipePanel.style.transform,'');
+swipePanel.scrollTop=50;touchHandlers.touchstart(touch(100));touchHandlers.touchmove(touch(250));touchHandlers.touchend();
+assert.equal(timeouts.length,0,'scrolling share content does not dismiss it');
+assert.ok(fs.readFileSync('static/album_controls.js','utf8').includes('attachPanelSwipeClose(dialog,dialog,()=>dialog.close())'));

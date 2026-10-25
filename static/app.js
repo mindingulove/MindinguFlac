@@ -3956,6 +3956,7 @@ function renderPlayerStatusIcon() {
 }
 
 function updatePlayerPie(pct) {
+  state.playerStatusIconPct = Math.max(0, Math.min(100, Number(pct) || 0));
   const playerStatusIcon = $("playerStatusIcon");
   const pie = playerStatusIcon ? playerStatusIcon.querySelector(".player-pie") : null;
   if (!pie) return;

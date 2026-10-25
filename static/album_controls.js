@@ -180,6 +180,7 @@ window.MindinguflacAlbums = (() => {
         <canvas width="720" height="1080" id="albumShareCanvas" aria-label="Album share card"></canvas><div class="album-share-colors" role="group" aria-label="Card background"></div>
         <div class="album-share-buttons"><button type="button" id="albumShareCopy"><i class="bi bi-link-45deg"></i><span>Copy link</span></button><button type="button" id="albumShareNative"><i class="bi bi-share"></i><span>Share card</span></button></div><p id="albumShareNotice" role="status"></p></div>`;
       document.body.appendChild(dialog);dialog.querySelector('.album-share-close').onclick=()=>dialog.close();
+      attachPanelSwipeClose(dialog,dialog,()=>dialog.close());
       dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close();});
     }
     const canvas=$('albumShareCanvas'),colors=dialog.querySelector('.album-share-colors');

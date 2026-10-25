@@ -27,6 +27,8 @@
 
 ## Security and version
 - Upgrade Pillow to 13.0.0, including the bundled native Android decoder.
-- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **22**.
+- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **23**.
 
 Mornye provider downloads require an installed provider extension. Monochrome, YouTube and torrent backends remain independent.
+
+Remote playback follow-up (Android build 23): each device resolves artwork through its own metadata cache and image proxy. Android control suppresses local audio/video playback and prefetch, while displaying the receiving player's loading progress and quality. The left-aligned status banner opens Devices; album share cards support swipe-down dismissal.

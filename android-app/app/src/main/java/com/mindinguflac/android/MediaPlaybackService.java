@@ -66,8 +66,9 @@ public final class MediaPlaybackService extends Service {
     private String title = "";
     private String artist = "";
     private String album = "";
-    private String artworkUrl = "";
+    private volatile String artworkUrl = "";
     private String apiToken = "";
+    private String apiOrigin = "";
     private long durationMs;
     private long positionMs;
     private boolean playing;
@@ -168,6 +169,7 @@ public final class MediaPlaybackService extends Service {
             positionMs = value.optLong("position_ms", positionMs);
             playing = value.optBoolean("playing", playing);
             apiToken = value.optString("token", apiToken);
+            apiOrigin = value.optString("api_origin", apiOrigin);
             String url = value.optString("artwork_url", artworkUrl);
             if (!url.equals(artworkUrl)) {
                 artworkUrl = url;
@@ -296,9 +298,10 @@ public final class MediaPlaybackService extends Service {
         }
         final String requested = url;
         final String token = apiToken;
+        final String origin = apiOrigin;
         artworkExecutor.execute(() -> {
-            Bitmap bitmap = fetchBitmap(requested, token);
-            if (bitmap == null) return;
+            Bitmap bitmap = fetchBitmap(requested, token, origin);
+            if (bitmap == null || !requested.equals(artworkUrl)) return;
             loadedArtwork = bitmap;
             loadedArtworkUrl = requested;
             // Re-publish so the lock screen picks up the cover once it lands.
@@ -306,14 +309,17 @@ public final class MediaPlaybackService extends Service {
         });
     }
 
-    private Bitmap fetchBitmap(String url, String token) {
+    private Bitmap fetchBitmap(String url, String token, String origin) {
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) new URL(url).openConnection();
+            URL target = new URL(url);
+            connection = (HttpURLConnection) target.openConnection();
             connection.setConnectTimeout(8000);
             connection.setReadTimeout(8000);
-            if (token != null && !token.isEmpty()) {
-                // Artwork is served by the app's own authenticated loopback API.
+            if (token != null && !token.isEmpty() && origin != null && !origin.isEmpty()
+                    && (target.getProtocol() + "://" + target.getAuthority()).equals(origin)) {
+                // Never send the local API token to an artwork provider or redirect.
+                connection.setInstanceFollowRedirects(false);
                 connection.setRequestProperty("X-Mindinguflac-Token", token);
             }
             try (InputStream stream = connection.getInputStream()) {
