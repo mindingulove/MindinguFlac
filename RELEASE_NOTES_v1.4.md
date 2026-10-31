@@ -15,6 +15,10 @@
 - Retain local artist-profile and lyrics implementations as compatibility fallbacks, and preserve already installed local provider extensions during migration.
 
 ## Fixed
+- Check small video storyboard previews before downloading music clips, skip static album artwork, and show No video available when matching uploads contain only artwork. Check existing video files before offering the video switch, and keep failed preview checks retryable.
+- Hide video/audio controls after three seconds without pointer or touch activity, including when the pointer stays over the artwork.
+- Let Monochrome downloads reuse the selected playback source and shared transfer, allow slow catalog responses, and save audio without keeping a video track.
+- Find the bundled Node.js and media tools for Mornye providers when the desktop app starts from Finder.
 - Show an animated remote-volume indicator with the connected device name and percentage on Android, and keep the remote session active in the background.
 - Renew connected-device sessions from Android's native playback foreground service instead of relying on WebView background timers; hold a CPU wake lock only while remote control is active.
 - Route Android hardware volume buttons and media-session volume controls to the selected computer only while connected; restore local phone volume when the remote session ends.
@@ -33,6 +37,7 @@
 - Show download errors with a visible retry state, retry punctuation-sensitive Monochrome searches without weakening recording matching, and prevent saved album siblings from supplying another track's progress or completion file.
 - Retry a timed-out stream or library-download request once after two seconds, recovering the accepted job first so the retry does not duplicate work.
 - Explain when Monochrome search finds only a live or alternate take and safely skips it; the stream then continues on YouTube instead of failing. Explicit Monochrome downloads still report the miss.
+- Android offline downloads from Monochrome use the same OkHttp client as playback, so they are no longer refused with HTTP 403.
 - Filter playlist recommendations against the saved playlist by recording identity, exclude incomplete artist/album catalog entries, and retain Spotify/ISRC identifiers on playable recommendations.
 - Resolve artist artwork for the Android Your Library artist list using the local metadata backend.
 - Restore desktop music search when file-based logging prevented the embedded Mornye API from starting.
@@ -49,6 +54,6 @@
 
 ## Security and version
 - Upgrade Pillow to 13.0.0, including the bundled native Android decoder.
-- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **26**.
+- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **32**.
 
 Mornye provider downloads require an installed provider extension. Monochrome, YouTube and torrent backends remain independent.

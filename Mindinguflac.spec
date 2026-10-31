@@ -34,6 +34,7 @@ hiddenimports = [
     'backend_monochrome',
     'video_sync',
     'video_sources',
+    'video_motion',
     'backend_ytpdl',
     'catalog',
     'service_downloader',
@@ -192,9 +193,10 @@ if helper.is_file():
     binaries.append((str(helper), '.'))
 
 import shutil
-_ffmpeg = shutil.which('ffmpeg')
-if _ffmpeg:
-    binaries.append((_ffmpeg, '.'))
+for _media_tool in ('ffmpeg', 'ffprobe'):
+    _media_executable = shutil.which(_media_tool)
+    if _media_executable:
+        binaries.append((_media_executable, '.'))
 
 
 # The lyrics aligner ships its verified model and native CPU bridge.

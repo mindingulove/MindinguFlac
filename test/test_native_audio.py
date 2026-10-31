@@ -456,11 +456,13 @@ class TestAndroidNativePlayback(unittest.TestCase):
         import native_audio
         self.player = _FakeAndroidPlayer()
         for item in (patch.object(native_audio, "_on_android", return_value=True),
-                     patch.object(native_audio, "_android_player", return_value=self.player)):
+                     patch.object(native_audio, "_android_player", return_value=self.player),
+                     patch.dict("os.environ", {"MINDINGUFLAC_ANDROID_API_ORIGIN": "http://127.0.0.1:45678",
+                                               "MINDINGUFLAC_API_TOKEN": "test-session"})):
             item.start()
             self.addCleanup(item.stop)
 
-    def test_monochrome_stream_plays_on_chosen_device_with_browser_headers(self):
+    def test_monochrome_stream_plays_through_shared_fetch_on_chosen_device(self):
         import backend_monochrome, json
         manager = NativeAudioManager()
         with patch.object(backend_monochrome, "_stream_blocked_until", 0.0):
@@ -469,7 +471,9 @@ class TestAndroidNativePlayback(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         _, source, headers, device_id, name, volume, position = self.player.calls[0]
         self.assertEqual((device_id, name, position), (7, "EDIFIER S351DB", 3.0))
-        self.assertEqual(json.loads(headers)["Sec-Fetch-Dest"], "audio")
+        self.assertEqual(source, "http://127.0.0.1:45678/api/monochrome/stream?url=https%3A%2F%2Ftracks.monochrome.st%2Ftrack%2F1")
+        self.assertEqual(json.loads(headers), {"X-Mindinguflac-Token": "test-session"})
+        self.assertEqual(manager._stream_url, "https://tracks.monochrome.st/track/1")
         self.assertEqual(result["stream_phase"], "playing")
         self.assertEqual(result["position"], 12.5)
         self.assertEqual(result["device_uid"], "android:7")

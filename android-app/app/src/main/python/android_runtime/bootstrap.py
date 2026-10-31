@@ -133,7 +133,9 @@ def start(data_path: str, cache_path: str, music_path: str, token: str) -> int:
         import app
 
         app.API_TOKEN = token
+        os.environ["MINDINGUFLAC_API_TOKEN"] = token
         port = int(_server.server_address[1])
+        os.environ["MINDINGUFLAC_ANDROID_API_ORIGIN"] = f"http://127.0.0.1:{port}"
         _preflight(port, token, Path(cache_path), Path(music_path))
         return port
 
@@ -182,6 +184,7 @@ def start(data_path: str, cache_path: str, music_path: str, token: str) -> int:
     )
     _thread.start()
     port = int(_server.server_address[1])
+    os.environ["MINDINGUFLAC_ANDROID_API_ORIGIN"] = f"http://127.0.0.1:{port}"
     try:
         _preflight(port, token, cache_dir, music_dir)
     except Exception:

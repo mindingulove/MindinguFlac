@@ -260,6 +260,8 @@ class AndroidWarmRestartAuthTest(unittest.TestCase):
                     self.assertEqual(port_warm, port_cold)
                     self.assertEqual(health("token-two"), 200)
                     self.assertEqual(health("token-one"), 401)
+                    self.assertEqual(os.environ["MINDINGUFLAC_API_TOKEN"], "token-two")
+                    self.assertEqual(os.environ["MINDINGUFLAC_ANDROID_API_ORIGIN"], f"http://127.0.0.1:{port_warm}")
                 finally:
                     bootstrap.stop()
 

@@ -94,10 +94,13 @@ def stream_request_headers(site_origin: str = _INSTANCES[0][1]) -> dict[str, str
 
 def _headers(site_origin: str, *, audio: bool = False) -> dict[str, str]:
     headers = {
-        "Accept": "*/*" if audio else "application/json, */*",
+        "Accept": "*/*" if audio else "application/json",
         "Origin": site_origin,
-        "Referer": f"{site_origin}/",
         "User-Agent": _USER_AGENT,
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Sec-Fetch-Dest": "audio" if audio else "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
     }
     if audio:
         headers.update({
@@ -523,7 +526,10 @@ def _search_items(requests_module, query: str, limit: int = 50, *, api_base: str
         f"{api_base}/search/tracks",
         params={"q": query, "limit": max(1, min(int(limit), 100))},
         headers=_headers(site_origin),
-        timeout=20,
+        # Healthy browser searches have taken over 30 s, and upstream responses
+        # can take over a minute. Match the browser's patience instead of
+        # aborting valid catalog lookups after 20 s.
+        timeout=(10, 120),
     )
     response.raise_for_status()
     payload = response.json()
@@ -531,9 +537,80 @@ def _search_items(requests_module, query: str, limit: int = 50, *, api_base: str
     return [item for item in tracks if isinstance(item, dict)]
 
 
+def _save_resolved_stream(output_dir: Path, job: dict, manager, url: str) -> Path:
+    """Save the same growing file consumed by native and browser playback."""
+    import shutil
+    import native_audio
+    from service_downloader import is_valid_audio_file
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_path = output_dir / f"{job.get('title') or 'Unknown'} - {job.get('artist') or 'Unknown'}.flac"
+    part_path = final_path.with_suffix(final_path.suffix + ".part")
+    fetch = native_audio._monochrome_fetch(url, pin=True)
+    try:
+        with manager._lock:
+            job["last_status"] = "Saving Monochrome FLAC from playback stream"
+        while True:
+            if job["id"] in manager._cancel_flags:
+                raise RuntimeError("Download cancelled")
+            with fetch.condition:
+                if not (fetch.done or fetch.error or fetch.cancelled.is_set()):
+                    fetch.condition.wait(timeout=0.5)
+                size, total, done, error = fetch.size, fetch.total, fetch.done, fetch.error
+            with manager._lock:
+                job["active_audio_path"] = str(fetch.path)
+                job["active_audio_size"] = total
+                job["active_audio_ready_bytes"] = size
+                if total:
+                    job["progress"] = min(95, int(size * 95 / total))
+            if error:
+                raise RuntimeError(error)
+            if fetch.cancelled.is_set():
+                raise RuntimeError("download was interrupted")
+            if done:
+                break
+        shutil.copyfile(fetch.path, part_path)
+        if not is_valid_audio_file(part_path):
+            raise RuntimeError("response was not a valid FLAC file")
+        decode_error = _decode_error(part_path)
+        if decode_error:
+            raise RuntimeError(f"downloaded FLAC is damaged ({decode_error})")
+        part_path.replace(final_path)
+        with manager._lock:
+            job["active_audio_path"] = str(final_path)
+            job["active_audio_size"] = final_path.stat().st_size
+            job["active_audio_ready_bytes"] = final_path.stat().st_size
+        return final_path
+    except Exception:
+        part_path.unlink(missing_ok=True)
+        with manager._lock:
+            if job.get("active_audio_path") in (str(part_path), str(fetch.path)):
+                job.update(active_audio_path="", active_audio_ready_bytes=0, active_audio_size=0)
+        raise
+    finally:
+        native_audio._release_monochrome_fetch(fetch)
+
+
+def _finish_saved_stream(job: dict, manager, url: str, path: Path) -> None:
+    with manager._lock:
+        job.update(progress=100, resolved_url=url, last_status="FLAC downloaded from Monochrome")
+    manager._append_cache_event(job, "provider", f"Monochrome download completed: {path.name}")
+
+
 def run(output_dir: Path, job: dict, manager) -> None:
     import requests
-    from service_downloader import is_valid_audio_file
+
+    # Only reuse a source already matched and retained by the job manager.
+    # A known playback URL needs no second catalog lookup.
+    parsed = urllib.parse.urlparse(str(job.get("resolved_url") or ""))
+    allowed = {urllib.parse.urlparse(base).netloc for base, _ in _INSTANCES}
+    if (job.get("mode") == "download" and job.get("source_recording")
+            and parsed.scheme == "https" and parsed.netloc in allowed
+            and re.fullmatch(r"/track/[0-9]+", parsed.path)):
+        url = f"https://{parsed.netloc}{parsed.path}"
+        path = _save_resolved_stream(output_dir, job, manager, url)
+        _finish_saved_stream(job, manager, url, path)
+        return
 
     if job.get("mode") == "download":
         blocked = stream_block_reason()
@@ -555,12 +632,12 @@ def run(output_dir: Path, job: dict, manager) -> None:
     if text_query and text_query.casefold() not in {query.casefold() for query in queries}:
         queries.append(text_query)
 
-    if job.get("mode", "stream") == "stream":
-        manager._append_cache_event(job, "trying", f"Searching Monochrome for {title} — {artist}…")
+    with manager._lock:
+        job["last_status"] = "Searching Monochrome"
+    manager._append_cache_event(job, "trying", f"Searching Monochrome for {title} — {artist}…")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     final_path = output_dir / f"{title} - {artist}.flac"
-    part_path = final_path.with_suffix(final_path.suffix + ".part")
     failures = []
     stream_url = ""
     selected = None
@@ -648,61 +725,16 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     job["last_status"] = "Streaming directly from Monochrome"
                 return
 
-            # Download through the same shared HTTP/2 fetch the native player
-            # streams from (native_audio._MonochromeFetch). Saving a track that
-            # is already playing reuses its bytes instead of requesting it
-            # again; otherwise it is one request with at most a couple of
-            # resumes, never the retry storm that trips the per-IP rate limit.
-            import shutil
-            import native_audio
-
-            fetch = native_audio._monochrome_fetch(candidate_url, pin=True)
             try:
-                while True:
-                    if job["id"] in manager._cancel_flags:
-                        raise RuntimeError("Download cancelled")
-                    with fetch.condition:
-                        if not (fetch.done or fetch.error or fetch.cancelled.is_set()):
-                            fetch.condition.wait(timeout=0.5)
-                        size, total, done, error = fetch.size, fetch.total, fetch.done, fetch.error
-                    with manager._lock:
-                        job["active_audio_path"] = str(fetch.path)
-                        job["active_audio_size"] = total
-                        job["active_audio_ready_bytes"] = size
-                        if total:
-                            job["progress"] = min(95, int(size * 95 / total))
-                    if error:
-                        raise RuntimeError(error)
-                    if fetch.cancelled.is_set():
-                        raise RuntimeError("download was interrupted")
-                    if done:
-                        break
-                shutil.copyfile(fetch.path, part_path)
-                if not is_valid_audio_file(part_path):
-                    raise RuntimeError("response was not a valid FLAC file")
-                decode_error = _decode_error(part_path)
-                if decode_error:
-                    raise RuntimeError(f"downloaded FLAC is damaged ({decode_error})")
-                part_path.replace(final_path)
-                with manager._lock:
-                    job["active_audio_path"] = str(final_path)
-                    job["active_audio_size"] = final_path.stat().st_size
-                    job["active_audio_ready_bytes"] = final_path.stat().st_size
+                _save_resolved_stream(output_dir, job, manager, candidate_url)
                 selected = match
                 stream_url = candidate_url
                 break
             except Exception as exc:
-                part_path.unlink(missing_ok=True)
-                with manager._lock:
-                    if job.get("active_audio_path") in (str(part_path), str(fetch.path)):
-                        job["active_audio_path"] = ""
-                        job["active_audio_ready_bytes"] = 0
-                        job["active_audio_size"] = 0
                 if str(exc) == "Download cancelled":
                     raise
                 failures.append(f"{api_base}: download failed ({exc})")
-            finally:
-                native_audio._release_monochrome_fetch(fetch)
+
         except Exception as exc:
             if str(exc) == "Download cancelled":
                 raise
@@ -710,8 +742,4 @@ def run(output_dir: Path, job: dict, manager) -> None:
     if selected is None:
         raise RuntimeError("Monochrome official instances failed: " + "; ".join(failures))
 
-    with manager._lock:
-        job["progress"] = 100
-        job["resolved_url"] = stream_url
-        job["last_status"] = "FLAC downloaded from Monochrome"
-    manager._append_cache_event(job, "provider", f"Monochrome download completed: {final_path.name}")
+    _finish_saved_stream(job, manager, stream_url, final_path)

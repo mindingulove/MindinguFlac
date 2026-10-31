@@ -10,6 +10,65 @@ import backend_spotiflac
 
 
 class PlaybackSourceTests(unittest.TestCase):
+    def test_save_copies_playback_bytes_even_when_selected_engine_requests_lossless(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import threading
+            root = Path(tmp)
+            audio = root / "cache" / "playing" / "Bad - Michael Jackson.ogg"
+            audio.parent.mkdir(parents=True)
+            body = b"OggSOpusHead" + b"audio" * 30000
+            audio.write_bytes(body)
+            source = {"id": "playing", "title": "Bad", "artist": "Michael Jackson", "album": "Bad",
+                      "mode": "stream", "status": "finished", "engine": "ytp-dl", "quality": "best",
+                      "library_path": str(audio), "metadata": {}, "created_at": 1}
+            manager = object.__new__(service_downloader.ServiceDownloadManager)
+            manager.config = SimpleNamespace(music_dir=root / "music", cache_dir=root / "cache", default_quality="LOSSLESS")
+            manager._lock = threading.RLock()
+            manager.jobs = {"playing": source, "failed-save": {**source, "id": "failed-save", "mode": "download", "status": "error"}}
+            payload = {"title": "Bad", "artist": "Michael Jackson", "album": "Bad", "mode": "download",
+                       "engine": "monochrome", "quality": "LOSSLESS", "use_playback_source": True,
+                       "ensure_download": True, "playback_job_id": "playing"}
+            with patch.object(manager, "_save_jobs"), patch.object(manager, "_save_sidecar_files"), \
+                    patch.object(manager, "_append_cache_event"), patch.object(manager, "start_job") as start:
+                result = manager._toggle_library(payload)
+            self.assertEqual(result["action"], "copied")
+            self.assertEqual(Path(result["library_path"]).read_bytes(), body)
+            self.assertEqual(result["library_format"], "ogg")
+            self.assertTrue(result["download_satisfied"])
+            self.assertEqual(result["job"]["id"], "failed-save")
+            self.assertEqual(manager.jobs["playing"]["mode"], "stream")
+            self.assertEqual(result["job"]["engine"], "ytp-dl")
+            start.assert_not_called()
+
+    def test_playback_source_id_cannot_select_a_different_track(self):
+        import threading
+        manager = object.__new__(service_downloader.ServiceDownloadManager)
+        manager._lock = threading.RLock()
+        manager.jobs = {"other": {"id": "other", "mode": "stream", "status": "finished", "engine": "monochrome",
+                                  "title": "Other Song", "artist": "Other Artist", "created_at": 2}}
+        self.assertIsNone(manager._playback_job_for_download({"use_playback_source": True, "playback_job_id": "other",
+                                                             "title": "Bad", "artist": "Michael Jackson"}))
+
+    def test_new_save_inherits_resolved_monochrome_recording_without_metadata_requests(self):
+        import threading
+        manager = object.__new__(service_downloader.ServiceDownloadManager)
+        manager._lock = threading.RLock()
+        manager.config = SimpleNamespace(download_engine="monochrome", download_service="monochrome", default_quality="LOSSLESS")
+        source = {"id": "playing", "mode": "stream", "status": "finished", "engine": "monochrome", "service": "monochrome",
+                  "title": "Bad", "artist": "Michael Jackson", "quality": "LOSSLESS", "created_at": 1,
+                  "resolved_url": "https://tracks.monochrome.st/track/158534777373302784",
+                  "isrc": "source-isrc", "metadata": {"isrc": "source-isrc"},
+                  "source_recording": {"isrc": "source-isrc", "title": "Bad"}}
+        manager.jobs = {"playing": source}
+        with patch.object(service_downloader, "_enrich_download_metadata_for_search") as enrich, \
+                patch.object(manager, "_append_cache_event"), patch("threading.Thread"):
+            saved = manager._create_job({"title": "Bad", "artist": "Michael Jackson", "mode": "download",
+                                         "use_playback_source": True, "playback_job_id": "playing", "_defer_metadata": True})
+        self.assertEqual(saved["resolved_url"], source["resolved_url"])
+        self.assertEqual(saved["source_recording"], source["source_recording"])
+        self.assertEqual(saved["isrc"], "source-isrc")
+        enrich.assert_not_called()
+
     def test_physical_lossy_file_is_not_lossless_just_because_job_requested_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'youtube.webm'
@@ -979,7 +1038,7 @@ if __name__ == "__main__":
 class MonochromeStreamFallbackTests(unittest.TestCase):
     """A Monochrome catalog miss must not leave a stream with nothing to play."""
 
-    def _run(self, mode):
+    def _run(self, mode, use_playback_source=False):
         with tempfile.TemporaryDirectory() as tmp:
             manager = service_downloader.ServiceDownloadManager.__new__(service_downloader.ServiceDownloadManager)
             import threading
@@ -994,6 +1053,7 @@ class MonochromeStreamFallbackTests(unittest.TestCase):
             job = {"id": "j1", "mode": mode, "engine": "monochrome", "service": "monochrome", "quality": "LOSSLESS",
                    "title": "Our House", "artist": "Madness", "status": "queued", "source_recording": {"title": "x"}}
             manager.jobs["j1"] = job
+            job["use_playback_source"] = use_playback_source
             ran = []
             miss = RuntimeError("Monochrome official instances failed: https://tracks.monochrome.st: no exact ISRC or title/artist match")
             fake_mono = SimpleNamespace(run=Mock(side_effect=miss))
@@ -1014,3 +1074,9 @@ class MonochromeStreamFallbackTests(unittest.TestCase):
         job, ran, events = self._run("download")
         self.assertEqual(ran, [], "a lossless download never silently becomes YouTube")
         self.assertIn("no exact ISRC", job.get("error") or "")
+
+    def test_failed_monochrome_save_is_not_replaced_with_youtube(self):
+        job, ran, events = self._run("download", use_playback_source=True)
+        self.assertEqual(ran, [])
+        self.assertEqual(job["engine"], "monochrome")
+        self.assertIn("no exact ISRC", job["error"])

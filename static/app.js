@@ -3484,6 +3484,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   state.lastActiveReadyBytes = 0;
   state.manualPauseRequested = false;
   state.activeJobId = null;
+  state.currentSourceJobId = null;
   state.currentTrack = item;
   state.currentLibraryPath = ""; // Clear path for new selection
   state.videoFetch = { trackKey: trackKey(item), status: "", path: "" };
@@ -3544,6 +3545,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
     if (requestId !== state.playbackRequestId) return;
     if (source.path) {
       state.activeJobId = source.active_job_id || null;
+      state.currentSourceJobId = source.source_job_id || source.active_job_id || null;
       await playFromLibraryPath(source.path, item, requestId, source.active_job_id || null, source.source === "cache" ? "Playing from cache" : "Playing from library");
       return;
     }
@@ -4236,7 +4238,8 @@ function canSwitchToLocalVideo(track = state.currentTrack) {
   // when the quality is explicitly set to the music-video mode.
   if ((state.settings.download_engine || "") === "ytp-dl" &&
       (state.settings.default_quality || "") !== "video") return false;
-  return true;
+  return state.videoFetch.trackKey === trackKey(track) && state.videoFetch.status === "ready"
+    && state.videoFetch.path === state.currentLibraryPath && state.videoFetch.motion_verified === true;
 }
 
 function canSwitchToVideo(track = state.currentTrack) {
@@ -4254,7 +4257,13 @@ function localMediaStreamUrl(filePath) {
 
 
 async function fetchVideoForTrack(track, { force = false } = {}) {
-  if (track?.offline) return;
+  const localVideo = track && state.currentTrack && trackKey(track) === trackKey(state.currentTrack)
+    && isVideoLibraryPath(state.currentLibraryPath || "") ? state.currentLibraryPath : "";
+  if (track?.offline && !localVideo) {
+    state.videoFetch = { trackKey: trackKey(track), status: "not_found", path: "" };
+    renderSideVideoButton();
+    return state.videoFetch;
+  }
   const key = trackKey(track || {});
   if (!track) return state.videoFetch;
   if (!force && state.videoFetch.trackKey === key) {
@@ -4270,6 +4279,8 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     track_key: key,
     ...(track.duration_ms ? { duration_ms: String(track.duration_ms) } : {}),
     ...(track.youtube_id ? { youtube_id: track.youtube_id } : {}),
+    ...(localVideo ? { video_path: localVideo } : {}),
+    ...(track.offline ? { offline: "1" } : {}),
     ...(force ? { force: "1" } : {}),
   });
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -4280,7 +4291,8 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
       const data = await api(`/api/video/fetch?${params.toString()}`);
       if (state.videoFetch.trackKey !== key) return state.videoFetch;
       state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "",
-        youtube_id: data.youtube_id || track.youtube_id || "", clip_duration: Number(data.clip_duration || 0) };
+        youtube_id: data.youtube_id || track.youtube_id || "", clip_duration: Number(data.clip_duration || 0),
+        motion_verified: data.motion_verified === true, stage: data.stage || "" };
       if (state.videoFetch.status === "not_found" && state.videoMode && state.sideVideoTrackKey === key) {
         state.videoMode = false;
         state.sideVideoTrackKey = "";
@@ -4294,7 +4306,7 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
           renderSideCover(track);
           showToast(data.error || "Video download failed. Try again.", 6000);
         }
-        if (data.status === "not_found") showToast("No video found for this track");
+        if (data.status === "not_found") showToast("No video available for this track");
         if (state.videoMode && state.sideVideoTrackKey === key && data.status === "ready") {
           renderSideCover(track);
         }
@@ -4303,16 +4315,16 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     } catch (_) {}
     await new Promise((r) => setTimeout(r, 3000));
   }
-  // Timed out — treat as not found
+  // A failed check is retryable; it does not establish that no video exists.
   if (state.videoFetch.trackKey === key) {
-    state.videoFetch = { trackKey: key, status: "not_found", path: "" };
+    state.videoFetch = { trackKey: key, status: "error", path: "" };
     if (state.videoMode && state.sideVideoTrackKey === key) {
       state.videoMode = false;
       state.sideVideoTrackKey = "";
       renderSideCover(track);
     }
     renderSideVideoButton();
-    showToast("No video found for this track");
+    showToast("Video preview timed out. Try again.");
   }
   return state.videoFetch;
 }
@@ -4452,13 +4464,16 @@ function renderSideVideoButton() {
   const hasUsableVideo = canSwitchToLocalVideo() || (state.videoFetch.status === "ready" && !!state.videoFetch.path);
   const available = (state.videoMode && hasUsableVideo) || canSwitchToVideo();
   button.hidden = !available;
+  button.disabled = state.videoFetch.status === "not_found" || state.videoFetch.status === "downloading";
   button.classList.toggle("active", !!state.videoMode && hasUsableVideo);
   if (state.videoMode && hasUsableVideo) {
     button.innerHTML = '<i class="bi bi-music-note-beamed"></i><span>Switch to audio</span>';
   } else if (state.videoFetch.status === "downloading") {
-    button.innerHTML = '<i class="bi bi-hourglass-split"></i><span>Loading video…</span>';
+    button.innerHTML = '<i class="bi bi-hourglass-split"></i><span>Checking video…</span>';
   } else if (state.videoFetch.status === "not_found") {
-    button.innerHTML = '<i class="bi bi-camera-video-off"></i><span>No video</span>';
+    button.innerHTML = '<i class="bi bi-camera-video-off"></i><span>No video available</span>';
+  } else if (state.videoFetch.status === "error") {
+    button.innerHTML = '<i class="bi bi-arrow-clockwise"></i><span>Retry video</span>';
   } else {
     button.innerHTML = '<i class="bi bi-play-btn"></i><span>Switch to video</span>';
   }
@@ -5849,6 +5864,11 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
     kind: "track",
     mode,
     prefetch,
+    use_playback_source: mode === "download" && selectedEngine === "monochrome"
+      && !!state.currentTrack && trackKey(track) === trackKey(state.currentTrack)
+      && !!(state.currentSourceJobId || state.activeJobId || state.currentLibraryPath),
+    playback_job_id: mode === "download" && state.currentTrack && trackKey(track) === trackKey(state.currentTrack)
+      ? (state.currentSourceJobId || state.activeJobId || "") : "",
     artist: track.artist || "",
     album: track.album || "",
     title: track.title || "",
@@ -6925,6 +6945,10 @@ async function toggleTrackLibrary(track, button, refresh, options = {}) {
       if (!status) return {ok:false, cancelled:!!options.isCancelled?.()};
     } else if (status.in_library) exportLibraryDownloadToPhone(status.library_path);
     options.onStatus?.(status);
+    if (payload.use_playback_source && status.in_library) {
+      const provider = {monochrome:"Monochrome", "ytp-dl":"YouTube"}[status.library_engine] || "Playback";
+      showToast(`Saved ${provider} audio${status.library_format ? ` (${status.library_format.toUpperCase()})` : ""}`);
+    }
     if (typeof refresh === "function") refresh();
     loadPlaylists();
     return {ok:true, ...result, status};
@@ -6975,7 +6999,7 @@ function exportLibraryDownloadToPhone(libraryPath) {
   const ext = (name.split(".").pop() || "").toLowerCase();
   const mime = {
     flac: "audio/flac", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac",
-    ogg: "audio/ogg", opus: "audio/opus", wav: "audio/wav", alac: "audio/alac",
+    ogg: "audio/ogg", opus: "audio/opus", webm: "audio/webm", wav: "audio/wav", alac: "audio/alac",
   }[ext] || "audio/mpeg";
   try {
     window.MindinguflacAndroid.exportDownloadToMusicLibrary(libraryPath, name, mime);
@@ -7100,6 +7124,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
     
     if (requestId !== state.playbackRequestId) return;
     state.activeJobId = job.id;
+    state.currentSourceJobId = job.id;
     
     if (mode === "stream") {
       if (job.engine === "monochrome" && job.direct_stream && job.resolved_url) {
@@ -7146,6 +7171,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
 
 function startMonochromeDirectPlayback(job, track, requestId) {
   if (requestId !== state.playbackRequestId || !job?.resolved_url) return;
+  state.currentSourceJobId = job.id;
   if (["original_album", "same_recording"].includes(job.recording_match?.kind)) {
     track = { ...track, requested_isrc: job.recording_match.requested_isrc,
       isrc: job.recording_match.resolved_isrc, source_isrc: job.recording_match.resolved_isrc,
@@ -11742,36 +11768,34 @@ $("lyricsScroll").addEventListener("pointerdown", event => {
       event.clientX >= scroll.getBoundingClientRect().left + scroll.clientWidth) pauseLyricsFollowFromInput();
 });
 $("sideVideoSwitch").onclick = () => {
-  if (!state.videoMode && state.videoFetch.status === "not_found" && state.currentTrack) {
-    state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };
-    renderSideVideoButton();
-    fetchVideoForTrack(state.currentTrack, { force: true }).catch(() => {});
-    return;
-  }
   switchSideVideoMode(!state.videoMode);
 };
-// Touchscreens have no hover, so the video controls (which only appear on
-// hover) would be unreachable. A tap reveals them for a few seconds; while they
-// are hidden, a tap that lands on one only reveals it rather than pressing it.
-(function bindTouchVideoControls() {
-  const cover = $("sideCover");
+function bindSideVideoControls(cover) {
   if (!cover) return;
   let hideTimer = null;
   let revealedAt = 0;
-  cover.addEventListener("pointerdown", (event) => {
-    if (event.pointerType === "mouse") return;
-    if (!cover.classList.contains("show-video-controls")) revealedAt = Date.now();
+  const hide = () => {
+    clearTimeout(hideTimer);
+    cover.classList.remove("show-video-controls");
+  };
+  const reveal = (event) => {
+    if (["pointerenter", "pointermove"].includes(event.type) && event.pointerType === "touch") return;
+    if (event.type === "pointerdown" && event.pointerType !== "mouse"
+        && !cover.classList.contains("show-video-controls")) revealedAt = Date.now();
     cover.classList.add("show-video-controls");
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => cover.classList.remove("show-video-controls"), 4000);
-  });
+    hideTimer = setTimeout(hide, 3000);
+  };
+  for (const type of ["pointerenter", "pointermove", "pointerdown", "focusin"]) cover.addEventListener(type, reveal);
+  cover.addEventListener("pointerleave", hide);
   cover.addEventListener("click", (event) => {
     if (Date.now() - revealedAt < 400 && event.target.closest("button")) {
       event.preventDefault();
       event.stopPropagation();
     }
   }, true);
-})();
+}
+bindSideVideoControls($("sideCover"));
 $("sideVideoEarlier").onclick = () => nudgeVideoSync(-0.25).catch(() => {});
 $("sideVideoLater").onclick = () => nudgeVideoSync(0.25).catch(() => {});
 $("sideVideoRefresh").onclick = () => {

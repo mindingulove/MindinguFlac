@@ -134,6 +134,35 @@ def is_download_audio_candidate(path: Path) -> bool:
     )
 
 
+def _save_playback_audio(source: Path, destination: Path) -> Path:
+    """Copy audio bytes, removing a video container's video without re-encoding."""
+    if source.suffix.lower() not in {".mp4", ".mov", ".webm"}:
+        if source.resolve() != destination.resolve():
+            shutil.copy2(source, destination)
+        return destination
+    temporary = None
+    try:
+        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+            from java import jclass  # type: ignore
+            temporary = Path(str(jclass("com.mindinguflac.android.AudioFileExport").saveAudio(
+                str(source), str(destination.with_suffix("")))))
+        else:
+            import subprocess
+            from native_audio import _ffmpeg_exe
+            extension = ".webm" if source.suffix.lower() == ".webm" else ".m4a"
+            temporary = destination.with_name(destination.stem + ".audio.part" + extension)
+            subprocess.run([_ffmpeg_exe(), "-nostdin", "-v", "error", "-y", "-i", str(source),
+                            "-map", "0:a:0", "-vn", "-c:a", "copy", str(temporary)],
+                           check=True, capture_output=True, timeout=120,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        target = destination.with_suffix(temporary.suffix)
+        temporary.replace(target)
+        return target
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 IDENTIFIER_FIELDS = (
     "spotify_id",
     "isrc",
@@ -1025,14 +1054,17 @@ class ServiceDownloadManager:
             active = self._find_active_library_job(identity)
         return {
             "in_library": bool(library),
-            "download_satisfied": bool(library and library["quality"] >= _quality_rank(
+            "download_satisfied": bool(library and (payload.get("use_playback_source") or library["quality"] >= _quality_rank(
                 Path(f"requested.{payload.get('quality') or self.config.default_quality or 'flac'}"),
-                payload.get("quality") or self.config.default_quality or "flac")),
+                payload.get("quality") or self.config.default_quality or "flac"))),
+            "library_format": Path(library["path"]).suffix.lstrip(".") if library else "",
+            "library_engine": (library.get("job") or {}).get("engine", "") if library else "",
             "library_path": str(library["path"]) if library else "",
             "library_quality": library["quality"] if library else 0,
             "cached": bool(cache),
             "cache_path": str(cache["path"]) if cache else "",
             "cache_quality": cache["quality"] if cache else 0,
+            "source_job_id": (cache.get("job") or {}).get("id", "") if cache else "",
             "active_job_id": active.get("id", "") if active else "",
             "active_job_status": active.get("status", "") if active else "",
             "library_requested": bool(active.get("library_requested") or active.get("mode") == "download") if active else False,
@@ -1094,6 +1126,22 @@ class ServiceDownloadManager:
         with self._library_toggle_lock:
             return self._toggle_library(payload)
 
+    def _playback_job_for_download(self, payload: dict) -> dict | None:
+        """Recover a server-owned playback source for this exact track."""
+        if not payload.get("use_playback_source"):
+            return None
+        identity = _track_identity_from_payload(payload)
+        wanted = str(payload.get("playback_job_id") or "")
+        with self._lock:
+            candidates = sorted(self.jobs.values(), key=lambda j: (j.get("id") == wanted, j.get("created_at", 0)), reverse=True)
+            for source in candidates:
+                if (source.get("mode", "stream") != "stream" or source.get("status") not in {"starting", "running", "finished"}
+                        or not _job_matches_identity(source, identity)):
+                    continue
+                if source.get("engine") in {"monochrome", "ytp-dl"}:
+                    return dict(source)
+        return None
+
     def _toggle_library(self, payload: dict) -> dict:
         ensure_download = bool(payload.get("ensure_download"))
         quality = payload.get("quality") or self.config.default_quality or "flac"
@@ -1104,7 +1152,11 @@ class ServiceDownloadManager:
             if not ensure_download:
                 self._delete_library_entry(library["path"])
                 return {"ok": True, "action": "deleted", **self.library_status(payload)}
-            if library["quality"] >= requested_rank:
+            if payload.get("use_playback_source") and Path(library["path"]).suffix.lower() in {".mp4", ".mov", ".webm"}:
+                source = self._playback_job_for_download(payload) or self._job_from_payload(payload)
+                result = self._copy_job_audio_to_library({**source, "use_playback_source": True}, Path(library["path"]))
+                return {"ok": True, "action": "copied", **result, **self.library_status(payload)}
+            if payload.get("use_playback_source") or library["quality"] >= requested_rank:
                 return {"ok": True, "action": "saved", **self.library_status(payload)}
 
         # An album queue may meet a download started from a row. Join it rather
@@ -1112,14 +1164,26 @@ class ServiceDownloadManager:
         active_library = self._find_active_library_job(identity)
         if ensure_download and active_library:
             return {"ok": True, "action": "queued", "job": active_library, **self.library_status(payload)}
+        source = self._playback_job_for_download(payload)
+        if source:
+            source_path = Path(source.get("library_path") or "")
+            if source.get("status") == "finished" and source_path.is_file() and is_valid_audio_file(source_path):
+                result = self._copy_job_audio_to_library({**source, "use_playback_source": True}, source_path)
+                self._append_cache_event(source, "provider", f"Saved playback audio to library ({source_path.suffix.lstrip('.')})")
+                return {"ok": True, "action": "copied", **result, **self.library_status(payload)}
+            if source.get("status") in {"starting", "running"}:
+                with self._lock:
+                    self.jobs[source["id"]].update(library_requested=True, library_request_payload=payload)
+                self._save_jobs()
+                return {"ok": True, "action": "queued", "job": self._public_job(self.jobs[source["id"]]), **self.library_status(payload)}
         cache = self._find_cache_entry(identity)
-        if cache and cache["quality"] >= requested_rank:
+        if cache and (payload.get("use_playback_source") or cache["quality"] >= requested_rank):
             job = cache.get("job") or self._job_from_payload(payload, mode="download")
             if cache.get("job"):
                 with self._lock:
                     self._merge_payload_into_job(job, payload)
                 self._save_jobs()
-            result = self._copy_job_audio_to_library(job, cache["path"])
+            result = self._copy_job_audio_to_library({**job, "use_playback_source": True} if payload.get("use_playback_source") else job, cache["path"])
             return {"ok": True, "action": "copied", **result, **self.library_status(payload)}
 
         active = self._find_active_cache_job(identity)
@@ -1434,7 +1498,10 @@ class ServiceDownloadManager:
         dest_dir = self.config.music_dir / clean_part(job.get("artist") or "Unknown Artist") / clean_part(job.get("album") or "Unknown Album")
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = dest_dir / source_path.name
-        if source_path.resolve() != dest_path.resolve():
+        if job.get("use_playback_source") or (job.get("library_request_payload") or {}).get("use_playback_source"):
+            dest_path = _save_playback_audio(source_path, dest_path)
+            job = {**job, "audio_only": True}
+        elif source_path.resolve() != dest_path.resolve():
             shutil.copy2(source_path, dest_path)
 
         for sidecar_name in ("cover.png", "cover.jpg", "cover.jpeg"):
@@ -1446,7 +1513,8 @@ class ServiceDownloadManager:
         with self._lock:
             existing = next((item for item in self.jobs.values() if item.get("mode") == "download" and _job_matches_identity(item, _track_identity_from_payload(job))), None)
             if existing:
-                existing.update({**job, "mode": "download", "status": "finished", "progress": 100, "library_path": str(dest_path), "output_dir": str(dest_dir)})
+                existing.update({**job, "id": existing["id"], "mode": "download", "status": "finished", "progress": 100,
+                                 "library_path": str(dest_path), "output_dir": str(dest_dir), "library_requested": False})
                 public = existing
             else:
                 library_job = {**job, "id": str(uuid.uuid4()), "mode": "download", "status": "finished", "progress": 100, "library_path": str(dest_path), "output_dir": str(dest_dir), "created_at": time.time()}
@@ -1464,6 +1532,12 @@ class ServiceDownloadManager:
         self._save_sidecar_files(album_dir, job)
 
     def _normalize_downloaded_audio(self, path: Path, job: dict) -> Path:
+        if job.get("mode") == "download" and job.get("use_playback_source") and not job.get("audio_only"):
+            original = path
+            path = _save_playback_audio(path, path)
+            if path != original:
+                original.unlink(missing_ok=True)
+            job["audio_only"] = True
         title = clean_part(job.get("title") or "Unknown Track")
         artist = clean_part(job.get("artist") or "Unknown Artist")
         target = path.with_name(f"{title} - {artist}{path.suffix.lower()}")
@@ -1706,19 +1780,26 @@ class ServiceDownloadManager:
 
         requested_engine = str(payload.get("engine") or getattr(self.config, "download_engine", "") or "").lower()
         engine, service, _requested_quality = self._requested_engine(payload)
-        if not payload.get("_defer_metadata"):
+        playback_source = self._playback_job_for_download(payload) if payload.get("mode") == "download" else None
+        if playback_source and playback_source.get("resolved_url"):
+            engine = playback_source["engine"]
+            service = playback_source.get("service") or service
+            metadata = _merge_nonempty_metadata(metadata, playback_source.get("metadata") or {})
+            isrc = playback_source.get("isrc") or isrc
+            payload = {**payload, "_defer_metadata": False, "quality": playback_source.get("quality") or _requested_quality}
+        if not payload.get("_defer_metadata") and not playback_source:
             metadata = _enrich_download_metadata_for_search(payload, engine, metadata)
         # Only the engine is pinned onto the payload: the clamp above may have
         # changed it, and every downstream reader must agree with the job the
         # payload will produce. ``quality`` is deliberately left untouched —
         # its absence is what signals "not a video request" further down.
         payload = {**payload, "metadata": metadata, "engine": engine, "service": service}
-        resolved_url = ""
+        resolved_url = str(playback_source.get("resolved_url") or "") if playback_source else ""
         fallback_resolved_url = ""
 
         # Persistent source recovery is only for engines that actually store
         # reusable source URLs in SQLite. SpotiFLAC should not consult it.
-        if engine in {"torrent", "ytp-dl"}:
+        if engine in {"torrent", "ytp-dl"} and not resolved_url:
             resolved_keys = _source_lookup_keys_from_payload(payload)
             resolved_data = db.get_resolved_source_for_keys(resolved_keys)
             if resolved_data:
@@ -1757,6 +1838,8 @@ class ServiceDownloadManager:
             "metadata": metadata,
             "service": service,
             "engine": engine,
+            "requested_engine": requested_engine or engine,
+            "use_playback_source": bool(payload.get("use_playback_source")),
             "quality": payload.get("quality") or getattr(self.config, "default_quality", "flac") or "flac",
             "status": "starting",
             "last_status": "Starting...",
@@ -1772,9 +1855,16 @@ class ServiceDownloadManager:
             value = payload.get(key) or metadata.get(key)
             if value:
                 job[key] = value
+        if playback_source:
+            job["playback_job_id"] = playback_source["id"]
+            for key in ("source_recording", "recording_match"):
+                if playback_source.get(key):
+                    job[key] = playback_source[key]
         with self._lock:
             self.jobs[job_id] = job
-        if requested_engine == "monochrome" and engine != "monochrome":
+        if playback_source:
+            self._append_cache_event(job, "provider", f"Saving the resolved playback source ({engine}); no new catalog search")
+        elif requested_engine == "monochrome" and engine != "monochrome":
             import backend_monochrome
 
             reason = backend_monochrome.stream_block_reason()
@@ -1861,10 +1951,9 @@ class ServiceDownloadManager:
                 try:
                     backend_monochrome.run(output_dir, job, self)
                 except Exception as exc:
-                    # A stream must still play when Monochrome's catalog lacks
-                    # the recording (or offers only a live/alternate take):
-                    # continue this track on YouTube. An explicit Download keeps
-                    # the error, so a lossless request never turns lossy silently.
+                    # A known playback fallback is adopted before this worker
+                    # starts. A fresh lossless download must keep Monochrome's
+                    # error, never replace a failed FLAC transfer with YouTube.
                     if job.get("mode", "stream") != "stream" or str(exc) == "Download cancelled" or job["id"] in self._cancel_flags:
                         raise
                     self._append_cache_event(job, "provider", f"{exc}; using YouTube for this track")
@@ -1872,14 +1961,20 @@ class ServiceDownloadManager:
                         job.update(engine="ytp-dl", service="youtube", quality="best", status="running",
                                    last_status="Monochrome unavailable for this track; searching YouTube")
                         job.pop("source_recording", None)
+                        job.pop("recording_match", None)
                     import backend_ytpdl
                     backend_ytpdl.run(output_dir, job, self)
                 if job.get("engine") == "monochrome" and job.get("direct_stream") and job.get("mode", "stream") == "stream":
-                    # Monochrome playback is a direct HTTP byte-range stream.
-                    # Do not create a local audio copy unless the user chose
-                    # the explicit Download action (mode="download").
+                    # A Save clicked while this resolver was running joins
+                    # its result, then pins the same fetch used by playback.
                     shutil.rmtree(output_dir, ignore_errors=True)
+                    save_payload = job.get("library_request_payload") if job.get("library_requested") else None
+                    with self._lock:
+                        job["library_requested"] = False
                     self._save_jobs()
+                    if save_payload:
+                        self.start_job({**save_payload, "mode": "download", "use_playback_source": True,
+                                        "playback_job_id": job["id"]})
                     return
 
             elif engine == "ytp-dl":

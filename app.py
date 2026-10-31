@@ -1535,6 +1535,8 @@ def _video_identity(payload: dict) -> dict:
         "musicbrainz_artist_id": _lyrics_field(payload, "musicbrainz_artist_id"),
         "deezer_id": _lyrics_field(payload, "deezer_id"),
         "tidal_id": _lyrics_field(payload, "tidal_id"),
+        "video_path": _lyrics_field(payload, "video_path"),
+        "offline": _lyrics_field(payload, "offline").lower() in {"1", "true"},
         # A paired controller asks for the exact clip its receiver matched, so
         # the receiver's audio-to-video offset applies to the same picture.
         "youtube_id": (lambda value: value if re.fullmatch(r"[A-Za-z0-9_-]{11}", value) else "")(
@@ -1984,123 +1986,27 @@ def _download_youtube_video_bg(identity: dict, key: str) -> None:
     mp4_path = VIDEO_FILES_DIR / f"{key}.mp4"
     tmp_path = VIDEO_FILES_DIR / f"{key}.tmp.mp4"
     try:
+        import backend_video
+        from video_motion import StaticVideoError, VideoPreviewError
+        def log(message):
+            service_downloader.append_cache_event("trying", message, title=identity.get("title", ""))
         try:
-            override = db.get_youtube_video_override(identity)
-        except Exception:
-            override = None
-
-        # Try backend_video torrent clip search first (own session, parallel with music downloads)
-        if not override and not identity.get("youtube_id") and os.environ.get("MINDINGUFLAC_ANDROID") != "1":
-            try:
-                import backend_video
-                _vid_title = f"{identity.get('artist', '')} – {identity.get('title', '')}".strip(" –")
-                def _vid_log(msg, _t=_vid_title):
-                    service_downloader.append_cache_event("trying", msg, title=_t)
-                if backend_video.fetch_clip_to_path(
-                    identity, mp4_path, log_cb=_vid_log, advisor_config=app_config
-                ):
-                    with _video_fetch_lock:
-                        _video_fetch_jobs[key] = "ready"
-                    return
-            except Exception:
-                pass
-
-        lookup = ({"ok": True, "found": True, "webpage_url": f"https://www.youtube.com/watch?v={identity['youtube_id']}"}
-                  if identity.get("youtube_id") else _lookup_youtube_video(identity))
-        if not lookup.get("found") or not lookup.get("webpage_url"):
-            with _video_fetch_lock:
-                _video_fetch_jobs[key] = "not_found" if lookup.get("ok") else "failed"
-                if not lookup.get("ok"):
-                    _video_fetch_errors[key] = "Video search failed. Check your connection and try again."
-            return
-        url = lookup["webpage_url"]
-        start_offset = int(lookup.get("video_start_offset") or 0)
-        VIDEO_FILES_DIR.mkdir(parents=True, exist_ok=True)
-        if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
-            from backend_video import _download_youtube_clip
-            def _android_video_log(message):
-                print(f"[VideoFetch] {message}")
-            downloaded = _download_youtube_clip(url, start_offset, mp4_path, log_cb=_android_video_log)
-            with _video_fetch_lock:
-                _video_fetch_jobs[key] = "ready" if downloaded else "failed"
-                if not downloaded:
-                    _video_fetch_errors[key] = "Video download failed. YouTube may require sign-in or this video may not offer a compatible stream."
-            return
-        import yt_dlp
-        # H.264 + AAC mp4 for Safari/WKWebView compatibility.
-        # Fallback chain: prefer avc≤480p, then any avc, then any mp4, then best.
-        opts = {
-            "format": (
-                "bestvideo[vcodec^=avc][height<=480]+bestaudio[ext=m4a]/"
-                "bestvideo[vcodec^=avc][height<=480]+bestaudio/"
-                "bestvideo[vcodec^=avc]+bestaudio[ext=m4a]/"
-                "bestvideo[vcodec^=avc]+bestaudio/"
-                "bestvideo[height<=480]+bestaudio[ext=m4a]/"
-                "bestvideo[height<=480]+bestaudio/"
-                "bestvideo+bestaudio/"
-                "best"
-            ),
-            "merge_output_format": "mp4",
-            "outtmpl": str(tmp_path),
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-            "noplaylist": True,
-            "socket_timeout": 15,
-            "retries": 3,
-            "fragment_retries": 3,
-            "http_chunk_size": 10 * 1024 * 1024,  # avoids 416 range errors on retries
-        }
-        if start_offset > 0:
-            from yt_dlp.utils import download_range_func
-            opts["download_ranges"] = download_range_func(None, [(start_offset, None)])
-            opts["force_keyframes_at_cuts"] = True
-        from backend_ytpdl import _add_youtube_cookie_file, _ffmpeg_location, _youtube_session_signed_out, _youtube_js_runtime_opts
-        opts.update(_youtube_js_runtime_opts())
-        ffmpeg = _ffmpeg_location()
-        if ffmpeg:
-            opts["ffmpeg_location"] = ffmpeg
-
-        # Prefer an explicit cookies.txt file, then browser cookies, then no cookies.
-        def _try_download(download_opts: dict) -> bool:
-            tmp_path.unlink(missing_ok=True)
-            with yt_dlp.YoutubeDL(download_opts) as ydl:
-                ydl.download([url])
-            return tmp_path.exists() and tmp_path.stat().st_size > 65536
-
-        downloaded = False
-        attempts = []
-        cookie_opts = dict(opts)
-        if _add_youtube_cookie_file(cookie_opts):
-            attempts.append(cookie_opts)
-        for _browser in (() if _youtube_session_signed_out() else ("safari", "chrome", "firefox")):
-            attempt_opts = dict(opts)
-            attempt_opts["cookiesfrombrowser"] = (_browser,)
-            attempts.append(attempt_opts)
-        attempts.append(dict(opts))
-
-        for attempt_opts in attempts:
-            try:
-                downloaded = _try_download(attempt_opts)
-                if downloaded:
-                    break
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                continue
-
-        if downloaded:
-            tmp_path.rename(mp4_path)
-            with _video_fetch_lock:
-                _video_fetch_jobs[key] = "ready"
-        else:
-            tmp_path.unlink(missing_ok=True)
-            with _video_fetch_lock:
-                _video_fetch_jobs[key] = "failed"
+            downloaded = backend_video.fetch_clip_to_path(identity, mp4_path, log_cb=log, advisor_config=app_config)
+            status, error = ("ready", "") if downloaded else ("not_found", "No matching music video found")
+        except StaticVideoError as exc:
+            status, error = "not_found", str(exc)
+        except VideoPreviewError as exc:
+            status, error = "failed", str(exc)
+        with _video_fetch_lock:
+            _video_fetch_jobs[key] = status
+            if error:
+                _video_fetch_errors[key] = error
     except Exception as exc:
         print(f"[VideoFetch] Download failed for key {key}: {exc}")
         tmp_path.unlink(missing_ok=True)
         with _video_fetch_lock:
             _video_fetch_jobs[key] = "failed"
+            _video_fetch_errors[key] = "Video preview or download failed. Try again."
 
 
 _video_clip_details_cache: dict = {}
@@ -2140,13 +2046,31 @@ def _video_clip_details(video: Path, identity: dict) -> dict:
     return details
 
 
+def _check_cached_video_bg(path: Path, key: str) -> None:
+    from video_motion import preview_file
+    result = preview_file(path)
+    with _video_fetch_lock:
+        _video_fetch_jobs[key] = {"moving": "ready", "static": "not_found"}.get(result.get("status"), "failed")
+        if result.get("status") != "moving":
+            _video_fetch_errors[key] = result.get("reason") or "Video preview could not be checked"
+
+
 def _get_video_fetch(identity: dict, force: bool = False) -> dict:
     if not identity.get("title") or not identity.get("artist"):
         return {"status": "not_found"}
     key = _video_cache_key(identity)
     mp4_path = VIDEO_FILES_DIR / f"{key}.mp4"
+    # A library MP4 can itself be an album-cover upload. Check its frames too;
+    # a video container alone is not proof that a music clip exists.
+    if identity.get("video_path"):
+        local = Path(str(identity["video_path"]))
+        roots = (app_config.music_dir, app_config.cache_dir, VIDEO_FILES_DIR)
+        if (local.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"} and local.is_file()
+                and any(local.resolve().is_relative_to(Path(root).resolve()) for root in roots)):
+            mp4_path = local
     if force:
-        mp4_path.unlink(missing_ok=True)
+        if mp4_path == VIDEO_FILES_DIR / f"{key}.mp4":
+            mp4_path.unlink(missing_ok=True)
         with video_cache_lock:
             cache = _load_video_cache()
             cache.pop(key, None)
@@ -2155,11 +2079,26 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
             _video_fetch_jobs.pop(key, None)
             _video_fetch_errors.pop(key, None)
     if mp4_path.exists() and mp4_path.stat().st_size > 65536:
-        return {"status": "ready", "path": str(mp4_path), **_video_clip_details(mp4_path, identity)}
+        from video_motion import cached_file_preview
+        preview = cached_file_preview(mp4_path)
+        if preview and preview.get("status") == "moving":
+            return {"status": "ready", "path": str(mp4_path), "motion_verified": True, **_video_clip_details(mp4_path, identity)}
+        if preview and preview.get("status") == "static":
+            return {"status": "not_found", "reason": "static_artwork", "error": "No video available: only static artwork"}
+        with _video_fetch_lock:
+            status = _video_fetch_jobs.get(key)
+            if status == "failed":
+                return {"status": "error", "error": _video_fetch_errors.get(key, "Video preview could not be checked")}
+            if status != "checking":
+                _video_fetch_jobs[key] = "checking"
+                threading.Thread(target=_check_cached_video_bg, args=(mp4_path, key), daemon=True).start()
+        return {"status": "downloading", "stage": "checking"}
+    if identity.get("offline"):
+        return {"status": "not_found"}
     with _video_fetch_lock:
         job_status = _video_fetch_jobs.get(key)
     if job_status == "ready":
-        return ({"status": "ready", "path": str(mp4_path), **_video_clip_details(mp4_path, identity)}
+        return ({"status": "ready", "path": str(mp4_path), "motion_verified": True, **_video_clip_details(mp4_path, identity)}
                 if mp4_path.exists() else {"status": "not_found"})
     if job_status == "downloading":
         return {"status": "downloading"}
@@ -2551,7 +2490,7 @@ class Handler(BaseHTTPRequestHandler):
                 import native_audio as audio_module
                 fetch = audio_module._monochrome_fetch(url, pin=True)
                 try:
-                    deadline = time.monotonic() + 30
+                    deadline = time.monotonic() + 185
                     with fetch.condition:
                         while not (fetch.total and fetch.size) and not (fetch.done or fetch.error or fetch.cancelled.is_set()):
                             wait = deadline - time.monotonic()

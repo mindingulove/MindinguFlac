@@ -327,7 +327,8 @@ public final class NativeAudioPlayer {
         // OkHttp negotiates HTTP/2 with ALPN. Monochrome's storage proxy
         // rejects HTTP/1.1 range requests (400 IncompleteBody), which is what
         // ExoPlayer's default HttpURLConnection source would send.
-        OkHttpDataSource.Factory http = new OkHttpDataSource.Factory(new OkHttpClient.Builder().build())
+        OkHttpDataSource.Factory http = new OkHttpDataSource.Factory(new OkHttpClient.Builder()
+                .connectTimeout(20, TimeUnit.SECONDS).readTimeout(195, TimeUnit.SECONDS).build())
                 .setDefaultRequestProperties(requestHeaders);
         if (userAgent != null) http.setUserAgent(userAgent);
         // Remote streams pass through a recorder that keeps the first part of
