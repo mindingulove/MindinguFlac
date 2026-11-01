@@ -10003,22 +10003,32 @@ async function loadPlaylistRecommendations(playlist, refresh = false) {
   }
 }
 
+const pendingRecommendationAdds = new Set();
+
 async function addPlaylistRecommendation(playlistId, item, button) {
   const playlist = state.playlists.find(p => p.id === playlistId);
   if (!playlist) throw new Error("Playlist not found");
   if (!item) throw new Error("Recommendation not found");
   const recState = state.playlistRecommendationState[playlistId] || { items: [] };
-  const row = button.closest(".track-row");
-  const parent = row?.parentElement || null;
-  const nextSibling = row?.nextElementSibling || null;
-  const snapshot = row ? row.cloneNode(true) : null;
   const sessionId = state.playlistRecommendationSessions[playlistId] || "";
   const allPlaylistKeys = new Set([...playlistTrackKeys(playlist), ...queueTrackKeys(), ...Object.keys(recState.itemsByKey || {})]);
   const excludeTrackKeys = [...allPlaylistKeys];
-  if (row) row.remove();
+  // Drop the item from state (not just its row) while the add is pending, so
+  // another add finishing first re-renders the list without it.
+  const dropItem = () => {
+    const current = state.playlistRecommendationState[playlistId];
+    if (!current) return;
+    current.items = (current.items || []).filter(entry => entry.track_key !== item.track_key);
+    current.itemsByKey = Object.fromEntries(current.items.map(entry => [entry.track_key, entry]));
+  };
+  const originalIndex = (recState.items || []).findIndex(entry => entry.track_key === item.track_key);
+  dropItem();
+  button.closest(".track-row")?.remove();
   button.disabled = true;
+  pendingRecommendationAdds.add(item.track_key);
+  let added;
   try {
-    const added = await api(`/api/playlists/${encodeURIComponent(playlistId)}/tracks`, {
+    added = await api(`/api/playlists/${encodeURIComponent(playlistId)}/tracks`, {
       method: "POST",
       body: JSON.stringify({
         playlist_id: playlistId,
@@ -10033,6 +10043,20 @@ async function addPlaylistRecommendation(playlistId, item, button) {
         session_id: sessionId,
       }),
     });
+  } catch (error) {
+    // The add itself failed: put the recommendation back where it was.
+    const current = state.playlistRecommendationState[playlistId];
+    if (current && !(current.items || []).some(entry => entry.track_key === item.track_key)) {
+      current.items = [...(current.items || [])];
+      current.items.splice(originalIndex < 0 ? current.items.length : Math.min(originalIndex, current.items.length), 0, item);
+      current.itemsByKey = Object.fromEntries(current.items.map(entry => [entry.track_key, entry]));
+      renderPlaylistRecommendations(playlistId, current.items);
+    }
+    button.disabled = false;
+    pendingRecommendationAdds.delete(item.track_key);
+    throw error;
+  }
+  try {
     const idx = state.playlists.findIndex(p => p.id === playlistId);
     if (idx !== -1 && added.track && !playlist.tracks.some(t => trackKey(t) === trackKey(added.track))) {
       state.playlists[idx].tracks.push(added.track);
@@ -10049,8 +10073,9 @@ async function addPlaylistRecommendation(playlistId, item, button) {
       }),
     });
     const current = state.playlistRecommendationState[playlistId] || { items: [], itemsByKey: {} };
-    current.items = (current.items || []).filter(entry => entry.track_key !== item.track_key);
-    if (replacement && replacement.item) {
+    dropItem();
+    if (replacement && replacement.item && !pendingRecommendationAdds.has(replacement.item.track_key)
+        && !current.items.some(entry => entry.track_key === replacement.item.track_key)) {
       current.items.push(replacement.item);
     }
     current.items.sort((a, b) => {
@@ -10071,15 +10096,19 @@ async function addPlaylistRecommendation(playlistId, item, button) {
       [...(current.items || []), ...((refilled && refilled.items) || [])].forEach(entry => {
         if (entry && entry.track_key && !merged.has(entry.track_key)) merged.set(entry.track_key, entry);
       });
-      current.items = sortPlaylistRecommendationItems([...merged.values()]).slice(0, 10);
+      current.items = sortPlaylistRecommendationItems([...merged.values()]
+        .filter(entry => !pendingRecommendationAdds.has(entry.track_key))).slice(0, 10);
     }
     current.itemsByKey = Object.fromEntries((current.items || []).map(entry => [entry.track_key, entry]));
     state.playlistRecommendationState[playlistId] = current;
     renderPlaylistRecommendations(playlistId, current.items);
   } catch (error) {
-    if (snapshot && parent) parent.insertBefore(snapshot, nextSibling);
-    button.disabled = false;
-    throw error;
+    // The song is already in the playlist; a missed replacement only leaves
+    // the list one shorter until the next refresh.
+    console.warn("[Recommendations] Replacement failed after adding:", error);
+    renderPlaylistRecommendations(playlistId, state.playlistRecommendationState[playlistId]?.items || []);
+  } finally {
+    pendingRecommendationAdds.delete(item.track_key);
   }
 }
 

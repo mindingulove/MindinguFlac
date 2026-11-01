@@ -1,6 +1,7 @@
 """Provider jobs through Mornye's versioned local REST API."""
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -16,6 +17,18 @@ def run(url: str, output_dir: Path, job: dict, manager):
     # Explicit installed IDs are more robust than assuming upstream ships
     # providers. Put the user's selected service first, then installed peers.
     installed.sort(key=lambda name: (not name.removeprefix("ext:").startswith(selected), name))
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        # Each provider has its own signed session, and a lapsed one needs a
+        # Cloudflare check the user must tap. Falling back through every
+        # provider would ask for one per provider, so the phone uses only
+        # the selected service when it is installed.
+        chosen = [name for name in installed if name.removeprefix("ext:").startswith(selected)]
+        installed = chosen or installed
+        if not job.get("prefetch"):
+            # A failed check pauses verification for 5 min, then 15, ...; in
+            # the pause the extension only reports "Download API failed" and
+            # no challenge is shown. A song the user picked tries again.
+            _clear_verification_pause()
     output_dir.mkdir(parents=True, exist_ok=True)
     result = request("POST", "/downloads", payload={
         "url": url, "quality": job.get("quality") or "LOSSLESS",
@@ -34,7 +47,11 @@ def run(url: str, output_dir: Path, job: dict, manager):
         if status == "done":
             return
         if status in {"failed", "cancelled"}:
-            raise RuntimeError(result.get("error") or f"Mornye download {status}")
+            error = result.get("error") or f"Mornye download {status}"
+            if status == "failed" and _verification_paused():
+                error = ("Provider verification did not complete, so the download was refused. "
+                         "Play the song again to retry the check.")
+            raise RuntimeError(error)
         payload = result.get("payload") or {}
         total = int(payload.get("items") or 0)
         completed = int(payload.get("completed_items") or 0)
@@ -43,3 +60,18 @@ def run(url: str, output_dir: Path, job: dict, manager):
             if total:
                 job["progress"] = max(float(job.get("progress") or 0), min(95, completed / total * 100))
         time.sleep(0.5)
+
+
+def _verification_pauses() -> list[Path]:
+    """Mornye's per-gateway pause files after a failed signed-session check."""
+    root = os.environ.get("MORNYE_DATA_DIR")
+    return list((Path(root) / "signed_sessions").glob(".*.auth-backoff.json")) if root else []
+
+
+def _clear_verification_pause() -> None:
+    for path in _verification_pauses():
+        path.unlink(missing_ok=True)
+
+
+def _verification_paused() -> bool:
+    return bool(_verification_pauses())

@@ -71,6 +71,10 @@ if (!isMainThread) {
   const BRIDGE_TIMEOUT_MS   = 60_000;
   const TRANSFER_TIMEOUT_MS  = 30 * 60_000;
   const TRANSFER_METHODS = new Set(['file.download', 'file.downloadSegments']);
+  //: A signed request may first wait for the user to pass the provider's
+  //: verification (up to ~2.5 min on Android). The flat 60s abandoned it
+  //: mid-check; this stays under the host's 180s call timeout.
+  const SIGNED_FETCH_TIMEOUT_MS = 170_000;
 
   /** Calls the main thread *synchronously* via SharedArrayBuffer. */
   function bridgeCall(method, args) {
@@ -94,7 +98,8 @@ if (!isMainThread) {
     // for minutes, so it gets its own cap. The flat 60s used to sit *below*
     // nodeFileDownload's own 120s socket timeout, which meant a slow album
     // track failed here while the main thread was still happily writing it.
-    const limit = TRANSFER_METHODS.has(method) ? TRANSFER_TIMEOUT_MS : BRIDGE_TIMEOUT_MS;
+    const limit = TRANSFER_METHODS.has(method) ? TRANSFER_TIMEOUT_MS
+      : method === 'session.signedFetch' ? SIGNED_FETCH_TIMEOUT_MS : BRIDGE_TIMEOUT_MS;
     let waited = 0;
     while (Atomics.load(STATE, 0) !== 2) {
       const r = Atomics.wait(STATE, 0, 1, 200);

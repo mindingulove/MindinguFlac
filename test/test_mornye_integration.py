@@ -152,6 +152,40 @@ class MornyeRoutingTests(unittest.TestCase):
             self.assertEqual(payload["services"][0], "ext:tidal-py")
         self.assertEqual(job["mornye_job_id"], "remote")
 
+    def test_android_uses_only_the_selected_provider(self):
+        manager = SimpleNamespace(_lock=threading.Lock(), _cancel_flags=set(), _append_cache_event=Mock())
+        providers = {"providers": [{"provider": "ext:amazon", "installed": True}, {"provider": "ext:deezer", "installed": True},
+                                   {"provider": "ext:tidal-web", "installed": True}]}
+        for service, expected in (("tidal", ["ext:tidal-web"]), ("pandora", ["ext:amazon", "ext:deezer", "ext:tidal-web"])):
+            job = {"id": "local", "service": service}
+            with tempfile.TemporaryDirectory() as tmp, \
+                    patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}), \
+                    patch.object(backend_mornye, "request", side_effect=[providers, {"id": "remote"}, {"status": "done"}]) as request:
+                backend_mornye.run("spotify:track:123", Path(tmp), job, manager)
+            self.assertEqual(request.call_args_list[1].kwargs["payload"]["services"], expected)
+
+    def test_android_user_download_retries_a_paused_verification(self):
+        manager = SimpleNamespace(_lock=threading.Lock(), _cancel_flags=set(), _append_cache_event=Mock())
+        providers = {"providers": [{"provider": "ext:amazon", "installed": True}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "signed_sessions"
+            sessions.mkdir()
+            pause = sessions / ".zarz-v2-89eebe525a30.auth-backoff.json"
+            env = {"MINDINGUFLAC_ANDROID": "1", "MORNYE_DATA_DIR": tmp}
+            pause.write_text("{}")
+            with patch.dict(os.environ, env), patch.object(backend_mornye, "request", side_effect=[
+                    providers, {"id": "remote"}, {"status": "done"}]):
+                backend_mornye.run("spotify:track:123", Path(tmp) / "out", {"id": "a", "service": "amazon"}, manager)
+            self.assertFalse(pause.exists())
+
+            pause.write_text("{}")
+            with patch.dict(os.environ, env), patch.object(backend_mornye, "request", side_effect=[
+                    providers, {"id": "remote"}, {"status": "failed", "error": "All providers failed"}]):
+                with self.assertRaisesRegex(RuntimeError, "verification did not complete"):
+                    backend_mornye.run("spotify:track:123", Path(tmp) / "out",
+                                       {"id": "b", "service": "amazon", "prefetch": True}, manager)
+            self.assertTrue(pause.exists())
+
     def test_cancel_is_forwarded_to_upstream_job(self):
         manager = SimpleNamespace(_lock=threading.Lock(), _cancel_flags={"local"}, _append_cache_event=Mock())
         job = {"id": "local", "service": "tidal"}

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 from .sandbox import build_env, describe
 
 logger = logging.getLogger(__name__)
+# A worker log line relayed by _bridge.js: "[EXT WARN] message".
+_EXT_STDERR_LEVEL = re.compile(r"^\[EXT (INFO|WARN|ERROR)\] (.*)$")
 
 _BRIDGE_JS = Path(__file__).parent / "_bridge.js"
 
@@ -557,6 +560,15 @@ class JSRuntime:
                 line = raw.rstrip(b"\n").decode("utf-8", errors="replace").rstrip()
                 if line:
                     self._stderr_tail.append(line)
-                    logger.debug("[EXT stderr] %s", line)
+                    # The worker's log.warn/error reach the bridge's main
+                    # thread, which relays them here as "[EXT WARN] ...".
+                    # Kept at debug they were invisible, and the extension's
+                    # 503 "try again in ..." never reached provider_cooldown.
+                    match = _EXT_STDERR_LEVEL.match(line)
+                    if match:
+                        level = match.group(1).lower()
+                        getattr(self._ext_logger, {"warn": "warning"}.get(level, level))("[EXT] %s", match.group(2))
+                    else:
+                        logger.debug("[EXT stderr] %s", line)
         except Exception:
             pass

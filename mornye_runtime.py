@@ -35,7 +35,12 @@ def _configure_node_runtime():
     an installer or depending on the user's interactive shell.
     """
     if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
-        return None
+        # The APK ships its own Node as a native library; see mornye_android.
+        try:
+            from android_runtime.mornye_android import configure_node
+        except ImportError:
+            return None
+        return configure_node()
     executable = "node.exe" if sys.platform == "win32" else "node"
     candidates = []
     bundle_root = getattr(sys, "_MEIPASS", None)
@@ -80,6 +85,15 @@ def configure():
         os.environ[key] = str(path)
     root.mkdir(parents=True, exist_ok=True)
     _adopt_installed_extensions(root)
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        # A fresh phone has no extensions and no registry install path; the
+        # APK carries the providers (vendor/mornye-extensions).
+        try:
+            from android_runtime.mornye_android import seed_extensions
+        except ImportError:
+            pass
+        else:
+            seed_extensions(root / "extensions")
     return root
 
 

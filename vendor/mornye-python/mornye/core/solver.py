@@ -1175,6 +1175,57 @@ async def _locate_turnstile(tab) -> tuple[object | None, dict | None]:
     return None, None
 
 
+def _screen_far_corner() -> tuple[int, int] | None:
+    """(x, y) of the bottom-right corner of all screens, in the top-left-origin
+    coordinates CDP uses, or None where it cannot be read (not macOS)."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        from AppKit import NSScreen
+    except Exception:
+        return None
+    screens = list(NSScreen.screens() or [])
+    if not screens:
+        return None
+    main_height = screens[0].frame().size.height
+    right = max(s.frame().origin.x + s.frame().size.width for s in screens)
+    bottom = max(main_height - s.frame().origin.y for s in screens)
+    return int(right), int(bottom)
+
+
+async def _park_window_offscreen(browser: Chrome, previous_app=None) -> None:
+    """Best-effort: move the solver window past the screens' bottom-right corner.
+
+    macOS ignores ``--window-position=-32000,-32000``: it moves the window back
+    on-screen at the top left, fully visible. A window moved there through CDP
+    after start is left with a 1 px sliver on-screen, and unlike a minimized or
+    hidden one its page still reports ``visible``, which Turnstile requires.
+    The app that was in front gets focus back, since launching Chrome takes it.
+    """
+    if _DEBUG_VISIBLE:
+        return
+    corner = _screen_far_corner()
+    if corner is None:
+        return
+    try:
+        await browser.set_window_bounds({"left": corner[0] - 1, "top": corner[1] - 1})
+    except Exception as exc:
+        logger.debug("[solver] could not park browser window: %s", exc)
+    if previous_app is not None:
+        with contextlib.suppress(Exception):
+            previous_app.activateWithOptions_(0)
+
+
+def _frontmost_app():
+    if platform.system() != "Darwin":
+        return None
+    try:
+        from AppKit import NSWorkspace
+        return NSWorkspace.sharedWorkspace().frontmostApplication()
+    except Exception:
+        return None
+
+
 async def _try_minimize_window(browser: Chrome) -> None:
     """Best-effort: minimize the browser window to taskbar/dock.
 
@@ -1310,9 +1361,11 @@ async def _solve_impl(
             options.binary_location,
             getattr(options, "start_timeout", "n/a"),
         )
+        previous_app = _frontmost_app()
         browser = Chrome(options=options)
         isolate_browser_temp_dir(browser, profile_dir)
         tab = await browser.start()
+        await _park_window_offscreen(browser, previous_app)
 
         # Hard ceiling on the whole solve (all reload attempts + cleanup),
         # armed the moment we have a real PID to kill. Sized generously

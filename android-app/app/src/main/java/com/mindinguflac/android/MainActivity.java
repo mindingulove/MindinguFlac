@@ -90,6 +90,10 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         // instead of waiting for the first on-device ranking request.
         NanoAdvisor.maybeStartDownload();
         MediaCommandRelay.setListener(this);
+        MornyeVerification.attach(this);
+        if (getIntent() != null && MornyeVerification.ACTION_SHOW.equals(getIntent().getAction())) {
+            MornyeVerification.showPending(this);
+        }
         registerBackHandler();
         requestNotificationPermission();
         startPythonBackend();
@@ -207,6 +211,9 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (intent != null && MornyeVerification.ACTION_SHOW.equals(intent.getAction())) {
+            MornyeVerification.showPending(this);
+        }
         if (intent != null && intent.getData() != null) {
             pendingPairingUrl = intent.getData().toString();
             dispatchPendingPairingUrl();
@@ -429,8 +436,21 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        MornyeVerification.setResumed(this, true);
+    }
+
+    @Override
+    protected void onPause() {
+        MornyeVerification.setResumed(this, false);
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
         MediaCommandRelay.clearListener(this);
+        MornyeVerification.detach(this);
         if (pairingMulticastLock != null && pairingMulticastLock.isHeld()) {
             pairingMulticastLock.release();
             pairingMulticastLock = null;

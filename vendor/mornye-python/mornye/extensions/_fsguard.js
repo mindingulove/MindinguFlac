@@ -143,10 +143,25 @@ const GUARDED = {
   rename: 1, copyFile: 1, cp: 1, link: 1, symlink: 1,
 };
 
+// open() only writes when its flags say so. Node 18 loads every module
+// through the public fs.openSync(path, 'r'), so refusing a read-only open
+// stopped the bridge itself from starting there.
+function opensForWriting(flags) {
+  if (flags === undefined || flags === null) return false;
+  if (typeof flags === 'number') {
+    const { O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
+    return (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) !== 0;
+  }
+  return /[wa+]/.test(String(flags));
+}
+
 function guard(namespace, name, index, { promise = false } = {}) {
   const original = namespace[name];
   if (typeof original !== 'function') return;
   namespace[name] = function guarded(...args) {
+    if (name.startsWith('open') && !opensForWriting(args[index + 1])) {
+      return original.apply(this, args);
+    }
     const target = asPath(args[index]);
     if (target !== null && !isAllowed(target)) {
       const err = refuse(target);

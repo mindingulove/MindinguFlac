@@ -1,0 +1,86 @@
+{
+  "name": "pandora",
+  "displayName": "Pandora",
+  "version": "1.0.8",
+  "description": "Pandora metadata and download provider for SpotiFLAC Mobile. Handles Pandora track and album URLs.",
+  "homepage": "https://github.com/zarzet/SpotiFLAC-Mobile",
+  "type": [
+    "metadata_provider",
+    "download_provider"
+  ],
+  "minAppVersion": "4.2.3",
+  "permissions": {
+    "network": [
+      "api.zarz.moe",
+      "api.song.link",
+      "song.link",
+      "pandora.app.link",
+      "www.pandora.com",
+      "*.pandora.com",
+      "*.p-cdn.us",
+      "*.p-cdn.com",
+      "api.deezer.com"
+    ],
+    "storage": true,
+    "file": true
+  },
+  "qualityOptions": [
+    {
+      "id": "mp3_192",
+      "label": "MP3 192kbps",
+      "description": "Best Pandora quality when available"
+    },
+    {
+      "id": "aac_64",
+      "label": "AAC 64kbps",
+      "description": "Medium Pandora quality"
+    },
+    {
+      "id": "aac_32",
+      "label": "AAC 32kbps",
+      "description": "Lowest Pandora quality"
+    }
+  ],
+  "urlHandler": {
+    "enabled": true,
+    "patterns": [
+      "pandora.app.link",
+      "pandora.com",
+      "www.pandora.com"
+    ]
+  },
+  "capabilities": {
+    "downloadFallbackTier": "low_res",
+    "preserveNativeOutputExtensions": [
+      ".m4a"
+    ]
+  },
+  "serviceHealth": [
+    {
+      "id": "zarz-api",
+      "label": "Zarz API",
+      "url": "https://api.zarz.moe/v1/health",
+      "method": "GET",
+      "serviceKey": "pandora",
+      "timeoutMs": 4000,
+      "cacheTtlSeconds": 60,
+      "required": true
+    }
+  ],
+  "settings": [
+    {
+      "key": "apiBaseUrl",
+      "label": "Resolver API URL",
+      "type": "string",
+      "default": "https://api.zarz.moe",
+      "description": "Base URL for the Pandora download API."
+    },
+    {
+      "key": "songLinkBaseUrl",
+      "label": "SongLink API URL",
+      "type": "string",
+      "default": "https://api.song.link/v1-alpha.1/links",
+      "description": "Base URL for SongLink URL resolution."
+    }
+  ]
+}

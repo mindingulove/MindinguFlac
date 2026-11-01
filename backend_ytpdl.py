@@ -375,6 +375,10 @@ def _ffmpeg_location() -> str:
     the ``imageio-ffmpeg`` pip package, which bundles a static ffmpeg binary
     per platform. Fall back to a frozen-bundle binary (``sys._MEIPASS``) or a
     PATH ffmpeg if the package is unavailable."""
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        # The APK's ffmpeg is for Mornye's providers (android_runtime.
+        # mornye_android). YouTube on the phone stays codec-native.
+        return ""
     try:
         import imageio_ffmpeg
 
