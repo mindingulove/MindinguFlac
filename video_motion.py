@@ -86,6 +86,27 @@ def assess_frames(frames: list) -> dict:
                       "Video preview contains motion" if status == "moving" else "Video motion could not be confirmed"}
 
 
+def _open_sheet(data: bytes):
+    """Storyboard sheets are WebP despite the .jpg name; Android's Pillow has no
+    WebP decoder, so there BitmapFactory decodes them and hands Pillow a PNG."""
+    from PIL import Image
+    try:
+        return Image.open(io.BytesIO(data)).convert("RGB")
+    except OSError:  # includes UnidentifiedImageError
+        if os.environ.get("MINDINGUFLAC_ANDROID") != "1":
+            raise
+    from java import jclass
+    bitmap = jclass("android.graphics.BitmapFactory").decodeByteArray(data, 0, len(data))
+    if bitmap is None:
+        raise VideoPreviewError("Storyboard preview could not be decoded")
+    try:
+        output = jclass("java.io.ByteArrayOutputStream")()
+        bitmap.compress(jclass("android.graphics.Bitmap$CompressFormat").PNG, 100, output)
+    finally:
+        bitmap.recycle()
+    return Image.open(io.BytesIO(bytes(output.toByteArray()))).convert("RGB")
+
+
 def storyboard_preview(info: dict, start_offset: float = 0) -> dict:
     """Read at most three small storyboard sheets, never the media stream."""
     from PIL import Image
@@ -120,7 +141,7 @@ def storyboard_preview(info: dict, start_offset: float = 0) -> dict:
             response.raise_for_status()
             if len(response.content) > 4 * 1024 * 1024:
                 raise VideoPreviewError("Storyboard preview is too large")
-            sheets[sheet_index] = Image.open(io.BytesIO(response.content)).convert("RGB")
+            sheets[sheet_index] = _open_sheet(response.content)
         sheet = sheets[sheet_index]
         width, height = sheet.width // columns, sheet.height // rows
         x, y = tile % columns * width, tile // columns * height

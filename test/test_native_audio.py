@@ -861,3 +861,46 @@ class TestNativeAudioMacOS(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestMacFileOutputStartup(unittest.TestCase):
+    def _play_on(self, live_name):
+        sound = MockSound(duration=225)
+        sound.setPlaybackDeviceIdentifier_ = MagicMock()
+        sound.setVolume_ = lambda value: setattr(sound, '_volume', value)
+        sound.stop = MagicMock()
+        factory = MagicMock()
+        factory.alloc.return_value.initWithContentsOfURL_byReference_.return_value = sound
+        manager = NativeAudioManager()
+        with patch('native_audio.sys.platform', 'darwin'), patch('native_audio._on_android', return_value=False), \
+                patch.object(manager, 'available', return_value=True), patch('pathlib.Path.is_file', return_value=True), \
+                patch('native_audio._native_playable_path', return_value='/test/song.wav'), \
+                patch('native_audio._macos_output_device_name', return_value=live_name), \
+                patch('native_audio._macos_unmute_device') as unmute, patch('native_audio._macos_set_device_volume'), \
+                patch.dict(sys.modules, {'AppKit': SimpleNamespace(NSSound=factory),
+                                         'Foundation': SimpleNamespace(NSURL=SimpleNamespace(fileURLWithPath_=lambda p:p))}):
+            result = manager.play('/test/song.wav', 'bluetooth-output', .37, 64)
+        return result, sound, unmute
+
+    def test_disconnected_saved_output_uses_default_and_keeps_position_and_volume(self):
+        result, sound, unmute = self._play_on('')
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['output_fallback'])
+        self.assertEqual(result['device_uid'], '')
+        self.assertEqual(result['requested_device_uid'], 'bluetooth-output')
+        self.assertEqual(result['position'], 64)
+        self.assertEqual(result['volume'], .37)
+        sound.setPlaybackDeviceIdentifier_.assert_not_called()
+        unmute.assert_not_called()
+
+    def test_connected_output_is_preserved(self):
+        result, sound, _ = self._play_on('EDIFIER S351DB')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['device_uid'], 'bluetooth-output')
+        self.assertFalse(result.get('output_fallback', False))
+        sound.setPlaybackDeviceIdentifier_.assert_called_once_with('bluetooth-output')
+
+    def test_query_failure_does_not_assume_the_selected_output_disconnected(self):
+        result, sound, _ = self._play_on(None)
+        self.assertTrue(result['ok'])
+        self.assertFalse(result.get('output_fallback', False))
+        sound.setPlaybackDeviceIdentifier_.assert_called_once_with('bluetooth-output')

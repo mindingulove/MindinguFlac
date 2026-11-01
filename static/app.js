@@ -8215,6 +8215,13 @@ async function startNativeAudio(filePath, track, requestId, position = 0, stream
     }
     throw new Error(result.error || "Native audio failed");
   }
+  if (result.output_fallback && requestId === state.playbackRequestId) {
+    _nativeAudioDeviceUid = result.device_uid || "";
+    _activeSinkId = _nativeAudioDeviceUid ? `native:${_nativeAudioDeviceUid}` : "";
+    await _persistPreferredAudioOutput({ deviceId: _activeSinkId, name: "", nativeUid: _nativeAudioDeviceUid, bluetoothAddress: "" });
+    _refreshConnectPanel().catch(() => {});
+    showToast(result.output_notice || "Audio output disconnected — playing on this computer");
+  }
   state.nativeAudio = {
     active: true,
     playing: !!result.playing,
@@ -11773,23 +11780,29 @@ $("sideVideoSwitch").onclick = () => {
 function bindSideVideoControls(cover) {
   if (!cover) return;
   let hideTimer = null;
-  let revealedAt = 0;
+  let revealOnlyTap = false;
   const hide = () => {
     clearTimeout(hideTimer);
     cover.classList.remove("show-video-controls");
   };
   const reveal = (event) => {
     if (["pointerenter", "pointermove"].includes(event.type) && event.pointerType === "touch") return;
-    if (event.type === "pointerdown" && event.pointerType !== "mouse"
-        && !cover.classList.contains("show-video-controls")) revealedAt = Date.now();
+    if (event.type === "pointerdown") {
+      revealOnlyTap = event.pointerType !== "mouse" && !cover.classList.contains("show-video-controls");
+    }
     cover.classList.add("show-video-controls");
     clearTimeout(hideTimer);
     hideTimer = setTimeout(hide, 3000);
   };
   for (const type of ["pointerenter", "pointermove", "pointerdown", "focusin"]) cover.addEventListener(type, reveal);
-  cover.addEventListener("pointerleave", hide);
+  cover.addEventListener("pointerleave", event => {
+    // Touch pointers leave on finger-up, even though the controls just appeared.
+    if (event.pointerType === "mouse") hide();
+  });
   cover.addEventListener("click", (event) => {
-    if (Date.now() - revealedAt < 400 && event.target.closest("button")) {
+    const revealOnly = revealOnlyTap;
+    revealOnlyTap = false;
+    if (revealOnly && event.target.closest("button")) {
       event.preventDefault();
       event.stopPropagation();
     }

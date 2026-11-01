@@ -1567,6 +1567,13 @@ class NativeAudioManager:
             from AppKit import NSSound
             from Foundation import NSURL
 
+            # Bluetooth UIDs can outlive their connection. NSSound accepts the
+            # stale UID but then refuses play(), so resolve it before opening.
+            requested_uid = device_uid
+            output_fallback = bool(device_uid and _macos_output_device_name(device_uid) == "")
+            if output_fallback:
+                device_uid = ""
+
             # NSSound can't decode some formats (notably YouTube webm/opus); use a
             # transcoded WAV when needed so native output works with every file.
             playback_path = _native_playable_path(audio_path)
@@ -1613,7 +1620,11 @@ class NativeAudioManager:
                     self._error = "Native audio player refused to start"
                     return {"ok": False, "error": self._error}
 
-            return self.status() | {"ok": True}
+            result = self.status() | {"ok": True}
+            if output_fallback:
+                result.update(output_fallback=True, requested_device_uid=requested_uid,
+                              output_notice="Audio output disconnected — playing on this computer")
+            return result
         except Exception as exc:
             with self._lock:
                 self._error = str(exc)

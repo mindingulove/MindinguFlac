@@ -28,6 +28,20 @@ body {
 
 button, input, select { font: inherit; }
 
+button, a, .player, .details-head, .details-cover {
+  -webkit-tap-highlight-color: transparent;
+}
+button, .player, .details-head, .details-cover {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+
 .sidebar {
   grid-column: 1;
   grid-row: 1;

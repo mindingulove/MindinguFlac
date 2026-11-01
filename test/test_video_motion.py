@@ -60,6 +60,22 @@ class MotionPreviewTests(unittest.TestCase):
         self.assertEqual(get.call_count, 1)
         self.assertEqual(get.call_args.args[0], "https://i.ytimg.com/sheet.jpg")
 
+    def test_sheet_pillow_cannot_read_is_decoded_by_android(self):
+        from types import SimpleNamespace
+        png = io.BytesIO()
+        artwork().save(png, "PNG")
+        bitmap = Mock()
+        bitmap.compress.side_effect = lambda fmt, quality, output: None
+        output = Mock(toByteArray=Mock(return_value=png.getvalue()))
+        classes = {"android.graphics.BitmapFactory": Mock(decodeByteArray=Mock(return_value=bitmap)),
+                   "java.io.ByteArrayOutputStream": Mock(return_value=output),
+                   "android.graphics.Bitmap$CompressFormat": SimpleNamespace(PNG="png")}
+        java = SimpleNamespace(jclass=lambda name: classes[name])
+        with patch.dict("os.environ", {"MINDINGUFLAC_ANDROID": "1"}), patch.dict("sys.modules", {"java": java}):
+            sheet = video_motion._open_sheet(b"RIFF\x00\x00\x00\x00WEBPVP8 undecodable")
+        self.assertEqual(sheet.size, (160, 90))
+        bitmap.recycle.assert_called_once()
+
     def test_static_preview_stops_before_full_download(self):
         import backend_video
         with tempfile.TemporaryDirectory() as tmp, \

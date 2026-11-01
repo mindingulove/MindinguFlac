@@ -15,6 +15,9 @@
 - Retain local artist-profile and lyrics implementations as compatibility fallbacks, and preserve already installed local provider extensions during migration.
 
 ## Fixed
+- Suppress browser tap highlights and accidental text selection on player controls while retaining selectable text fields.
+- Keep Android video controls visible after finger-up and allow a quick second tap to switch video mode.
+- Start cached desktop audio on the system output when a saved Bluetooth device has disconnected, retaining volume and playback position.
 - Check small video storyboard previews before downloading music clips, skip static album artwork, and show No video available when matching uploads contain only artwork. Check existing video files before offering the video switch, and keep failed preview checks retryable.
 - Hide video/audio controls after three seconds without pointer or touch activity, including when the pointer stays over the artwork.
 - Let Monochrome downloads reuse the selected playback source and shared transfer, allow slow catalog responses, and save audio without keeping a video track.
@@ -38,6 +41,7 @@
 - Retry a timed-out stream or library-download request once after two seconds, recovering the accepted job first so the retry does not duplicate work.
 - Explain when Monochrome search finds only a live or alternate take and safely skips it; the stream then continues on YouTube instead of failing. Explicit Monochrome downloads still report the miss.
 - Android offline downloads from Monochrome use the same OkHttp client as playback, so they are no longer refused with HTTP 403.
+- The side-video motion check decodes YouTube's storyboard previews on Android too. They are WebP, which the phone's Pillow cannot read, so it failed with `UnidentifiedImageError`.
 - Filter playlist recommendations against the saved playlist by recording identity, exclude incomplete artist/album catalog entries, and retain Spotify/ISRC identifiers on playable recommendations.
 - Resolve artist artwork for the Android Your Library artist list using the local metadata backend.
 - Restore desktop music search when file-based logging prevented the embedded Mornye API from starting.
@@ -54,6 +58,6 @@
 
 ## Security and version
 - Upgrade Pillow to 13.0.0, including the bundled native Android decoder.
-- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **32**.
+- Update Settings, backend user agents, macOS bundle metadata and Android to version **1.4**. Android versionCode is **36**.
 
 Mornye provider downloads require an installed provider extension. Monochrome, YouTube and torrent backends remain independent.
