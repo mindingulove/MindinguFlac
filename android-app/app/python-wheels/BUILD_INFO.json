@@ -59,7 +59,9 @@
     "starlette-1.6.0-py3-none-any.whl": "a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c",
     "uvicorn-0.53.0-py3-none-any.whl": "e8dca71ec86dce5f04e333f0d56cdedf942446e6643b9cea1af0d6d3a02cb03e",
     "pydantic-2.13.4-py3-none-any.whl": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
-    "annotated_types-0.8.0-py3-none-any.whl": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
+    "annotated_types-0.8.0-py3-none-any.whl": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+    "yt_dlp_ejs-0.8.0-py3-none-any.whl": "79300e5fca7f937a1eeede11f0456862c1b41107ce1d726871e0207424f4bdb4",
+    "ytmusicapi-1.12.0-py3-none-any.whl": "4130a3a7a0ab56eeeff33b343c8cf4a2f4ea14c206d96c221a7646ab0e61ebc8"
   },
   "numpy_source": "Chaquopy package index https://chaquo.com/pypi-13.1/ (numpy 1.26.2 + chaquopy-libcxx/openblas/libgfortran); used by video_sync.py soundtrack matching",
   "pillow_source": {

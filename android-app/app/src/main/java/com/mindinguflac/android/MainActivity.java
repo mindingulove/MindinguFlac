@@ -91,6 +91,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         NanoAdvisor.maybeStartDownload();
         MediaCommandRelay.setListener(this);
         MornyeVerification.attach(this);
+        YoutubeLoginActivity.attach(this);
         if (getIntent() != null && MornyeVerification.ACTION_SHOW.equals(getIntent().getAction())) {
             MornyeVerification.showPending(this);
         }

@@ -619,6 +619,9 @@ def _job_matches_identity(job: dict, identity: dict) -> bool:
     )
 
 
+# Both limit requests per address, so they never prefetch.
+_NO_PREFETCH_ENGINES = {"monochrome", "spotiflac"}  # spotiflac = Mornye providers
+
 _QUALITY_RANK = {
     # Video containers rank 900 only when quality="video" (see _quality_rank below)
     # A cached video-only MP4 must not beat audio files. YouTube's audio-only
@@ -1763,6 +1766,10 @@ class ServiceDownloadManager:
                         threading.Thread(target=self._worker, args=(resumable["id"], {**payload, "_resume_torrent": True}), daemon=True).start()
                         return self._public_job(resumable)
 
+            if payload.get("prefetch") and self._requested_engine(payload)[0] in _NO_PREFETCH_ENGINES:
+                # Songs nobody is playing yet would spend the quota the
+                # playing song needs.
+                return {"skipped": True, "reason": "prefetch disabled for this engine"}
             return self._create_job(payload)
 
     def _create_job(self, payload: dict) -> dict:
@@ -1940,6 +1947,30 @@ class ServiceDownloadManager:
 
             engine = job.get("engine", "spotiflac")
 
+            if engine not in {"monochrome", "ytp-dl", "qobuz-dlp", "torrent"}:  # spotiflac = Mornye providers
+                resolved_url = resolve_download_url(merged, service="spotify", kind=kind)
+                if not resolved_url:
+                    raise RuntimeError("Could not resolve a Spotify URL from the selected track metadata")
+                with self._lock:
+                    job["status"] = "running"
+                    job["resolved_url"] = resolved_url
+                    job["output_dir"] = str(output_dir)
+                if job.get("mode", "stream") == "stream":
+                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
+                self._ensure_progress_thread()
+                import backend_spotiflac
+                try:
+                    backend_spotiflac.run(resolved_url, output_dir, job, self)
+                except Exception as exc:
+                    engine = self._fallback_engine_after_mornye(job, exc)
+                    if not engine:
+                        raise
+                    if job.get("mode", "stream") == "stream":
+                        # A per-job cache dir; a partial provider file must not
+                        # be taken for the fallback's audio.
+                        shutil.rmtree(output_dir, ignore_errors=True)
+                        output_dir.mkdir(parents=True, exist_ok=True)
+
             if engine == "monochrome":
                 with self._lock:
                     job["status"] = "running"
@@ -2007,20 +2038,6 @@ class ServiceDownloadManager:
                 # the shared libtorrent session and starve the playing track.
                 with backend_torrent.prefetch_torrent_gate(job):
                     backend_torrent.run(output_dir, job, self)
-
-            else:  # spotiflac (default)
-                resolved_url = resolve_download_url(merged, service="spotify", kind=kind)
-                if not resolved_url:
-                    raise RuntimeError("Could not resolve a Spotify URL from the selected track metadata")
-                with self._lock:
-                    job["status"] = "running"
-                    job["resolved_url"] = resolved_url
-                    job["output_dir"] = str(output_dir)
-                if job.get("mode", "stream") == "stream":
-                    self._append_cache_event(job, "watching", f"Watching cache folder for {job['title']}")
-                self._ensure_progress_thread()
-                import backend_spotiflac
-                backend_spotiflac.run(resolved_url, output_dir, job, self)
 
             if str(job.get("id") or "") in self._cancel_flags:
                 return
@@ -2110,6 +2127,8 @@ class ServiceDownloadManager:
                     job["error"] = "Cancelled by user"
                 self._save_jobs()
                 return
+            if self._retry_after_network_returns(job, payload, exc):
+                return
             logging.getLogger("service_downloader").exception(
                 "Download worker failed before completion: job=%s engine=%s service=%s",
                 job.get("id"),
@@ -2129,6 +2148,60 @@ class ServiceDownloadManager:
                     backend_ytpdl.cleanup_browser_cookie_export(job.get("id", ""))
                 except Exception:
                     pass
+
+    def _fallback_engine_after_mornye(self, job: dict, exc: Exception) -> str:
+        """Where a failed Mornye job goes next: Monochrome, or YouTube when
+        Monochrome is cooling down after a 403/429 (Monochrome's own failure
+        then falls back to YouTube for playback). "" keeps the Mornye error:
+        cancellations, network drops (retried once the network is back) and
+        lossless downloads Monochrome cannot serve."""
+        import network_status
+
+        if str(exc) == "Download cancelled" or str(job.get("id") or "") in self._cancel_flags:
+            return ""
+        if network_status.is_network_error(exc):
+            return ""
+        import backend_monochrome
+
+        streaming = job.get("mode", "stream") == "stream"
+        blocked = backend_monochrome.stream_block_reason()
+        if blocked and not streaming:
+            return ""
+        engine, service, quality = (("ytp-dl", "youtube", "best") if blocked
+                                    else ("monochrome", "monochrome", "LOSSLESS"))
+        detail = f"Mornye failed ({str(exc)[:120]})"
+        self._append_cache_event(job, "provider", f"{detail}; trying {'YouTube (Monochrome is cooling down)' if blocked else 'Monochrome'}")
+        with self._lock:
+            job["mornye_error"] = str(exc)
+            job.update(engine=engine, service=service, quality=quality, status="running",
+                       last_status=f"{detail}; trying {'YouTube' if blocked else 'Monochrome'}")
+            job.pop("resolved_url", None)
+        return engine
+
+    _NETWORK_RETRY_LIMIT = 5
+
+    def _retry_after_network_returns(self, job: dict, payload: dict, exc: Exception) -> bool:
+        """A job that failed on a dropped connection, or while offline, is run
+        again once the network is back, whatever the engine. True when it was."""
+        import network_status
+
+        job_id = str(job.get("id") or "")
+        if not (network_status.is_network_error(exc) or not network_status.online()):
+            return False
+        attempts = int(job.get("network_retries") or 0)
+        if attempts >= self._NETWORK_RETRY_LIMIT:
+            return False
+        with self._lock:
+            job["network_retries"] = attempts + 1
+            job["status"] = "running"
+            job["last_status"] = "Waiting for the network to come back..."
+        self._append_cache_event(job, "trying", f"Network problem ({str(exc)[:80]}); retrying when the connection is back")
+        self._save_jobs()
+        if not network_status.wait_until_online(should_stop=lambda: job_id in self._cancel_flags):
+            return False
+        self._append_cache_event(job, "trying", f"Connection is back; retrying (attempt {attempts + 2})")
+        self._worker(job_id, payload)
+        return True
 
     def _save_sidecar_files(self, directory: Path, job: dict) -> None:
         try:

@@ -45,6 +45,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".YoutubeLoginActivity"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
+
         <!-- The Mornye provider check returns its grant here. The Zarz page
              only redirects to mornye:// or spotiflac:// (SpotiFLAC owns the
              latter), so the grant arrives as Mornye's own deep link. -->

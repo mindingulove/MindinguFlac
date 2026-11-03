@@ -8,7 +8,31 @@ from pathlib import Path
 from mornye_runtime import request
 
 
+class MornyeRateLimited(RuntimeError):
+    """The provider gateway refused this address with 429."""
+
+
+def rate_limit_remaining() -> float:
+    """Seconds the provider gateway still refuses requests (0 when unknown)."""
+    try:
+        from mornye.core.signed_session_mobile import rate_limited_seconds
+    except ImportError:
+        return 0.0
+    return rate_limited_seconds()
+
+
+def _raise_if_rate_limited() -> None:
+    # Every provider goes through the same gateway, so retrying another one
+    # only spends more requests; a long wait means the daily quota is gone.
+    remaining = rate_limit_remaining()
+    if remaining > 60:
+        hours, minutes = divmod(int(remaining + 59) // 60, 60)
+        wait = f"{hours} h {minutes:02d} min" if hours else f"{minutes} min"
+        raise MornyeRateLimited(f"Mornye download limit reached; it resets in about {wait}")
+
+
 def run(url: str, output_dir: Path, job: dict, manager):
+    _raise_if_rate_limited()
     providers = request("GET", "/extensions").get("providers", [])
     installed = [row["provider"] for row in providers if row.get("installed")]
     if not installed:
@@ -42,6 +66,11 @@ def run(url: str, output_dir: Path, job: dict, manager):
         if job["id"] in manager._cancel_flags:
             request("POST", f"/downloads/{remote_id}/cancel", payload={})
             return
+        try:
+            _raise_if_rate_limited()
+        except MornyeRateLimited:
+            request("POST", f"/downloads/{remote_id}/cancel", payload={})
+            raise
         result = request("GET", f"/downloads/{remote_id}")
         status = result.get("status")
         if status == "done":

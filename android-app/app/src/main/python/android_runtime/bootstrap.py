@@ -174,6 +174,8 @@ def start(data_path: str, cache_path: str, music_path: str, token: str) -> int:
     # process. Refresh the per-launch token explicitly instead of leaving the
     # cached module bound to a dead session.
     app.API_TOKEN = token
+    from android_runtime import youtube_login
+    youtube_login.install(app)
     import device_sync
     device_sync.start_android_pairing(data_dir)
     _server = app.create_server("127.0.0.1", 0)

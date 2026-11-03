@@ -9,6 +9,19 @@ import service_downloader
 import backend_spotiflac
 
 
+# A failed job checks whether the device is online before giving up; tests
+# must not depend on (or wait for) the real network.
+_online_patch = patch("network_status.online", return_value=True)
+
+
+def setUpModule():
+    _online_patch.start()
+
+
+def tearDownModule():
+    _online_patch.stop()
+
+
 class PlaybackSourceTests(unittest.TestCase):
     def test_save_copies_playback_bytes_even_when_selected_engine_requests_lossless(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1080,3 +1093,150 @@ class MonochromeStreamFallbackTests(unittest.TestCase):
         self.assertEqual(ran, [])
         self.assertEqual(job["engine"], "monochrome")
         self.assertIn("no exact ISRC", job["error"])
+
+
+class NetworkRetryTests(unittest.TestCase):
+    """A dropped connection retries the job once the network is back, for any engine."""
+
+    def _run(self, error, online=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = service_downloader.ServiceDownloadManager.__new__(service_downloader.ServiceDownloadManager)
+            import threading
+            manager._lock = threading.RLock()
+            manager._cancel_flags = set()
+            events = []
+            manager._append_cache_event = lambda job, kind, message: events.append((kind, message))
+            manager._ensure_progress_thread = lambda: None
+            manager._save_jobs = lambda: None
+            manager._output_dir = lambda job: Path(tmp) / job["id"]
+            job = {"id": "j1", "mode": "stream", "engine": "ytp-dl", "service": "youtube", "quality": "best",
+                   "title": "Take on Me", "artist": "a-ha", "status": "queued"}
+            manager.jobs = {"j1": job}
+            fake_yt = SimpleNamespace(run=Mock(side_effect=error), cleanup_browser_cookie_export=lambda job_id: None)
+            with patch.dict(sys.modules, {"backend_ytpdl": fake_yt}), \
+                 patch.object(manager, "_resolve_job_metadata", side_effect=lambda j, p: p, create=True), \
+                 patch("network_status.online", return_value=online), \
+                 patch("network_status.wait_until_online", return_value=True) as waited:
+                manager._worker("j1", {"metadata": {}})
+            return job, fake_yt.run.call_count, waited.call_count, events
+
+    def test_network_error_waits_and_retries_up_to_the_limit(self):
+        job, runs, waits, events = self._run(RuntimeError(
+            "ytp-dl failed: Unable to download API page: Failed to resolve 'www.youtube.com'"))
+        limit = service_downloader.ServiceDownloadManager._NETWORK_RETRY_LIMIT
+        self.assertEqual(runs, limit + 1)
+        self.assertEqual(waits, limit)
+        self.assertEqual(job["status"], "error")
+        self.assertTrue(any("Connection is back" in message for _, message in events))
+
+    def test_mornye_node_timeout_counts_as_network(self):
+        job, runs, waits, _ = self._run(RuntimeError("Failed to download file: read ETIMEDOUT"))
+        self.assertGreater(runs, 1)
+
+    def test_failure_while_offline_is_retried(self):
+        job, runs, waits, _ = self._run(RuntimeError("All YouTube download attempts failed"), online=False)
+        self.assertGreater(runs, 1)
+
+    def test_real_failure_while_online_is_not_retried(self):
+        job, runs, waits, _ = self._run(RuntimeError("Track not available: not_found_on_amazon"))
+        self.assertEqual((runs, waits), (1, 0))
+        self.assertIn("not_found_on_amazon", job["error"])
+
+
+class MornyeFallbackTests(unittest.TestCase):
+    """Mornye failure → Monochrome → YouTube (playback); downloads stay lossless."""
+
+    def _run(self, mornye_error, mode="stream", mono_error=None, mono_blocked=""):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = service_downloader.ServiceDownloadManager.__new__(service_downloader.ServiceDownloadManager)
+            import threading
+            manager._lock = threading.RLock()
+            manager._cancel_flags = set()
+            events = []
+            manager._append_cache_event = lambda job, kind, message: events.append((kind, message))
+            manager._ensure_progress_thread = lambda: None
+            manager._save_jobs = lambda: None
+            manager._output_dir = lambda job: Path(tmp) / job["id"]
+            job = {"id": "j1", "mode": mode, "engine": "spotiflac", "service": "amazon", "quality": "LOSSLESS",
+                   "title": "Cruel Summer", "artist": "Bananarama", "status": "queued"}
+            manager.jobs = {"j1": job}
+            ran = []
+            stop = RuntimeError("stop after engine")
+            fake_mornye = SimpleNamespace(run=Mock(side_effect=mornye_error))
+            fake_mono = SimpleNamespace(
+                run=Mock(side_effect=lambda out, j, m: ran.append(("monochrome", j["engine"])) or (_ for _ in ()).throw(mono_error or stop)),
+                stream_block_reason=lambda: mono_blocked)
+            fake_yt = SimpleNamespace(
+                run=lambda out, j, m: ran.append(("youtube", j["engine"])) or (_ for _ in ()).throw(stop),
+                cleanup_browser_cookie_export=lambda job_id: None)
+            with patch.dict(sys.modules, {"backend_spotiflac": fake_mornye, "backend_monochrome": fake_mono,
+                                          "backend_ytpdl": fake_yt}), \
+                 patch.object(manager, "_resolve_job_metadata", side_effect=lambda j, p: p, create=True), \
+                 patch("service_downloader.resolve_download_url", return_value="https://open.spotify.com/track/x"), \
+                 patch("network_status.wait_until_online", return_value=False):
+                manager._worker("j1", {"metadata": {}})
+            return job, ran, events
+
+    LIMIT = RuntimeError("All providers failed after 1 attempt(s) — ext:amazon: Download API failed for ASIN: B076Q9K833")
+
+    def test_mornye_failure_tries_monochrome(self):
+        job, ran, events = self._run(self.LIMIT)
+        self.assertEqual(ran[0], ("monochrome", "monochrome"))
+        self.assertTrue(any("trying Monochrome" in message for _, message in events))
+        self.assertIn("Download API failed", job["mornye_error"])
+
+    def test_monochrome_failure_then_plays_from_youtube(self):
+        job, ran, _ = self._run(self.LIMIT, mono_error=RuntimeError("Monochrome official instances failed: 522"))
+        self.assertEqual([engine for engine, _ in ran], ["monochrome", "youtube"])
+
+    def test_monochrome_cooling_down_goes_straight_to_youtube(self):
+        job, ran, _ = self._run(self.LIMIT, mono_blocked="Monochrome is rate-limiting this IP")
+        self.assertEqual(ran, [("youtube", "ytp-dl")])
+
+    def test_lossless_download_never_becomes_youtube(self):
+        job, ran, _ = self._run(self.LIMIT, mode="download",
+                                mono_error=RuntimeError("Monochrome official instances failed: 522"))
+        self.assertEqual([engine for engine, _ in ran], ["monochrome"])
+        self.assertEqual(job["status"], "error")
+
+    def test_network_drop_keeps_mornye_for_the_network_retry(self):
+        job, ran, _ = self._run(RuntimeError("Failed to download file: read ETIMEDOUT"))
+        self.assertEqual(ran, [])
+        self.assertEqual(job["engine"], "spotiflac")
+
+
+class NoPrefetchEngineTests(unittest.TestCase):
+    """Monochrome and Mornye limit requests per address, so they never prefetch."""
+
+    def _start(self, engine, prefetch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = SimpleNamespace(music_dir=root / "music", cache_dir=root / "cache", download_service="qobuz",
+                                     default_quality="LOSSLESS", download_engine=engine)
+            fake_db = SimpleNamespace(get_resolved_source_for_keys=lambda keys: None)
+            fake_mono = SimpleNamespace(stream_block_reason=lambda: "")
+            with patch.object(service_downloader, "JOBS_PATH", root / "jobs.json"), \
+                 patch.object(service_downloader.threading, "Thread") as thread, \
+                 patch.dict(sys.modules, {"db": fake_db, "backend_monochrome": fake_mono}):
+                manager = service_downloader.ServiceDownloadManager(config)
+                job = manager.start_job({"mode": "stream", "prefetch": prefetch, "title": "Song", "artist": "Artist",
+                                         "_defer_metadata": True, "metadata": {"spotify_id": "spotify-id"}})
+            return job, thread
+
+    def test_monochrome_and_mornye_prefetch_is_skipped(self):
+        for engine in ("monochrome", "spotiflac"):
+            with self.subTest(engine=engine):
+                job, thread = self._start(engine, prefetch=True)
+                self.assertTrue(job.get("skipped"))
+                self.assertNotIn("id", job)
+                thread.assert_not_called()
+
+    def test_played_song_still_starts(self):
+        job, thread = self._start("spotiflac", prefetch=False)
+        self.assertEqual(job["engine"], "spotiflac")
+        thread.assert_called_once()
+
+    def test_youtube_still_prefetches(self):
+        job, thread = self._start("ytp-dl", prefetch=True)
+        self.assertEqual(job["engine"], "ytp-dl")
+        thread.assert_called_once()

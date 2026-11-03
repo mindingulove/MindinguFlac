@@ -10,6 +10,19 @@ from unittest.mock import Mock, patch
 import service_downloader as sd
 
 
+# A failed job checks whether the device is online before giving up; tests
+# must not depend on (or wait for) the real network.
+_online_patch = patch("network_status.online", return_value=True)
+
+
+def setUpModule():
+    _online_patch.start()
+
+
+def tearDownModule():
+    _online_patch.stop()
+
+
 class AlbumDownloadSafetyTests(unittest.TestCase):
     def manager(self):
         manager=object.__new__(sd.ServiceDownloadManager)

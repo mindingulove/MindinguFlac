@@ -106,8 +106,8 @@ android {
         applicationId = "com.mindinguflac.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 36
-        versionName = "1.4"
+        versionCode = 37
+        versionName = "1.4.1"
 
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }

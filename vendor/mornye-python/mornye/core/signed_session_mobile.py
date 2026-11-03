@@ -43,6 +43,21 @@ _REFRESH_RETRY_S = 300.0
 #: for every request, so nothing kept on an instance survives to the next one.
 _REFRESH_RETRY_AT: dict[str, float] = {}
 
+#: Gateway namespace -> wall-clock time until which it refuses requests with
+#: 429. The gateway's limit is per address and shared by every provider, so
+#: the host app reads this to skip Mornye instead of waiting on retries.
+_RATE_LIMITED_UNTIL: dict[str, float] = {}
+
+#: Wait assumed for a 429 that names no Retry-After.
+_RATE_LIMIT_DEFAULT_S = 300.0
+
+
+def rate_limited_seconds() -> float:
+    """Seconds until the longest-refusing gateway accepts requests again."""
+    now = time.time()
+    return max((until - now for until in _RATE_LIMITED_UNTIL.values()), default=0.0)
+
+
 #: Session file path -> monotonic time of its last successful refresh, so a
 #: request that queued behind one can tell the session was just refreshed.
 _REFRESH_DONE_AT: dict[str, float] = {}
@@ -1420,6 +1435,8 @@ async def perform_signed_fetch(
         # on their own and say nothing, so the log held no record of how long
         # an address had been limited for.
         ok = 200 <= resp.status_code < 300
+        if ok:
+            _RATE_LIMITED_UNTIL.pop(client.namespace, None)
         retry_after = retry_after_header_seconds(resp.headers.get("Retry-After"))
         # Parsed only for a refusal: a success body is the provider's payload,
         # sometimes a large manifest, and never an envelope.
@@ -1462,6 +1479,7 @@ async def perform_signed_fetch(
             )
 
         if resp.status_code == 429:
+            _RATE_LIMITED_UNTIL[client.namespace] = time.time() + (wait or _RATE_LIMIT_DEFAULT_S)
             logger.warning(
                 "[signed_session:%s] HTTP 429 for %s %s — %s",
                 client.namespace,

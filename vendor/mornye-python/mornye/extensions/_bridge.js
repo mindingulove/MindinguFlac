@@ -159,6 +159,37 @@ if (!isMainThread) {
     delete: (url, headers)       => methodCall('DELETE', url, null, headers),
   };
 
+  // The mobile runtime's fetch() is synchronous (extension_runtime_http.go):
+  // amazon writes `var res = fetch(url, {...}); if (!res.ok) ...`. Node's own
+  // fetch hands back a Promise there, so `res.ok` and `res.status` read as
+  // undefined and every SongLink/Songstats/showSearch lookup "failed" with a
+  // blank status. Extensions that `await fetch(...)` still work: awaiting a
+  // plain object yields the object.
+  global.fetch = (url, opts) => {
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const raw = methodCall(String(o.method || 'GET').toUpperCase(), String(url), o.body,
+      o.headers && typeof o.headers === 'object' ? o.headers : {}) || {};
+    if (raw.error && !raw.statusCode) throw new TypeError(`fetch failed: ${raw.error}`);
+    const status = raw.statusCode || 0;
+    const body = typeof raw.body === 'string' ? raw.body : String(raw.body || '');
+    const headerMap = {};
+    for (const [k, v] of Object.entries(raw.headers || {})) headerMap[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : String(v);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      statusCode: status,
+      statusText: '',
+      url: raw.url || String(url),
+      headers: Object.assign({}, headerMap, {
+        get: (name) => headerMap[String(name).toLowerCase()] ?? null,
+        has: (name) => String(name).toLowerCase() in headerMap,
+      }),
+      body,
+      text: () => body,
+      json: () => JSON.parse(body),
+    };
+  };
+
   // `matching`, as the mobile runtime defines it (extension_runtime_matching.go).
   // Reproduced rather than improved on: apple-music turns these numbers into
   // accept/reject thresholds tuned against the Go versions — a Levenshtein

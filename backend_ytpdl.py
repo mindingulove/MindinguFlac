@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,7 +25,10 @@ _BROWSER_COOKIE_EXPORTS_LOCK = threading.Lock()
 
 
 def _youtube_extractor_args() -> dict:
-    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1" and not _youtube_cookie_file():
+        # Signed out, the mobile clients avoid the web client's challenges.
+        # They ignore cookies, though, so a signed-in phone uses yt-dlp's own
+        # choice, as desktop does, with Node solving the challenges.
         return {"youtube": {"player_client": ["android", "ios", "web"]}}
     # yt-dlp selects different clients for authenticated sessions. Forcing
     # mobile clients on desktop discards cookies and can hide playable formats.
@@ -33,7 +37,9 @@ def _youtube_extractor_args() -> dict:
 
 def _youtube_js_runtime_opts() -> dict:
     if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
-        return {}
+        # The APK's Node, put on PATH by android_runtime.mornye_android.
+        node = shutil.which("node")
+        return {"js_runtimes": {"node": {"path": node}}} if node else {}
     name = "node.exe" if sys.platform == "win32" else "node"
     roots = [Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "playwright"]
     try:
@@ -662,6 +668,17 @@ def _broad_youtube_search_query(job: dict) -> str:
     if title:
         return "ytsearch15:" + title
     return ""
+
+
+def _title_only_youtube_search_query(job: dict) -> str:
+    """Last resort: YouTube answers some artist + title searches with nothing
+    at all ("Styx Babe" returns 0 entries while "Babe" lists Styx's official
+    video). Scoring still requires the artist in the candidate's title or
+    channel, so a title-only search cannot pick another artist's song."""
+    if _ytpdl_search_profile(job) == "classical":
+        return ""
+    title = _clean_text(_expected_track(job)["title"])
+    return "ytsearch15:" + title if title else ""
 
 
 def _is_youtube_search_target(value: str) -> bool:
@@ -1611,8 +1628,10 @@ def _extract_youtube_search_info(yt_dlp, target_url: str, ydl_opts: dict) -> dic
     search_opts["extract_flat"] = "in_playlist"
 
     def _extract_with(opts: dict) -> dict | None:
-        with yt_dlp.YoutubeDL(opts) as search_ydl:
-            search_info = search_ydl.extract_info(target_url, download=False)
+        def _extract() -> dict | None:
+            with yt_dlp.YoutubeDL(opts) as search_ydl:
+                return search_ydl.extract_info(target_url, download=False)
+        search_info = _retry_on_network_error(_extract)
         return search_info if isinstance(search_info, dict) else None
 
     def _entry_count(search_info: dict | None) -> int:
@@ -1770,6 +1789,127 @@ def _ranked_youtube_matches_with_ai(
     return candidates
 
 
+_YTMUSIC_WAIT_SECONDS = 8.0
+
+
+def _ytmusic_song_entries(job: dict) -> list[dict]:
+    """Songs from YouTube Music's catalog, shaped like yt-dlp search entries."""
+    try:
+        from ytmusicapi import YTMusic
+    except ImportError:
+        return []
+    wanted = _expected_track(job)
+    title = _clean_text(wanted["title"])
+    query = " ".join(part for part in (wanted["artist"], title) if part)
+    if not query:
+        return []
+    entries = []
+    for song in YTMusic().search(query, filter="songs", limit=10) or []:
+        video_id = str(song.get("videoId") or "")
+        if not video_id:
+            continue
+        artists = ", ".join(a.get("name", "") for a in song.get("artists") or [] if a.get("name"))
+        first_artist = ((song.get("artists") or [{}])[0] or {}).get("name") or artists
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        entries.append({
+            "id": video_id,
+            "title": song.get("title") or "",
+            # Catalog songs are the artist's auto-generated "Topic" uploads.
+            "uploader": f"{first_artist} - Topic" if first_artist else "",
+            "channel": f"{first_artist} - Topic" if first_artist else "",
+            "artists": artists,
+            "album": (song.get("album") or {}).get("name") or "",
+            "duration": song.get("duration_seconds") or 0,
+            "url": url,
+            "webpage_url": url,
+            "ytmusic": True,
+        })
+    return entries
+
+
+class _YoutubeMusicSearch:
+    """Starts the YouTube Music lookup at once; take() hands its songs to the
+    first search that asks, waiting at most a few seconds, and [] after that."""
+
+    def __init__(self, job: dict, enabled: bool):
+        self._entries: list[dict] = []
+        self._taken = not enabled
+        self._done = threading.Event()
+        if enabled:
+            threading.Thread(target=self._run, args=(job,), daemon=True, name="ytmusic-search").start()
+        else:
+            self._done.set()
+
+    def _run(self, job: dict) -> None:
+        try:
+            self._entries = _ytmusic_song_entries(job)
+        except Exception as exc:
+            logger.debug("YouTube Music search failed: %s", exc)
+        finally:
+            self._done.set()
+
+    def take(self) -> list[dict]:
+        if self._taken:
+            return []
+        self._taken = True
+        self._done.wait(_YTMUSIC_WAIT_SECONDS)
+        return list(self._entries)
+
+
+class YoutubeRateLimited(RuntimeError):
+    """YouTube refuses every video for a while; stop instead of cycling candidates."""
+
+
+#: YouTube first answers a throttled session with "This content isn't available,
+#: try again later ... rate-limited", then with a bare "Video unavailable" for
+#: every video. Remember the first signal so the bare ones are read the same way.
+_RATE_LIMIT_SECONDS = 3600
+_rate_limited_until = 0.0
+
+
+def _youtube_rate_limited(message: str) -> bool:
+    global _rate_limited_until
+    text = str(message or "")
+    if "try again later" in text or "rate-limited by YouTube" in text:
+        _rate_limited_until = time.time() + _RATE_LIMIT_SECONDS
+        return True
+    return "Video unavailable" in text and time.time() < _rate_limited_until
+
+
+def _youtube_rate_limit_cleared() -> None:
+    global _rate_limited_until
+    _rate_limited_until = 0.0
+
+
+def _bare_video_unavailable(message: str) -> bool:
+    """"Video unavailable" with no reason after it. Search never lists removed
+    videos, so for a search result this is YouTube throttling a burst of
+    requests; region blocks, private and removed videos say why."""
+    text = str(message or "").strip().rstrip(".")
+    return text.endswith("Video unavailable")
+
+
+_NETWORK_RETRY_DELAYS = (2.0, 5.0)
+
+
+def _is_network_error(message: str) -> bool:
+    import network_status
+    return network_status.is_network_error(message)
+
+
+def _retry_on_network_error(action, delays=None):
+    """Run action(); repeat it after a short pause while it fails with a
+    connection/DNS error, which says nothing about the video or the search."""
+    delays = _NETWORK_RETRY_DELAYS if delays is None else delays
+    for delay in (*delays, None):
+        try:
+            return action()
+        except Exception as exc:
+            if delay is None or not _is_network_error(str(exc)):
+                raise
+            time.sleep(delay)
+
+
 def _video_download_ranges(selected: dict | None, job: dict):
     if not selected or _quality_mode(job.get("quality") or "best") != "video":
         return None
@@ -1884,6 +2024,15 @@ def run(output_dir: Path, job: dict, manager) -> None:
         manager._append_cache_event(job, "trying", "Browser cookies could not be imported; trying public YouTube access without requiring another login")
     manager._append_cache_event(job, "trying", f"Downloading via ytp-dl ({label})...")
 
+    # YouTube Music's catalog search runs alongside the first yt-dlp search; its
+    # songs (official "Topic" uploads with artist, album and length) join that
+    # search's candidates and go through the same scoring.
+    ytmusic_search = _YoutubeMusicSearch(job, enabled=not video_mode and _is_youtube_search_target(url))
+
+    # Search results that answered a bare "Video unavailable" (see
+    # _bare_video_unavailable); two of them mean YouTube is throttling.
+    bare_unavailable: list[str] = []
+
     auth_failures = []
     def _remember_auth_failure(exc):
         message = str(exc).lower()
@@ -1897,11 +2046,24 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     try:
                         channel_id = _youtube_search_channel_id(target_url)
                         extract_target = _youtube_search_without_channel_filter(target_url)
-                        search_info = _extract_youtube_search_info(yt_dlp, extract_target, ydl_opts)
+                        search_error = None
+                        try:
+                            search_info = _extract_youtube_search_info(yt_dlp, extract_target, ydl_opts)
+                        except Exception as exc:
+                            search_error, search_info = exc, None
+                        if channel_id and isinstance(search_info, dict):
+                            search_info = _filter_youtube_entries_by_channel(search_info, channel_id)
+                        music_entries = ytmusic_search.take()
+                        if music_entries:
+                            manager._append_cache_event(
+                                job, "trying", f"YouTube Music found {len(music_entries)} catalog song(s) for this track"
+                            )
+                            found = (search_info or {}).get("entries") or []
+                            search_info = {**(search_info or {}), "entries": [*music_entries, *found]}
+                        elif search_error is not None:
+                            raise search_error
                         if not isinstance(search_info, dict):
                             return None
-                        if channel_id:
-                            search_info = _filter_youtube_entries_by_channel(search_info, channel_id)
                         candidates = _ranked_youtube_matches(search_info, job)
                         candidates = _prepend_current_youtube_candidate(candidates, job)
                         candidates = _ranked_youtube_matches_with_ai(candidates, job, manager)
@@ -1985,7 +2147,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             result_code = result if isinstance(result, int) else 0
                             return result_code, bool(produced or _find_audio_files(output_dir))
 
-                        result_code, has_file = _download_with(ydl)
+                        result_code, has_file = _retry_on_network_error(lambda: _download_with(ydl))
                         if result_code == 0 or has_file:
                             return download_url
 
@@ -2013,7 +2175,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
                         # formats, while the same video resolves fine anonymously. Treating
                         # it as non-transient skipped the no-cookie retry below *and*
                         # permanently blacklisted videos that are perfectly downloadable.
-                        transient = any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in", "cookies", "PO Token", "SABR", "Requested format is not available"))
+                        rate_limited = _youtube_rate_limited(exc_str)
+                        if selected and _bare_video_unavailable(exc_str):
+                            bare_unavailable.append(download_url)
+                            rate_limited = rate_limited or len(bare_unavailable) >= 2
+                        transient = rate_limited or _is_network_error(exc_str) or (
+                            bool(selected) and _bare_video_unavailable(exc_str)
+                        ) or any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in", "cookies", "PO Token", "SABR", "Requested format is not available"))
                         if transient and _has_youtube_auth_opts(ydl.params):
                             no_cookie_opts = _without_youtube_auth_opts(ydl_opts)
                             manager._append_cache_event(job, "trying", f"YouTube candidate unavailable with cookies ({exc_str[:60]}), retrying without cookies...")
@@ -2025,6 +2193,14 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             except Exception as retry_exc:
                                 _remember_auth_failure(retry_exc)
                                 exc_str = f"{exc_str}; no-cookie retry: {retry_exc}"
+                        # A throttled session gets "Video unavailable. This content isn't
+                        # available, try again later" for *every* video, so cycling through
+                        # the other candidates and fallback searches only burns good matches.
+                        if rate_limited:
+                            raise YoutubeRateLimited(
+                                "YouTube is rate-limiting this connection (usually for up to an hour); "
+                                "the matched video was not blacklisted"
+                            ) from exc
                         if not transient:
                             db.add_to_blacklist(download_url, f"ytp-dl error: {exc_str[:120]}")
                         if index + 1 < len(attempts):
@@ -2072,6 +2248,13 @@ def run(output_dir: Path, job: dict, manager) -> None:
                     worked_url = _try_download(broad_query)
 
             if not worked_url:
+                # Phase 5: Title only, for searches YouTube answers with no entries
+                title_query = _title_only_youtube_search_query(job)
+                if title_query and title_query not in {url, broad_query}:
+                    manager._append_cache_event(job, "trying", "Falling back to a title-only YouTube search (artist + title found nothing)...")
+                    worked_url = _try_download(title_query)
+
+            if not worked_url:
                 if auth_failures and not is_android:
                     _mark_youtube_login_required(job, manager)
                     raise RuntimeError("YouTube requires sign-in. Use Mindinguflac's Log in button or Settings → YouTube account to save an app-owned session.")
@@ -2085,7 +2268,8 @@ def run(output_dir: Path, job: dict, manager) -> None:
         raise RuntimeError("ytp-dl reported success but no playable audio file was found")
 
     final = audio_files[0]
-    
+    _youtube_rate_limit_cleared()
+
     # Persistence: save the successful URL
     if worked_url:
         track_key = job.get("track_key") or f"{job.get('artist','').lower()}||{job.get('title','').lower()}"

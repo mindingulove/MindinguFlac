@@ -3719,6 +3719,8 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
   if (state.videoMode && isVideoLibraryPath(filePath)) {
     renderSideCover(track || state.currentTrack);
   }
+  // The audio file is known now; match the side video against it.
+  if (state.videoMode) refreshVideoSync().catch(() => {});
   state.pendingNativeStartAt = 0;
   const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}&audio=1`;
   state.currentStreamUrl = streamUrl;
@@ -6794,6 +6796,10 @@ async function prefetchOneTrack(next, orderKey) {
   try {
     if (currentQueueOrderKey() !== orderKey || !currentPrefetchWindowKeys().has(key)) return;
     const job = await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream", true)) });
+    if (job?.skipped) {
+      console.log("[Prefetch] skipped:", job.reason, next.title);
+      return;
+    }
     if (job && job.id) {
       if (currentQueueOrderKey() !== orderKey || !currentPrefetchWindowKeys().has(key)) {
         api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: job.id }) }).catch(() => {});
@@ -7289,6 +7295,9 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         if (mode === "stream" && job.library_path) {
           state.currentLibraryPath = job.library_path;
           state.currentPlayableReady = true;
+          // Mornye/torrent audio arrives as one file, often minutes after the
+          // side video; matching started with the video found no audio then.
+          if (state.videoMode) refreshVideoSync().catch(() => {});
           if (state.videoMode && isVideoLibraryPath(job.library_path)) {
             renderSideCover(track);
           }
@@ -7781,7 +7790,7 @@ async function setupYoutubeSignInSettings() {
   const row = $("youtubeSignInRow");
   const button = $("youtubeSignInButton");
   const label = $("youtubeSignInStatus");
-  if (!row || !button || IS_ANDROID) return;
+  if (!row || !button) return;
   let signedIn = false;
   const showStatus = status => {
     signedIn = !!status.signed_in;
@@ -12452,13 +12461,46 @@ document.addEventListener("click", (e) => {
   }
 });
 
-$("ctxAddQueue")?.addEventListener("click", () => {
-  if (contextMenuTargetTrack) {
-    state.queue.push(contextMenuTargetTrack);
-    if (state.originalQueue) state.originalQueue.push(contextMenuTargetTrack);
-    if (!$("queuePanel").hidden) refreshQueuePanel();
-    updateSidebarNextQueue();
+// "Add to queue" plays the songs next, after any queued before them (as
+// Spotify's queue does), not after the rest of the album or playlist.
+// The last queued song's key marks where the queued block ends, so a
+// replaced or reshuffled queue simply starts a new block.
+function queueInsertionPoint(list, start, lastKey) {
+  let at = Math.min(Math.max(start, 0), list.length);
+  if (lastKey) {
+    const last = list.findIndex((track, index) => index >= at && trackKey(track) === lastKey);
+    if (last >= 0) at = last + 1;
   }
+  return at;
+}
+
+function enqueueNext(tracks) {
+  if (!tracks.length) return;
+  let current = getQueueIndex();
+  if (current < 0 && state.currentTrack) {
+    // Playing something outside the queue (or with none): the queue panel
+    // lists only what follows the current song, so start the queue with it.
+    state.queue.unshift(state.currentTrack);
+    state.queueIndex = current = 0;
+  }
+  const lastKey = state.userQueueLastKey || "";
+  const at = queueInsertionPoint(state.queue, current >= 0 ? current + 1 : state.queue.length, lastKey);
+  state.queue.splice(at, 0, ...tracks);
+  if (state.originalQueue && state.originalQueue !== state.queue) {
+    const currentKey = state.currentTrack ? trackKey(state.currentTrack) : "";
+    const originalCurrent = currentKey ? state.originalQueue.findIndex(track => trackKey(track) === currentKey) : -1;
+    const originalAt = queueInsertionPoint(state.originalQueue,
+      originalCurrent >= 0 ? originalCurrent + 1 : state.originalQueue.length, lastKey);
+    state.originalQueue.splice(originalAt, 0, ...tracks);
+  }
+  state.userQueueLastKey = trackKey(tracks[tracks.length - 1]);
+  if (!$("queuePanel").hidden) refreshQueuePanel();
+  updateSidebarNextQueue();
+  prefetchNextTracks().catch(() => {});
+}
+
+$("ctxAddQueue")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack) enqueueNext([contextMenuTargetTrack]);
   $("trackContextMenu").hidden = true;
 });
 
@@ -12602,13 +12644,7 @@ $("ctxArtistAddQueue")?.addEventListener("click", async () => {
   if (!artist) return;
   const tracks = await fetchArtistTopTracks(artist);
   if (!tracks.length) return;
-  tracks.forEach(t => {
-    const trackItem = { ...t, kind: "track" };
-    state.queue.push(trackItem);
-    if (state.originalQueue) state.originalQueue.push(trackItem);
-  });
-  if (!$("queuePanel").hidden) refreshQueuePanel();
-  updateSidebarNextQueue();
+  enqueueNext(tracks.map(t => ({ ...t, kind: "track" })));
 });
 
 $("ctxArtistAddPlaylist")?.addEventListener("click", async () => {
@@ -12671,13 +12707,7 @@ $("ctxAlbumAddQueue")?.addEventListener("click", async () => {
       }
     }
     if (tracks.length) {
-        tracks.forEach(t => {
-            const trackItem = { ...t, kind: "track" };
-            state.queue.push(trackItem);
-            if (state.originalQueue) state.originalQueue.push(trackItem);
-        });
-        if (!$("queuePanel").hidden) refreshQueuePanel();
-        updateSidebarNextQueue();
+        enqueueNext(tracks.map(t => ({ ...t, kind: "track" })));
     }
   }
   $("albumContextMenu").hidden = true;
