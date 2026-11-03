@@ -33,6 +33,10 @@ val syncPythonSources by tasks.registering(Sync::class) {
         exclude("android_runtime/static/**")
         exclude("**/__pycache__/**", "**/*.pyc")
     }
+    from(repositoryRoot.resolve("vendor/mornye-extensions")) {
+        exclude(".DS_Store", "**/.DS_Store", "README.md")
+        into("android_runtime/mornye_extensions")
+    }
     from(repositoryRoot.resolve("static")) {
         exclude(".DS_Store", "**/.DS_Store")
         into("android_runtime/static")
@@ -66,6 +70,33 @@ val extractJlibtorrentNative by tasks.registering(Copy::class) {
     into(generatedJniLibs)
 }
 
+// Mornye's JavaScript providers run under Node. Android only executes files
+// from the app's native library directory, so the pinned standalone Node is
+// packaged as a lib*.so and extracted at install (useLegacyPackaging below).
+val prepareAndroidNode by tasks.registering(Exec::class) {
+    val output = generatedJniLibs.get().file("arm64-v8a/libmindinguflac_node.so").asFile
+    workingDir(repositoryRoot)
+    commandLine(providers.environmentVariable("MINDINGUFLAC_BUILD_PYTHON").orElse("python3.12").get(),
+        "scripts/prepare_android_node.py", output.absolutePath)
+    inputs.file(repositoryRoot.resolve("scripts/prepare_android_node.py"))
+    outputs.file(output)
+}
+
+// ffmpeg/ffprobe for Mornye's providers, cross-compiled from pinned FFmpeg
+// source with this project's NDK and packaged like Node above.
+val buildAndroidFfmpeg by tasks.registering(Exec::class) {
+    val folder = generatedJniLibs.get().dir("arm64-v8a").asFile
+    workingDir(repositoryRoot)
+    inputs.file(repositoryRoot.resolve("scripts/build_android_ffmpeg.py"))
+    outputs.files(folder.resolve("libmindinguflac_ffmpeg.so"), folder.resolve("libmindinguflac_ffprobe.so"))
+    doFirst {
+        commandLine(providers.environmentVariable("MINDINGUFLAC_BUILD_PYTHON").orElse("python3.12").get(),
+            "scripts/build_android_ffmpeg.py", "--ndk", android.ndkDirectory.absolutePath,
+            folder.resolve("libmindinguflac_ffmpeg.so").absolutePath,
+            folder.resolve("libmindinguflac_ffprobe.so").absolutePath)
+    }
+}
+
 android {
     namespace = "com.mindinguflac.android"
     compileSdk = 35
@@ -75,8 +106,8 @@ android {
         applicationId = "com.mindinguflac.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.4"
+        versionCode = 37
+        versionName = "1.4.1"
 
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }
@@ -116,6 +147,17 @@ android {
             jniLibs.srcDir(generatedJniLibs)
         }
     }
+
+    packaging {
+        jniLibs {
+            // Extract native libraries to nativeLibraryDir: Node must exist
+            // there as a real file to be executed.
+            useLegacyPackaging = true
+            // Already stripped; leave the executable exactly as verified.
+            keepDebugSymbols += listOf("**/libmindinguflac_node.so", "**/libmindinguflac_ffmpeg.so",
+                "**/libmindinguflac_ffprobe.so")
+        }
+    }
 }
 
 chaquopy {
@@ -140,7 +182,7 @@ chaquopy {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(syncPythonSources, extractJlibtorrentNative)
+    dependsOn(syncPythonSources, extractJlibtorrentNative, prepareAndroidNode, buildAndroidFfmpeg)
 }
 
 tasks.configureEach {
@@ -151,12 +193,14 @@ tasks.configureEach {
         dependsOn(syncPythonSources)
     }
     if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
-        dependsOn(extractJlibtorrentNative)
+        dependsOn(extractJlibtorrentNative, prepareAndroidNode, buildAndroidFfmpeg)
     }
 }
 
 dependencies {
     implementation("androidx.core:core:1.13.1")
+    // Custom Tabs for the Mornye provider check (MornyeVerification), as in Mornye's app.
+    implementation("androidx.browser:browser:1.8.0")
     // jlibtorrent is the real native torrent engine used by the Android FLAC
     // backend. Only the Java/SWIG bindings go on the classpath; the arm64 JNI
     // library is repacked into jniLibs by extractJlibtorrentNative above, so

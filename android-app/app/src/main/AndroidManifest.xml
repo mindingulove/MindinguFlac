@@ -45,6 +45,28 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".YoutubeLoginActivity"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
+
+        <!-- The Mornye provider check returns its grant here. The Zarz page
+             only redirects to mornye:// or spotiflac:// (SpotiFLAC owns the
+             latter), so the grant arrives as Mornye's own deep link. -->
+        <activity
+            android:name=".MornyeGrantActivity"
+            android:exported="true"
+            android:noHistory="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mornye" android:host="session-grant" />
+            </intent-filter>
+        </activity>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.share"

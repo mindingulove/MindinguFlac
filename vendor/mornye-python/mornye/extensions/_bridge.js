@@ -71,6 +71,10 @@ if (!isMainThread) {
   const BRIDGE_TIMEOUT_MS   = 60_000;
   const TRANSFER_TIMEOUT_MS  = 30 * 60_000;
   const TRANSFER_METHODS = new Set(['file.download', 'file.downloadSegments']);
+  //: A signed request may first wait for the user to pass the provider's
+  //: verification (up to ~2.5 min on Android). The flat 60s abandoned it
+  //: mid-check; this stays under the host's 180s call timeout.
+  const SIGNED_FETCH_TIMEOUT_MS = 170_000;
 
   /** Calls the main thread *synchronously* via SharedArrayBuffer. */
   function bridgeCall(method, args) {
@@ -94,7 +98,8 @@ if (!isMainThread) {
     // for minutes, so it gets its own cap. The flat 60s used to sit *below*
     // nodeFileDownload's own 120s socket timeout, which meant a slow album
     // track failed here while the main thread was still happily writing it.
-    const limit = TRANSFER_METHODS.has(method) ? TRANSFER_TIMEOUT_MS : BRIDGE_TIMEOUT_MS;
+    const limit = TRANSFER_METHODS.has(method) ? TRANSFER_TIMEOUT_MS
+      : method === 'session.signedFetch' ? SIGNED_FETCH_TIMEOUT_MS : BRIDGE_TIMEOUT_MS;
     let waited = 0;
     while (Atomics.load(STATE, 0) !== 2) {
       const r = Atomics.wait(STATE, 0, 1, 200);
@@ -152,6 +157,37 @@ if (!isMainThread) {
     put:    (url, body, headers) => methodCall('PUT', url, body, headers),
     patch:  (url, body, headers) => methodCall('PATCH', url, body, headers),
     delete: (url, headers)       => methodCall('DELETE', url, null, headers),
+  };
+
+  // The mobile runtime's fetch() is synchronous (extension_runtime_http.go):
+  // amazon writes `var res = fetch(url, {...}); if (!res.ok) ...`. Node's own
+  // fetch hands back a Promise there, so `res.ok` and `res.status` read as
+  // undefined and every SongLink/Songstats/showSearch lookup "failed" with a
+  // blank status. Extensions that `await fetch(...)` still work: awaiting a
+  // plain object yields the object.
+  global.fetch = (url, opts) => {
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const raw = methodCall(String(o.method || 'GET').toUpperCase(), String(url), o.body,
+      o.headers && typeof o.headers === 'object' ? o.headers : {}) || {};
+    if (raw.error && !raw.statusCode) throw new TypeError(`fetch failed: ${raw.error}`);
+    const status = raw.statusCode || 0;
+    const body = typeof raw.body === 'string' ? raw.body : String(raw.body || '');
+    const headerMap = {};
+    for (const [k, v] of Object.entries(raw.headers || {})) headerMap[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : String(v);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      statusCode: status,
+      statusText: '',
+      url: raw.url || String(url),
+      headers: Object.assign({}, headerMap, {
+        get: (name) => headerMap[String(name).toLowerCase()] ?? null,
+        has: (name) => String(name).toLowerCase() in headerMap,
+      }),
+      body,
+      text: () => body,
+      json: () => JSON.parse(body),
+    };
   };
 
   // `matching`, as the mobile runtime defines it (extension_runtime_matching.go).

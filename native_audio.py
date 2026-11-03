@@ -409,6 +409,44 @@ def android_output_devices() -> list[dict]:
             for item in devices if isinstance(item, dict) and "id" in item]
 
 
+class _AndroidHttpResponse:
+    """A streamed OkHttp response (MonochromeHttp.java) shaped like requests'."""
+
+    def __init__(self, url: str, headers: dict) -> None:
+        import json
+        from java import jclass  # type: ignore
+        from requests.structures import CaseInsensitiveDict
+
+        self._http = jclass("com.mindinguflac.android.MonochromeHttp")
+        self._response = self._http.get(url, json.dumps(headers))
+        self.status_code = int(self._response.code())
+        names = self._response.headers()
+        self.headers = CaseInsensitiveDict({str(names.name(i)): str(names.value(i)) for i in range(names.size())})
+
+    def iter_content(self, chunk_size: int = 65536):
+        stream = self._response.body().byteStream()
+        while True:
+            chunk = self._http.read(stream, chunk_size)
+            if chunk is None:
+                return
+            yield bytes(chunk)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> bool:
+        self._response.close()
+        return False
+
+
+class _AndroidHttpSession:
+    def get(self, url: str, headers: dict | None = None, stream: bool = True, timeout=None) -> _AndroidHttpResponse:
+        return _AndroidHttpResponse(url, headers or {})
+
+    def close(self) -> None:
+        pass
+
+
 class _MonochromeFetch:
     """Download one Monochrome track once, into a temp file all decoders share.
 
@@ -439,12 +477,19 @@ class _MonochromeFetch:
         self.thread.start()
 
     def _session(self):
+        if _on_android():
+            # No curl_cffi on the phone, and httpx's Python TLS handshake gets
+            # 403 from Monochrome; ExoPlayer's OkHttp client is accepted.
+            return _AndroidHttpSession()
         try:
             from curl_cffi import requests as curl_requests
-            return curl_requests.Session(impersonate="safari")
+            # Session.stream also exists in curl_cffi. It must inherit an
+            # explicit timeout: otherwise this branch silently uses its 30 s
+            # default while the get() branch below used a different timeout.
+            return curl_requests.Session(impersonate="safari", timeout=(20, 180))
         except Exception:
             import httpx  # HTTP/2 fallback when curl_cffi is unavailable
-            return httpx.Client(http2=True, follow_redirects=True, timeout=httpx.Timeout(20.0, read=60.0))
+            return httpx.Client(http2=True, follow_redirects=True, timeout=httpx.Timeout(20.0, read=180.0))
 
     def _headers(self, offset: int) -> dict:
         try:
@@ -473,7 +518,7 @@ class _MonochromeFetch:
                     if hasattr(session, "stream"):  # httpx
                         context = session.stream("GET", self.url, headers=self._headers(offset))
                     else:
-                        context = session.get(self.url, headers=self._headers(offset), stream=True, timeout=(20, 60))
+                        context = session.get(self.url, headers=self._headers(offset), stream=True, timeout=(20, 180))
                     with context as response:
                         status = int(response.status_code)
                         if status not in (200, 206):
@@ -851,14 +896,19 @@ class NativeAudioManager:
         import json
 
         headers = ""
+        playback_source = source
         if stream:
-            try:
-                import backend_monochrome
-                headers = json.dumps(backend_monochrome.stream_request_headers())
-            except Exception:
-                headers = ""
+            # ExoPlayer and Save must read one shared fetch. Passing the
+            # upstream URL here opened a separate request and kept only a
+            # short head recording, so a save could not reuse playback bytes.
+            from urllib.parse import quote
+            origin = os.environ.get("MINDINGUFLAC_ANDROID_API_ORIGIN", "")
+            if not origin:
+                return {"ok": False, "error": "Android audio service is not ready"}
+            playback_source = f"{origin}/api/monochrome/stream?url={quote(source, safe='')}"
+            headers = json.dumps({"X-Mindinguflac-Token": os.environ.get("MINDINGUFLAC_API_TOKEN", "")})
         result = json.loads(str(_android_player().play(
-            source, headers, _android_device_id(device_uid), device_name or "",
+            playback_source, headers, _android_device_id(device_uid), device_name or "",
             max(0.0, min(1.0, float(volume))), max(0.0, float(position or 0)))))
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error") or "Native audio failed"}
@@ -1517,6 +1567,13 @@ class NativeAudioManager:
             from AppKit import NSSound
             from Foundation import NSURL
 
+            # Bluetooth UIDs can outlive their connection. NSSound accepts the
+            # stale UID but then refuses play(), so resolve it before opening.
+            requested_uid = device_uid
+            output_fallback = bool(device_uid and _macos_output_device_name(device_uid) == "")
+            if output_fallback:
+                device_uid = ""
+
             # NSSound can't decode some formats (notably YouTube webm/opus); use a
             # transcoded WAV when needed so native output works with every file.
             playback_path = _native_playable_path(audio_path)
@@ -1563,7 +1620,11 @@ class NativeAudioManager:
                     self._error = "Native audio player refused to start"
                     return {"ok": False, "error": self._error}
 
-            return self.status() | {"ok": True}
+            result = self.status() | {"ok": True}
+            if output_fallback:
+                result.update(output_fallback=True, requested_device_uid=requested_uid,
+                              output_notice="Audio output disconnected — playing on this computer")
+            return result
         except Exception as exc:
             with self._lock:
                 self._error = str(exc)

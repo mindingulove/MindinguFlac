@@ -5,6 +5,7 @@ Python, and neither controller metadata nor snapshots can carry local paths.
 """
 from __future__ import annotations
 
+import collections
 import math
 import secrets
 import threading
@@ -232,7 +233,10 @@ class Receiver:
     def status(self, peer_id, session_id):
         with self.lock:
             self._require(peer_id, session_id)
-            return {'ok': True, 'session': self._public(), 'snapshot': self.player_state}
+            # How long this snapshot has waited here since the player sent it,
+            # on this computer's clock; the controller adds the trip back.
+            return {'ok': True, 'session': self._public(), 'snapshot': self.player_state,
+                    'snapshot_age': max(0.0, self.clock() - self.player_seen)}
 
     def command(self, peer_id, session_id, action, payload):
         payload = command_payload(action, payload)
@@ -266,6 +270,7 @@ receiver = Receiver()
 _controller = None
 _controller_generation = 0
 _controller_lock = threading.Lock()
+_lan_exchanges = collections.deque(maxlen=10)
 
 
 def local_bridge(body):
@@ -308,6 +313,8 @@ def controller_request(action, body=None):
         with _controller_lock:
             _controller_generation += 1
             generation = _controller_generation
+        with _controller_lock:
+            _lan_exchanges.clear()
         result = client.remote_request('/remote/connect', {}, str(body.get('device_id') or ''))
         route = {'device_id': result['device_id'], 'name': result['name'],
                  'session_id': result['session']['id']}
@@ -349,6 +356,18 @@ def controller_request(action, body=None):
         result = client.remote_request('/remote/' + action if action in ('status', 'offline') else '/remote/command',
                                        {'session_id': route['session_id'], 'action': body.get('action'),
                                         'payload': body.get('payload') or {}}, route['device_id'])
+        if 'snapshot_age' in result:
+            # The reply travelled back for about half a round trip. Use the
+            # median of recent exchanges, re-measured on every request, so one
+            # slow packet cannot move the lyrics or video.
+            exchange = float(result.get('_exchange_seconds') or 0)
+            with _controller_lock:
+                if exchange > 0:
+                    _lan_exchanges.append(exchange)
+                ordered = sorted(_lan_exchanges)
+            rtt = ordered[len(ordered) // 2] if ordered else 0.0
+            result['snapshot_age'] = min(10.0, float(result['snapshot_age'] or 0) + rtt / 2)
+            result['lan_rtt'] = rtt
         return {**result, 'route': route}
     except Exception as exc:
         if 'Remote playback session ended.' in str(exc) or 'removed this device pairing' in str(exc):

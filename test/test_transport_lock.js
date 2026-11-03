@@ -11,7 +11,7 @@ const icon = {};
 const button = { querySelector: () => icon, setAttribute: () => {} };
 const state = { nativeAudio: { active: false }, playbackRequestId: 1, currentTrack: { title: 'Song' }, nativeAudioStart: null };
 const context = vm.createContext({
-  console, state, $: id => id === 'playPause' ? button : { paused: true }, IS_ANDROID: true,
+  console, performance: { now: () => 0 }, state, $: id => id === 'playPause' ? button : { paused: true }, IS_ANDROID: true,
   renderPlayerStatusIcon: () => {}, publishDockPlayingState: () => {}, persistPlaybackSnapshot: () => {},
   isNativeAudioSelected: () => true, isMonochromeDirectStreamUrl: () => true,
   nativeAudioVolume: () => 1, _nativeAudioDeviceUid: '', _outputSwitchesInFlight: 1,
@@ -62,5 +62,21 @@ function sync() { vm.runInContext('syncPlayPauseButton()', context); return butt
   context.api = async () => ({ playing: true, buffering: false, stream_phase: 'playing', position: 1 });
   await poll();
   assert.equal(button.disabled, false);
-  console.log('Browser/native buffering, Android status polling, startup race and failed-start retry lock checks passed');
+  let persisted;
+  context.IS_ANDROID = false;
+  context.isMonochromeDirectStreamUrl = () => false;
+  context._nativeAudioDeviceUid = 'gone-output';
+  context._activeSinkId = 'native:gone-output';
+  context._persistPreferredAudioOutput = async value => { persisted = value; };
+  context._refreshConnectPanel = async () => {};
+  context.showToast = () => {};
+  context.api = async () => ({ok: true, playing: true, position: 64, duration: 225,
+    device_uid: '', output_fallback: true, output_notice: 'Using this computer'});
+  await context.startNativeAudio('/song.wav', state.currentTrack, 1, 64);
+  assert.equal(context._nativeAudioDeviceUid, '');
+  assert.equal(context._activeSinkId, '');
+  assert.equal(persisted.nativeUid, '', 'disconnected output is removed from saved preferences');
+  assert.equal(state.nativeAudio.active, true);
+  assert.equal(state.nativeAudio.position, 64);
+  console.log('Transport startup, buffering, retry and disconnected-output fallback checks passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

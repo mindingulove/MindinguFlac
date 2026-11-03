@@ -34,6 +34,7 @@ hiddenimports = [
     'backend_monochrome',
     'video_sync',
     'video_sources',
+    'video_motion',
     'backend_ytpdl',
     'catalog',
     'service_downloader',
@@ -45,9 +46,12 @@ hiddenimports = [
     'browser_worker_proxy',
     'ddg_browser',
     'tour_ai', 'hypebot_tour', 'gemini_proxy', 'gemini_browser',
-    'db'
+    'db', 'network_status'
 ]
 hiddenimports += collect_submodules('qrcode')
+# YouTube Music catalog search (backend_ytpdl); ships locale data files.
+tmp_ret = collect_all('ytmusicapi')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 # Embedded Mornye REST service and narrowly scoped metadata adapters.
 try:
     tmp_ret = collect_all('mornye')
@@ -192,9 +196,10 @@ if helper.is_file():
     binaries.append((str(helper), '.'))
 
 import shutil
-_ffmpeg = shutil.which('ffmpeg')
-if _ffmpeg:
-    binaries.append((_ffmpeg, '.'))
+for _media_tool in ('ffmpeg', 'ffprobe'):
+    _media_executable = shutil.which(_media_tool)
+    if _media_executable:
+        binaries.append((_media_executable, '.'))
 
 
 # The lyrics aligner ships its verified model and native CPU bridge.
@@ -255,8 +260,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.4',
-        'CFBundleVersion': '1.4',
+        'CFBundleShortVersionString': '1.4.1',
+        'CFBundleVersion': '1.4.1',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

@@ -142,9 +142,9 @@ def _spotiflac_provider_status() -> dict:
     """Is there a Mornye *download* provider this device can actually run?
 
     Mornye supplies download providers through extensions.
-    JavaScript extensions need ``node`` on PATH; Python ``.sflx`` extensions
-    are imported in-process and so only need to be installed. The phone ships
-    neither, which is why the Mornye engine stays off until one is present.
+    JavaScript extensions need ``node`` on PATH (the APK bundles one, see
+    mornye_android); Python ``.sflx`` extensions are imported in-process.
+    The engine stays off until a provider extension is installed.
     """
     imported, detail = _probe_import("mornye")
     if not imported:
@@ -173,9 +173,9 @@ def _spotiflac_provider_status() -> dict:
     if installed:
         return {"ok": True, "providers": sorted(installed), "node": bool(node)}
     reason = (
-        "Mornye 1.0.4 imports, but its download path needs a provider "
-        "extension: JavaScript extensions require Node.js (not in the APK) and "
-        "no Python provider extension is installed."
+        "Mornye needs an installed download provider extension; none is installed on this phone."
+        if node else
+        "Mornye's JavaScript provider extensions need Node.js, and the APK's bundled Node is missing."
     )
     if error:
         reason = f"{reason} Extension manager probe: {error}"

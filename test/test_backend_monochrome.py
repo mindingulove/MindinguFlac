@@ -90,6 +90,26 @@ def _patched_fetch(responses):
 
 
 class MonochromeBackendTests(unittest.TestCase):
+    def test_save_resolved_playback_uses_existing_bytes_without_search(self):
+        import native_audio
+        flac = b"fLaC" + bytes(range(256)) * 500
+        url = "https://tracks.monochrome.st/track/123"
+        session, patchers = _patched_fetch([_Response(chunks=[flac], status_code=206,
+            headers={"Content-Range": f"bytes 0-{len(flac)-1}/{len(flac)}"})])
+        job = {"id": "save", "title": "Song", "artist": "Artist", "mode": "download",
+               "resolved_url": url, "source_recording": {"title": "Song", "isrc": "TEST"}}
+        with tempfile.TemporaryDirectory() as tmp, patchers[0], patchers[1], \
+                patch.object(backend_monochrome, "_search_items", side_effect=AssertionError("must reuse playback")), \
+                patch.object(backend_monochrome, "_decode_error", return_value=""):
+            playing = native_audio._monochrome_fetch(url, pin=True)
+            playing.thread.join(timeout=5)
+            backend_monochrome.run(Path(tmp), job, _Manager())
+            self.assertEqual(Path(job["active_audio_path"]).read_bytes(), flac)
+            self.assertEqual(len(session.calls), 1, "Save must not open another upstream request")
+            self.assertEqual(playing.pins, 1, "Save releases only its own pin")
+            self.assertEqual(job["resolved_url"], url)
+            native_audio._release_monochrome_fetch(playing)
+
     def test_compilation_edit_maps_to_verified_studio_album_without_changing_album(self):
         row = {'id': '173847391828508672', 'title': 'One Of Us', 'artistNames': ['Joan Osborne'],
                'isrc': 'USPR39500200', 'duration': 320466}
@@ -217,6 +237,54 @@ class MonochromeBackendTests(unittest.TestCase):
         self.assertTrue(fetch.done)
         self.assertEqual(fetch.path.read_bytes(), body)
         self.assertEqual(len(session.calls), 2)
+
+    def test_android_downloads_through_the_okhttp_bridge(self):
+        import sys
+        import native_audio
+        body = b"fLaC" + b"z" * 150000
+        calls = []
+
+        class Headers:
+            items = [("Content-Range", f"bytes 0-{len(body) - 1}/{len(body)}")]
+            def size(self): return len(self.items)
+            def name(self, i): return self.items[i][0]
+            def value(self, i): return self.items[i][1]
+
+        class Stream:
+            offset = 0
+
+        class Response:
+            closed = False
+            def code(self): return 206
+            def headers(self): return Headers()
+            def body(self): return SimpleNamespace(byteStream=lambda: Stream())
+            def close(self): Response.closed = True
+
+        class MonochromeHttp:
+            @staticmethod
+            def get(url, headers_json):
+                calls.append((url, headers_json))
+                return Response()
+
+            @staticmethod
+            def read(stream, max_bytes):
+                chunk = body[stream.offset:stream.offset + max_bytes]
+                stream.offset += len(chunk)
+                return chunk or None
+
+        for fetch in list(native_audio._monochrome_fetches.values()):
+            fetch.cancel()
+        native_audio._monochrome_fetches.clear()
+        with patch.dict(sys.modules, {"java": SimpleNamespace(jclass=lambda name: MonochromeHttp)}), \
+             patch.object(native_audio, "_on_android", return_value=True):
+            fetch = native_audio._monochrome_fetch("https://tracks.monochrome.st/track/android-test")
+            fetch.thread.join(timeout=5)
+        self.assertTrue(fetch.done, fetch.error)
+        self.assertEqual(fetch.path.read_bytes(), body)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('"Range": "bytes=0-"', calls[0][1])
+        self.assertTrue(Response.closed)
+        fetch.cancel()
 
     def test_full_decode_rejects_a_spliced_flac(self):
         import subprocess

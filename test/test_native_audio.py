@@ -456,11 +456,13 @@ class TestAndroidNativePlayback(unittest.TestCase):
         import native_audio
         self.player = _FakeAndroidPlayer()
         for item in (patch.object(native_audio, "_on_android", return_value=True),
-                     patch.object(native_audio, "_android_player", return_value=self.player)):
+                     patch.object(native_audio, "_android_player", return_value=self.player),
+                     patch.dict("os.environ", {"MINDINGUFLAC_ANDROID_API_ORIGIN": "http://127.0.0.1:45678",
+                                               "MINDINGUFLAC_API_TOKEN": "test-session"})):
             item.start()
             self.addCleanup(item.stop)
 
-    def test_monochrome_stream_plays_on_chosen_device_with_browser_headers(self):
+    def test_monochrome_stream_plays_through_shared_fetch_on_chosen_device(self):
         import backend_monochrome, json
         manager = NativeAudioManager()
         with patch.object(backend_monochrome, "_stream_blocked_until", 0.0):
@@ -469,7 +471,9 @@ class TestAndroidNativePlayback(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         _, source, headers, device_id, name, volume, position = self.player.calls[0]
         self.assertEqual((device_id, name, position), (7, "EDIFIER S351DB", 3.0))
-        self.assertEqual(json.loads(headers)["Sec-Fetch-Dest"], "audio")
+        self.assertEqual(source, "http://127.0.0.1:45678/api/monochrome/stream?url=https%3A%2F%2Ftracks.monochrome.st%2Ftrack%2F1")
+        self.assertEqual(json.loads(headers), {"X-Mindinguflac-Token": "test-session"})
+        self.assertEqual(manager._stream_url, "https://tracks.monochrome.st/track/1")
         self.assertEqual(result["stream_phase"], "playing")
         self.assertEqual(result["position"], 12.5)
         self.assertEqual(result["device_uid"], "android:7")
@@ -857,3 +861,46 @@ class TestNativeAudioMacOS(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestMacFileOutputStartup(unittest.TestCase):
+    def _play_on(self, live_name):
+        sound = MockSound(duration=225)
+        sound.setPlaybackDeviceIdentifier_ = MagicMock()
+        sound.setVolume_ = lambda value: setattr(sound, '_volume', value)
+        sound.stop = MagicMock()
+        factory = MagicMock()
+        factory.alloc.return_value.initWithContentsOfURL_byReference_.return_value = sound
+        manager = NativeAudioManager()
+        with patch('native_audio.sys.platform', 'darwin'), patch('native_audio._on_android', return_value=False), \
+                patch.object(manager, 'available', return_value=True), patch('pathlib.Path.is_file', return_value=True), \
+                patch('native_audio._native_playable_path', return_value='/test/song.wav'), \
+                patch('native_audio._macos_output_device_name', return_value=live_name), \
+                patch('native_audio._macos_unmute_device') as unmute, patch('native_audio._macos_set_device_volume'), \
+                patch.dict(sys.modules, {'AppKit': SimpleNamespace(NSSound=factory),
+                                         'Foundation': SimpleNamespace(NSURL=SimpleNamespace(fileURLWithPath_=lambda p:p))}):
+            result = manager.play('/test/song.wav', 'bluetooth-output', .37, 64)
+        return result, sound, unmute
+
+    def test_disconnected_saved_output_uses_default_and_keeps_position_and_volume(self):
+        result, sound, unmute = self._play_on('')
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['output_fallback'])
+        self.assertEqual(result['device_uid'], '')
+        self.assertEqual(result['requested_device_uid'], 'bluetooth-output')
+        self.assertEqual(result['position'], 64)
+        self.assertEqual(result['volume'], .37)
+        sound.setPlaybackDeviceIdentifier_.assert_not_called()
+        unmute.assert_not_called()
+
+    def test_connected_output_is_preserved(self):
+        result, sound, _ = self._play_on('EDIFIER S351DB')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['device_uid'], 'bluetooth-output')
+        self.assertFalse(result.get('output_fallback', False))
+        sound.setPlaybackDeviceIdentifier_.assert_called_once_with('bluetooth-output')
+
+    def test_query_failure_does_not_assume_the_selected_output_disconnected(self):
+        result, sound, _ = self._play_on(None)
+        self.assertTrue(result['ok'])
+        self.assertFalse(result.get('output_fallback', False))
+        sound.setPlaybackDeviceIdentifier_.assert_called_once_with('bluetooth-output')

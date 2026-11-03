@@ -159,7 +159,7 @@ def _local_snapshot(local_id: str, statistics_since: float = 0, desktop_cursor: 
     }
 
 
-def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
+def _apply_snapshot(snapshot: dict, remote_id: str, local_id: str = "") -> dict:
     """Merge append-only listen events and recent rows; apply newer shared settings."""
     import app
     import db
@@ -172,12 +172,29 @@ def _apply_snapshot(snapshot: dict, remote_id: str) -> dict:
     manager = app.service_downloader
     imported_recent = 0
     save_recent = False
+    # The peer sends back the rows it got from us, still named for this
+    # device ("<local_id>:<job id>"). They are ours, not new: importing them
+    # doubled every recent row and revived rows removed here.
+    own_prefix = f"{local_id}:" if local_id else ""
     with manager._lock:
+        if own_prefix:
+            echoes = [job_id for job_id, job in manager.jobs.items()
+                      if str(job.get("sync_id") or "").startswith(own_prefix)]
+            for job_id in echoes:
+                del manager.jobs[job_id]
+            save_recent = bool(echoes)
         for row in (snapshot.get("recent") or [])[:1000]:
             if not isinstance(row, dict):
                 continue
             sync_id = str(row.get("sync_id") or "").strip()
             if not sync_id or len(sync_id) > 512:
+                continue
+            if own_prefix and sync_id.startswith(own_prefix):
+                own = manager.jobs.get(sync_id[len(own_prefix):])
+                if own is not None and row.get("hidden_from_recent") and not own.get("hidden_from_recent"):
+                    own["hidden_from_recent"] = True
+                    imported_recent += 1
+                    save_recent = True
                 continue
             job_id = "sync-" + hashlib.sha256(sync_id.encode("utf-8")).hexdigest()[:32]
             if job_id in manager.jobs:
@@ -352,7 +369,7 @@ class DesktopPairingService:
                         self.respond(result)
                         return
                     if self.path == "/sync":
-                        counts = _apply_snapshot(body, device_id)
+                        counts = _apply_snapshot(body, device_id, service.state["device_id"])
                         with service.lock:
                             peer["last_seen"] = time.time()
                             peer["phone_cursor"] = float((body.get("statistics") or {}).get("cursor") or peer.get("phone_cursor") or 0)
@@ -592,9 +609,15 @@ class AndroidPairingClient:
                    "X-Mindinguflac-Device": str(payload.get("device_id") or "")}
         if secret:
             headers["X-Mindinguflac-Pair-Secret"] = secret
-        conn.request("POST", path, body=_encode_body(payload), headers=headers)
+        body = _encode_body(payload)
+        # Time only the request/response exchange; the TLS handshake before it
+        # does not delay the reply. Remote playback uses half of this as the
+        # age the reply picked up on its way back.
+        sent_at = time.monotonic()
+        conn.request("POST", path, body=body, headers=headers)
         response = conn.getresponse()
         raw = response.read(MAX_COMPRESSED_BYTES + 1)
+        exchange_seconds = time.monotonic() - sent_at
         status = response.status
         encoding = response.getheader("Content-Encoding", "")
         conn.close()
@@ -602,6 +625,7 @@ class AndroidPairingClient:
         if status not in (200, 410):
             raise RuntimeError(str(result.get("error") or f"Pairing request failed ({status})"))
         result["_status"] = status
+        result["_exchange_seconds"] = exchange_seconds
         return result
 
     @staticmethod
@@ -730,7 +754,7 @@ class AndroidPairingClient:
                 self.state["pair"] = None
                 self._save()
             raise RuntimeError("Desktop removed this device pairing")
-        _apply_snapshot(result.get("snapshot") or {}, pair["device_id"])
+        _apply_snapshot(result.get("snapshot") or {}, pair["device_id"], pair["phone_id"])
         pair["desktop_cursor"] = float(((result.get("snapshot") or {}).get("statistics") or {}).get("cursor") or pair.get("desktop_cursor") or 0)
         pair["phone_cursor"] = float(outgoing["statistics"].get("cursor") or pair.get("phone_cursor") or 0)
         with self.lock:

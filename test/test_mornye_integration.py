@@ -17,6 +17,38 @@ from local_metadata import lyrics
 
 
 class MornyeRoutingTests(unittest.TestCase):
+    def test_js_provider_starts_with_finder_path_using_packaged_node(self):
+        import importlib.util
+        import shutil
+        import sys
+        from mornye.extensions.runtime import JSRuntime
+        spec = importlib.util.find_spec("playwright")
+        if not spec or not spec.origin:
+            self.skipTest("Playwright Node driver is not installed")
+        driver = Path(spec.origin).parent / "driver" / ("node.exe" if sys.platform == "win32" else "node")
+        if not driver.is_file():
+            self.skipTest("Packaged Node driver is not available")
+        with tempfile.TemporaryDirectory(prefix="mornye node test ") as tmp:
+            extension = Path(tmp) / "index.js"
+            extension.write_text('registerExtension({ ping: function() { return "ready"; } });')
+            with patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "MINDINGUFLAC_ANDROID": "0"}), \
+                    patch.object(sys, "_MEIPASS", str(Path(spec.origin).parent.parent), create=True):
+                selected = mornye_runtime._configure_node_runtime()
+                self.assertEqual(selected, driver)
+                self.assertEqual(Path(shutil.which("node")), driver)
+                runtime = JSRuntime(extension)
+                try:
+                    runtime.start()
+                    self.assertEqual(runtime.call("ping"), "ready")
+                finally:
+                    runtime.stop()
+
+    def test_android_does_not_adopt_a_desktop_node_driver(self):
+        with patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}), \
+                patch.object(mornye_runtime.shutil, "which") as which:
+            self.assertIsNone(mornye_runtime._configure_node_runtime())
+            which.assert_not_called()
+
     def test_track_results_survive_uncovered_category_failure_and_api_limit_is_valid(self):
         client = mornye_bridge.SpotifyMetadataClient()
         client._sdk_instance = SimpleNamespace(search_async=AsyncMock(side_effect=RuntimeError("category unavailable")))
@@ -119,6 +151,40 @@ class MornyeRoutingTests(unittest.TestCase):
             self.assertEqual(payload["output_dir"], str(Path(tmp).resolve()))
             self.assertEqual(payload["services"][0], "ext:tidal-py")
         self.assertEqual(job["mornye_job_id"], "remote")
+
+    def test_android_uses_only_the_selected_provider(self):
+        manager = SimpleNamespace(_lock=threading.Lock(), _cancel_flags=set(), _append_cache_event=Mock())
+        providers = {"providers": [{"provider": "ext:amazon", "installed": True}, {"provider": "ext:deezer", "installed": True},
+                                   {"provider": "ext:tidal-web", "installed": True}]}
+        for service, expected in (("tidal", ["ext:tidal-web"]), ("pandora", ["ext:amazon", "ext:deezer", "ext:tidal-web"])):
+            job = {"id": "local", "service": service}
+            with tempfile.TemporaryDirectory() as tmp, \
+                    patch.dict(os.environ, {"MINDINGUFLAC_ANDROID": "1"}), \
+                    patch.object(backend_mornye, "request", side_effect=[providers, {"id": "remote"}, {"status": "done"}]) as request:
+                backend_mornye.run("spotify:track:123", Path(tmp), job, manager)
+            self.assertEqual(request.call_args_list[1].kwargs["payload"]["services"], expected)
+
+    def test_android_user_download_retries_a_paused_verification(self):
+        manager = SimpleNamespace(_lock=threading.Lock(), _cancel_flags=set(), _append_cache_event=Mock())
+        providers = {"providers": [{"provider": "ext:amazon", "installed": True}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "signed_sessions"
+            sessions.mkdir()
+            pause = sessions / ".zarz-v2-89eebe525a30.auth-backoff.json"
+            env = {"MINDINGUFLAC_ANDROID": "1", "MORNYE_DATA_DIR": tmp}
+            pause.write_text("{}")
+            with patch.dict(os.environ, env), patch.object(backend_mornye, "request", side_effect=[
+                    providers, {"id": "remote"}, {"status": "done"}]):
+                backend_mornye.run("spotify:track:123", Path(tmp) / "out", {"id": "a", "service": "amazon"}, manager)
+            self.assertFalse(pause.exists())
+
+            pause.write_text("{}")
+            with patch.dict(os.environ, env), patch.object(backend_mornye, "request", side_effect=[
+                    providers, {"id": "remote"}, {"status": "failed", "error": "All providers failed"}]):
+                with self.assertRaisesRegex(RuntimeError, "verification did not complete"):
+                    backend_mornye.run("spotify:track:123", Path(tmp) / "out",
+                                       {"id": "b", "service": "amazon", "prefetch": True}, manager)
+            self.assertTrue(pause.exists())
 
     def test_cancel_is_forwarded_to_upstream_job(self):
         manager = SimpleNamespace(_lock=threading.Lock(), _cancel_flags={"local"}, _append_cache_event=Mock())

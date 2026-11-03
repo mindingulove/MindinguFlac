@@ -7,6 +7,19 @@ from unittest.mock import patch
 import service_downloader
 
 
+# A failed job checks whether the device is online before giving up; tests
+# must not depend on (or wait for) the real network.
+_online_patch = patch("network_status.online", return_value=True)
+
+
+def setUpModule():
+    _online_patch.start()
+
+
+def tearDownModule():
+    _online_patch.stop()
+
+
 class TorrentResumeTests(unittest.TestCase):
     def test_retry_reuses_retained_job_and_directory_without_starting_a_new_search(self):
         with tempfile.TemporaryDirectory() as directory:

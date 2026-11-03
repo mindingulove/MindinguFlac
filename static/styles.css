@@ -28,6 +28,20 @@ body {
 
 button, input, select { font: inherit; }
 
+button, a, .player, .details-head, .details-cover {
+  -webkit-tap-highlight-color: transparent;
+}
+button, .player, .details-head, .details-cover {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+
 .sidebar {
   grid-column: 1;
   grid-row: 1;
@@ -1317,11 +1331,13 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   z-index: 2;
   backdrop-filter: blur(12px);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.2s;
 }
-.details-cover:hover .side-video-switch:not([hidden]),
-.details-cover.show-video-controls .side-video-switch:not([hidden]) {
+.details-cover.show-video-controls .side-video-switch:not([hidden]),
+.side-video-switch:focus-visible {
   opacity: 1;
+  pointer-events: auto;
 }
 .side-video-switch:hover {
   background: rgba(255,255,255,0.18);
@@ -1349,6 +1365,7 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   font-size: 15px;
   cursor: pointer;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.2s;
 }
 .side-video-refresh[hidden] { display: none; }
@@ -1367,20 +1384,19 @@ h2 { font-size: 22px; margin: 0; font-weight: 800; }
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.2s;
 }
-/* Video controls stay out of the picture until the pointer is over it,
-   like the video/audio switch. */
-.details-cover:hover .side-video-refresh:not([hidden]),
-.details-cover:hover .side-video-sync:not([hidden]),
+/* Pointer activity reveals controls briefly; hover alone must not pin them. */
 .details-cover.show-video-controls .side-video-refresh:not([hidden]),
 .details-cover.show-video-controls .side-video-sync:not([hidden]),
 .side-video-refresh:focus-visible,
-.side-video-sync:focus-within {
+.side-video-sync:has(:focus-visible) {
   opacity: 0.85;
+  pointer-events: auto;
 }
-.details-cover .side-video-refresh:not([hidden]):hover,
-.details-cover .side-video-sync:not([hidden]):hover {
+.details-cover.show-video-controls .side-video-refresh:not([hidden]):hover,
+.details-cover.show-video-controls .side-video-sync:not([hidden]):hover {
   opacity: 1;
 }
 .side-video-sync[hidden] { display: none; }

@@ -5,6 +5,21 @@ from unittest.mock import MagicMock, patch
 
 import backend_ytpdl
 
+# run() starts a YouTube Music lookup next to the yt-dlp search; keep it offline.
+_ytmusic_patch = patch("backend_ytpdl._ytmusic_song_entries", return_value=[])
+# Network-error retries pause for real; tests don't need to wait.
+_retry_delay_patch = patch("backend_ytpdl._NETWORK_RETRY_DELAYS", (0, 0))
+
+
+def setUpModule():
+    _ytmusic_patch.start()
+    _retry_delay_patch.start()
+
+
+def tearDownModule():
+    _ytmusic_patch.stop()
+    _retry_delay_patch.stop()
+
 
 class TestBackendYtpDl(unittest.TestCase):
     def test_missing_youtube_cookies_marks_job_for_login_notification(self):
@@ -340,6 +355,17 @@ class TestBackendYtpDl(unittest.TestCase):
                 "metadata": {},
             }),
             "ytsearch15:Claudio Monteverdi Oblivion",
+        )
+
+    def test_title_only_query_is_the_last_resort_for_empty_searches(self):
+        # YouTube returns no entries for "Styx Babe" but lists Styx's video for "Babe".
+        self.assertEqual(
+            backend_ytpdl._title_only_youtube_search_query({
+                "artist": "Styx",
+                "title": "Babe",
+                "metadata": {},
+            }),
+            "ytsearch15:Babe",
         )
 
     def test_title_only_scoring_does_not_reject_missing_artist_metadata(self):
@@ -865,6 +891,137 @@ class TestBackendYtpDl(unittest.TestCase):
         yt_dlp_instance.download.assert_called_once_with(["https://www.youtube.com/watch?v=official"])
         self.assertEqual(job["resolved_url"], "https://www.youtube.com/watch?v=official")
         self.assertEqual(job["ytpdl_match"]["title"], "Pink Floyd - See Emily Play (Official Audio)")
+
+    @patch("backend_ytpdl._get_yt_dlp")
+    @patch("backend_ytpdl._resolved_youtube_url", return_value="ytsearch15:Styx Babe Cornerstone official audio")
+    @patch("service_downloader._find_audio_files", return_value=[Path("/tmp/out/song.webm")])
+    def test_youtube_music_songs_are_used_when_youtube_search_is_empty(self, find_audio_files, resolved_url, get_yt_dlp):
+        manager = MagicMock()
+        manager._cancel_flags = set()
+        manager._append_cache_event = MagicMock()
+        job = {"id": "job-1", "quality": "best", "artist": "Styx", "title": "Babe",
+               "metadata": {"duration_ms": 266000}}
+        yt_dlp_module = MagicMock()
+        yt_dlp_instance = MagicMock()
+        yt_dlp_instance.extract_info.return_value = {"entries": []}
+        yt_dlp_module.YoutubeDL.return_value.__enter__.return_value = yt_dlp_instance
+        get_yt_dlp.return_value = yt_dlp_module
+        music = [
+            {"title": "Babe (In the Style of Styx) [Karaoke Version]", "uploader": "A* Karaoke Jukebox - Topic",
+             "duration": 239, "webpage_url": "https://www.youtube.com/watch?v=karaoke"},
+            {"title": "Babe", "uploader": "Styx - Topic", "duration": 266,
+             "webpage_url": "https://www.youtube.com/watch?v=ogicte-_dwA"},
+        ]
+
+        with patch("backend_ytpdl._ytmusic_song_entries", return_value=music), \
+                patch("backend_ytpdl._add_youtube_cookie_file", return_value=False), \
+                patch("backend_ytpdl._add_browser_youtube_cookies", return_value=False):
+            backend_ytpdl.run(Path("/tmp/out"), job, manager)
+
+        yt_dlp_instance.download.assert_called_once_with(["https://www.youtube.com/watch?v=ogicte-_dwA"])
+
+    @patch("db.add_to_blacklist")
+    @patch("backend_ytpdl._get_yt_dlp")
+    @patch("backend_ytpdl._resolved_youtube_url", return_value="ytsearch15:Madness Our House official audio")
+    @patch("service_downloader._find_audio_files", return_value=[])
+    def test_rate_limited_youtube_stops_without_cycling_or_blacklisting(self, find_audio_files, resolved_url, get_yt_dlp, add_to_blacklist):
+        manager = MagicMock()
+        manager._cancel_flags = set()
+        manager._append_cache_event = MagicMock()
+        job = {"id": "job-1", "quality": "best", "artist": "Madness", "title": "Our House",
+               "metadata": {"duration_ms": 200000}}
+        yt_dlp_module = MagicMock()
+        yt_dlp_instance = MagicMock()
+        yt_dlp_instance.extract_info.return_value = {"entries": [
+            {"title": f"Madness - Our House {n}", "uploader": "Madness", "duration": 200,
+             "webpage_url": f"https://www.youtube.com/watch?v=v{n}"}
+            for n in range(5)
+        ]}
+        yt_dlp_instance.download.side_effect = Exception(
+            "ERROR: [youtube] v0: This content isn't available, try again later. "
+            "The current session has been rate-limited by YouTube for up to an hour."
+        )
+        yt_dlp_module.YoutubeDL.return_value.__enter__.return_value = yt_dlp_instance
+        get_yt_dlp.return_value = yt_dlp_module
+
+        with patch("backend_ytpdl._add_youtube_cookie_file", return_value=False), \
+                patch("backend_ytpdl._add_browser_youtube_cookies", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "rate-limiting"):
+                backend_ytpdl.run(Path("/tmp/out"), job, manager)
+
+        # Only the first match is tried (at most once more without the saved session).
+        tried = {call.args[0][0] for call in yt_dlp_instance.download.call_args_list}
+        self.assertEqual(tried, {"https://www.youtube.com/watch?v=v0"})
+        add_to_blacklist.assert_not_called()
+        # The bare "Video unavailable" that follows a rate limit reads as one too.
+        self.assertTrue(backend_ytpdl._youtube_rate_limited("ERROR: [youtube] v1: Video unavailable"))
+        backend_ytpdl._youtube_rate_limit_cleared()
+
+    @patch("db.add_to_blacklist")
+    @patch("backend_ytpdl._get_yt_dlp")
+    @patch("backend_ytpdl._resolved_youtube_url", return_value="ytsearch15:Dido White Flag official audio")
+    @patch("service_downloader._find_audio_files", return_value=[])
+    def test_bare_unavailable_search_results_stop_after_two(self, find_audio_files, resolved_url, get_yt_dlp, add_to_blacklist):
+        manager = MagicMock()
+        manager._cancel_flags = set()
+        manager._append_cache_event = MagicMock()
+        job = {"id": "job-1", "quality": "best", "artist": "Dido", "title": "White Flag",
+               "metadata": {"duration_ms": 240000}}
+        yt_dlp_module = MagicMock()
+        yt_dlp_instance = MagicMock()
+        yt_dlp_instance.params = {}
+        yt_dlp_instance.extract_info.return_value = {"entries": [
+            {"title": f"Dido - White Flag {n}", "uploader": "Dido", "duration": 240,
+             "webpage_url": f"https://www.youtube.com/watch?v=w{n}"}
+            for n in range(6)
+        ]}
+        yt_dlp_instance.download.side_effect = lambda urls: (_ for _ in ()).throw(
+            Exception(f"ERROR: [youtube] {urls[0][-2:]}: Video unavailable"))
+        yt_dlp_module.YoutubeDL.return_value.__enter__.return_value = yt_dlp_instance
+        get_yt_dlp.return_value = yt_dlp_module
+
+        with patch("backend_ytpdl._add_youtube_cookie_file", return_value=False), \
+                patch("backend_ytpdl._add_browser_youtube_cookies", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "rate-limiting"):
+                backend_ytpdl.run(Path("/tmp/out"), job, manager)
+
+        tried = [call.args[0][0] for call in yt_dlp_instance.download.call_args_list]
+        self.assertEqual(len(set(tried)), 2)
+        add_to_blacklist.assert_not_called()
+        backend_ytpdl._youtube_rate_limit_cleared()
+
+    def test_network_errors_are_retried_then_raised(self):
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise RuntimeError("Unable to download API page: Failed to resolve 'www.youtube.com'")
+            return "ok"
+
+        self.assertEqual(backend_ytpdl._retry_on_network_error(flaky, delays=(0, 0)), "ok")
+        self.assertEqual(len(calls), 3)
+
+        def always_down():
+            raise RuntimeError("Unable to download API page: timed out")
+
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            backend_ytpdl._retry_on_network_error(always_down, delays=(0,))
+
+        def real_error():
+            calls.append(1)
+            raise RuntimeError("Private video")
+
+        calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "Private video"):
+            backend_ytpdl._retry_on_network_error(real_error, delays=(0, 0))
+        self.assertEqual(len(calls), 1)
+
+    def test_rate_limit_flag_resets(self):
+        backend_ytpdl._youtube_rate_limited("This content isn't available, try again later.")
+        self.assertTrue(backend_ytpdl._youtube_rate_limited("ERROR: [youtube] v1: Video unavailable"))
+        backend_ytpdl._youtube_rate_limit_cleared()
+        self.assertFalse(backend_ytpdl._youtube_rate_limited("ERROR: [youtube] v1: Video unavailable"))
 
     @patch("ai_reranker.rank_candidates", return_value={
         "ranked_urls": [

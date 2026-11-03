@@ -28,6 +28,10 @@ def _ffprobe_exe() -> str:
         if Path(probe).exists():
             return probe
     name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    import sys
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / name
+    if getattr(sys, "frozen", False) and bundled.is_file():
+        return str(bundled)
     return shutil.which(name) or "ffprobe"
 
 
@@ -119,6 +123,12 @@ def _clip_duration_ok(path: Path, expected_s: float) -> bool:
 
 def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_cb=None) -> bool:
     """Download a YouTube music video at 480p H.264/AAC into output_path."""
+    from video_motion import preview_youtube, StaticVideoError, VideoPreviewError, mark_file_preview
+    preview = preview_youtube(url, start_offset, log_cb)
+    if preview.get("status") == "static":
+        raise StaticVideoError("No video available: preview contains only static artwork")
+    if preview.get("status") != "moving":
+        raise VideoPreviewError(preview.get("reason") or "Video preview could not be checked")
     try:
         import yt_dlp
         from backend_ytpdl import _ffmpeg_location, _youtube_metadata_opts, _add_youtube_cookie_file, _youtube_session_signed_out, _youtube_js_runtime_opts
@@ -182,6 +192,7 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
                 ydl.download([url])
             if tmp.exists() and tmp.stat().st_size > 65536:
                 tmp.replace(output_path)
+                mark_file_preview(output_path, preview)
                 return True
         except Exception as exc:
             if log_cb:
@@ -193,106 +204,98 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 def fetch_clip_to_path(identity: dict, output_path: Path, log_cb=None, advisor_config=None) -> bool:
-    """Find and download a music video from YouTube into ``output_path``."""
+    """Screen matching previews, then download only a candidate with motion."""
+    from video_motion import StaticVideoError, VideoPreviewError
     log = log_cb if callable(log_cb) else print
-    artist = str(identity.get("artist") or "").strip()
-    title = str(identity.get("title") or "").strip()
+    artist, title = (str(identity.get(field) or "").strip() for field in ("artist", "title"))
     if not artist or not title:
         return False
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        expected_s = float(identity.get("duration_s") or 0)
-        if not expected_s:
-            expected_s = float(identity.get("duration_ms") or 0) / 1000
+        expected_s = float(identity.get("duration_s") or 0) or float(identity.get("duration_ms") or 0) / 1000
     except (TypeError, ValueError):
         expected_s = 0.0
-    track_key = str(identity.get("track_key") or "").strip()
-    log(f"Searching YouTube video for: {artist} – {title}")
-
-    saved_url = ""
-    if track_key:
+    track_key = str(identity.get("track_key") or "")
+    candidates = []
+    def add(url, offset=0):
+        if url and url not in [item[0] for item in candidates]:
+            candidates.append((url, int(offset or 0)))
+    explicit = bool(identity.get("youtube_id"))
+    if explicit:
+        add(f"https://www.youtube.com/watch?v={identity['youtube_id']}")
+    else:
         try:
             import db
-            saved = db.get_video_source(track_key) or {}
-            saved_url = str(saved.get("youtube_url") or "")
-            if saved_url and saved_url not in db.get_video_blacklist():
-                log(f"Reusing saved YouTube video — {saved_url[:80]}")
-                if _download_youtube_clip(saved_url, 0, output_path, log):
-                    if _clip_duration_ok(output_path, expected_s):
-                        return True
-                    output_path.unlink(missing_ok=True)
-                db.add_video_blacklist(saved_url, reason="failed on reuse")
-                saved_url = ""
+            override = db.get_youtube_video_override(identity) or {}
+            if override.get("youtube_video_id"):
+                explicit = True
+                add(f"https://www.youtube.com/watch?v={override['youtube_video_id']}", override.get("start_offset_s"))
+            elif track_key:
+                saved = db.get_video_source(track_key) or {}
+                url = str(saved.get("youtube_url") or "")
+                if url not in db.get_video_blacklist():
+                    add(url)
         except Exception:
-            saved_url = ""
-
-    result: dict = {}
-    start_offset = 0
-    try:
-        import db
-        override = db.get_youtube_video_override(identity)
-        if override and override.get("youtube_video_id"):
-            video_id = str(override["youtube_video_id"])
-            result = {"found": True, "webpage_url": f"https://www.youtube.com/watch?v={video_id}"}
-            start_offset = int(override.get("start_offset_s") or 0)
-    except Exception:
-        pass
-
-    if not result:
+            pass
+    if not explicit:
+        log(f"Searching YouTube video for: {artist} – {title}")
         try:
             import yt_dlp
-            query = f"ytsearch5:{artist} {title} official music video"
             opts = {"quiet": True, "no_warnings": True, "noprogress": True,
                     "noplaylist": True, "extract_flat": True, "socket_timeout": 8}
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(query, download=False) or {}
-            entries = info.get("entries") or []
-            duration_limit = max(expected_s * 3, 900) if expected_s else 900
+                info = ydl.extract_info(f"ytsearch5:{artist} {title} official music video", download=False) or {}
             artist_words = [word.casefold() for word in artist.split() if len(word) > 3]
             title_words = [word.casefold() for word in title.split() if len(word) > 2]
-            for entry in entries:
-                candidate_title = str(entry.get("title") or "").casefold()
+            for entry in info.get("entries") or []:
+                name = str(entry.get("title") or "").casefold()
                 duration = float(entry.get("duration") or 0)
-                if duration and duration > duration_limit:
+                if duration and duration > (max(expected_s * 3, 900) if expected_s else 900):
                     continue
-                if not (artist.casefold() in candidate_title or any(w in candidate_title for w in artist_words)):
+                if not (artist.casefold() in name or any(word in name for word in artist_words)):
                     continue
-                if not (title.casefold() in candidate_title or all(w in candidate_title for w in title_words)):
+                if not (title.casefold() in name or title_words and all(word in name for word in title_words)):
                     continue
                 url = str(entry.get("webpage_url") or entry.get("url") or "")
-                video_id = str(entry.get("id") or "")
-                if video_id and not url.startswith("http"):
-                    url = f"https://www.youtube.com/watch?v={video_id}"
-                if url:
-                    result = {"found": True, "webpage_url": url}
-                    break
+                if entry.get("id") and not url.startswith("http"):
+                    url = f"https://www.youtube.com/watch?v={entry['id']}"
+                add(url)
         except Exception:
             pass
-
-    if not result:
+    if not candidates:
+        from app import _lookup_youtube_video
+        result = _lookup_youtube_video(identity) or {}
+        if not result.get("ok"):
+            raise VideoPreviewError("Video search failed. Check your connection and try again.")
+        if result.get("found"):
+            add(result.get("webpage_url"), result.get("video_start_offset"))
+    uncertain = []
+    static = 0
+    for url, offset in candidates[:3]:
         try:
-            from app import _lookup_youtube_video
-            result = _lookup_youtube_video(identity) or {}
-            start_offset = int(result.get("video_start_offset") or 0)
-        except Exception:
-            result = {}
-    url = str(result.get("webpage_url") or "")
-    if not result.get("found") or not url:
-        log("No matching YouTube music video found")
-        return False
-
-    log(f"Downloading YouTube video — {url[:80]}")
-    if not _download_youtube_clip(url, start_offset, output_path, log):
-        return False
-    if not _clip_duration_ok(output_path, expected_s):
-        output_path.unlink(missing_ok=True)
-        log("YouTube video rejected because its duration did not match the track")
-        return False
-    if track_key:
-        try:
-            import db
-            db.save_video_source(track_key, youtube_url=url)
-        except Exception:
-            pass
-    log(f"Video saved from YouTube → {output_path.name}")
-    return True
+            if not _download_youtube_clip(url, offset, output_path, log):
+                uncertain.append("Video download failed. Try again.")
+                continue
+        except StaticVideoError:
+            static += 1
+            log("Skipping video containing only static artwork")
+            continue
+        except VideoPreviewError as exc:
+            uncertain.append(str(exc))
+            continue
+        if not _clip_duration_ok(output_path, expected_s):
+            output_path.unlink(missing_ok=True)
+            continue
+        if track_key:
+            try:
+                import db
+                db.save_video_source(track_key, youtube_url=url)
+            except Exception:
+                pass
+        log(f"Video saved from YouTube → {output_path.name}")
+        return True
+    if uncertain:
+        raise VideoPreviewError(uncertain[0])
+    if static:
+        raise StaticVideoError("No video available: matching previews contain only static artwork")
+    return False

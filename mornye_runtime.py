@@ -11,6 +11,7 @@ import os
 import secrets
 import shutil
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -26,7 +27,52 @@ _session = requests.Session()
 _session.trust_env = False  # Loopback must not use a user's external proxy.
 
 
+def _configure_node_runtime():
+    """Make the packaged Node driver visible to Mornye's JS providers.
+
+    Finder-launched apps do not inherit nvm or shell startup files. Playwright
+    already ships a Node executable inside this app; use it before considering
+    an installer or depending on the user's interactive shell.
+    """
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        # The APK ships its own Node as a native library; see mornye_android.
+        try:
+            from android_runtime.mornye_android import configure_node
+        except ImportError:
+            return None
+        return configure_node()
+    executable = "node.exe" if sys.platform == "win32" else "node"
+    candidates = []
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        candidates.append(Path(bundle_root) / "playwright" / "driver" / executable)
+    existing = shutil.which(executable)
+    if existing:
+        candidates.append(Path(existing))
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("playwright")
+        if spec and spec.origin:
+            candidates.append(Path(spec.origin).parent / "driver" / executable)
+    except (ImportError, ValueError):
+        pass
+    candidates.extend(Path(folder) / executable for folder in ("/opt/homebrew/bin", "/usr/local/bin"))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            folder = str(candidate.parent)
+            current = os.environ.get("PATH", "").split(os.pathsep)
+            folders = [folder]
+            # Provider postprocessing also invokes the packaged ffmpeg and
+            # ffprobe by name after Node has downloaded the audio.
+            if bundle_root:
+                folders.append(str(bundle_root))
+            os.environ["PATH"] = os.pathsep.join(dict.fromkeys([*folders, *[item for item in current if item]]))
+            return candidate
+    return None
+
+
 def configure():
+    _configure_node_runtime()
     from config import app_data_dir
     root = app_data_dir() / "mornye"
     for key, path in {
@@ -39,6 +85,15 @@ def configure():
         os.environ[key] = str(path)
     root.mkdir(parents=True, exist_ok=True)
     _adopt_installed_extensions(root)
+    if os.environ.get("MINDINGUFLAC_ANDROID") == "1":
+        # A fresh phone has no extensions and no registry install path; the
+        # APK carries the providers (vendor/mornye-extensions).
+        try:
+            from android_runtime.mornye_android import seed_extensions
+        except ImportError:
+            pass
+        else:
+            seed_extensions(root / "extensions")
     return root
 
 

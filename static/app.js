@@ -3484,6 +3484,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
   state.lastActiveReadyBytes = 0;
   state.manualPauseRequested = false;
   state.activeJobId = null;
+  state.currentSourceJobId = null;
   state.currentTrack = item;
   state.currentLibraryPath = ""; // Clear path for new selection
   state.videoFetch = { trackKey: trackKey(item), status: "", path: "" };
@@ -3544,6 +3545,7 @@ async function selectMusicItem(item, mode = "stream", contextList = null, playba
     if (requestId !== state.playbackRequestId) return;
     if (source.path) {
       state.activeJobId = source.active_job_id || null;
+      state.currentSourceJobId = source.source_job_id || source.active_job_id || null;
       await playFromLibraryPath(source.path, item, requestId, source.active_job_id || null, source.source === "cache" ? "Playing from cache" : "Playing from library");
       return;
     }
@@ -3717,6 +3719,8 @@ async function playFromLibraryPath(filePath, track, requestId, jobId, statusText
   if (state.videoMode && isVideoLibraryPath(filePath)) {
     renderSideCover(track || state.currentTrack);
   }
+  // The audio file is known now; match the side video against it.
+  if (state.videoMode) refreshVideoSync().catch(() => {});
   state.pendingNativeStartAt = 0;
   const streamUrl = `${API_BASE}/api/library/stream?path=${encodeURIComponent(filePath)}&t=${Date.now()}&audio=1`;
   state.currentStreamUrl = streamUrl;
@@ -4236,7 +4240,8 @@ function canSwitchToLocalVideo(track = state.currentTrack) {
   // when the quality is explicitly set to the music-video mode.
   if ((state.settings.download_engine || "") === "ytp-dl" &&
       (state.settings.default_quality || "") !== "video") return false;
-  return true;
+  return state.videoFetch.trackKey === trackKey(track) && state.videoFetch.status === "ready"
+    && state.videoFetch.path === state.currentLibraryPath && state.videoFetch.motion_verified === true;
 }
 
 function canSwitchToVideo(track = state.currentTrack) {
@@ -4254,7 +4259,13 @@ function localMediaStreamUrl(filePath) {
 
 
 async function fetchVideoForTrack(track, { force = false } = {}) {
-  if (track?.offline) return;
+  const localVideo = track && state.currentTrack && trackKey(track) === trackKey(state.currentTrack)
+    && isVideoLibraryPath(state.currentLibraryPath || "") ? state.currentLibraryPath : "";
+  if (track?.offline && !localVideo) {
+    state.videoFetch = { trackKey: trackKey(track), status: "not_found", path: "" };
+    renderSideVideoButton();
+    return state.videoFetch;
+  }
   const key = trackKey(track || {});
   if (!track) return state.videoFetch;
   if (!force && state.videoFetch.trackKey === key) {
@@ -4270,6 +4281,8 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     track_key: key,
     ...(track.duration_ms ? { duration_ms: String(track.duration_ms) } : {}),
     ...(track.youtube_id ? { youtube_id: track.youtube_id } : {}),
+    ...(localVideo ? { video_path: localVideo } : {}),
+    ...(track.offline ? { offline: "1" } : {}),
     ...(force ? { force: "1" } : {}),
   });
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -4280,7 +4293,8 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
       const data = await api(`/api/video/fetch?${params.toString()}`);
       if (state.videoFetch.trackKey !== key) return state.videoFetch;
       state.videoFetch = { trackKey: key, status: data.status || "not_found", path: data.path || "",
-        youtube_id: data.youtube_id || track.youtube_id || "", clip_duration: Number(data.clip_duration || 0) };
+        youtube_id: data.youtube_id || track.youtube_id || "", clip_duration: Number(data.clip_duration || 0),
+        motion_verified: data.motion_verified === true, stage: data.stage || "" };
       if (state.videoFetch.status === "not_found" && state.videoMode && state.sideVideoTrackKey === key) {
         state.videoMode = false;
         state.sideVideoTrackKey = "";
@@ -4294,7 +4308,7 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
           renderSideCover(track);
           showToast(data.error || "Video download failed. Try again.", 6000);
         }
-        if (data.status === "not_found") showToast("No video found for this track");
+        if (data.status === "not_found") showToast("No video available for this track");
         if (state.videoMode && state.sideVideoTrackKey === key && data.status === "ready") {
           renderSideCover(track);
         }
@@ -4303,16 +4317,16 @@ async function fetchVideoForTrack(track, { force = false } = {}) {
     } catch (_) {}
     await new Promise((r) => setTimeout(r, 3000));
   }
-  // Timed out — treat as not found
+  // A failed check is retryable; it does not establish that no video exists.
   if (state.videoFetch.trackKey === key) {
-    state.videoFetch = { trackKey: key, status: "not_found", path: "" };
+    state.videoFetch = { trackKey: key, status: "error", path: "" };
     if (state.videoMode && state.sideVideoTrackKey === key) {
       state.videoMode = false;
       state.sideVideoTrackKey = "";
       renderSideCover(track);
     }
     renderSideVideoButton();
-    showToast("No video found for this track");
+    showToast("Video preview timed out. Try again.");
   }
   return state.videoFetch;
 }
@@ -4452,13 +4466,16 @@ function renderSideVideoButton() {
   const hasUsableVideo = canSwitchToLocalVideo() || (state.videoFetch.status === "ready" && !!state.videoFetch.path);
   const available = (state.videoMode && hasUsableVideo) || canSwitchToVideo();
   button.hidden = !available;
+  button.disabled = state.videoFetch.status === "not_found" || state.videoFetch.status === "downloading";
   button.classList.toggle("active", !!state.videoMode && hasUsableVideo);
   if (state.videoMode && hasUsableVideo) {
     button.innerHTML = '<i class="bi bi-music-note-beamed"></i><span>Switch to audio</span>';
   } else if (state.videoFetch.status === "downloading") {
-    button.innerHTML = '<i class="bi bi-hourglass-split"></i><span>Loading video…</span>';
+    button.innerHTML = '<i class="bi bi-hourglass-split"></i><span>Checking video…</span>';
   } else if (state.videoFetch.status === "not_found") {
-    button.innerHTML = '<i class="bi bi-camera-video-off"></i><span>No video</span>';
+    button.innerHTML = '<i class="bi bi-camera-video-off"></i><span>No video available</span>';
+  } else if (state.videoFetch.status === "error") {
+    button.innerHTML = '<i class="bi bi-arrow-clockwise"></i><span>Retry video</span>';
   } else {
     button.innerHTML = '<i class="bi bi-play-btn"></i><span>Switch to video</span>';
   }
@@ -5849,6 +5866,11 @@ function serviceDownloadPayload(track, mode = "stream", prefetch = false) {
     kind: "track",
     mode,
     prefetch,
+    use_playback_source: mode === "download" && selectedEngine === "monochrome"
+      && !!state.currentTrack && trackKey(track) === trackKey(state.currentTrack)
+      && !!(state.currentSourceJobId || state.activeJobId || state.currentLibraryPath),
+    playback_job_id: mode === "download" && state.currentTrack && trackKey(track) === trackKey(state.currentTrack)
+      ? (state.currentSourceJobId || state.activeJobId || "") : "",
     artist: track.artist || "",
     album: track.album || "",
     title: track.title || "",
@@ -6774,6 +6796,10 @@ async function prefetchOneTrack(next, orderKey) {
   try {
     if (currentQueueOrderKey() !== orderKey || !currentPrefetchWindowKeys().has(key)) return;
     const job = await api("/api/service/download", { method: "POST", body: JSON.stringify(serviceDownloadPayload(next, "stream", true)) });
+    if (job?.skipped) {
+      console.log("[Prefetch] skipped:", job.reason, next.title);
+      return;
+    }
     if (job && job.id) {
       if (currentQueueOrderKey() !== orderKey || !currentPrefetchWindowKeys().has(key)) {
         api("/api/service/cancel", { method: "DELETE", body: JSON.stringify({ job_id: job.id }) }).catch(() => {});
@@ -6925,6 +6951,10 @@ async function toggleTrackLibrary(track, button, refresh, options = {}) {
       if (!status) return {ok:false, cancelled:!!options.isCancelled?.()};
     } else if (status.in_library) exportLibraryDownloadToPhone(status.library_path);
     options.onStatus?.(status);
+    if (payload.use_playback_source && status.in_library) {
+      const provider = {monochrome:"Monochrome", "ytp-dl":"YouTube"}[status.library_engine] || "Playback";
+      showToast(`Saved ${provider} audio${status.library_format ? ` (${status.library_format.toUpperCase()})` : ""}`);
+    }
     if (typeof refresh === "function") refresh();
     loadPlaylists();
     return {ok:true, ...result, status};
@@ -6975,7 +7005,7 @@ function exportLibraryDownloadToPhone(libraryPath) {
   const ext = (name.split(".").pop() || "").toLowerCase();
   const mime = {
     flac: "audio/flac", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac",
-    ogg: "audio/ogg", opus: "audio/opus", wav: "audio/wav", alac: "audio/alac",
+    ogg: "audio/ogg", opus: "audio/opus", webm: "audio/webm", wav: "audio/wav", alac: "audio/alac",
   }[ext] || "audio/mpeg";
   try {
     window.MindinguflacAndroid.exportDownloadToMusicLibrary(libraryPath, name, mime);
@@ -7100,6 +7130,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
     
     if (requestId !== state.playbackRequestId) return;
     state.activeJobId = job.id;
+    state.currentSourceJobId = job.id;
     
     if (mode === "stream") {
       if (job.engine === "monochrome" && job.direct_stream && job.resolved_url) {
@@ -7146,6 +7177,7 @@ async function startServiceDownload(track, mode = "stream", requestId = state.pl
 
 function startMonochromeDirectPlayback(job, track, requestId) {
   if (requestId !== state.playbackRequestId || !job?.resolved_url) return;
+  state.currentSourceJobId = job.id;
   if (["original_album", "same_recording"].includes(job.recording_match?.kind)) {
     track = { ...track, requested_isrc: job.recording_match.requested_isrc,
       isrc: job.recording_match.resolved_isrc, source_isrc: job.recording_match.resolved_isrc,
@@ -7263,6 +7295,9 @@ async function watchServiceDownload(jobId, track, mode = "stream", requestId = s
         if (mode === "stream" && job.library_path) {
           state.currentLibraryPath = job.library_path;
           state.currentPlayableReady = true;
+          // Mornye/torrent audio arrives as one file, often minutes after the
+          // side video; matching started with the video found no audio then.
+          if (state.videoMode) refreshVideoSync().catch(() => {});
           if (state.videoMode && isVideoLibraryPath(job.library_path)) {
             renderSideCover(track);
           }
@@ -7755,7 +7790,7 @@ async function setupYoutubeSignInSettings() {
   const row = $("youtubeSignInRow");
   const button = $("youtubeSignInButton");
   const label = $("youtubeSignInStatus");
-  if (!row || !button || IS_ANDROID) return;
+  if (!row || !button) return;
   let signedIn = false;
   const showStatus = status => {
     signedIn = !!status.signed_in;
@@ -8189,6 +8224,13 @@ async function startNativeAudio(filePath, track, requestId, position = 0, stream
     }
     throw new Error(result.error || "Native audio failed");
   }
+  if (result.output_fallback && requestId === state.playbackRequestId) {
+    _nativeAudioDeviceUid = result.device_uid || "";
+    _activeSinkId = _nativeAudioDeviceUid ? `native:${_nativeAudioDeviceUid}` : "";
+    await _persistPreferredAudioOutput({ deviceId: _activeSinkId, name: "", nativeUid: _nativeAudioDeviceUid, bluetoothAddress: "" });
+    _refreshConnectPanel().catch(() => {});
+    showToast(result.output_notice || "Audio output disconnected — playing on this computer");
+  }
   state.nativeAudio = {
     active: true,
     playing: !!result.playing,
@@ -8334,6 +8376,9 @@ function startNativeAudioPolling(requestId) {
       duration: status.duration || 0,
       ended: !!status.ended,
       output_latency: Number(status.output_latency || 0),
+      // When this position was read; a paired controller is sent the
+      // position advanced to the moment it is reported.
+      position_read_at: performance.now(),
     };
     // The worker moves the stream to the default output by itself when the
     // selected device stops accepting audio (Bluetooth dropped). Follow it so
@@ -9967,22 +10012,32 @@ async function loadPlaylistRecommendations(playlist, refresh = false) {
   }
 }
 
+const pendingRecommendationAdds = new Set();
+
 async function addPlaylistRecommendation(playlistId, item, button) {
   const playlist = state.playlists.find(p => p.id === playlistId);
   if (!playlist) throw new Error("Playlist not found");
   if (!item) throw new Error("Recommendation not found");
   const recState = state.playlistRecommendationState[playlistId] || { items: [] };
-  const row = button.closest(".track-row");
-  const parent = row?.parentElement || null;
-  const nextSibling = row?.nextElementSibling || null;
-  const snapshot = row ? row.cloneNode(true) : null;
   const sessionId = state.playlistRecommendationSessions[playlistId] || "";
   const allPlaylistKeys = new Set([...playlistTrackKeys(playlist), ...queueTrackKeys(), ...Object.keys(recState.itemsByKey || {})]);
   const excludeTrackKeys = [...allPlaylistKeys];
-  if (row) row.remove();
+  // Drop the item from state (not just its row) while the add is pending, so
+  // another add finishing first re-renders the list without it.
+  const dropItem = () => {
+    const current = state.playlistRecommendationState[playlistId];
+    if (!current) return;
+    current.items = (current.items || []).filter(entry => entry.track_key !== item.track_key);
+    current.itemsByKey = Object.fromEntries(current.items.map(entry => [entry.track_key, entry]));
+  };
+  const originalIndex = (recState.items || []).findIndex(entry => entry.track_key === item.track_key);
+  dropItem();
+  button.closest(".track-row")?.remove();
   button.disabled = true;
+  pendingRecommendationAdds.add(item.track_key);
+  let added;
   try {
-    const added = await api(`/api/playlists/${encodeURIComponent(playlistId)}/tracks`, {
+    added = await api(`/api/playlists/${encodeURIComponent(playlistId)}/tracks`, {
       method: "POST",
       body: JSON.stringify({
         playlist_id: playlistId,
@@ -9997,6 +10052,20 @@ async function addPlaylistRecommendation(playlistId, item, button) {
         session_id: sessionId,
       }),
     });
+  } catch (error) {
+    // The add itself failed: put the recommendation back where it was.
+    const current = state.playlistRecommendationState[playlistId];
+    if (current && !(current.items || []).some(entry => entry.track_key === item.track_key)) {
+      current.items = [...(current.items || [])];
+      current.items.splice(originalIndex < 0 ? current.items.length : Math.min(originalIndex, current.items.length), 0, item);
+      current.itemsByKey = Object.fromEntries(current.items.map(entry => [entry.track_key, entry]));
+      renderPlaylistRecommendations(playlistId, current.items);
+    }
+    button.disabled = false;
+    pendingRecommendationAdds.delete(item.track_key);
+    throw error;
+  }
+  try {
     const idx = state.playlists.findIndex(p => p.id === playlistId);
     if (idx !== -1 && added.track && !playlist.tracks.some(t => trackKey(t) === trackKey(added.track))) {
       state.playlists[idx].tracks.push(added.track);
@@ -10013,8 +10082,9 @@ async function addPlaylistRecommendation(playlistId, item, button) {
       }),
     });
     const current = state.playlistRecommendationState[playlistId] || { items: [], itemsByKey: {} };
-    current.items = (current.items || []).filter(entry => entry.track_key !== item.track_key);
-    if (replacement && replacement.item) {
+    dropItem();
+    if (replacement && replacement.item && !pendingRecommendationAdds.has(replacement.item.track_key)
+        && !current.items.some(entry => entry.track_key === replacement.item.track_key)) {
       current.items.push(replacement.item);
     }
     current.items.sort((a, b) => {
@@ -10035,15 +10105,19 @@ async function addPlaylistRecommendation(playlistId, item, button) {
       [...(current.items || []), ...((refilled && refilled.items) || [])].forEach(entry => {
         if (entry && entry.track_key && !merged.has(entry.track_key)) merged.set(entry.track_key, entry);
       });
-      current.items = sortPlaylistRecommendationItems([...merged.values()]).slice(0, 10);
+      current.items = sortPlaylistRecommendationItems([...merged.values()]
+        .filter(entry => !pendingRecommendationAdds.has(entry.track_key))).slice(0, 10);
     }
     current.itemsByKey = Object.fromEntries((current.items || []).map(entry => [entry.track_key, entry]));
     state.playlistRecommendationState[playlistId] = current;
     renderPlaylistRecommendations(playlistId, current.items);
   } catch (error) {
-    if (snapshot && parent) parent.insertBefore(snapshot, nextSibling);
-    button.disabled = false;
-    throw error;
+    // The song is already in the playlist; a missed replacement only leaves
+    // the list one shorter until the next refresh.
+    console.warn("[Recommendations] Replacement failed after adding:", error);
+    renderPlaylistRecommendations(playlistId, state.playlistRecommendationState[playlistId]?.items || []);
+  } finally {
+    pendingRecommendationAdds.delete(item.track_key);
   }
 }
 
@@ -11739,36 +11813,40 @@ $("lyricsScroll").addEventListener("pointerdown", event => {
       event.clientX >= scroll.getBoundingClientRect().left + scroll.clientWidth) pauseLyricsFollowFromInput();
 });
 $("sideVideoSwitch").onclick = () => {
-  if (!state.videoMode && state.videoFetch.status === "not_found" && state.currentTrack) {
-    state.videoFetch = { trackKey: trackKey(state.currentTrack), status: "downloading", path: "" };
-    renderSideVideoButton();
-    fetchVideoForTrack(state.currentTrack, { force: true }).catch(() => {});
-    return;
-  }
   switchSideVideoMode(!state.videoMode);
 };
-// Touchscreens have no hover, so the video controls (which only appear on
-// hover) would be unreachable. A tap reveals them for a few seconds; while they
-// are hidden, a tap that lands on one only reveals it rather than pressing it.
-(function bindTouchVideoControls() {
-  const cover = $("sideCover");
+function bindSideVideoControls(cover) {
   if (!cover) return;
   let hideTimer = null;
-  let revealedAt = 0;
-  cover.addEventListener("pointerdown", (event) => {
-    if (event.pointerType === "mouse") return;
-    if (!cover.classList.contains("show-video-controls")) revealedAt = Date.now();
+  let revealOnlyTap = false;
+  const hide = () => {
+    clearTimeout(hideTimer);
+    cover.classList.remove("show-video-controls");
+  };
+  const reveal = (event) => {
+    if (["pointerenter", "pointermove"].includes(event.type) && event.pointerType === "touch") return;
+    if (event.type === "pointerdown") {
+      revealOnlyTap = event.pointerType !== "mouse" && !cover.classList.contains("show-video-controls");
+    }
     cover.classList.add("show-video-controls");
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => cover.classList.remove("show-video-controls"), 4000);
+    hideTimer = setTimeout(hide, 3000);
+  };
+  for (const type of ["pointerenter", "pointermove", "pointerdown", "focusin"]) cover.addEventListener(type, reveal);
+  cover.addEventListener("pointerleave", event => {
+    // Touch pointers leave on finger-up, even though the controls just appeared.
+    if (event.pointerType === "mouse") hide();
   });
   cover.addEventListener("click", (event) => {
-    if (Date.now() - revealedAt < 400 && event.target.closest("button")) {
+    const revealOnly = revealOnlyTap;
+    revealOnlyTap = false;
+    if (revealOnly && event.target.closest("button")) {
       event.preventDefault();
       event.stopPropagation();
     }
   }, true);
-})();
+}
+bindSideVideoControls($("sideCover"));
 $("sideVideoEarlier").onclick = () => nudgeVideoSync(-0.25).catch(() => {});
 $("sideVideoLater").onclick = () => nudgeVideoSync(0.25).catch(() => {});
 $("sideVideoRefresh").onclick = () => {
@@ -12383,13 +12461,46 @@ document.addEventListener("click", (e) => {
   }
 });
 
-$("ctxAddQueue")?.addEventListener("click", () => {
-  if (contextMenuTargetTrack) {
-    state.queue.push(contextMenuTargetTrack);
-    if (state.originalQueue) state.originalQueue.push(contextMenuTargetTrack);
-    if (!$("queuePanel").hidden) refreshQueuePanel();
-    updateSidebarNextQueue();
+// "Add to queue" plays the songs next, after any queued before them (as
+// Spotify's queue does), not after the rest of the album or playlist.
+// The last queued song's key marks where the queued block ends, so a
+// replaced or reshuffled queue simply starts a new block.
+function queueInsertionPoint(list, start, lastKey) {
+  let at = Math.min(Math.max(start, 0), list.length);
+  if (lastKey) {
+    const last = list.findIndex((track, index) => index >= at && trackKey(track) === lastKey);
+    if (last >= 0) at = last + 1;
   }
+  return at;
+}
+
+function enqueueNext(tracks) {
+  if (!tracks.length) return;
+  let current = getQueueIndex();
+  if (current < 0 && state.currentTrack) {
+    // Playing something outside the queue (or with none): the queue panel
+    // lists only what follows the current song, so start the queue with it.
+    state.queue.unshift(state.currentTrack);
+    state.queueIndex = current = 0;
+  }
+  const lastKey = state.userQueueLastKey || "";
+  const at = queueInsertionPoint(state.queue, current >= 0 ? current + 1 : state.queue.length, lastKey);
+  state.queue.splice(at, 0, ...tracks);
+  if (state.originalQueue && state.originalQueue !== state.queue) {
+    const currentKey = state.currentTrack ? trackKey(state.currentTrack) : "";
+    const originalCurrent = currentKey ? state.originalQueue.findIndex(track => trackKey(track) === currentKey) : -1;
+    const originalAt = queueInsertionPoint(state.originalQueue,
+      originalCurrent >= 0 ? originalCurrent + 1 : state.originalQueue.length, lastKey);
+    state.originalQueue.splice(originalAt, 0, ...tracks);
+  }
+  state.userQueueLastKey = trackKey(tracks[tracks.length - 1]);
+  if (!$("queuePanel").hidden) refreshQueuePanel();
+  updateSidebarNextQueue();
+  prefetchNextTracks().catch(() => {});
+}
+
+$("ctxAddQueue")?.addEventListener("click", () => {
+  if (contextMenuTargetTrack) enqueueNext([contextMenuTargetTrack]);
   $("trackContextMenu").hidden = true;
 });
 
@@ -12533,13 +12644,7 @@ $("ctxArtistAddQueue")?.addEventListener("click", async () => {
   if (!artist) return;
   const tracks = await fetchArtistTopTracks(artist);
   if (!tracks.length) return;
-  tracks.forEach(t => {
-    const trackItem = { ...t, kind: "track" };
-    state.queue.push(trackItem);
-    if (state.originalQueue) state.originalQueue.push(trackItem);
-  });
-  if (!$("queuePanel").hidden) refreshQueuePanel();
-  updateSidebarNextQueue();
+  enqueueNext(tracks.map(t => ({ ...t, kind: "track" })));
 });
 
 $("ctxArtistAddPlaylist")?.addEventListener("click", async () => {
@@ -12602,13 +12707,7 @@ $("ctxAlbumAddQueue")?.addEventListener("click", async () => {
       }
     }
     if (tracks.length) {
-        tracks.forEach(t => {
-            const trackItem = { ...t, kind: "track" };
-            state.queue.push(trackItem);
-            if (state.originalQueue) state.originalQueue.push(trackItem);
-        });
-        if (!$("queuePanel").hidden) refreshQueuePanel();
-        updateSidebarNextQueue();
+        enqueueNext(tracks.map(t => ({ ...t, kind: "track" })));
     }
   }
   $("albumContextMenu").hidden = true;
