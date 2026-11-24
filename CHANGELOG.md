@@ -13,6 +13,9 @@ All notable changes to Mindinguflac are documented here.
 ### Fixed
 - YouTube downloads failed with "The page needs to be reloaded" when signed in to YouTube: yt-dlp updated to 2026.11.23 (desktop and Android), and that error now triggers the retry without the YouTube session.
 
+### Changed
+- ytmusicapi updated to 1.12.4 (YouTube Music catalog search) on desktop and Android.
+
 ## [1.4.1] — 2026-11-03
 
 ### Added
