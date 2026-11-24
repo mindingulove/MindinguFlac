@@ -63,7 +63,9 @@ def _remember(key: str, result: dict) -> dict:
 def assess_frames(frames: list) -> dict:
     """Ignore small JPEG differences; require motion across several samples."""
     from PIL import Image
-    if len(frames) < 6:
+    # Fewer frames only lowers confidence; it is not a reason to refuse the
+    # video. Two frames are enough to tell clear motion from a still image.
+    if len(frames) < 2:
         return {"status": "unknown", "reason": "Not enough video preview frames", "samples": len(frames)}
     samples = [list(frame.convert("L").resize((64, 36), Image.Resampling.BILINEAR).tobytes()) for frame in frames]
 
@@ -76,7 +78,7 @@ def assess_frames(frames: list) -> dict:
     moving_pairs = sum(mean > .02 or changed > .08 for mean, changed in pairs)
     if largest_cluster >= math.ceil(len(samples) * .8):
         status = "static"
-    elif moving_pairs >= 2:
+    elif moving_pairs >= min(2, len(pairs)):
         status = "moving"
     else:
         status = "unknown"
@@ -170,7 +172,10 @@ def preview_youtube(url: str, start_offset: float = 0, log=None) -> dict:
             info = ydl.extract_info(url, download=False) or {}
         result = storyboard_preview(info, start_offset)
     except Exception as exc:
-        result = {"status": "unknown", "reason": f"Could not check video preview: {type(exc).__name__}"}
+        # The check itself failed (offline, blocked): retry later rather than
+        # download blind. Inconclusive frames are different — see backend_video.
+        result = {"status": "unknown", "reason": f"Could not check video preview: {type(exc).__name__}",
+                  "preview_failed": True}
     if key:
         return _remember(key, result)
     return result
@@ -208,7 +213,10 @@ def preview_file(path: Path) -> dict:
                     return mark_file_preview(path, {"status": "static", "reason": "File has no video track", "method": "local_frames"})
                 duration = float(str(retriever.extractMetadata(9))) / 1000
                 for fraction in (.1, .25, .4, .55, .7, .85):
-                    bitmap = retriever.getFrameAtTime(int(duration * fraction * 1000000), 2)
+                    when = int(duration * fraction * 1000000)
+                    # OPTION_CLOSEST_SYNC (2) returns null on some phone
+                    # decoders/containers; OPTION_CLOSEST (3) still decodes.
+                    bitmap = retriever.getFrameAtTime(when, 2) or retriever.getFrameAtTime(when, 3)
                     if bitmap is None:
                         continue
                     scaled = jclass("android.graphics.Bitmap").createScaledBitmap(bitmap, 160, 90, True)

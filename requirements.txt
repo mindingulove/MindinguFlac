@@ -24,7 +24,7 @@ browser-cookie3==0.20.1
 codex-auth==0.1.1
 packaging>=23.0
 pycryptodome>=3.20.0
-yt-dlp[default]>=2026.7.4
+yt-dlp[default]>=2026.11.23
 ytmusicapi>=1.12.0
 imageio-ffmpeg>=0.5.1
 python-dotenv>=1.2.2
@@ -40,6 +40,7 @@ pyobjc-framework-AVFoundation>=12.2; sys_platform == "darwin"
 pyobjc-framework-CoreAudio>=12.2; sys_platform == "darwin"
 pyobjc-framework-UserNotifications>=10.0; sys_platform == "darwin"
 sounddevice>=0.5.1; sys_platform == "darwin"
+soundfile>=0.12.1; sys_platform == "darwin"
 numpy>=1.26.0; sys_platform == "darwin"
 bleak>=0.22.3; sys_platform == "win32"
 pythonnet>=3.0.4; sys_platform == "win32"

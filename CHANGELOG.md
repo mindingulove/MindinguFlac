@@ -3,6 +3,16 @@
 All notable changes to Mindinguflac are documented here.
 
 ---
+## [1.4.2] — 2026-11-24
+
+### Added
+- Optional volume normalization in Playback settings, with adaptive level matching for browser and native playback on desktop and Android. The preference is saved; music files are unchanged.
+- Android: open Spotify links (or Share > Mindinguflac) straight into the running app.
+- Android: track progress on the Glyph lights of Nothing phones, and music controls in Google Maps.
+
+### Fixed
+- YouTube downloads failed with "The page needs to be reloaded" when signed in to YouTube: yt-dlp updated to 2026.11.23 (desktop and Android), and that error now triggers the retry without the YouTube session.
+
 ## [1.4.1] — 2026-11-03
 
 ### Added

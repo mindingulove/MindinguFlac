@@ -2321,8 +2321,29 @@ def search_relevance(query: str, result: dict) -> tuple[int, int, int, int]:
     return (score, kind_prio, int(result.get("plays") or 0), 0)
 
 
+def _spotify_artist_name_for_id(artist_id: str) -> str:
+    """Name of a Spotify artist known only by id (a shared open.spotify.com link)."""
+    artist_id = str(artist_id or "").strip()
+    if not artist_id:
+        return ""
+    name = str(_sp(f"artists/{artist_id}").get("name") or "").strip()
+    if name:
+        return name
+    try:
+        page = _load_open_spotify_artist_page(artist_id)
+    except Exception:
+        return ""
+    match = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', page or "")
+    return html.unescape(match.group(1)).strip() if match else ""
+
+
 def artist_page(config: AppConfig, artist: str, artist_id: str = ""):
-    resolved_artist_id = _resolve_spotify_artist_id(artist, artist_id)
+    if not artist.strip() and artist_id:
+        # Opened by id alone: that id is exact, never swap it for a name match.
+        artist = _spotify_artist_name_for_id(artist_id)
+        resolved_artist_id = artist_id.strip()
+    else:
+        resolved_artist_id = _resolve_spotify_artist_id(artist, artist_id)
     art = ""
     if resolved_artist_id:
         art = spotify_artist_artwork(artist, resolved_artist_id)

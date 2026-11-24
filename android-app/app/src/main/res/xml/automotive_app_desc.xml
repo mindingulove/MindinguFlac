@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares a media app: Google Maps' music controls (and Android Auto) only list apps that carry this. -->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>

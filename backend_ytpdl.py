@@ -2181,7 +2181,7 @@ def run(output_dir: Path, job: dict, manager) -> None:
                             rate_limited = rate_limited or len(bare_unavailable) >= 2
                         transient = rate_limited or _is_network_error(exc_str) or (
                             bool(selected) and _bare_video_unavailable(exc_str)
-                        ) or any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in", "cookies", "PO Token", "SABR", "Requested format is not available"))
+                        ) or any(t in exc_str for t in ("403", "429", "Forbidden", "Too Many Requests", "Sign in", "cookies", "PO Token", "SABR", "Requested format is not available", "page needs to be reloaded"))
                         if transient and _has_youtube_auth_opts(ydl.params):
                             no_cookie_opts = _without_youtube_auth_opts(ydl_opts)
                             manager._append_cache_event(job, "trying", f"YouTube candidate unavailable with cookies ({exc_str[:60]}), retrying without cookies...")

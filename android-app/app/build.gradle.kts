@@ -106,8 +106,8 @@ android {
         applicationId = "com.mindinguflac.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 37
-        versionName = "1.4.1"
+        versionCode = 38
+        versionName = "1.4.2"
 
         externalNativeBuild {
             cmake { arguments += listOf("-DANDROID_STL=c++_static") }
@@ -213,4 +213,8 @@ dependencies {
     // OkHttp data source gives HTTP/2, which Monochrome's storage requires.
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
+    // Nothing's Glyph Developer Kit (Glyph strips + Glyph Matrix), from
+    // github.com/Nothing-Developer-Programme/Glyph-Developer-Kit (sdk/).
+    // Used only on Nothing phones on Android 14+ (GlyphProgress).
+    implementation(files("libs/glyph-matrix-sdk-2.0.aar"))
 }

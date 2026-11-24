@@ -64,6 +64,7 @@ public final class NativeAudioPlayer {
 
     private static volatile Context context;
     private static ExoPlayer player;
+    private static final VolumeNormalizer NORMALIZER = new VolumeNormalizer();
     private static AudioManager audioManager;
     private static AudioDeviceCallback deviceCallback;
 
@@ -267,6 +268,8 @@ public final class NativeAudioPlayer {
         }, "");
     }
 
+    public static void setNormalization(boolean enabled) { NORMALIZER.setEnabled(enabled); }
+
     public static void setVolume(double volume) {
         onMain(() -> { if (player != null) player.setVolume((float) Math.max(0, Math.min(1, volume))); return ""; }, "");
     }
@@ -336,7 +339,16 @@ public final class NativeAudioPlayer {
         // audio without downloading it a second time.
         DefaultDataSource.Factory dataSource = new DefaultDataSource.Factory(context,
                 () -> new TeeDataSource(http.createDataSource(), new StreamHeadRecorder()));
-        player = new ExoPlayer.Builder(context)
+        androidx.media3.exoplayer.DefaultRenderersFactory renderers =
+                new androidx.media3.exoplayer.DefaultRenderersFactory(context) {
+                    @Override protected androidx.media3.exoplayer.audio.AudioSink buildAudioSink(
+                            Context ctx, boolean floatOutput, boolean playbackParams) {
+                        return new androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(ctx)
+                                .setAudioProcessors(new androidx.media3.common.audio.AudioProcessor[]{NORMALIZER})
+                                .build();
+                    }
+                };
+        player = new ExoPlayer.Builder(context, renderers)
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(dataSource))
                 .setWakeMode(C.WAKE_MODE_NETWORK)
                 .setAudioAttributes(new AudioAttributes.Builder()

@@ -3,7 +3,7 @@
 mutagen
 requests
 PySocks
-yt-dlp>=2026.7.4
+yt-dlp>=2026.11.23
 # YouTube's player challenges, solved with the bundled Node (mornye_android).
 yt-dlp-ejs==0.8.0
 # YouTube Music catalog search, run next to the yt-dlp search (backend_ytpdl).

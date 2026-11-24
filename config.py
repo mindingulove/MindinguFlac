@@ -113,6 +113,7 @@ class AppConfig:
     demo_music_indexer: bool = True
     music_indexers: list[MusicIndexerConfig] = field(default_factory=list)
     volume: float = 1.0
+    normalize_volume: bool = False
     track_max_retries: int = 1
     download_engine: str = "ytp-dl"
     torrent_playback_candidates: int = 3
@@ -165,6 +166,7 @@ class AppConfig:
             "demo_music_indexer": self.demo_music_indexer,
             "music_indexers": [vars(item) for item in self.music_indexers],
             "volume": self.volume,
+            "normalize_volume": self.normalize_volume,
             "track_max_retries": self.track_max_retries,
             "discogs_token": self.discogs_token,
             "preferred_audio_output_id": self.preferred_audio_output_id,
@@ -220,6 +222,7 @@ class AppConfig:
             demo_music_indexer=bool(value.get("demo_music_indexer", True)),
             music_indexers=music_indexers,
             volume=float(value.get("volume", 1.0)),
+            normalize_volume=bool(value.get("normalize_volume", False)),
             track_max_retries=rt,
             download_engine=value.get("download_engine", cls.download_engine),
             torrent_playback_candidates=candidate_count("torrent_playback_candidates", 3),

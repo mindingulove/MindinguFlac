@@ -99,13 +99,16 @@
 
           <div class="settings-section">
             <h2 class="settings-section-title">Playback</h2>
-            <div class="settings-row hidden" id="youtubeSignInRow">
+            <div class="settings-row" id="normalizeVolumeRow">
               <div class="settings-info">
-                <strong>YouTube account</strong>
-                <span id="youtubeSignInStatus">Sign in in the app. Your session stays on this device.</span>
+                <label for="normalizeVolume"><strong>Normalize volume</strong></label>
+                <span>Keep songs at a similar listening level. Adapts during playback; your music files stay unchanged.</span>
               </div>
               <div class="settings-control">
-                <button type="button" id="youtubeSignInButton" class="primary">Sign in to YouTube</button>
+                <label class="settings-toggle">
+                  <input id="normalizeVolume" type="checkbox" role="switch">
+                  <span class="settings-toggle-track" aria-hidden="true"></span>
+                </label>
               </div>
             </div>
             <div class="settings-row" id="downloadEngineRow">
@@ -120,6 +123,15 @@
                   <option value="torrent">Torrent (Experimental)</option>
                   <option value="spotiflac">Mornye (Extensions)</option>
                 </select>
+              </div>
+            </div>
+            <div class="settings-row hidden" id="youtubeSignInRow">
+              <div class="settings-info">
+                <strong>YouTube account</strong>
+                <span id="youtubeSignInStatus">Sign in in the app. Your session stays on this device.</span>
+              </div>
+              <div class="settings-control">
+                <button type="button" id="youtubeSignInButton" class="primary">Sign in to YouTube</button>
               </div>
             </div>
             <div class="settings-row hidden" id="torrentPlaybackCandidatesRow">
@@ -352,7 +364,7 @@
 
           <div class="settings-footer" style="display: flex; justify-content: space-between; align-items: center;">
             <div style="font-size: 12px; color: var(--muted);">
-              Mindingulove © 2026 | Version 1.4.1
+              Mindingulove © 2026 | Version 1.4.2
             </div>
             <button class="primary" type="submit">Save settings</button>
           </div>

@@ -45,6 +45,9 @@ public final class LocalModelAdvisor {
     private static volatile Context applicationContext;
     private static final AtomicBoolean downloading = new AtomicBoolean(false);
     private static volatile boolean lastDownloadFailed;
+    private static volatile String lastError = "";
+    private static volatile long downloadedBytes;
+    private static volatile long totalBytes;
 
     private LocalModelAdvisor() {
     }
@@ -128,7 +131,22 @@ public final class LocalModelAdvisor {
 
     /** Explicit user request — e.g. the Settings retry button — downloads regardless of network type. */
     public static void forceDownload() {
+        if ("installed".equals(status())) return;
         startDownload();
+    }
+
+    /** Status plus progress and the last failure, for the Settings row. */
+    public static String detail() {
+        try {
+            org.json.JSONObject value = new org.json.JSONObject();
+            value.put("status", status());
+            value.put("downloaded", downloadedBytes);
+            value.put("total", totalBytes);
+            value.put("error", lastDownloadFailed ? lastError : "");
+            return value.toString();
+        } catch (Throwable ignored) {
+            return "{\"status\":\"" + status() + "\"}";
+        }
     }
 
     private static boolean isUnmeteredNetworkAvailable() {
@@ -150,6 +168,7 @@ public final class LocalModelAdvisor {
 
     private static void startDownload() {
         if (!downloading.compareAndSet(false, true)) return;
+        lastError = "";
         Thread thread = new Thread(LocalModelAdvisor::runDownload, "mindinguflac-model-download");
         thread.setDaemon(true);
         thread.start();
@@ -159,58 +178,81 @@ public final class LocalModelAdvisor {
         try {
             File target = modelFile();
             if (target == null) {
-                lastDownloadFailed = true;
+                fail("App storage is not ready yet");
                 return;
             }
             File parent = target.getParentFile();
             if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
-                lastDownloadFailed = true;
+                fail("Could not create the model folder");
                 return;
             }
+            // Kept across failures so a retry resumes instead of starting over.
             File partial = new File(parent, MODEL_NAME + ".partial");
             if (!downloadTo(partial)) {
                 lastDownloadFailed = true;
-                partial.delete();
                 return;
             }
             if (target.exists()) target.delete();
             if (!partial.renameTo(target)) {
-                lastDownloadFailed = true;
                 partial.delete();
+                fail("Could not save the downloaded model");
                 return;
             }
             lastDownloadFailed = false;
-        } catch (Throwable ignored) {
-            lastDownloadFailed = true;
+        } catch (Throwable error) {
+            fail(error.getClass().getSimpleName());
         } finally {
             downloading.set(false);
         }
     }
 
+    private static void fail(String reason) {
+        lastError = reason == null ? "" : reason;
+        lastDownloadFailed = true;
+    }
+
     private static boolean downloadTo(File destination) {
         HttpURLConnection connection = null;
+        long existing = destination.isFile() ? destination.length() : 0;
         try {
             connection = (HttpURLConnection) new URL(MODEL_URL).openConnection();
             connection.setConnectTimeout(15_000);
             connection.setReadTimeout(30_000);
             connection.setInstanceFollowRedirects(true);
+            if (existing > 0) connection.setRequestProperty("Range", "bytes=" + existing + "-");
             int code = connection.getResponseCode();
-            if (code != HttpURLConnection.HTTP_OK) return false;
+            boolean append = code == HttpURLConnection.HTTP_PARTIAL && existing > 0;
+            if (code == 416 && existing >= MIN_VALID_BYTES) return true; // already complete
+            if (code != HttpURLConnection.HTTP_OK && !append) {
+                destination.delete();
+                fail("Server answered HTTP " + code);
+                return false;
+            }
+            long start = append ? existing : 0;
+            long length = connection.getContentLengthLong();
+            totalBytes = length > 0 ? start + length : 0;
+            downloadedBytes = start;
+            File parent = destination.getParentFile();
+            if (parent != null && totalBytes > 0 && parent.getUsableSpace() < totalBytes - start + 64L * 1024 * 1024) {
+                fail("Not enough free storage (needs about " + (totalBytes / 1_000_000) + " MB)");
+                return false;
+            }
             try (InputStream input = connection.getInputStream();
-                 FileOutputStream output = new FileOutputStream(destination)) {
+                 FileOutputStream output = new FileOutputStream(destination, append)) {
                 byte[] buffer = new byte[1024 * 1024];
                 int count;
-                long total = 0;
                 while ((count = input.read(buffer)) != -1) {
-                    // Give up before filling the phone's storage with a dead
-                    // partial file if the network drops mid-download; the
-                    // next launch (or an explicit retry) starts over cleanly.
                     output.write(buffer, 0, count);
-                    total += count;
+                    downloadedBytes += count;
                 }
-                return total >= MIN_VALID_BYTES;
             }
+            if (downloadedBytes < MIN_VALID_BYTES || (totalBytes > 0 && downloadedBytes != totalBytes)) {
+                fail("Download ended early — tap Download now to resume");
+                return false;
+            }
+            return true;
         } catch (IOException error) {
+            fail("Network error (" + error.getClass().getSimpleName() + ") — tap Download now to resume");
             return false;
         } finally {
             if (connection != null) connection.disconnect();

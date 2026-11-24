@@ -643,7 +643,13 @@ window.MindinguflacRemote = (() => {
       case 'video_nudge': await nudgeVideoSync(Number(p.delta) || 0);break;
       case 'shuffle': if (state.isShuffle !== p.enabled) $('btnShuffle').onclick();break;
       case 'repeat': if (state.isRepeat !== p.enabled) $('btnRepeat').onclick();break;
-      case 'queue_append': appendTracksToPlaybackQueue(p.tracks);break;
+      case 'queue_append':
+        // "Add to queue" from the phone must behave as it does here: play next.
+        // Appending put the song after the whole album/playlist (and dropped it
+        // if already queued), so it never showed where the user expected.
+        if (p.next) enqueueNext((p.tracks || []).map(t => ({...t,kind:'track'})));
+        else { appendTracksToPlaybackQueue(p.tracks);if(!$('queuePanel').hidden)refreshQueuePanel();updateSidebarNextQueue(); }
+        break;
       case 'queue_reorder':
         if (!reorderQueueTrack(p.from_index,p.to_index)) throw new Error('Queue changed. Try again.');break;
       case 'queue_remove':
@@ -731,6 +737,12 @@ window.MindinguflacRemote = (() => {
     syncVolumeBar=wrap('volumeUi',syncVolumeBar,renderRemoteVolume);
     reorderQueueTrack=wrap('reorder',reorderQueueTrack,(from,to)=>send('queue_reorder',{from_index:from,to_index:to}));
     appendTracksToPlaybackQueue=wrap('append',appendTracksToPlaybackQueue,tracks=>send('queue_append',{tracks:publicTracks(tracks)}));
+    // INVARIANT: every user "Add to queue" (song, album, artist, any future
+    // button) calls enqueueNext, so wrapping it here sends all of them to the
+    // receiver as play-next. Never intercept individual buttons instead: a
+    // missed button edits the phone's mirror copy, which the next snapshot
+    // overwrites, so the song silently "never appears".
+    enqueueNext=wrap('enqueue',enqueueNext,tracks=>command('queue_append',{tracks:publicTracks(tracks),next:true}).catch(report));
     currentPlaybackSeconds=wrap('clock',currentPlaybackSeconds,()=>remoteClock(false));
     audiblePlaybackSeconds=wrap('audibleClock',audiblePlaybackSeconds,()=>remoteClock(true));
     // Lyrics and video come from the receiver, which hears the audio; its
@@ -801,22 +813,14 @@ window.MindinguflacRemote = (() => {
       const el=$(id),handler=el.onclick;el.onclick=()=>route?send(action,{enabled:!route.snapshot?.[key]}):handler();
     }
     // This phone and physical audio outputs both explicitly leave remote mode.
+    // Removing still needs the receiver's index; adding goes through enqueueNext above.
     document.addEventListener('click',event=>{
       if (!route) return;
-      const target=event.target.closest('#ctxAddQueue,#ctxRemoveQueue,#ctxAlbumAddQueue,#ctxArtistAddQueue');
+      const target=event.target.closest('#ctxRemoveQueue');
       if (!target) return;
       event.preventDefault();event.stopImmediatePropagation();
-      const action=async()=>{
-        let tracks=[];
-        if(target.id==='ctxAddQueue') tracks=[contextMenuTargetTrack];
-        else if(target.id==='ctxRemoveQueue') {
-          const index=state.queue.findIndex((t,i)=>i>state.queueIndex && trackKey(t)===trackKey(contextMenuTargetTrack));
-          await command('queue_remove',{index});return;
-        } else if(target.id==='ctxAlbumAddQueue') tracks=contextMenuTargetAlbum?.tracks?.length?contextMenuTargetAlbum.tracks:await fetchAlbumTracks(contextMenuTargetAlbum);
-        else tracks=await fetchArtistTopTracks(contextMenuTargetArtist);
-        await command('queue_append',{tracks:publicTracks(tracks)});
-      };
-      action().catch(report);for(const id of ['trackContextMenu','albumContextMenu','artistContextMenu'])$(id).hidden=true;
+      const index=state.queue.findIndex((t,i)=>i>state.queueIndex && trackKey(t)===trackKey(contextMenuTargetTrack));
+      command('queue_remove',{index}).catch(report);$('trackContextMenu').hidden=true;
     },true);
     await poll();timer=setInterval(poll,750);
     // Lyrics and video follow the receiver's clock between polls.

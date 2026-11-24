@@ -271,6 +271,7 @@ function renderAndroidEngineNotes() {
 }
 
 function updateEngineControls(engine, currentService, currentQuality) {
+  updateYoutubeSignInVisibility(engine);
   $("torrentPlaybackCandidatesRow")?.classList.toggle("hidden", engine !== "torrent");
   $("torrentPrefetchCandidatesRow")?.classList.toggle("hidden", engine !== "torrent");
   $("torrentMetadataTimeoutRow")?.classList.toggle("hidden", engine !== "torrent");
@@ -1153,6 +1154,30 @@ function advisorStatusText(kind, status) {
   return `${kind}: ${labels[status] || status || "unavailable"}`;
 }
 
+function localModelDetail() {
+  try {
+    if (typeof window.MindinguflacAndroid.localModelDetail === "function") {
+      return JSON.parse(window.MindinguflacAndroid.localModelDetail()) || {};
+    }
+    return { status: window.MindinguflacAndroid.localModelStatus() };
+  } catch (_) {
+    return { status: "not_installed" };
+  }
+}
+
+function localModelStatusText(detail) {
+  const mb = bytes => `${Math.round(bytes / 1e6).toLocaleString()} MB`;
+  if (detail.status === "downloading") {
+    if (detail.total > 0) {
+      const percent = Math.floor((detail.downloaded / detail.total) * 100);
+      return `Local model: downloading ${percent}% (${mb(detail.downloaded)} of ${mb(detail.total)})`;
+    }
+    return detail.downloaded > 0 ? `Local model: downloading ${mb(detail.downloaded)}…` : "Local model: connecting…";
+  }
+  if (detail.error) return `Local model: download failed — ${detail.error}`;
+  return advisorStatusText("Local model", detail.status);
+}
+
 function stopAndroidAdvisorPolling() {
   if (state.androidAdvisorTimer) {
     clearInterval(state.androidAdvisorTimer);
@@ -1164,7 +1189,7 @@ function stopAndroidAdvisorPolling() {
 // line only ever showed whatever it said the moment Settings was opened.
 function startAndroidAdvisorPolling() {
   if (!IS_ANDROID || state.androidAdvisorTimer) return;
-  state.androidAdvisorTimer = setInterval(refreshAndroidAdvisorStatus, 3000);
+  state.androidAdvisorTimer = setInterval(refreshAndroidAdvisorStatus, 1500);
 }
 
 function refreshAndroidAdvisorStatus() {
@@ -1175,16 +1200,27 @@ function refreshAndroidAdvisorStatus() {
   startAndroidAdvisorPolling();
   try {
     $("nanoAdvisorStatus").textContent = advisorStatusText("Gemini Nano", window.MindinguflacAndroid.nanoStatus());
-    $("localModelStatus").textContent = advisorStatusText("Local model", window.MindinguflacAndroid.localModelStatus());
   } catch (_) {
     $("nanoAdvisorStatus").textContent = advisorStatusText("Gemini Nano", "unavailable");
-    $("localModelStatus").textContent = advisorStatusText("Local model", "not_installed");
   }
+  const detail = localModelDetail();
+  $("localModelStatus").textContent = localModelStatusText(detail);
   // "Download now" auto-starts over Wi-Fi already; this button is for forcing
-  // it over mobile data, or retrying after a failed attempt. "Install from
+  // it over mobile data, or resuming after a failed attempt. "Install from
   // file" stays for picking a different model, or a manual browser download.
   const download = $("downloadLocalModel");
-  if (download) download.onclick = () => window.MindinguflacAndroid.downloadLocalModel();
+  if (download) {
+    download.hidden = detail.status === "installed";
+    download.disabled = detail.status === "downloading";
+    download.textContent = detail.status === "downloading" ? "Downloading…" : detail.error ? "Resume download" : "Download now";
+    download.onclick = () => {
+      download.disabled = true;
+      download.textContent = "Downloading…";
+      $("localModelStatus").textContent = "Local model: starting download…";
+      try { window.MindinguflacAndroid.downloadLocalModel(); } catch (_) {}
+      setTimeout(refreshAndroidAdvisorStatus, 800);
+    };
+  }
   const install = $("installLocalModel");
   if (install) install.onclick = () => window.MindinguflacAndroid.installLocalModel();
 }
@@ -2592,7 +2628,8 @@ async function renderArtistPage(artist) {
     window.artistEvtSource.close();
   }
 
-  const artistName = artist.name || artist.artist;
+  // Empty when opened from a shared link by id alone; artist_info names it.
+  let artistName = artist.name || artist.artist || "";
   const artistId = artist.artist_id || artist.spotify_id || "";
   let artistTracks = [];
   let artistAlbums = [];
@@ -2800,7 +2837,8 @@ async function renderArtistPage(artist) {
       if (part.type === "artist_info") {
         resolvedArtistId = part.artist_id || resolvedArtistId;
         artistArtwork = part.artwork_url || artistArtwork;
-        $("artistHeroName").textContent = part.artist;
+        artistName = artistName || part.artist || "";
+        $("artistHeroName").textContent = part.artist || artistName;
         if (part.artwork_url) {
           $("artistHeroArt").style.backgroundImage = `url('${part.artwork_url}')`;
         }
@@ -7763,6 +7801,7 @@ async function renderSettings() {
   await hydrateTourLocationInputs();
   setupTourLocationPicker();
 
+  $("normalizeVolume").checked = !!state.settings.normalize_volume;
   $("trackMaxRetries").value = (state.settings.track_max_retries !== undefined) ? state.settings.track_max_retries : 1;
 
   $("cacheCleanupFrequency").value = state.settings.cache_cleanup_frequency || "never";
@@ -7784,6 +7823,11 @@ async function renderSettings() {
 
 let youtubeSettingsLoginPoll = null;
 
+function updateYoutubeSignInVisibility(engine = $("downloadEngine")?.value || state.settings?.download_engine) {
+  const row = $("youtubeSignInRow");
+  row?.classList.toggle("hidden", engine !== "ytp-dl" || row.dataset.embeddedAvailable !== "true");
+}
+
 async function setupYoutubeSignInSettings() {
   if (youtubeSettingsLoginPoll) clearInterval(youtubeSettingsLoginPoll);
   youtubeSettingsLoginPoll = null;
@@ -7791,6 +7835,8 @@ async function setupYoutubeSignInSettings() {
   const button = $("youtubeSignInButton");
   const label = $("youtubeSignInStatus");
   if (!row || !button) return;
+  row.dataset.embeddedAvailable = "false";
+  updateYoutubeSignInVisibility();
   let signedIn = false;
   const showStatus = status => {
     signedIn = !!status.signed_in;
@@ -7800,7 +7846,8 @@ async function setupYoutubeSignInSettings() {
   };
   try {
     const status = await api("/api/system/youtube-login-status", { method: "POST", body: JSON.stringify({}) });
-    row.classList.toggle("hidden", !status.embedded_available);
+    row.dataset.embeddedAvailable = String(!!status.embedded_available);
+    updateYoutubeSignInVisibility();
     if (!status.embedded_available) return;
     showStatus(status);
   } catch (_) { return; }
@@ -8018,6 +8065,56 @@ window.handleDevicePairingUrl = function (value) {
   return true;
 };
 
+// A Spotify link opened with Mindinguflac (Android "Open with" or Share):
+// open.spotify.com/{track,album,artist,playlist}/ID, with an optional
+// intl-xx path prefix, or a spotify:type:id URI.
+function parseSpotifyLink(value) {
+  const text = String(value || "").trim();
+  const uri = text.match(/spotify:(track|album|artist|playlist):([A-Za-z0-9]+)/);
+  if (uri) return { type: uri[1], id: uri[2] };
+  const web = text.match(/open\.spotify\.com\/(?:intl-[a-z-]+\/)?(?:embed\/)?(track|album|artist|playlist)\/([A-Za-z0-9]+)/i);
+  return web ? { type: web[1].toLowerCase(), id: web[2] } : null;
+}
+
+window.handleSpotifyLink = function (value) {
+  const link = parseSpotifyLink(value);
+  if (!link) {
+    showToast("That link is not a Spotify track, album, artist or playlist.", 5000);
+    return true;
+  }
+  if (link.type === "track") {
+    openAlbumLink({ track_spotify_id: link.id });
+  } else if (link.type === "album") {
+    openAlbumLink({ spotify_id: link.id, spotify_url: `https://open.spotify.com/album/${link.id}` });
+  } else if (link.type === "artist") {
+    openArtistLink({ name: "", artist_id: link.id, spotify_artist_id: link.id, spotify_url: `https://open.spotify.com/artist/${link.id}` });
+  } else {
+    void openSharedSpotifyPlaylist(link.id);
+  }
+  return true;
+};
+
+async function openSharedSpotifyPlaylist(id) {
+  const spotifyUrl = `https://open.spotify.com/playlist/${id}`;
+  const existing = (state.playlists || []).find((pl) => parseSpotifyLink(pl.spotify_url)?.id === id);
+  if (existing) {
+    pushPage(() => renderPlaylistPage(existing));
+    return;
+  }
+  showToast("Importing Spotify playlist…", 4000);
+  try {
+    const playlist = await api("/api/playlists", {
+      method: "POST",
+      body: JSON.stringify({ name: "", spotify_url: spotifyUrl, origin: "manual" }),
+    });
+    state.playlists = [playlist, ...(state.playlists || [])];
+    renderSidebarPlaylists();
+    pushPage(() => renderPlaylistPage(playlist));
+  } catch (error) {
+    showToast(`Could not import the playlist: ${error.message || error}`, 6000);
+  }
+}
+
 async function presentDevicePairingConfirmation(invitation) {
   state.pendingPairingInvitation = invitation;
   state.pairingPreview = null;
@@ -8116,6 +8213,7 @@ async function saveSettings(e) {
     cache_cleanup_frequency: $("cacheCleanupFrequency").value,
 
     demo_music_indexer: $("demoMusicIndexer") ? $("demoMusicIndexer").checked : !!state.settings.demo_music_indexer,
+    normalize_volume: $("normalizeVolume").checked,
     strict_title_match: $("strictTitleMatch") ? $("strictTitleMatch").checked : !!state.settings.strict_title_match,
     discogs_token: $("discogsToken").value.trim(),
     music_indexers: []
@@ -8123,8 +8221,11 @@ async function saveSettings(e) {
   try {
     await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
     state.settings = body;
+    let normalizationWarning = "";
+    try { await updateBrowserNormalization(); }
+    catch (error) { normalizationWarning = ` Volume normalization is unavailable in this browser: ${error.message}`; }
     state.tourLocation = null;
-    showSettingsNotice("Settings saved", "Your preferences have been saved.");
+    showSettingsNotice("Settings saved", "Your preferences have been saved." + normalizationWarning);
   } catch (e) { showSettingsNotice("Could not save settings", e.message || "Please try again."); }
 }
 
@@ -8836,6 +8937,13 @@ function bindMediaSessionActions() {
 function bindPlayer() {
   const audio = $("audioPlayer");
   audio.volume = storedVolume();
+  audio.addEventListener("volumechange", () => {
+    _normalizationNode?.port.postMessage({ volume: audio.volume });
+  });
+  audio.addEventListener("loadstart", () => {
+    _normalizationNode?.port.postMessage({ reset: true });
+    updateBrowserNormalization().catch(error => console.warn("Volume normalization:", error));
+  });
   syncVolumeBar();
   $("playPause").onclick = () => {
     if (playbackTransportBusy()) return;
@@ -10701,6 +10809,38 @@ window.addEventListener("keydown", (event) => {
 
 let _audioCtx = null;
 let _audioSrcNode = null;
+let _normalizationNode = null;
+let _normalizationLoading = null;
+
+async function updateBrowserNormalization() {
+  const audio = $("audioPlayer");
+  const enabled = !!state.settings?.normalize_volume;
+  if (_normalizationNode) {
+    _normalizationNode.port.postMessage({ enabled, volume: audio.volume });
+    return;
+  }
+  if (!enabled || !audio?.src || new URL(audio.src, location.href).origin !== location.origin) return;
+  if (_normalizationLoading) return _normalizationLoading;
+  _normalizationLoading = (async () => {
+    const context = _ensureAudioContext(false);
+    if (context.state === "suspended") {
+      await Promise.race([context.resume(), new Promise(resolve => setTimeout(resolve, 200))]);
+    }
+    if (context.state !== "running") return;
+    if (!context.audioWorklet) throw new Error("Volume normalization requires AudioWorklet support.");
+    await context.audioWorklet.addModule("volume_normalizer.js");
+    const node = new AudioWorkletNode(context, "volume-normalizer");
+    node.port.postMessage({ enabled: !!state.settings?.normalize_volume, volume: audio.volume });
+    // Preserve the existing device route; insert only after the processor loads.
+    _ensureAudioContext(true);
+    _audioSrcNode.disconnect();
+    _audioSrcNode.connect(node);
+    node.connect(context.destination);
+    _normalizationNode = node;
+  })();
+  try { await _normalizationLoading; }
+  finally { _normalizationLoading = null; }
+}
 let _activeSinkId = "";  // "" = default (this computer)
 let _nativeAudioDeviceUid = "";
 let _nativeAudioAvailable = false;
@@ -10720,6 +10860,7 @@ async function prepareBrowserAudioClock(audio) {
   try {
     const Constructor = window.AudioContext || window.webkitAudioContext;
     if (!Constructor || !audio?.src || new URL(audio.src, window.location.href).origin !== window.location.origin) return;
+    await updateBrowserNormalization();
     if (!Constructor.prototype.getOutputTimestamp && !("outputLatency" in Constructor.prototype)) return;
     const canRoute = !(typeof audio.setSinkId === "function" && typeof Constructor.prototype.setSinkId !== "function");
     const context = _ensureAudioContext(false);

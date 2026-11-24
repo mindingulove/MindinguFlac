@@ -2050,9 +2050,13 @@ def _check_cached_video_bg(path: Path, key: str) -> None:
     from video_motion import preview_file
     result = preview_file(path)
     with _video_fetch_lock:
-        _video_fetch_jobs[key] = {"moving": "ready", "static": "not_found"}.get(result.get("status"), "failed")
-        if result.get("status") != "moving":
-            _video_fetch_errors[key] = result.get("reason") or "Video preview could not be checked"
+        # Only a confirmed still image blocks the video; an inconclusive check
+        # (too few decodable frames) still plays the clip we already have.
+        if result.get("status") == "static":
+            _video_fetch_jobs[key] = "not_found"
+            _video_fetch_errors[key] = result.get("reason") or "No video available: only static artwork"
+        else:
+            _video_fetch_jobs[key] = "ready"
 
 
 def _get_video_fetch(identity: dict, force: bool = False) -> dict:
@@ -2089,6 +2093,11 @@ def _get_video_fetch(identity: dict, force: bool = False) -> dict:
             status = _video_fetch_jobs.get(key)
             if status == "failed":
                 return {"status": "error", "error": _video_fetch_errors.get(key, "Video preview could not be checked")}
+            if status == "ready":
+                return {"status": "ready", "path": str(mp4_path), **_video_clip_details(mp4_path, identity)}
+            if status == "not_found":
+                return {"status": "not_found", "reason": "static_artwork",
+                        "error": _video_fetch_errors.get(key, "No video available: only static artwork")}
             if status != "checking":
                 _video_fetch_jobs[key] = "checking"
                 threading.Thread(target=_check_cached_video_bg, args=(mp4_path, key), daemon=True).start()
@@ -2388,7 +2397,7 @@ def _candidate_is_streamable(path: Path) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SpotiFLACStreamer/1.4.1"
+    server_version = "SpotiFLACStreamer/1.4.2"
     protocol_version = "HTTP/1.1"
 
     def handle_one_request(self) -> None:
@@ -3452,6 +3461,7 @@ class Handler(BaseHTTPRequestHandler):
                     app_config = updated
                     save_config(CONFIG_PATH, app_config)
                     service_downloader.update_config(app_config)
+                native_audio.set_normalization(app_config.normalize_volume)
                 try:
                     import device_sync
                     device_sync.mark_settings_changed()
@@ -3615,6 +3625,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(service_downloader.playback_source(enrich_download_payload(body)))
                 return
             if path == "/api/native_audio/play":
+                native_audio.set_normalization(app_config.normalize_volume)
                 raw_volume = body.get("volume", 1)
                 raw_position = body.get("position", 0)
                 volume = float(1 if raw_volume is None else raw_volume)

@@ -23,7 +23,7 @@ function setup(android=true) {
    prepareSelectedTrackUi:()=>localCalls.push('restore-paused'),
    prefetchOneTrack:async()=>localCalls.push('prefetch'),prefetchNextTracks:async()=>localCalls.push('prefetch-next'),prefetchNextVideos:()=>localCalls.push('prefetch-video'),_triggerVideoFetchForTrack:()=>localCalls.push('trigger-video'),fetchVideoForTrack:async()=>localCalls.push('video'),startServiceDownload:async()=>localCalls.push('download'),playFromLibraryPath:async()=>localCalls.push('library-play'),startNativeAudio:async()=>localCalls.push('native-start'),selectMusicItem:(...args)=>{localCalls.push(['select',...args]);return Promise.resolve();},playQueueOffset:d=>localCalls.push(['offset',d]),
    seekBy:n=>localCalls.push(['seek',n]),changeVolumeBy:n=>localCalls.push(['adjust-volume',n]),syncVolumeBar:()=>localCalls.push('sync-local-volume'),setPlayerVolume:n=>localCalls.push(['volume',n]),reorderQueueTrack:()=>true,
-   appendTracksToPlaybackQueue:()=>1,currentPlaybackSeconds:()=>10,audiblePlaybackSeconds:()=>10,isPlaybackVisiblyActive:()=>true,
+   appendTracksToPlaybackQueue:()=>1,enqueueNext:t=>localCalls.push(['enqueue-next',t]),currentPlaybackSeconds:()=>10,audiblePlaybackSeconds:()=>10,isPlaybackVisiblyActive:()=>true,
    playbackTransportBusy:()=>false,persistPlaybackSnapshot(){},syncPlayPauseButton(){},performance:{now:()=>context.now||0},
    refreshLyricsAlignment:async()=>localCalls.push('align-local'),updateLyricsOffset:async d=>localCalls.push(['lyrics-nudge',d]),
    refreshVideoSync:async()=>localCalls.push('video-sync-local'),nudgeVideoSync:async d=>localCalls.push(['video-nudge',d]),
@@ -165,5 +165,16 @@ async function lyricsAndVideo() {
  receiver.state.nativeAudio.active=false;receiver.$('audioPlayer').paused=true;
  await receiver.api.applyCommand({action:'seek',payload:{position:30}});
  assert.equal(receiver.state.pendingResumePosition,30,'seeking a restored paused track changes its actual resume position');
+ // Regression: phone "Add to queue" must reach the receiver as play-next and
+ // run the same enqueueNext as a local add (it used to append to the end).
+ const ctl=setup();await ctl.api.initialize();await ctl.api.connect({device_id:'mac',name:'My Mac'});
+ await ctl.context.enqueueNext([{title:'Added',spotify_id:'added'}]);
+ const add=ctl.calls.find(c=>c.path==='/api/remote/command'&&c.body.action==='queue_append');
+ assert.ok(add&&add.body.payload.next===true,'phone add-to-queue is sent as play-next');
+ assert.ok(!ctl.localCalls.some(c=>Array.isArray(c)&&c[0]==='enqueue-next'),'phone never edits its mirror queue');
+ await receiver.api.applyCommand({action:'queue_append',payload:{tracks:[{title:'Added'}],next:true}});
+ assert.ok(receiver.localCalls.some(c=>Array.isArray(c)&&c[0]==='enqueue-next'&&c[1][0].title==='Added'),'receiver plays it next');
+ const css=fs.readFileSync('static/styles.css','utf8');
+ assert.match(css,/body\.has-remote-playback \.queue-content-area\s*\{[^}]*remote-playback-banner-height/,'queue list clears the remote banner');
  console.log('Paired remote transport, phone audio suppression, receiver dispatch, clocks, disconnect cleanup and failed acknowledgement passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

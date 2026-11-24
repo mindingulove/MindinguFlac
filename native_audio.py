@@ -862,6 +862,7 @@ class NativeAudioManager:
         self._position = 0.0
         self._duration = 0.0
         self._volume = 1.0
+        self._normalize_volume = False
         self._metadata = {}
         # macOS NSSound finish-detection: currentTime() can reset to 0 when a
         # sound finishes, so "position near duration" is unreliable. Track
@@ -1161,6 +1162,8 @@ class NativeAudioManager:
     def _stream_worker(self, ffmpeg: str) -> None:
         process = None
         output = None
+        from volume_normalizer import VolumeNormalizer
+        normalizer = VolumeNormalizer()
         try:
             import sounddevice as sd
             start_at = max(0.0, self._position)
@@ -1457,7 +1460,7 @@ class NativeAudioManager:
                                 import numpy as np
                                 pcm = np.frombuffer(block, dtype=np.float32).reshape(-1, self._stream_channels)
                                 with self._lock:
-                                    pcm = pcm * self._volume
+                                    pcm = normalizer.process(pcm, self._stream_sample_rate, self._normalize_volume) * self._volume
                                 if not write_block(pcm):
                                     pending_pcm[:0] = block
                                     break
@@ -1499,7 +1502,7 @@ class NativeAudioManager:
                     import numpy as np
                     pcm = np.frombuffer(block, dtype=np.float32).reshape(-1, self._stream_channels)
                     with self._lock:
-                        pcm = pcm * self._volume
+                        pcm = normalizer.process(pcm, self._stream_sample_rate, self._normalize_volume) * self._volume
                     if not write_block(pcm):
                         pending_pcm[:0] = block
                         with self._lock:
@@ -1556,7 +1559,7 @@ class NativeAudioManager:
         if not audio_path.is_file():
             return {"ok": False, "error": "Audio file not found"}
 
-        if sys.platform == "win32":
+        if sys.platform == "win32" or self._normalize_volume:
             res = self._play_windows(audio_path, device_uid, volume, position, device_name)
             if res.get("ok"):
                 with self._lock:
@@ -1643,7 +1646,7 @@ class NativeAudioManager:
             if self._stream_url and self._thread is not None:
                 self._pause_event.set()
                 wait_for_stream = True
-            elif sys.platform == "win32" and self._thread is not None:
+            elif self._thread is not None:
                 self._pause_event.set()
                 self._playing = False
             elif self._sound is not None:
@@ -1675,7 +1678,7 @@ class NativeAudioManager:
                 self._pause_event.clear()
                 self._playing = False
                 self._stream_phase = "buffering"
-            elif sys.platform == "win32" and self._thread is not None:
+            elif self._thread is not None:
                 self._pause_event.clear()
                 self._playing = True
             elif self._sound is not None:
@@ -1712,6 +1715,7 @@ class NativeAudioManager:
             return self.status() | {"ok": True}
         stream = None
         windows_restart = None
+        was_paused = self._paused
         with self._lock:
             if self._stream_url and self._thread is not None:
                 url, uid, name = self._stream_url, self._device_uid, self._stream_device_name
@@ -1720,7 +1724,7 @@ class NativeAudioManager:
                 was_paused = self._paused
                 stream = (url, uid, name, volume, metadata, was_paused)
                 position = max(0.0, float(position))
-            elif sys.platform == "win32" and self._thread is not None:
+            elif self._thread is not None:
                 windows_restart = (
                     self._path, self._playback_path, self._device_uid,
                     max(0.0, float(position)), self._volume, self._duration,
@@ -1751,7 +1755,30 @@ class NativeAudioManager:
                 self._playing = True
                 self._thread = threading.Thread(target=self._windows_worker, daemon=True, name="native-audio-win")
                 self._thread.start()
+            if was_paused:
+                self.pause()
         return self.status() | {"ok": True}
+
+    def set_normalization(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        with self._lock:
+            changed = self._normalize_volume != enabled
+            self._normalize_volume = enabled
+            # NSSound has no PCM processing hook. Move a currently playing file
+            # to the same app-only PCM output used on Windows, at its position.
+            sound = self._sound if changed and enabled else None
+            if sound is not None:
+                restart = (self._path, self._device_uid, self._volume,
+                           float(sound.currentTime() or 0), self._metadata, self._paused)
+        if _on_android():
+            _android_player().setNormalization(enabled)
+        elif sound is not None:
+            path, uid, volume, position, metadata, paused = restart
+            result = self.play(path, uid, volume, position, metadata)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "Could not enable volume normalization")
+            if paused:
+                self.pause()
 
     def set_volume(self, volume: float) -> dict:
         if _on_android():
@@ -1763,7 +1790,7 @@ class NativeAudioManager:
             self._volume = max(0.0, min(1.0, float(volume)))
             if self._sound is not None:
                 self._sound.setVolume_(self._volume)
-            if self._device_uid and sys.platform == "darwin":
+            if self._sound is not None and self._device_uid and sys.platform == "darwin":
                 if self._volume > 0.0001:
                     _macos_unmute_device(self._device_uid)
                 _macos_set_device_volume(self._device_uid, self._volume)
@@ -1789,7 +1816,7 @@ class NativeAudioManager:
                         "buffered_seconds": self._stream_buffered_seconds,
                         "prebuffer_target_seconds": _NATIVE_STREAM_PREBUFFER_SECONDS,
                         "stream_elapsed_seconds": max(0.0, time.monotonic() - self._stream_started_at) if self._stream_started_at else 0.0}
-            if sys.platform == "win32":
+            if sys.platform == "win32" or self._thread is not None:
                 return {
                     "available": self.available(),
                     "playing": self._playing,
@@ -1950,6 +1977,8 @@ class NativeAudioManager:
         return self._windows_output_index
 
     def _windows_worker(self) -> None:
+        from volume_normalizer import VolumeNormalizer
+        normalizer = VolumeNormalizer()
         try:
             import sounddevice as sd
             import soundfile as sf
@@ -1981,7 +2010,7 @@ class NativeAudioManager:
                             volume = self._volume
                             self._position = audio_file.tell() / float(audio_file.samplerate or 1)
                             self._playing = True
-                        stream.write(data * volume)
+                        stream.write(normalizer.process(data, audio_file.samplerate, self._normalize_volume) * volume)
         except Exception as exc:
             with self._lock:
                 self._error = str(exc)

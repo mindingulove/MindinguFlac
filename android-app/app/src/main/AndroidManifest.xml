@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- The Glyph SDK declares minSdk 33; GlyphProgress only calls it on
+         Nothing phones running Android 14+. -->
+    <uses-sdk tools:overrideLibrary="com.nothing.thirdparty" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Playback has to survive the app going to the background, which
@@ -15,6 +19,19 @@
     <!-- Android filters Wi-Fi broadcasts unless the app holds a multicast lock. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Nothing Glyph Interface: track progress on the Glyph lights. -->
+    <uses-permission android:name="com.nothing.ketchum.permission.ENABLE" />
+
+    <!-- Lets links the app opens itself find the Spotify app or a browser
+         (package visibility), instead of bouncing back to Mindinguflac. -->
+    <queries>
+        <package android:name="com.spotify.music" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
 
     <application
         android:name="com.chaquo.python.android.PyApplication"
@@ -26,6 +43,13 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Mindinguflac"
         android:usesCleartextTraffic="true">
+        <!-- "test" works while Glyph debugging is on (adb shell settings put
+             global nt_glyph_interface_debug_enable 1, 48 h); Nothing drops
+             the key check from Android 16. -->
+        <meta-data android:name="NothingKey" android:value="test" />
+        <!-- Media app declaration, required by Google Maps' music controls. -->
+        <meta-data android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <uses-native-library android:name="libOpenCL-car.so" android:required="false" />
         <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
@@ -42,6 +66,47 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="mindinguflac" android:host="pair" />
+            </intent-filter>
+        </activity>
+
+        <!-- Forwards Spotify links / shares to the running MainActivity, so a
+             link opened from another app never starts a second one (and a
+             second Python backend) inside that app's task. -->
+        <activity
+            android:name=".SpotifyLinkActivity"
+            android:exported="true"
+            android:noHistory="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:label="Mindinguflac"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <!-- Spotify links: "Open with Mindinguflac". Spotify verifies
+                 open.spotify.com for its own app, so Android 12+ only offers
+                 this when the Spotify app is not installed or its "Open
+                 supported links" is off (Settings > Apps > Spotify > Open by
+                 default); otherwise add it under Mindinguflac's "Open by
+                 default". spotify: URIs always show the chooser. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="open.spotify.com" />
+                <data android:host="spotify.link" />
+                <data android:host="spotify.app.link" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="spotify" />
+            </intent-filter>
+            <!-- Share > Mindinguflac from the Spotify app's share sheet. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 
@@ -77,7 +142,12 @@
 
         <service
             android:name=".MediaPlaybackService"
-            android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <!-- Lists the app in Google Maps' navigation media controls. -->
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

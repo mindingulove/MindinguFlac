@@ -65,6 +65,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         }
     };
     private String pendingPairingUrl;
+    private String pendingSpotifyLink;
     private WifiManager.MulticastLock pairingMulticastLock;
 
     @Override
@@ -81,6 +82,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         acquirePairingMulticastLock();
         configureWebView();
         if (getIntent() != null && getIntent().getData() != null) pendingPairingUrl = getIntent().getData().toString();
+        acceptSpotifyLink(getIntent());
         LocalModelAdvisor.initialize(getApplicationContext());
         // Auto-download runs on its own over Wi-Fi; on mobile data it waits
         // for the user to explicitly ask for it (the Settings "Download now"
@@ -178,7 +180,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
                     return false;
                 }
                 if ("https".equals(uri.getScheme())) {
-                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                    startActivity(externalViewIntent(uri));
                 }
                 return true;
             }
@@ -189,6 +191,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
                     loadingView.setVisibility(View.GONE);
                 }).start();
                 dispatchPendingPairingUrl();
+                dispatchPendingSpotifyLink();
             }
         });
     }
@@ -219,6 +222,103 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             pendingPairingUrl = intent.getData().toString();
             dispatchPendingPairingUrl();
         }
+        acceptSpotifyLink(intent);
+    }
+
+    /**
+     * VIEW intent for a link the page opens outside the app. Spotify links are
+     * aimed at the Spotify app (or a browser), never back at Mindinguflac,
+     * which also handles them now.
+     */
+    private Intent externalViewIntent(Uri uri) {
+        Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(java.util.Locale.ROOT);
+        if (!host.equals("open.spotify.com") && !host.equals("spotify.link") && !host.equals("spotify.app.link")) {
+            return intent;
+        }
+        Intent spotify = new Intent(intent).setPackage("com.spotify.music");
+        if (spotify.resolveActivity(getPackageManager()) != null) return spotify;
+        Intent browser = new Intent(Intent.ACTION_VIEW, Uri.parse("https://"));
+        android.content.pm.ResolveInfo info = getPackageManager().resolveActivity(browser, PackageManager.MATCH_DEFAULT_ONLY);
+        if (info != null && info.activityInfo != null && !getPackageName().equals(info.activityInfo.packageName)
+                && !"android".equals(info.activityInfo.packageName)) {
+            intent.setPackage(info.activityInfo.packageName);
+        }
+        return intent;
+    }
+
+    /** A Spotify link forwarded by {@link SpotifyLinkActivity}. */
+    private void acceptSpotifyLink(Intent intent) {
+        String link = intent == null ? null : intent.getStringExtra(SpotifyLinkActivity.EXTRA_SPOTIFY_LINK);
+        if (link == null || link.isEmpty()) return;
+        intent.removeExtra(SpotifyLinkActivity.EXTRA_SPOTIFY_LINK);
+        Uri uri = Uri.parse(link);
+        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(java.util.Locale.ROOT);
+        if (!host.equals("spotify.link") && !host.equals("spotify.app.link")) {
+            pendingSpotifyLink = link;
+            dispatchPendingSpotifyLink();
+            return;
+        }
+        // Short share links redirect (or point by page) to open.spotify.com.
+        new Thread(() -> {
+            String resolved = resolveSpotifyShortLink(link);
+            runOnUiThread(() -> {
+                pendingSpotifyLink = resolved;
+                dispatchPendingSpotifyLink();
+            });
+        }, "spotify-short-link").start();
+    }
+
+    private static String resolveSpotifyShortLink(String link) {
+        java.net.HttpURLConnection connection = null;
+        try {
+            String current = link;
+            for (int hop = 0; hop < 6; hop++) {
+                connection = (java.net.HttpURLConnection) new java.net.URL(current).openConnection();
+                connection.setInstanceFollowRedirects(false);
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36");
+                int code = connection.getResponseCode();
+                String location = connection.getHeaderField("Location");
+                if (code >= 300 && code < 400 && location != null) {
+                    current = new java.net.URL(new java.net.URL(current), location).toString();
+                    connection.disconnect();
+                    if (current.contains("open.spotify.com/")) return current;
+                    continue;
+                }
+                if (current.contains("open.spotify.com/")) return current;
+                StringBuilder body = new StringBuilder();
+                try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                        connection.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                    char[] buffer = new char[8192];
+                    int read;
+                    while ((read = reader.read(buffer)) > 0 && body.length() < 512 * 1024) body.append(buffer, 0, read);
+                }
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("https://open\\.spotify\\.com/[A-Za-z0-9/_-]+").matcher(body);
+                return m.find() ? m.group() : link;
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+        return link;
+    }
+
+    private void dispatchPendingSpotifyLink() {
+        if (pendingSpotifyLink == null || webView == null) return;
+        String value = pendingSpotifyLink;
+        webView.evaluateJavascript(
+                "(function(){if(typeof window.handleSpotifyLink!=='function')return false;" +
+                        "return window.handleSpotifyLink(" + org.json.JSONObject.quote(value) + ")===true;})()",
+                result -> {
+                    if ("true".equals(result) && value.equals(pendingSpotifyLink)) {
+                        pendingSpotifyLink = null;
+                    } else if (value.equals(pendingSpotifyLink) && webView != null) {
+                        new Handler(Looper.getMainLooper()).postDelayed(this::dispatchPendingSpotifyLink, 250);
+                    }
+                });
     }
 
     private void startPythonBackend() {
@@ -659,6 +759,12 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
             return LocalModelAdvisor.status();
         }
 
+        /** JSON: status, downloaded/total bytes and the last error. */
+        @JavascriptInterface
+        public String localModelDetail() {
+            return LocalModelAdvisor.detail();
+        }
+
         /** Pick a .task bundle manually — a different model, or a retry via a browser download. */
         @JavascriptInterface
         public void installLocalModel() {
@@ -668,7 +774,9 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         /** Force the auto-download now, including over a metered connection. */
         @JavascriptInterface
         public void downloadLocalModel() {
-            startupExecutor.execute(LocalModelAdvisor::forceDownload);
+            // Not via startupExecutor: that queue can be busy starting the
+            // Python backend, which left this tap waiting with no feedback.
+            LocalModelAdvisor.forceDownload();
         }
 
         /**
@@ -734,7 +842,7 @@ public final class MainActivity extends Activity implements MediaCommandRelay.Li
         public void openExternal(String url) {
             runOnUiThread(() -> {
                 try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                    startActivity(externalViewIntent(Uri.parse(url)));
                 } catch (Exception ignored) {
                 }
             });

@@ -88,11 +88,44 @@ class MotionPreviewTests(unittest.TestCase):
     def test_unavailable_preview_does_not_start_an_unchecked_download(self):
         import backend_video
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(video_motion, "preview_youtube", return_value={"status": "unknown", "reason": "network error"}), \
+                patch.object(video_motion, "preview_youtube", return_value={"status": "unknown", "reason": "network error", "preview_failed": True}), \
                 patch("yt_dlp.YoutubeDL") as downloader:
             with self.assertRaises(video_motion.VideoPreviewError):
                 backend_video._download_youtube_clip("https://youtube.com/watch?v=abcdefghijk", 0, Path(tmp) / "video.mp4")
         downloader.assert_not_called()
+
+    def test_few_preview_frames_still_decide_motion(self):
+        self.assertEqual(video_motion.assess_frames(moving_frames()[:3])["status"], "moving")
+        self.assertEqual(video_motion.assess_frames([artwork(), artwork(), artwork()])["status"], "static")
+
+    def test_inconclusive_preview_downloads_then_checks_the_file(self):
+        import backend_video
+        def fake_download(urls):
+            Path(tmp, "video.ytmp.mp4").write_bytes(b"x" * 70000)
+        context = Mock()
+        context.__enter__ = Mock(return_value=context)
+        context.__exit__ = Mock(return_value=False)
+        context.download.side_effect = fake_download
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "video.mp4"
+            with patch.object(video_motion, "preview_youtube", return_value={"status": "unknown", "reason": "Not enough video preview frames"}), \
+                    patch("yt_dlp.YoutubeDL", return_value=context), \
+                    patch("backend_ytpdl._add_youtube_cookie_file", return_value=False), \
+                    patch("backend_ytpdl._youtube_session_signed_out", return_value=True), \
+                    patch.object(video_motion, "preview_file", return_value={"status": "moving"}) as check:
+                self.assertTrue(backend_video._download_youtube_clip("https://youtube.com/watch?v=abcdefghijk", 0, target))
+                self.assertTrue(target.exists())
+                check.assert_called_once()
+            with patch.object(video_motion, "preview_youtube", return_value={"status": "unknown", "reason": "Not enough video preview frames"}), \
+                    patch("yt_dlp.YoutubeDL", return_value=context), \
+                    patch("backend_ytpdl._add_youtube_cookie_file", return_value=False), \
+                    patch("backend_ytpdl._youtube_session_signed_out", return_value=True), \
+                    patch.object(video_motion, "preview_file", return_value={"status": "static"}):
+                with self.assertRaises(video_motion.StaticVideoError):
+                    backend_video._download_youtube_clip("https://youtube.com/watch?v=abcdefghijk", 0, target)
+                self.assertFalse(target.exists())
+                self.assertEqual(context.download.call_count, 2)
+
 
 class VideoSelectionTests(unittest.TestCase):
     def test_static_first_candidate_is_skipped_for_a_moving_match(self):
@@ -138,6 +171,17 @@ class CachedVideoTests(unittest.TestCase):
                 self.assertEqual(app._get_video_fetch(identity, force=True)["status"], "not_found")
                 self.assertTrue(video.exists())
                 thread.assert_not_called()
+
+    def test_inconclusive_check_of_a_cached_clip_still_plays_it(self):
+        import app
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"x" * 70000)
+            key = "k1"
+            with patch.object(video_motion, "preview_file", return_value={"status": "unknown", "reason": "Not enough video preview frames"}):
+                app._check_cached_video_bg(video, key)
+            self.assertEqual(app._video_fetch_jobs[key], "ready")
+            app._video_fetch_jobs.pop(key, None)
 
     def test_offline_missing_video_never_starts_a_network_job(self):
         import app

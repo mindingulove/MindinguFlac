@@ -4,7 +4,6 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
@@ -15,11 +14,13 @@ import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.VolumeProvider;
+import android.media.browse.MediaBrowser;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
+import android.os.Bundle;
+import android.service.media.MediaBrowserService;
 import android.os.Handler;
-import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
@@ -30,6 +31,8 @@ import org.json.JSONObject;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -48,8 +51,12 @@ import java.util.concurrent.Executors;
  * This service never touches audio itself. Every control it exposes is relayed
  * back to the page through {@link MediaCommandRelay}, so the page stays the one
  * source of truth for what is playing.
+ *
+ * It is also a {@link MediaBrowserService}: Google Maps' in-navigation media
+ * controls (and other media surfaces) only list apps that expose one. The
+ * browse tree is empty; those surfaces just drive the session.
  */
-public final class MediaPlaybackService extends Service {
+public final class MediaPlaybackService extends MediaBrowserService {
 
     static final String ACTION_UPDATE = "com.mindinguflac.android.action.UPDATE";
     static final String ACTION_PLAY_PAUSE = "com.mindinguflac.android.action.PLAY_PAUSE";
@@ -57,6 +64,14 @@ public final class MediaPlaybackService extends Service {
     static final String ACTION_NEXT = "com.mindinguflac.android.action.NEXT";
     static final String ACTION_STOP = "com.mindinguflac.android.action.STOP";
     static final String EXTRA_STATE = "state";
+    /**
+     * The service is exported (media browsers such as Google Maps must bind
+     * to it), so start commands carry this per-process secret: an intent
+     * from another app can never set the API origin the keepalive sends the
+     * token to, or drive playback.
+     */
+    private static final String EXTRA_NONCE = "com.mindinguflac.android.extra.NONCE";
+    private static final String NONCE = java.util.UUID.randomUUID().toString();
 
     private static final String TAG = "MindinguflacMedia";
     private static final String CHANNEL_ID = "mindinguflac_playback";
@@ -74,10 +89,12 @@ public final class MediaPlaybackService extends Service {
         }
     };
     private MediaSession session;
+    private GlyphProgress glyph;
     private AudioManager audioManager;
     private PowerManager.WakeLock remoteWakeLock;
     private AudioFocusRequest focusRequest;
     private boolean hasStartedForeground;
+    private String shownNotification = "";
 
     private String title = "";
     private String artist = "";
@@ -98,6 +115,7 @@ public final class MediaPlaybackService extends Service {
     public void onCreate() {
         super.onCreate();
         audioManager = getSystemService(AudioManager.class);
+        glyph = new GlyphProgress(this);
         createChannel();
         session = new MediaSession(this, "Mindinguflac");
         session.setCallback(new MediaSession.Callback() {
@@ -151,11 +169,29 @@ public final class MediaPlaybackService extends Service {
             }
         });
         session.setActive(true);
+        setSessionToken(session.getSessionToken());
+    }
+
+    @Override
+    public BrowserRoot onGetRoot(String clientPackageName, int clientUid, Bundle rootHints) {
+        // Only transport controls are exposed, so any caller may connect.
+        return new BrowserRoot("mindinguflac_root", null);
+    }
+
+    @Override
+    public void onLoadChildren(String parentId, Result<List<MediaBrowser.MediaItem>> result) {
+        result.sendResult(new ArrayList<>());
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
+        if (intent != null && !NONCE.equals(intent.getStringExtra(EXTRA_NONCE))) {
+            // Not from this process. Still go foreground if this start came
+            // through startForegroundService, or the system kills the app.
+            if (hasStartedForeground) return START_NOT_STICKY;
+            action = null;
+        }
         if (ACTION_PLAY_PAUSE.equals(action)) {
             MediaCommandRelay.playPause();
         } else if (ACTION_PREVIOUS.equals(action)) {
@@ -228,6 +264,8 @@ public final class MediaPlaybackService extends Service {
         if (playing && !remotePlayback) {
             holdAudioFocus();
         }
+        glyph.setTrack(title, artist);
+        glyph.update(playing, positionMs, durationMs);
     }
 
     /** Refresh the receiver lease without relying on background WebView timers. */
@@ -289,6 +327,15 @@ public final class MediaPlaybackService extends Service {
                 .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
                         Math.max(0L, positionMs), playing ? 1.0f : 0.0f)
                 .build());
+
+        // The page reports state many times a second around track changes;
+        // re-posting an unchanged notification that often makes Android shed
+        // the app's notifications (rate limit ~5/s), including the Glyph
+        // progress Live Update. The session above still gets every update.
+        String shown = title + '\u0000' + artist + '\u0000' + album + '\u0000' + playing
+                + '\u0000' + System.identityHashCode(loadedArtwork);
+        if (hasStartedForeground && shown.equals(shownNotification)) return;
+        shownNotification = shown;
 
         Notification notification = buildNotification();
         if (!hasStartedForeground) {
@@ -373,7 +420,8 @@ public final class MediaPlaybackService extends Service {
     }
 
     private PendingIntent servicePendingIntent(String action) {
-        Intent intent = new Intent(this, MediaPlaybackService.class).setAction(action);
+        Intent intent = new Intent(this, MediaPlaybackService.class).setAction(action)
+                .putExtra(EXTRA_NONCE, NONCE);
         return PendingIntent.getService(this, action.hashCode(), intent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
@@ -460,6 +508,7 @@ public final class MediaPlaybackService extends Service {
     }
 
     private void stopPlaybackService() {
+        glyph.update(false, 0, 0);
         releaseAudioFocus();
         stopForeground(STOP_FOREGROUND_REMOVE);
         hasStartedForeground = false;
@@ -482,6 +531,7 @@ public final class MediaPlaybackService extends Service {
         heartbeatHandler.removeCallbacks(heartbeat);
         releaseRemoteWakeLock();
         releaseAudioFocus();
+        if (glyph != null) glyph.release();
         if (session != null) {
             session.setActive(false);
             session.release();
@@ -491,15 +541,11 @@ public final class MediaPlaybackService extends Service {
         super.onDestroy();
     }
 
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
-
     /** Push the page's current now-playing state into the notification. */
     static void update(Context context, String json) {
         Intent intent = new Intent(context, MediaPlaybackService.class)
                 .setAction(ACTION_UPDATE)
+                .putExtra(EXTRA_NONCE, NONCE)
                 .putExtra(EXTRA_STATE, json);
         context.startForegroundService(intent);
     }
@@ -507,6 +553,7 @@ public final class MediaPlaybackService extends Service {
     /** Tear the notification down when the page has nothing playing. */
     static void clear(Context context) {
         context.startService(new Intent(context, MediaPlaybackService.class)
-                .setAction(ACTION_STOP));
+                .setAction(ACTION_STOP)
+                .putExtra(EXTRA_NONCE, NONCE));
     }
 }

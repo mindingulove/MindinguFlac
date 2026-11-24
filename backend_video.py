@@ -127,8 +127,13 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
     preview = preview_youtube(url, start_offset, log_cb)
     if preview.get("status") == "static":
         raise StaticVideoError("No video available: preview contains only static artwork")
-    if preview.get("status") != "moving":
+    if preview.get("preview_failed"):
         raise VideoPreviewError(preview.get("reason") or "Video preview could not be checked")
+    # An inconclusive preview (e.g. too few storyboard frames) is not proof of
+    # a still image: download, then check real frames from the file itself.
+    verify_after_download = preview.get("status") != "moving"
+    if verify_after_download and log_cb:
+        log_cb(f"{preview.get('reason') or 'Video preview unclear'} — checking the downloaded video instead")
     try:
         import yt_dlp
         from backend_ytpdl import _ffmpeg_location, _youtube_metadata_opts, _add_youtube_cookie_file, _youtube_session_signed_out, _youtube_js_runtime_opts
@@ -192,8 +197,16 @@ def _download_youtube_clip(url: str, start_offset: int, output_path: Path, log_c
                 ydl.download([url])
             if tmp.exists() and tmp.stat().st_size > 65536:
                 tmp.replace(output_path)
-                mark_file_preview(output_path, preview)
+                if verify_after_download:
+                    from video_motion import preview_file
+                    if preview_file(output_path).get("status") == "static":
+                        output_path.unlink(missing_ok=True)
+                        raise StaticVideoError("No video available: video contains only static artwork")
+                else:
+                    mark_file_preview(output_path, preview)
                 return True
+        except StaticVideoError:
+            raise
         except Exception as exc:
             if log_cb:
                 log_cb(f"Video download failed: {exc}")

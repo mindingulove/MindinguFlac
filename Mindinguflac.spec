@@ -154,6 +154,8 @@ try:
     tmp_ret = collect_all('sounddevice')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
     hiddenimports += collect_submodules('sounddevice')
+    tmp_ret = collect_all('soundfile')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
     tmp_ret = collect_all('numpy')
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 except Exception:
@@ -260,8 +262,8 @@ app = BUNDLE(
     icon='build/icons/mindinguflac.icns',
     bundle_identifier='com.mindinguflac.app',
     info_plist={
-        'CFBundleShortVersionString': '1.4.1',
-        'CFBundleVersion': '1.4.1',
+        'CFBundleShortVersionString': '1.4.2',
+        'CFBundleVersion': '1.4.2',
         'NSHumanReadableCopyright': 'Copyright © 2026 Mindingulove. All rights reserved.',
         'NSBluetoothAlwaysUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',
         'NSBluetoothPeripheralUsageDescription': 'Mindinguflac needs Bluetooth access to discover and connect audio devices.',

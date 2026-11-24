@@ -138,7 +138,9 @@ def command_payload(action, payload):
     if action == 'select':
         return {'track': track(payload.get('track')), 'queue': queue(payload.get('queue') or [])}
     if action == 'queue_append':
-        return {'tracks': queue(payload.get('tracks') or [])}
+        # next=True is the user's "Add to queue" (play next, like local); without
+        # it the songs go to the end (playlist continuation).
+        return {'tracks': queue(payload.get('tracks') or []), 'next': payload.get('next') is True}
     if action in ('queue_remove', 'queue_reorder'):
         return {key: int(number(payload.get(key), 0, MAX_QUEUE))
                 for key in (('index',) if action == 'queue_remove' else ('from_index', 'to_index'))}
