@@ -8515,7 +8515,7 @@ function startNativeAudioPolling(requestId) {
     if (status.ended && !state.manualPauseRequested) {
       await finalizeListeningSession("complete", "native_audio_ended").catch(() => {});
       await stopNativeAudio();
-      clearMediaSession();
+      clearMediaSessionBetweenTracks();
       playQueueOffset(1);
     }
   }, 500);
@@ -8863,6 +8863,17 @@ function clearMediaSession() {
   _callNowPlaying("clear_now_playing");
 }
 
+// A track ended and the next one is about to load. On Android the playback
+// notification belongs to a foreground service; clearing it here stopped that
+// service, and Android 12+ refuses to restart a foreground service while the
+// app is in the background, so the next track loaded but never played and the
+// notification controls disappeared. Keep the service (and its audio focus)
+// up; the next track's updateMediaSession replaces the metadata.
+function clearMediaSessionBetweenTracks() {
+  if (IS_ANDROID) return;
+  clearMediaSession();
+}
+
 function updateMediaSession(track) {
   if (!track || !shouldExposeNowPlaying()) {
     clearMediaSession();
@@ -9101,12 +9112,14 @@ function bindPlayer() {
       if (endedRequestId !== state.playbackRequestId || state.activeJobId !== endedJobId) return;
     }
     finalizeListeningSession("complete", "audio_ended").catch(() => {});
-    clearMediaSession();
+    clearMediaSessionBetweenTracks();
     const playlistCtx = currentPlaylistContext();
     if (playlistCtx && state.queueIndex >= state.queue.length - 1) {
       continuePlaylistWithRecommendations("audio_ended").then((advanced) => {
         if (advanced && state.queue.length > state.queueIndex + 1) {
           playQueueOffset(1);
+        } else {
+          clearMediaSession();
         }
       }).catch(() => {});
       return;
